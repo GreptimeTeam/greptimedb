@@ -124,6 +124,17 @@ impl DropTableExecutor {
             .await
     }
 
+    /// Deletes the table metadata tombstone **permanently**.
+    pub async fn on_delete_metadata_tombstone(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .delete_table_metadata_tombstone(self.table_id, &self.table, table_route_value)
+            .await
+    }
+
     /// Deletes metadata for table **permanently**.
     pub async fn on_destroy_metadata(
         &self,

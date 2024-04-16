@@ -81,7 +81,7 @@ impl DropTableProcedure {
             return Ok(Status::done());
         }
         self.fill_table_metadata().await?;
-        self.data.state = DropTableState::RemoveMetadata;
+        self.data.state = DropTableState::DeleteMetadata;
 
         Ok(Status::executing(true))
     }
@@ -113,7 +113,7 @@ impl DropTableProcedure {
     }
 
     /// Removes the table metadata.
-    pub(crate) async fn on_remove_metadata(&mut self) -> Result<Status> {
+    pub(crate) async fn on_delete_metadata(&mut self) -> Result<Status> {
         self.register_dropping_regions()?;
         // NOTES: If the meta server is crashed after the `RemoveMetadata`,
         // Corresponding regions of this table on the Datanode will be closed automatically.
@@ -144,9 +144,24 @@ impl DropTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub async fn on_datanode_drop_regions(&self) -> Result<Status> {
+    pub async fn on_datanode_drop_regions(&mut self) -> Result<Status> {
         self.executor
             .on_drop_regions(&self.context, &self.data.physical_region_routes)
+            .await?;
+        self.data.state = DropTableState::DeleteTombstone;
+        Ok(Status::executing(true))
+    }
+
+    /// Deletes metadata tombstone.
+    async fn on_delete_metadata_tombstone(&self) -> Result<Status> {
+        let table_route_value = &TableRouteValue::new(
+            self.data.task.table_id,
+            // Safety: checked
+            self.data.physical_table_id.unwrap(),
+            self.data.physical_region_routes.clone(),
+        );
+        self.executor
+            .on_delete_metadata_tombstone(&self.context, table_route_value)
             .await?;
         Ok(Status::done())
     }
@@ -166,9 +181,10 @@ impl Procedure for DropTableProcedure {
 
         match self.data.state {
             DropTableState::Prepare => self.on_prepare().await,
-            DropTableState::RemoveMetadata => self.on_remove_metadata().await,
+            DropTableState::DeleteMetadata => self.on_delete_metadata().await,
             DropTableState::InvalidateTableCache => self.on_broadcast().await,
             DropTableState::DatanodeDropRegions => self.on_datanode_drop_regions().await,
+            DropTableState::DeleteTombstone => self.on_delete_metadata_tombstone().await,
         }
         .map_err(handle_retry_error)
     }
@@ -254,10 +270,12 @@ impl DropTableData {
 pub enum DropTableState {
     /// Prepares to drop the table
     Prepare,
-    /// Removes metadata
-    RemoveMetadata,
+    /// Deletes metadata logically
+    DeleteMetadata,
     /// Invalidates Table Cache
     InvalidateTableCache,
     /// Drops regions on Datanode
     DatanodeDropRegions,
+    /// Deletes metadata tombstone permanently
+    DeleteTombstone,
 }

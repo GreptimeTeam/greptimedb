@@ -626,6 +626,22 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    /// Deletes metadata tombstone for table **permanently**.
+    /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
+    pub async fn delete_table_metadata_tombstone(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
+    ) -> Result<()> {
+        let keys = self
+            .table_metadata_keys(table_id, table_name, table_route_value)?
+            .into_iter()
+            .map(|key| key.into_bytes())
+            .collect::<Vec<_>>();
+        self.tombstone_manager.delete(keys).await
+    }
+
     /// Restores metadata for table.
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn restore_table_metadata(

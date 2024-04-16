@@ -256,7 +256,7 @@ async fn test_on_rollback() {
         };
         let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
         procedure.on_prepare().await.unwrap();
-        procedure.on_remove_metadata().await.unwrap();
+        procedure.on_delete_metadata().await.unwrap();
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
@@ -278,7 +278,7 @@ async fn test_on_rollback() {
     };
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
-    procedure.on_remove_metadata().await.unwrap();
+    procedure.on_delete_metadata().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
