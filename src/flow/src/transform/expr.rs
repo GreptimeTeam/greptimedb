@@ -33,6 +33,28 @@ use crate::repr::{ColumnType, RelationType};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
 use crate::transform::FunctionExtensions;
 
+// TODO: found proper place for this
+/// ref to `arrow_schema::datatype` for type name
+fn typename_to_cdt(name: &str) -> CDT {
+    match name {
+        "Int8" => CDT::int8_datatype(),
+        "Int16" => CDT::int16_datatype(),
+        "Int32" => CDT::int32_datatype(),
+        "Int64" => CDT::int64_datatype(),
+        "UInt8" => CDT::uint8_datatype(),
+        "UInt16" => CDT::uint16_datatype(),
+        "UInt32" => CDT::uint32_datatype(),
+        "UInt64" => CDT::uint64_datatype(),
+        "Float32" => CDT::float32_datatype(),
+        "Float64" => CDT::float64_datatype(),
+        "Boolean" => CDT::boolean_datatype(),
+        "String" => CDT::string_datatype(),
+        "Date" => CDT::date_datatype(),
+        "Timestamp" => CDT::timestamp_second_datatype(),
+        _ => CDT::null_datatype(),
+    }
+}
+
 impl TypedExpr {
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
@@ -82,6 +104,21 @@ impl TypedExpr {
             // because variadic function can also have 1 arguments, we need to check if it's a variadic function first
             1 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
                 let func = UnaryFunc::from_str_and_type(fn_name, None)?;
+                let arg = arg_exprs[0].clone();
+                let ret_type = ColumnType::new_nullable(func.signature().output.clone());
+
+                Ok(TypedExpr::new(arg.call_unary(func), ret_type))
+            }
+            2 if fn_name == "arrow_cast" => {
+                let cast_to = arg_exprs[1]
+                    .clone()
+                    .as_literal()
+                    .and_then(|lit| lit.as_string())
+                    .with_context(|| InvalidQuerySnafu {
+                        reason: "array_cast's second argument must be a literal string",
+                    })?;
+                let cast_to = typename_to_cdt(&cast_to);
+                let func = UnaryFunc::Cast(cast_to);
                 let arg = arg_exprs[0].clone();
                 let ret_type = ColumnType::new_nullable(func.signature().output.clone());
 
