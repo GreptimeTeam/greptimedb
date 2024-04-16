@@ -25,6 +25,7 @@ prost.workspace = true
 regex.workspace = true
 regex-automata.workspace = true
 snafu.workspace = true
+tantivy = "0.22"
 
 [dev-dependencies]
 rand.workspace = true

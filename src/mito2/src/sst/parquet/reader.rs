@@ -284,6 +284,8 @@ impl ParquetReaderBuilder {
             .await
             .or_else(|| self.prune_row_groups_by_minmax(read_format, parquet_meta, metrics))
             .unwrap_or_else(|| (0..num_row_groups).map(|i| (i, None)).collect())
+
+        // todo: change here
     }
 
     /// Applies index to prune row groups.

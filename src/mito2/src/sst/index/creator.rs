@@ -21,6 +21,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::warn;
+use datatypes::scalars::ScalarVector;
+use datatypes::vectors::StringVector;
+use index::full_text_index::create::FullTextIndexCreater;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
@@ -29,6 +32,7 @@ use object_store::ObjectStore;
 use puffin::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ConcreteDataType;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -83,6 +87,10 @@ pub struct SstIndexCreator {
 
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
+
+    // experimental full text index
+    full_text_index_creater: FullTextIndexCreater,
+    log_column_id: Option<u32>,
 }
 
 impl SstIndexCreator {
@@ -96,6 +104,7 @@ impl SstIndexCreator {
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
+        log_column_id: Option<u32>,
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
@@ -112,6 +121,10 @@ impl SstIndexCreator {
         );
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
+        let full_text_index_path = format!("{file_path}/full_text_index");
+        let full_text_index_creater =
+            FullTextIndexCreater::new(segment_row_count.get(), full_text_index_path).unwrap();
+
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {
             file_path,
@@ -127,6 +140,9 @@ impl SstIndexCreator {
 
             ignore_column_ids: HashSet::default(),
             memory_usage,
+
+            full_text_index_creater,
+            log_column_id,
         }
     }
 
@@ -233,6 +249,23 @@ impl SstIndexCreator {
                 .context(PushIndexValueSnafu)?;
         }
 
+        // try find column named "log" and update it into full text index
+        if let Some(log_column_id) = self.log_column_id {
+            for col in batch.fields() {
+                if col.column_id == log_column_id {
+                    let vector = &col.data;
+                    if vector.data_type() == ConcreteDataType::string_datatype() {
+                        let vector = vector.as_any().downcast_ref::<StringVector>().unwrap();
+                        for content in vector.iter_data() {
+                            self.full_text_index_creater
+                                .push_string(content.unwrap_or_default().to_string())
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -295,6 +328,8 @@ impl SstIndexCreator {
             (e @ Err(_), Ok(_)) => e?,
             _ => {}
         }
+
+        self.full_text_index_creater.finish().unwrap();
 
         let byte_count = puffin_writer.finish().await.context(PuffinFinishSnafu)?;
         guard.inc_byte_count(byte_count);
@@ -421,6 +456,7 @@ mod tests {
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
+            None,
         );
 
         for (str_tag, i32_tag) in &tags {

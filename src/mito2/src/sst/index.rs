@@ -189,6 +189,9 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count = row_group_size;
         }
 
+        // find a column named "log"
+        let log_column_id = self.metadata.column_by_name("log").map(|c| c.column_id);
+
         let creator = SstIndexCreator::new(
             self.file_path,
             self.file_id,
@@ -197,6 +200,7 @@ impl<'a> IndexerBuilder<'a> {
             self.intermediate_manager,
             self.mem_threshold_index_create,
             segment_row_count,
+            log_column_id,
         )
         .with_buffer_size(self.write_buffer_size)
         .with_ignore_column_ids(

@@ -336,6 +336,11 @@ impl ScanRegion {
         .flatten()
         .map(Arc::new)
     }
+
+    fn build_full_text_index_applier(&self) -> Option<SstIndexApplierRef> {
+        // start here
+        todo!()
+    }
 }
 
 /// Config for parallel scan.

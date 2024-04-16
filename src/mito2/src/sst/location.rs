@@ -29,6 +29,10 @@ pub fn index_file_path(region_dir: &str, sst_file_id: FileId) -> String {
     util::join_path(&dir, &sst_file_id.as_puffin())
 }
 
+pub fn full_text_index_path(region_dir: &str) -> String {
+    util::join_dir(region_dir, "full_text_index")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
