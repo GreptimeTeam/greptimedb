@@ -141,7 +141,11 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if let Some(expr) = &self.expr {
+            vec![expr.clone()]
+        } else {
+            vec![]
+        }
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -152,8 +156,19 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
         )
     }
 
-    fn from_template(&self, _expr: &[Expr], _inputs: &[LogicalPlan]) -> Self {
-        self.clone()
+    fn from_template(&self, expr: &[Expr], _inputs: &[LogicalPlan]) -> Self {
+        Self {
+            start: self.start,
+            end: self.end,
+            interval: self.interval,
+            expr: if !expr.is_empty() {
+                Some(expr[0].clone())
+            } else {
+                None
+            },
+            time_index_schema: self.time_index_schema.clone(),
+            result_schema: self.result_schema.clone(),
+        }
     }
 }
 
