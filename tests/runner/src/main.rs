@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use env::{Env, WalConfig};
 use sqlness::{ConfigBuilder, Runner};
-use tempdir::TempDir;
 
 mod env;
 mod util;
@@ -79,7 +78,10 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    let temp_dir = TempDir::new("sqlness").unwrap();
+    let temp_dir = tempfile::Builder::new()
+        .prefix("sqlness")
+        .tempdir()
+        .unwrap();
     let data_home = temp_dir.path().to_path_buf();
 
     let config = ConfigBuilder::default()
