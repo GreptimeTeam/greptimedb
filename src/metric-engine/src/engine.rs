@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod alter;
+mod close;
+mod create;
+mod drop;
+mod open;
+mod options;
+mod put;
+mod read;
+mod region_metadata;
+mod state;
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -33,17 +44,6 @@ use crate::data_region::DataRegion;
 use crate::error::{Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::utils;
-
-mod alter;
-mod close;
-mod create;
-mod drop;
-mod open;
-mod options;
-mod put;
-mod read;
-mod region_metadata;
-mod state;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine

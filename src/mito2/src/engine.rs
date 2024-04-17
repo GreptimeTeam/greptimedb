@@ -14,33 +14,6 @@
 
 //! Mito region engine.
 
-use std::any::Any;
-use std::sync::Arc;
-use std::time::Instant;
-
-use api::region::RegionResponse;
-use async_trait::async_trait;
-use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing;
-use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{AffectedRows, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::oneshot;
-
-use crate::config::MitoConfig;
-use crate::error::{InvalidRequestSnafu, RecvSnafu, RegionNotFoundSnafu, Result};
-use crate::manifest::action::RegionEdit;
-use crate::metrics::HANDLE_REQUEST_ELAPSED;
-use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
-use crate::region::RegionUsage;
-use crate::request::WorkerRequest;
-use crate::worker::WorkerGroup;
-
 #[cfg(test)]
 mod alter_test;
 #[cfg(test)]
@@ -75,6 +48,33 @@ mod prune_test;
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
+
+use std::any::Any;
+use std::sync::Arc;
+use std::time::Instant;
+
+use api::region::RegionResponse;
+use async_trait::async_trait;
+use common_error::ext::BoxedError;
+use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::tracing;
+use object_store::manager::ObjectStoreManagerRef;
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_request::{AffectedRows, RegionRequest};
+use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::oneshot;
+
+use crate::config::MitoConfig;
+use crate::error::{InvalidRequestSnafu, RecvSnafu, RegionNotFoundSnafu, Result};
+use crate::manifest::action::RegionEdit;
+use crate::metrics::HANDLE_REQUEST_ELAPSED;
+use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
+use crate::region::RegionUsage;
+use crate::request::WorkerRequest;
+use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
 
