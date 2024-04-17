@@ -38,35 +38,6 @@ fn to_tombstone(key: &[u8]) -> Vec<u8> {
     [TOMBSTONE_PREFIX.as_bytes(), key].concat()
 }
 
-fn format_move_value_error(
-    unexpected_items: Vec<(MoveValue, Option<Vec<u8>>, Option<Vec<u8>>)>,
-) -> String {
-    unexpected_items
-        .into_iter()
-        .map(
-            |(
-                MoveValue {
-                    key,
-                    dest_key,
-                    value,
-                },
-                src_value,
-                dest_value,
-            )| {
-                format!(
-                    "Moving key: '{}' to dest: '{}' with value: '{}'\nSrc value: {:?}\nDest value: {:?}",
-                    String::from_utf8_lossy(&key),
-                    String::from_utf8_lossy(&dest_key),
-                    String::from_utf8_lossy(&value),
-                    src_value.map(|value| String::from_utf8_lossy(&value).to_string()),
-                    dest_value.map(|value| String::from_utf8_lossy(&value).to_string()),
-                )
-            },
-        )
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[derive(Debug, Clone)]
 struct MoveValue {
     key: Vec<u8>,
@@ -215,7 +186,30 @@ impl TombstoneManager {
             ensure!(
                 comparison_result.into_iter().all(Into::into),
                 error::MoveValuesSnafu {
-                    err_msg: format_move_value_error(unexpected_items)
+                    err_msg: unexpected_items
+                    .into_iter()
+                    .map(
+                        |(
+                            MoveValue {
+                                key,
+                                dest_key,
+                                value,
+                            },
+                            src_value,
+                            dest_value,
+                        )| {
+                            format!(
+                                "Moving key: '{}' to dest: '{}' with value: '{}'\nSrc value: {:?}\nDest value: {:?}",
+                                String::from_utf8_lossy(&key),
+                                String::from_utf8_lossy(&dest_key),
+                                String::from_utf8_lossy(&value),
+                                src_value.map(|value| String::from_utf8_lossy(&value).to_string()),
+                                dest_value.map(|value| String::from_utf8_lossy(&value).to_string()),
+                            )
+                        },
+                    )
+                    .collect::<Vec<_>>()
+                    .join("\n")
                 }
             )
         }
