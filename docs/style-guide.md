@@ -34,3 +34,9 @@ It's mainly an complement to the [Rust Style Guide](https://pingcap.github.io/st
 - Add comments for public functions and structs.
 - Prefer document comment (`///`) over normal comment (`//`) for structs, fields, functions etc.
 - Add link (`[]`) to struct, method, or any other reference. And make sure that link works.
+
+## Error handling
+
+- Define a custom error type for the module if needed.
+- Prefer `with_context()` over `context()` when allocation is needed to construct an error.
+  
