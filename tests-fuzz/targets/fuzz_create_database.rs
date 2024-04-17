@@ -17,7 +17,7 @@
 use common_telemetry::info;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use snafu::ResultExt;
 use sqlx::{MySql, Pool};
@@ -57,11 +57,13 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn generate_expr(input: FuzzInput) -> Result<CreateDatabaseExpr> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
+    let if_not_exists = rng.gen_bool(0.5);
     let create_database_generator = CreateDatabaseExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
+        .if_not_exists(if_not_exists)
         .build()
         .unwrap();
     create_database_generator.generate(&mut rng)
