@@ -14,7 +14,6 @@
 
 use snafu::ensure;
 
-use super::TableMetaKeyGetTxnOp;
 use crate::error::{self, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};

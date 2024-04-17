@@ -1332,14 +1332,17 @@ mod tests {
             .delete_table_metadata(table_id, &table_name, table_route_value)
             .await
             .unwrap();
-
+        // Should be ignored.
+        table_metadata_manager
+            .delete_table_metadata(table_id, &table_name, table_route_value)
+            .await
+            .unwrap();
         assert!(table_metadata_manager
             .table_info_manager()
             .get(table_id)
             .await
             .unwrap()
             .is_none());
-
         assert!(table_metadata_manager
             .table_route_manager()
             .table_route_storage()
@@ -1347,7 +1350,6 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-
         assert!(table_metadata_manager
             .datanode_table_manager()
             .tables(datanode_id)
@@ -1362,7 +1364,6 @@ mod tests {
             .await
             .unwrap();
         assert!(table_info.is_none());
-
         let table_route = table_metadata_manager
             .table_route_manager()
             .table_route_storage()
@@ -1832,6 +1833,13 @@ mod tests {
             .delete_table_metadata(table_id, &table_name, &table_route_value)
             .await
             .unwrap();
+        table_metadata_manager
+            .restore_table_metadata(table_id, &table_name, &table_route_value)
+            .await
+            .unwrap();
+        let kvs = mem_kv.dump();
+        assert_eq!(kvs, expected_result);
+        // Should be ignored.
         table_metadata_manager
             .restore_table_metadata(table_id, &table_name, &table_route_value)
             .await

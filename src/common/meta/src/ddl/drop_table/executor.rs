@@ -106,19 +106,6 @@ impl DropTableExecutor {
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let table_name_key = TableNameKey::new(
-            &self.table.catalog_name,
-            &self.table.schema_name,
-            &self.table.table_name,
-        );
-        if !ctx
-            .table_metadata_manager
-            .table_name_manager()
-            .exists(table_name_key)
-            .await?
-        {
-            return Ok(());
-        }
         ctx.table_metadata_manager
             .delete_table_metadata(self.table_id, &self.table, table_route_value)
             .await
@@ -152,19 +139,6 @@ impl DropTableExecutor {
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let table_name_key = TableNameKey::new(
-            &self.table.catalog_name,
-            &self.table.schema_name,
-            &self.table.table_name,
-        );
-        if ctx
-            .table_metadata_manager
-            .table_name_manager()
-            .exists(table_name_key)
-            .await?
-        {
-            return Ok(());
-        }
         ctx.table_metadata_manager
             .restore_table_metadata(self.table_id, &self.table, table_route_value)
             .await
