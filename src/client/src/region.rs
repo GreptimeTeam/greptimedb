@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest};
+use api::region::RegionResponse;
+use api::v1::region::{QueryRequest, RegionRequest};
 use api::v1::ResponseHeader;
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
@@ -46,7 +47,7 @@ pub struct RegionRequester {
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionHandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
         self.handle_inner(request).await.map_err(|err| {
             if err.should_retry() {
                 meta_error::Error::RetryLater {
@@ -165,7 +166,7 @@ impl RegionRequester {
         Ok(Box::pin(record_batch_stream))
     }
 
-    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
         let request_type = request
             .body
             .as_ref()
@@ -194,10 +195,10 @@ impl RegionRequester {
 
         check_response_header(&response.header)?;
 
-        Ok(RegionHandleResponse::from_region_response(response))
+        Ok(RegionResponse::from_region_response(response))
     }
 
-    pub async fn handle(&self, request: RegionRequest) -> Result<RegionHandleResponse> {
+    pub async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         self.handle_inner(request).await
     }
 }

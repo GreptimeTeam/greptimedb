@@ -16,7 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use api::v1::region::RegionHandleResponse;
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
 use common_error::ext::BoxedError;
@@ -61,7 +61,7 @@ impl RegionEngine for FileRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResponse, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await
@@ -155,7 +155,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> EngineResult<RegionHandleResponse> {
+    ) -> EngineResult<RegionResponse> {
         let result = match request {
             RegionRequest::Create(req) => self.handle_create(region_id, req).await,
             RegionRequest::Drop(req) => self.handle_drop(region_id, req).await,
@@ -166,7 +166,7 @@ impl EngineInner {
             }
             .fail(),
         };
-        result.map(RegionHandleResponse::new)
+        result.map(RegionResponse::new)
     }
 
     async fn stop(&self) -> EngineResult<()> {

@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::region::RegionHandleResponse;
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
@@ -167,18 +167,18 @@ impl RegionEngine for MockRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResponse, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
         if let Some(delay) = self.handle_request_delay {
             tokio::time::sleep(delay).await;
         }
         if let Some(mock_fn) = &self.handle_request_mock_fn {
             return mock_fn(region_id, request)
                 .map_err(BoxedError::new)
-                .map(RegionHandleResponse::new);
+                .map(RegionResponse::new);
         };
 
         let _ = self.sender.send((region_id, request)).await;
-        Ok(RegionHandleResponse::new(0))
+        Ok(RegionResponse::new(0))
     }
 
     async fn handle_query(

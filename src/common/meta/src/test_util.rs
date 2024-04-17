@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest};
+use api::region::RegionResponse;
+use api::v1::region::{QueryRequest, RegionRequest};
 pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
@@ -33,7 +34,7 @@ use crate::wal_options_allocator::WalOptionsAllocator;
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionHandleResponse>;
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse>;
 
     async fn handle_query(
         &self,
@@ -63,7 +64,7 @@ struct MockDatanode<T> {
 
 #[async_trait::async_trait]
 impl<T: MockDatanodeHandler> Datanode for MockDatanode<T> {
-    async fn handle(&self, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         self.handler.handle(&self.peer, request).await
     }
 

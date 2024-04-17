@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod column_def;
-pub mod region;
 
 pub mod meta {
     pub use greptime_proto::v1::meta::*;

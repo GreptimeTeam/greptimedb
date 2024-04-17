@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest};
+use api::region::RegionResponse;
+use api::v1::region::{QueryRequest, RegionRequest};
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
@@ -26,7 +27,7 @@ use crate::test_util::MockDatanodeHandler;
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for () {
-    async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
         unreachable!()
     }
 
@@ -44,10 +45,10 @@ pub struct DatanodeWatcher(pub mpsc::Sender<(Peer, RegionRequest)>);
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for DatanodeWatcher {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
         debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
         self.0.send((peer.clone(), request)).await.unwrap();
-        Ok(RegionHandleResponse::new(0))
+        Ok(RegionResponse::new(0))
     }
 
     async fn handle_query(
@@ -64,7 +65,7 @@ pub struct RetryErrorDatanodeHandler;
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for RetryErrorDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
         debug!("Returning retry later for request: {request:?}, peer: {peer:?}");
         Err(Error::RetryLater {
             source: BoxedError::new(
@@ -90,7 +91,7 @@ pub struct UnexpectedErrorDatanodeHandler;
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for UnexpectedErrorDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
         debug!("Returning mock error for request: {request:?}, peer: {peer:?}");
         error::UnexpectedSnafu {
             err_msg: "mock error",
@@ -134,7 +135,7 @@ impl ErrorExt for MockRequestOutdatedError {
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for RequestOutdatedErrorDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
         debug!("Returning mock error for request: {request:?}, peer: {peer:?}");
         Err(BoxedError::new(MockRequestOutdatedError)).context(error::ExternalSnafu)
     }
@@ -153,9 +154,9 @@ pub struct NaiveDatanodeHandler;
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for NaiveDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionHandleResponse> {
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
         debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
-        Ok(RegionHandleResponse::new(0))
+        Ok(RegionResponse::new(0))
     }
 
     async fn handle_query(

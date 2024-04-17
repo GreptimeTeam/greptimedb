@@ -18,7 +18,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::region::RegionHandleResponse;
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -300,7 +300,7 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResponse, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&[request.request_type()])
             .start_timer();
@@ -308,7 +308,7 @@ impl RegionEngine for MitoEngine {
         self.inner
             .handle_request(region_id, request)
             .await
-            .map(RegionHandleResponse::new)
+            .map(RegionResponse::new)
             .map_err(BoxedError::new)
     }
 

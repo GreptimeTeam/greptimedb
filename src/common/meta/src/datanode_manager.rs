@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionHandleResponse, RegionRequest};
+use api::region::RegionResponse;
+use api::v1::region::{QueryRequest, RegionRequest};
 pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
@@ -25,7 +26,7 @@ use crate::peer::Peer;
 #[async_trait::async_trait]
 pub trait Datanode: Send + Sync {
     /// Handles DML, and DDL requests.
-    async fn handle(&self, request: RegionRequest) -> Result<RegionHandleResponse>;
+    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse>;
 
     /// Handles query requests
     async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;

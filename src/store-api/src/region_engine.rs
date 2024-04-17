@@ -19,7 +19,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
-use api::v1::region::RegionHandleResponse;
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -130,7 +130,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResponse, BoxedError>;
+    ) -> Result<RegionResponse, BoxedError>;
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(

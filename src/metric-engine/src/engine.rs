@@ -16,7 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use api::v1::region::RegionHandleResponse;
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -123,7 +123,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResponse, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
         let mut extension_return_value = HashMap::new();
 
         let result = match request {
@@ -149,12 +149,10 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Catchup(_) => Ok(0),
         };
 
-        result
-            .map_err(BoxedError::new)
-            .map(|rows| RegionHandleResponse {
-                affected_rows: rows,
-                extension: extension_return_value,
-            })
+        result.map_err(BoxedError::new).map(|rows| RegionResponse {
+            affected_rows: rows,
+            extension: extension_return_value,
+        })
     }
 
     /// Handles substrait query and return a stream of record batches
