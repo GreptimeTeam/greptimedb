@@ -52,6 +52,7 @@ snafu.workspace = true
 sql.workspace = true
 sqlparser.workspace = true
 store-api.workspace = true
+substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
 tonic.workspace = true

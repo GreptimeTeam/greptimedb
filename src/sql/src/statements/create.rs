@@ -20,6 +20,7 @@ use sqlparser::ast::Expr;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
+use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
@@ -235,6 +236,17 @@ pub struct CreateTableLike {
     pub table_name: ObjectName,
     /// The table that is designated to be imitated by `Like`
     pub source_name: ObjectName,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub struct CreateView {
+    /// View name
+    pub view_name: ObjectName,
+    /// The clause after `As` that defines the VIEW.
+    /// Can only be either [Statement::Query] or [Statement::Tql].
+    pub input: Box<Statement>,
+    /// Whether to replace existing VIEW
+    pub or_replace: bool,
 }
 
 #[cfg(test)]
