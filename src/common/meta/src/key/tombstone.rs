@@ -51,7 +51,7 @@ impl TombstoneManager {
     /// - the value of `src_key` equals `value`.
     /// - the `dest_key` is vacant.
     ///
-    /// Otherwise retrieves the values of `src_key`, `dest_key`.
+    /// Otherwise retrieves the value of `src_key`.
     fn build_move_value_txn(
         &self,
         src_key: Vec<u8>,
@@ -127,7 +127,6 @@ impl TombstoneManager {
     /// Moves values to `dest_key` if:
     ///
     /// - All `dest_key` are vacant.
-    /// - All origin values remain unchanged.
     async fn move_values(&self, keys: Vec<Vec<u8>>, dest_keys: Vec<Vec<u8>>) -> Result<()> {
         let chunk_size = self.kv_backend.max_txn_ops() / 2;
         if keys.len() > chunk_size {
