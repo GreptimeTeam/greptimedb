@@ -41,9 +41,8 @@ impl State for DropDatabaseRemoveMetadata {
             .schema_manager()
             .delete(SchemaNameKey::new(&ctx.catalog, &ctx.schema))
             .await?;
-        self.invalidate_schema_cache(ddl_ctx, ctx).await?;
 
-        return Ok((Box::new(DropDatabaseEnd), Status::done()));
+        return Ok((Box::new(DropMetadataBroadcast), Status::executing(true)));
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -51,7 +50,10 @@ impl State for DropDatabaseRemoveMetadata {
     }
 }
 
-impl DropDatabaseRemoveMetadata {
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DropMetadataBroadcast;
+
+impl DropMetadataBroadcast {
     /// Invalidates frontend caches
     async fn invalidate_schema_cache(
         &self,
@@ -77,12 +79,29 @@ impl DropDatabaseRemoveMetadata {
     }
 }
 
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for DropMetadataBroadcast {
+    async fn next(
+        &mut self,
+        ddl_ctx: &DdlContext,
+        ctx: &mut DropDatabaseContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        self.invalidate_schema_cache(ddl_ctx, ctx).await?;
+        Ok((Box::new(DropDatabaseEnd), Status::done()))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use crate::ddl::drop_database::end::DropDatabaseEnd;
-    use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
+    use crate::ddl::drop_database::metadata::{DropDatabaseRemoveMetadata, DropMetadataBroadcast};
     use crate::ddl::drop_database::{DropDatabaseContext, State};
     use crate::key::schema_name::SchemaNameKey;
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
@@ -105,14 +124,23 @@ mod tests {
             tables: None,
         };
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
-        state.as_any().downcast_ref::<DropDatabaseEnd>().unwrap();
-        assert!(status.is_done());
+        state
+            .as_any()
+            .downcast_ref::<DropMetadataBroadcast>()
+            .unwrap();
+        assert!(!status.is_done());
         assert!(!ddl_context
             .table_metadata_manager
             .schema_manager()
             .exists(SchemaNameKey::new("foo", "bar"))
             .await
             .unwrap());
+
+        let mut state = DropMetadataBroadcast;
+        let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
+        state.as_any().downcast_ref::<DropDatabaseEnd>().unwrap();
+        assert!(status.is_done());
+
         // Schema not exists
         let mut state = DropDatabaseRemoveMetadata;
         let mut ctx = DropDatabaseContext {
@@ -122,7 +150,10 @@ mod tests {
             tables: None,
         };
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
-        state.as_any().downcast_ref::<DropDatabaseEnd>().unwrap();
-        assert!(status.is_done());
+        state
+            .as_any()
+            .downcast_ref::<DropMetadataBroadcast>()
+            .unwrap();
+        assert!(!status.is_done());
     }
 }
