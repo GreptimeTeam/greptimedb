@@ -18,10 +18,12 @@ use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
 use super::end::DropDatabaseEnd;
+use crate::cache_invalidator::Context;
 use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::ddl::DdlContext;
 use crate::error::Result;
-use crate::key::schema_name::SchemaNameKey;
+use crate::instruction::CacheIdent;
+use crate::key::schema_name::{SchemaName, SchemaNameKey};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseRemoveMetadata;
@@ -39,12 +41,39 @@ impl State for DropDatabaseRemoveMetadata {
             .schema_manager()
             .delete(SchemaNameKey::new(&ctx.catalog, &ctx.schema))
             .await?;
+        self.invalidate_schema_cache(ddl_ctx, ctx).await?;
 
         return Ok((Box::new(DropDatabaseEnd), Status::done()));
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl DropDatabaseRemoveMetadata {
+    /// Invalidates frontend caches
+    pub async fn invalidate_schema_cache(
+        &self,
+        ddl_ctx: &DdlContext,
+        db_ctx: &mut DropDatabaseContext,
+    ) -> Result<()> {
+        let cache_invalidator = &ddl_ctx.cache_invalidator;
+        let ctx = Context {
+            subject: Some("Invalidate schema cache by dropping database".to_string()),
+        };
+
+        cache_invalidator
+            .invalidate(
+                &ctx,
+                vec![CacheIdent::SchemaName(SchemaName {
+                    catalog_name: db_ctx.catalog.clone(),
+                    schema_name: db_ctx.schema.clone(),
+                })],
+            )
+            .await?;
+
+        Ok(())
     }
 }
 

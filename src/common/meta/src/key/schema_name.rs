@@ -197,6 +197,21 @@ impl SchemaManager {
     }
 }
 
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SchemaName {
+    pub catalog_name: String,
+    pub schema_name: String,
+}
+
+impl<'a> From<&'a SchemaName> for SchemaNameKey<'a> {
+    fn from(value: &'a SchemaName) -> Self {
+        Self {
+            catalog: &value.catalog_name,
+            schema: &value.schema_name,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
