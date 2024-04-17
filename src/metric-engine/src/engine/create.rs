@@ -381,6 +381,10 @@ impl MetricEngineInner {
         // concat region dir
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
 
+        // remove TTL option
+        let mut options = request.options.clone();
+        options.remove("ttl");
+
         RegionCreateRequest {
             engine: MITO_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -389,7 +393,7 @@ impl MetricEngineInner {
                 value_column_metadata,
             ],
             primary_key: vec![METADATA_SCHEMA_KEY_COLUMN_INDEX as _],
-            options: request.options.clone(),
+            options,
             region_dir: metadata_region_dir,
         }
     }
@@ -569,7 +573,10 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_create_request_for_data_region() {
+    async fn test_create_request_for_physical_regions() {
+        // original request
+        let mut ttl_options = HashMap::new();
+        ttl_options.insert("ttl".to_string(), "60m".to_string());
         let request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -593,15 +600,17 @@ mod test {
                 },
             ],
             primary_key: vec![0],
-            options: HashMap::new(),
+            options: ttl_options,
             region_dir: "/test_dir".to_string(),
         };
 
+        // set up
         let env = TestEnv::new().await;
         let engine = MetricEngine::new(env.mito());
         let engine_inner = engine.inner;
-        let data_region_request = engine_inner.create_request_for_data_region(&request);
 
+        // check create data region request
+        let data_region_request = engine_inner.create_request_for_data_region(&request);
         assert_eq!(
             data_region_request.region_dir,
             "/test_dir/data/".to_string()
@@ -611,5 +620,14 @@ mod test {
             data_region_request.primary_key,
             vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
         );
+        assert!(data_region_request.options.get("ttl").is_some());
+
+        // check create metadata region request
+        let metadata_region_request = engine_inner.create_request_for_metadata_region(&request);
+        assert_eq!(
+            metadata_region_request.region_dir,
+            "/test_dir/metadata/".to_string()
+        );
+        assert!(metadata_region_request.options.get("ttl").is_none());
     }
 }
