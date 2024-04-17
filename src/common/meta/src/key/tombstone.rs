@@ -122,9 +122,7 @@ impl TombstoneManager {
         .fail()
     }
 
-    /// Moves values to `dest_key` if:
-    ///
-    /// - All `dest_key` are vacant.
+    /// Moves values to `dest_key`.
     async fn move_values(&self, keys: Vec<Vec<u8>>, dest_keys: Vec<Vec<u8>>) -> Result<()> {
         let chunk_size = self.kv_backend.max_txn_ops() / 2;
         if keys.len() > chunk_size {
