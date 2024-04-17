@@ -177,7 +177,11 @@ impl StatementExecutor {
                     stmt.drop_if_exists(),
                     query_ctx,
                 )
-                .await
+                    .await
+            }
+            Statement::CreateView(stmt) => {
+                let _ = self.create_view(stmt, query_ctx).await?;
+                Ok(Output::new_with_affected_rows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
@@ -271,6 +275,13 @@ impl StatementExecutor {
             .planner()
             .plan(stmt, query_ctx)
             .await
+            .context(PlanStatementSnafu)
+    }
+
+    pub fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        self.query_engine
+            .planner()
+            .optimize(plan)
             .context(PlanStatementSnafu)
     }
 

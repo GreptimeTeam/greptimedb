@@ -686,6 +686,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert between logical plan and substrait plan"))]
+    SubstraitCodec {
+        location: Location,
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -744,6 +750,7 @@ impl ErrorExt for Error {
             Error::RequestInserts { source, .. } => source.status_code(),
             Error::RequestRegion { source, .. } => source.status_code(),
             Error::RequestDeletes { source, .. } => source.status_code(),
+            Error::SubstraitCodec { source, .. } => source.status_code(),
 
             Error::ColumnDataType { source, .. } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()

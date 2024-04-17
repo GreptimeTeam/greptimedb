@@ -42,6 +42,7 @@ use datatypes::value::Value;
 use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
+use query::parser::QueryStatement;
 use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
@@ -49,11 +50,13 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{
-    CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
+    CreateExternalTable, CreateTable, CreateFlow, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::sql_value_to_value;
+use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -65,7 +68,7 @@ use crate::error::{
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
     DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
+    ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
@@ -372,6 +375,32 @@ impl StatementExecutor {
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
+    }
+
+    pub async fn create_view(
+        &self,
+        create_view: CreateView,
+        ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        // convert input into logical plan
+        let logical_plan = match *create_view.input {
+            Statement::Query(query) => {
+                self.plan(QueryStatement::Sql(Statement::Query(query)), ctx)
+                    .await?
+            }
+            Statement::Tql(query) => self.plan_tql(query, &ctx).await?,
+            _ => {
+                todo!("throw an error")
+            }
+        };
+        let optimized_plan = self.optimize_logical_plan(logical_plan)?;
+
+        // encode logical plan
+        let encoded_plan = DFLogicalSubstraitConvertor
+            .encode(&optimized_plan.unwrap_df_plan())
+            .context(SubstraitCodecSnafu)?;
+
+        todo!()
     }
 
     #[tracing::instrument(skip_all)]

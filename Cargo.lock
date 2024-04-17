@@ -6643,6 +6643,7 @@ dependencies = [
  "sql",
  "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
  "store-api",
+ "substrait 0.7.2",
  "table",
  "tokio",
  "tonic 0.11.0",

@@ -511,7 +511,6 @@ pub fn check_permission(
         | Statement::ShowDatabases(_)
         | Statement::DropDatabase(_)
         | Statement::DropFlow(_) => {}
-
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
         }
@@ -521,6 +520,8 @@ pub fn check_permission(
         Statement::CreateFlow(stmt) => {
             // TODO: should also validate source table name here?
             validate_param(&stmt.sink_table_name, query_ctx)?;
+        Statement::CreateView(stmt) => {
+            validate_param(&stmt.name, query_ctx)?;
         }
         Statement::Alter(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;

@@ -20,7 +20,8 @@ use sqlparser::ast::{Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
-use crate::statements::OptionMap;
+use crate::statements::statement::Statement;
+use crate::statements::{redact_and_sort_options, OptionMap};
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -282,6 +283,18 @@ impl Display for CreateFlow {
         }
         write!(f, "AS {}", &self.query)
     }
+}
+
+/// Create SQL view statement.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub struct CreateView {
+    /// View name
+    pub name: ObjectName,
+    /// The clause after `As` that defines the VIEW.
+    /// Can only be either [Statement::Query] or [Statement::Tql].
+    pub input: Box<Statement>,
+    /// Whether to replace existing VIEW
+    pub or_replace: bool,
 }
 
 #[cfg(test)]

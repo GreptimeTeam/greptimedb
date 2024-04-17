@@ -21,7 +21,7 @@ use sqlparser_derive::{Visit, VisitMut};
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike,
+    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView
 };
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
@@ -56,6 +56,8 @@ pub enum Statement {
     CreateFlow(CreateFlow),
     // DROP FLOW
     DropFlow(DropFlow),
+    // CREATE VIEW ... AS
+    CreateView(CreateView),
     // DROP TABLE
     DropTable(DropTable),
     // DROP DATABASE
@@ -126,6 +128,7 @@ impl Display for Statement {
             Statement::ShowCollation(kind) => {
                 write!(f, "SHOW COLLATION {kind}")
             }
+            Statement::CreateView(_c) => todo!(),
         }
     }
 }
