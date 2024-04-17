@@ -48,6 +48,7 @@ SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2
 
 -- The "0=1" will be evaluated as a constant expression that is always false, and will be optimized away in the query
 -- engine. In the final plan, there's no filter node. We explain it to ensure that.
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
 
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
