@@ -90,11 +90,13 @@ use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu, UnexpectedSnafu};
 use crate::key::table_route::TableRouteKey;
-use crate::key::tombstone::Key;
+use crate::key::tombstone::TombstoneKeyValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::rpc::store::BatchGetRequest;
+use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 use crate::DatanodeId;
 
@@ -582,7 +584,7 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
-    ) -> Result<Vec<Key>> {
+    ) -> Result<Vec<Vec<u8>>> {
         // Builds keys
         let datanode_ids = if table_route_value.is_physical() {
             region_distribution(table_route_value.region_routes()?)
@@ -604,11 +606,11 @@ impl TableMetadataManager {
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<HashSet<_>>();
 
-        keys.push(Key::compare_and_swap(table_name.as_raw_key()));
-        keys.push(Key::new(table_info_key.as_raw_key()));
-        keys.push(Key::new(table_route_key.as_raw_key()));
+        keys.push(table_name.as_raw_key());
+        keys.push(table_info_key.as_raw_key());
+        keys.push(table_route_key.as_raw_key());
         for key in &datanode_table_keys {
-            keys.push(Key::new(key.as_raw_key()));
+            keys.push(key.as_raw_key());
         }
         Ok(keys)
     }
@@ -622,8 +624,32 @@ impl TableMetadataManager {
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
         let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        self.tombstone_manager.create(keys).await?;
-        Ok(())
+        let num_keys = keys.len();
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest::new().with_keys(keys))
+            .await?;
+        if resp.kvs.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            resp.kvs.len() == num_keys,
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "Read incomplete metadata during delete table metadata, table: {}({}); Expected num of keys: {}, but got: {}",
+                    table_name,
+                    table_id,
+                    num_keys,
+                    resp.kvs.len()
+                )
+            }
+        );
+        let kvs = resp
+            .kvs
+            .into_iter()
+            .map(|KeyValue { key, value }| (key, value))
+            .collect();
+        self.tombstone_manager.create(kvs).await
     }
 
     /// Deletes metadata tombstone for table **permanently**.
@@ -634,11 +660,7 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let keys = self
-            .table_metadata_keys(table_id, table_name, table_route_value)?
-            .into_iter()
-            .map(|key| key.into_bytes())
-            .collect::<Vec<_>>();
+        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
         self.tombstone_manager.delete(keys).await
     }
 
@@ -651,8 +673,32 @@ impl TableMetadataManager {
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
         let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        self.tombstone_manager.restore(keys).await?;
-        Ok(())
+        let num_keys = keys.len();
+        let kvs = self.tombstone_manager.batch_get(keys).await?;
+        if kvs.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            kvs.len() == num_keys,
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "Read incomplete metadata during restore table metadata, table: {}({}); Expected num of keys: {}, but got: {}",
+                    table_name,
+                    table_id,
+                    num_keys,
+                    kvs.len()
+                )
+            }
+        );
+        let kvs = kvs
+            .into_iter()
+            .map(
+                |TombstoneKeyValue {
+                     origin_key, value, ..
+                 }| (origin_key, value),
+            )
+            .collect();
+        self.tombstone_manager.restore(kvs).await
     }
 
     /// Deletes metadata for table **permanently**.
@@ -666,7 +712,7 @@ impl TableMetadataManager {
         let operations = self
             .table_metadata_keys(table_id, table_name, table_route_value)?
             .into_iter()
-            .map(|key| TxnOp::Delete(key.into_bytes()))
+            .map(TxnOp::Delete)
             .collect::<Vec<_>>();
 
         let txn = Txn::new().and_then(operations);
