@@ -421,9 +421,6 @@ pub enum Error {
     #[snafu(display("Invalid role: {}", role))]
     InvalidRole { role: i32, location: Location },
 
-    #[snafu(display("Atomic key changed: {err_msg}"))]
-    CasKeyChanged { err_msg: String, location: Location },
-
     #[snafu(display("Failed to move values: {err_msg}"))]
     MoveValues { err_msg: String, location: Location },
 
@@ -447,7 +444,6 @@ impl ErrorExt for Error {
             | EtcdFailed { .. }
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
-            | CasKeyChanged { .. }
             | MoveValues { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
