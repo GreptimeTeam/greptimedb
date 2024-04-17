@@ -509,7 +509,6 @@ impl BatchDeleteRequest {
         }
     }
 
-    #[inline]
     /// Sets `keys`.
     pub fn with_keys(mut self, keys: Vec<Vec<u8>>) -> Self {
         self.keys = keys;
