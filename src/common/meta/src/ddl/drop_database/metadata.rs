@@ -53,7 +53,7 @@ impl State for DropDatabaseRemoveMetadata {
 
 impl DropDatabaseRemoveMetadata {
     /// Invalidates frontend caches
-    pub async fn invalidate_schema_cache(
+    async fn invalidate_schema_cache(
         &self,
         ddl_ctx: &DdlContext,
         db_ctx: &mut DropDatabaseContext,
