@@ -47,9 +47,7 @@ impl TombstoneManager {
 
     /// Moves value to `dest_key`.
     ///
-    /// Puts `value` to `dest_key` if:
-    /// - the value of `src_key` equals `value`.
-    /// - the `dest_key` is vacant.
+    /// Puts `value` to `dest_key` if the value of `src_key` equals `value`.
     ///
     /// Otherwise retrieves the value of `src_key`.
     fn build_move_value_txn(
@@ -59,10 +57,11 @@ impl TombstoneManager {
         dest_key: Vec<u8>,
     ) -> (Txn, impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>) {
         let txn = Txn::new()
-            .when(vec![
-                Compare::with_not_exist_value(dest_key.clone(), CompareOp::Equal),
-                Compare::with_value(src_key.clone(), CompareOp::Equal, value.clone()),
-            ])
+            .when(vec![Compare::with_value(
+                src_key.clone(),
+                CompareOp::Equal,
+                value.clone(),
+            )])
             .and_then(vec![
                 TxnOp::Put(dest_key.clone(), value.clone()),
                 TxnOp::Delete(src_key.clone()),
@@ -116,9 +115,8 @@ impl TombstoneManager {
 
         error::MoveValuesSnafu {
             err_msg: format!(
-                "keys: {:?}, dest keys: {:?}",
+                "keys: {:?}",
                 keys.iter().map(|key| String::from_utf8_lossy(key)),
-                dest_keys.iter().map(|key| String::from_utf8_lossy(key))
             ),
         }
         .fail()
@@ -477,5 +475,81 @@ mod tests {
             .move_values(keys, dest_keys)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_move_values_overwrite_dest_values() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Prepares
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        tombstone_manager
+            .move_values(keys, dest_keys)
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+
+        // Overwrites existing dest keys.
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"new baz".to_vec()),
+            (b"foo".to_vec(), b"new hi".to_vec()),
+            (b"baz".to_vec(), b"new baz".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        tombstone_manager
+            .move_values(keys, dest_keys)
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
     }
 }

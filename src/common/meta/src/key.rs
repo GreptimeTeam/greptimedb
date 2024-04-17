@@ -88,12 +88,13 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
-use crate::error::{self, Result, SerdeJsonSnafu, UnexpectedSnafu};
+use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::rpc::store::BatchDeleteRequest;
 use crate::table_name::TableName;
 use crate::DatanodeId;
 
@@ -656,21 +657,11 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let operations = self
-            .table_metadata_keys(table_id, table_name, table_route_value)?
-            .into_iter()
-            .map(TxnOp::Delete)
-            .collect::<Vec<_>>();
-
-        let txn = Txn::new().and_then(operations);
-        let resp = self.kv_backend.txn(txn).await?;
-        ensure!(
-            resp.succeeded,
-            UnexpectedSnafu {
-                err_msg: format!("Failed to destroy table metadata: {table_id}")
-            }
-        );
-
+        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        let _ = self
+            .kv_backend
+            .batch_delete(BatchDeleteRequest::new().with_keys(keys))
+            .await?;
         Ok(())
     }
 

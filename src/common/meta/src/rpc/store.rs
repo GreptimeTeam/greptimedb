@@ -510,6 +510,13 @@ impl BatchDeleteRequest {
     }
 
     #[inline]
+    /// Sets `keys`.
+    pub fn with_keys(mut self, keys: Vec<Vec<u8>>) -> Self {
+        self.keys = keys;
+        self
+    }
+
+    #[inline]
     pub fn add_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.keys.push(key.into());
         self
