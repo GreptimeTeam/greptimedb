@@ -103,10 +103,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-#      - uses: Swatinem/rust-cache@v2
-#        with:
-#          # Shares across multiple jobs
-#          shared-key: "build-binaries"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-binaries"
       - name: Build greptime binaries
         shell: bash
         run: cargo build --bin greptime --bin sqlness-runner
