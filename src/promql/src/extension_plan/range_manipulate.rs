@@ -517,7 +517,9 @@ mod test {
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
+    use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::physical_plan::ExecutionMode;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 

@@ -693,6 +693,7 @@ mod test {
     use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::common::ToDFSchema;
+    use datafusion::physical_plan::ExecutionMode;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
