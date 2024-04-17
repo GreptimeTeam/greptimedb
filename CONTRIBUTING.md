@@ -50,7 +50,7 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 
 - To ensure that community is free and confident in its ability to use your contributions, please sign the Contributor License Agreement (CLA) which will be incorporated in the pull request process.
 - Make sure all files have proper license header (running `docker run --rm -v $(pwd):/github/workspace ghcr.io/korandoru/hawkeye-native:v3 format` from the project root).
-- Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/).
+- Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/) and [style guide](http://github.com/greptimeTeam/docs/style-guide.md).
 - Make sure all unit tests are passed (using `cargo test --workspace` or [nextest](https://nexte.st/index.html) `cargo nextest run`).
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings`).
 
