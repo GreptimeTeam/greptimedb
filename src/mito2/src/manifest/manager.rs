@@ -119,9 +119,6 @@ pub struct RegionManifestManager {
     stopped: bool,
 }
 
-/// Ref-counted pointer to a [RegionManifestManager] guarded by a lock.
-pub type RegionManifestManagerRef = Arc<tokio::sync::RwLock<RegionManifestManager>>;
-
 impl RegionManifestManager {
     /// Constructs a region's manifest and persist it.
     pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
