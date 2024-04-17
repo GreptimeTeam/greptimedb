@@ -39,4 +39,8 @@ It's mainly an complement to the [Rust Style Guide](https://pingcap.github.io/st
 
 - Define a custom error type for the module if needed.
 - Prefer `with_context()` over `context()` when allocation is needed to construct an error.
-  
+- Use `error!()` or `warn!()` macros in the `common_telemetry` crate to log errors. E.g.:
+
+```rust
+error!(e; "Failed to do something");
+```
