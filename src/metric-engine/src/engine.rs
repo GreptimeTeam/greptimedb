@@ -27,6 +27,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -34,7 +35,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -122,7 +123,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResult, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
         let mut extension_return_value = HashMap::new();
 
         let result = match request {
@@ -148,12 +149,10 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Catchup(_) => Ok(0),
         };
 
-        result
-            .map_err(BoxedError::new)
-            .map(|rows| RegionHandleResult {
-                affected_rows: rows,
-                extension: extension_return_value,
-            })
+        result.map_err(BoxedError::new).map(|rows| RegionResponse {
+            affected_rows: rows,
+            extension: extension_return_value,
+        })
     }
 
     /// Handles substrait query and return a stream of record batches
