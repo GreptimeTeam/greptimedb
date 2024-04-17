@@ -8,11 +8,13 @@ It's mainly an complement to the [Rust Style Guide](https://pingcap.github.io/st
 
 - Formatting
 - Modules
+- Comments
 
 ## Formatting
 
 - Place all `mod` declaration before any `use`.
 - Use `unimplemented!()` instead of `todo!()` for things that aren't likely to be implemented.
+- Add an empty line before and after declaration blocks.
 
 ## Modules
 
@@ -25,3 +27,9 @@ It's mainly an complement to the [Rust Style Guide](https://pingcap.github.io/st
 │  └── write_cache.rs
 └── cache.rs
 ```
+
+## Comments
+
+- Add comments for public functions and structs.
+- Prefer document comment (`///`) over normal comment (`//`) for structs, fields, functions etc.
+- Add link (`[]`) to struct, method, or any other reference. And make sure that link works.
