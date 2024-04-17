@@ -18,5 +18,6 @@ common-time.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlness = { version = "0.5" }
+tempdir = "0.3"
 tinytemplate = "1.2"
 tokio.workspace = true

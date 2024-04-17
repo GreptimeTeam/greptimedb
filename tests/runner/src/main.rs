@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use env::{Env, WalConfig};
 use sqlness::{ConfigBuilder, Runner};
+use tempdir::TempDir;
 
 mod env;
 mod util;
@@ -67,16 +68,19 @@ struct Args {
     /// If not set, sqlness will build GreptimeDB on the fly.
     #[clap(long)]
     bins_dir: Option<PathBuf>,
+
+    /// Preserve persistent state in the temporary directory.
+    /// This may affect future test runs.
+    #[clap(long)]
+    preserve_state: bool,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    #[cfg(windows)]
-    let data_home = std::env::temp_dir();
-    #[cfg(not(windows))]
-    let data_home = std::path::PathBuf::from("/tmp");
+    let temp_dir = TempDir::new("sqlness").unwrap();
+    let data_home = temp_dir.path().to_path_buf();
 
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
@@ -104,4 +108,9 @@ async fn main() {
         Env::new(data_home, args.server_addr, wal, args.bins_dir),
     );
     runner.run().await.unwrap();
+
+    // skip clean up and exit
+    if args.preserve_state {
+        println!("Preserving state in {:?}", temp_dir.into_path());
+    }
 }
