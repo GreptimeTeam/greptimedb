@@ -122,17 +122,42 @@ impl<'referred, 'df> Context<'referred, 'df> {
         }
     }
 
-    /// render Constant, will only emit the `rows` once.
-    pub fn render_constant(&mut self, mut rows: Vec<DiffRow>) -> CollectionBundle {
+    /// render Constant, take all rows that have a timestamp not greater than the current time
+    ///
+    /// Always assume input is sorted by timestamp
+    pub fn render_constant(&mut self, rows: Vec<DiffRow>) -> CollectionBundle {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff>("constant");
+        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = rows
+            .into_iter()
+            .group_by(|(_row, ts, _diff)| *ts)
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect_vec()))
+            .collect();
+        let now = self.compute_state.current_time_ref();
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+        let scheduler_inner = scheduler.clone();
 
-        self.df
-            .add_subgraph_source("Constant", send_port, move |_ctx, send_port| {
-                if rows.is_empty() {
-                    return;
-                }
-                send_port.give(std::mem::take(&mut rows));
-            });
+        let subgraph_id =
+            self.df
+                .add_subgraph_source("Constant", send_port, move |_ctx, send_port| {
+                    // find the first timestamp that is greater than now
+                    // use filter_map
+
+                    let mut after = per_time.split_off(&(*now.borrow() + 1));
+                    // swap
+                    std::mem::swap(&mut per_time, &mut after);
+                    let not_great_than_now = after;
+                    dbg!(&not_great_than_now);
+                    not_great_than_now.into_iter().for_each(|(_ts, rows)| {
+                        send_port.give(rows);
+                    });
+                    // schedule the next run
+                    if let Some(next_run_time) = per_time.keys().next().copied() {
+                        scheduler_inner.schedule_at(next_run_time);
+                    }
+                });
+        scheduler.set_cur_subgraph(subgraph_id);
 
         CollectionBundle::from_collection(Collection::from_port(recv_port))
     }
@@ -219,6 +244,9 @@ mod test {
                 assert_eq!(*output.borrow(), vec![], "at ts={}", now);
             };
             output.borrow_mut().clear();
+            // print future scheduled
+            let scheduled = state.get_scheduler();
+            dbg!(scheduled);
         }
     }
 
@@ -275,7 +303,7 @@ mod test {
         let collection = collection.collection.clone(ctx.df);
         let cnt = Rc::new(RefCell::new(0));
         let cnt_inner = cnt.clone();
-        ctx.df.add_subgraph_sink(
+        let res_subgraph_id = ctx.df.add_subgraph_sink(
             "test_render_constant",
             collection.into_inner(),
             move |_ctx, recv| {
@@ -283,9 +311,16 @@ mod test {
                 *cnt_inner.borrow_mut() += data.iter().map(|v| v.len()).sum::<usize>();
             },
         );
+        ctx.compute_state.set_current_ts(2);
+        ctx.compute_state.run_available_with_schedule(ctx.df);
+        assert_eq!(*cnt.borrow(), 2);
+
+        ctx.compute_state.set_current_ts(3);
+        ctx.compute_state.run_available_with_schedule(ctx.df);
+        // to get output
+        ctx.df.schedule_subgraph(res_subgraph_id);
         ctx.df.run_available();
-        assert_eq!(*cnt.borrow(), 3);
-        ctx.df.run_available();
+
         assert_eq!(*cnt.borrow(), 3);
     }
 
@@ -313,5 +348,34 @@ mod test {
         df.run_available();
 
         assert_eq!(sum.borrow().to_owned(), 45);
+    }
+
+    #[test]
+    fn test_tee_auto_schedule() {
+        use hydroflow::scheduled::handoff::TeeingHandoff as Toff;
+        let mut df = Hydroflow::new();
+        let (send_port, recv_port) = df.make_edge::<_, Toff<i32>>("test_handoff");
+        let source = df.add_subgraph_source("test_handoff_source", send_port, move |_ctx, send| {
+            for i in 0..10 {
+                send.give(vec![i]);
+            }
+        });
+        let teed_recv_port = recv_port.tee(&mut df);
+
+        let sum = Rc::new(RefCell::new(0));
+        let sum_move = sum.clone();
+        let _sink = df.add_subgraph_sink("test_handoff_sink", teed_recv_port, move |_ctx, recv| {
+            let data = recv.take_inner();
+            *sum_move.borrow_mut() += data.iter().flat_map(|i| i.iter()).sum::<i32>();
+        });
+        drop(recv_port);
+
+        df.run_available();
+        assert_eq!(sum.borrow().to_owned(), 45);
+
+        df.schedule_subgraph(source);
+        df.run_available();
+
+        assert_eq!(sum.borrow().to_owned(), 90);
     }
 }

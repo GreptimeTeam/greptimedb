@@ -28,7 +28,7 @@ use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::DiffRow;
 use crate::utils::{ArrangeHandler, Arrangement};
 
-pub type Toff = TeeingHandoff<DiffRow>;
+pub type Toff<T = DiffRow> = TeeingHandoff<T>;
 
 /// A collection, represent a collections of data that is received from a handoff.
 pub struct Collection<T: 'static> {

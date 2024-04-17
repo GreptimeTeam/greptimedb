@@ -83,7 +83,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
             move |_ctx, recv, send| {
                 // mfp only need to passively receive updates from recvs
                 let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
-
+                dbg!("reduce subgraph");
                 reduce_subgraph(
                     &reduce_arrange,
                     data,
@@ -242,8 +242,7 @@ fn eval_distinct_core(
             let old_val = arrange
                 .get(now, &key)
                 .or_else(|| inner_map.get(&key).cloned());
-            dbg!(now, &key, &old_val);
-            dbg!(&arrange);
+
             let new_key_val = match (old_val, diff) {
                 // a new distinct row
                 (None, 1) => Some(((key, val), ts, diff)),
@@ -269,7 +268,7 @@ fn update_reduce_distinct_arrange(
     err_collector: &ErrCollector,
 ) -> impl Iterator<Item = DiffRow> {
     let result_updates = eval_distinct_core(arrange.read(), kv, now, err_collector);
-    dbg!(&result_updates);
+
     err_collector.run(|| {
         arrange.write().apply_updates(now, result_updates)?;
         Ok(())
@@ -642,7 +641,7 @@ fn from_val_to_slice_idx(
         .map(|idx| {
             if idx == 0 {
                 // note that the first element is the offset list
-                1..offset_end[0]
+                1.min(offset_end[0])..offset_end[0]
             } else {
                 offset_end[idx - 1]..offset_end[idx]
             }
@@ -663,7 +662,7 @@ mod test {
     use super::*;
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
-    use crate::expr::{self, BinaryFunc, GlobalId, MapFilterProject};
+    use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject};
 
     #[test]
     fn test_basic_distinct() {
@@ -704,5 +703,66 @@ mod test {
             ],
         )]);
         run_and_check(&mut state, &mut df, 6..7, expected, output);
+    }
+
+    #[test]
+    fn test_basic_reduce_accum() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 4, 1),
+            (Row::new(vec![2i64.into()]), 5, 1),
+            (Row::new(vec![3i64.into()]), 6, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        let key_val_plan = KeyValPlan {
+            key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
+            val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
+        };
+
+        let simple_aggrs = vec![(
+            0,
+            0,
+            AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+        )];
+        let accum_plan = AccumulablePlan {
+            full_aggrs: vec![AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            }],
+            simple_aggrs,
+            distinct_aggrs: vec![],
+        };
+
+        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let bundle = ctx
+            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        let expected = BTreeMap::from([
+            (1, vec![(Row::new(vec![1i64.into()]), 1, 1)]),
+            (2, vec![(Row::new(vec![3i64.into()]), 2, 1)]),
+            (3, vec![(Row::new(vec![6i64.into()]), 3, 1)]),
+            (4, vec![(Row::new(vec![7i64.into()]), 4, 1)]),
+            (5, vec![(Row::new(vec![9i64.into()]), 5, 1)]),
+            (6, vec![(Row::new(vec![12i64.into()]), 6, 1)]),
+        ]);
+        run_and_check(&mut state, &mut df, 1..7, expected, output);
     }
 }
