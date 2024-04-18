@@ -1,0 +1,82 @@
+mode = "standalone"
+enable_memory_catalog = false
+skip_write = false
+
+[http_options]
+addr = "127.0.0.1:4000"
+timeout = "30s"
+body_limit = "64MB"
+
+[grpc_options]
+addr = "127.0.0.1:4001"
+runtime_size = 8
+
+[mysql_options]
+addr = "127.0.0.1:4002"
+runtime_size = 2
+
+[mysql_options.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+
+[postgres_options]
+addr = "127.0.0.1:4003"
+runtime_size = 2
+
+[postgres_options.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+
+[opentsdb_options]
+addr = "127.0.0.1:4242"
+runtime_size = 2
+
+[influxdb_options]
+enable = true
+
+[prometheus_options]
+enable = true
+
+[prom_options]
+addr = "127.0.0.1:4004"
+
+[wal]
+file_size = "256MB"
+purge_threshold = "4GB"
+purge_interval = "10m"
+read_batch_size = 128
+sync_write = false
+
+[storage]
+type = "File"
+data_home = '{data_home}'
+global_ttl = "15m"
+skip_wal = true
+sst_compression = "lz4raw"
+memtable_type = "time_series"
+
+[storage.compaction]
+max_inflight_tasks = 4
+max_files_in_level0 = 5
+max_purge_tasks = 4
+purge_expired_only = true
+
+[storage.manifest]
+checkpoint_margin = 128
+gc_duration = '10m'
+checkpoint_on_startup = false
+
+[storage.flush]
+max_flush_tasks = 2
+region_write_buffer_size = "1MB"
+picker_schedule_interval = "5m"
+global_write_buffer_size = "150MB"
+
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"
+
+[logging]
+enable_logcat = false

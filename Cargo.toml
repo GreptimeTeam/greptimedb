@@ -55,6 +55,7 @@ members = [
     "src/store-api",
     "src/table",
     "src/index",
+    "tests-chaos",
     "tests-fuzz",
     "tests-integration",
     "tests/runner",
@@ -212,6 +213,7 @@ sql = { path = "src/sql" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
+tests-fuzz = { path = "tests-fuzz" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"

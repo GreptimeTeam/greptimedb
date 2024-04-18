@@ -27,8 +27,7 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generat
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
-    droppable_columns, generate_columns, generate_random_value, generate_random_value_abs,
-    ColumnTypeGenerator, Ident,
+    droppable_columns, generate_columns, generate_random_value_abs, ColumnTypeGenerator, Ident,
 };
 
 fn add_column_options_generator<R: Rng>(

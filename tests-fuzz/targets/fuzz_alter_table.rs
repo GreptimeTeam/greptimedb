@@ -25,10 +25,7 @@ use snafu::{ensure, ResultExt};
 use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
-use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
-};
+use tests_fuzz::fake::WordGenerator;
 use tests_fuzz::generator::alter_expr::{
     AlterExprAddColumnGeneratorBuilder, AlterExprDropColumnGeneratorBuilder,
     AlterExprRenameGeneratorBuilder,

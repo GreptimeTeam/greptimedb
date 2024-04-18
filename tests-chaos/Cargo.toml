@@ -1,0 +1,27 @@
+[package]
+name = "tests-chaos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common-error.workspace = true
+common-macro.workspace = true
+common-telemetry.workspace = true
+common-time = { workspace = true }
+nix = { version = "0.26", features = ["process"] }
+rand = { workspace = true }
+rand_chacha = "0.3.1"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+sqlx = { version = "0.6", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "postgres",
+    "chrono",
+] }
+tests-fuzz.workspace = true
+tinytemplate = "1.2"
+tokio.workspace = true

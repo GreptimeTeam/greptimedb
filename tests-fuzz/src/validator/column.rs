@@ -217,13 +217,13 @@ where
     for<'c> String: Encode<'c, DB> + Type<DB>,
     for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
 {
-    // let sql = format!("DESC TABLE {table_name}");
-    // let rows = sqlx::query(&sql)
-    //     .fetch_all(e)
-    //     .await
-    //     .context(error::ExecuteQuerySnafu { sql })?;
-
-    todo!()
+    let sql = "SELECT table_schema, table_name, column_name, greptime_data_type as data_type, semantic_type, column_default, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?";
+    sqlx::query_as::<_, ColumnEntry>(sql)
+        .bind(schema_name.value.to_string())
+        .bind(table_name.value.to_string())
+        .fetch_all(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })
 }
 
 pub async fn fetch_columns_via_mysql(

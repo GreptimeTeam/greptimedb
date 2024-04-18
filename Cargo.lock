@@ -10062,6 +10062,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 
 [[package]]
+name = "tests-chaos"
+version = "0.7.2"
+dependencies = [
+ "common-error",
+ "common-macro",
+ "common-telemetry",
+ "common-time",
+ "nix 0.26.4",
+ "rand",
+ "rand_chacha",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "snafu",
+ "sqlx",
+ "tests-fuzz",
+ "tinytemplate",
+ "tokio",
+]
+
+[[package]]
 name = "tests-fuzz"
 version = "0.7.2"
 dependencies = [
