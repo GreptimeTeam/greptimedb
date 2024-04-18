@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 
+use snafu::ensure;
+
 use crate::error::{self, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
@@ -72,6 +74,12 @@ impl TombstoneManager {
     }
 
     async fn move_values_inner(&self, keys: &[Vec<u8>], dest_keys: &[Vec<u8>]) -> Result<()> {
+        ensure!(
+            keys.len() == dest_keys.len(),
+            error::UnexpectedSnafu {
+                err_msg: "The length of keys does not match the length of dest_keys."
+            }
+        );
         // The key -> dest key mapping.
         let lookup_table = keys.iter().zip(dest_keys.iter()).collect::<HashMap<_, _>>();
 
