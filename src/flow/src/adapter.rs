@@ -28,8 +28,9 @@ pub struct FlowTaskManager {
     /// table_id: TableId to a list of task ids(u64)
     mirror_write_manager: TaskRouteManager,
     /// task_id: u64 -> TaskMetadata
-    task_info: TaskMetadata,
+    task_info: TaskMetadataManager,
 }
+
 impl FlowTaskManager {
     pub async fn create_flow_task(&self, sql: &str) -> MetaResult<TaskId> {
         // TODO: send sql to flow node, which will try to parse it into a flow task
@@ -45,22 +46,42 @@ impl FlowTaskManager {
 pub struct TaskRouteManager {
     /// table_id: TableId to a list of task ids(u64)
     source_table_to_tasks: KvBackendRef,
+    flow_node_id_to_metadata: KvBackendRef,
 }
 
 impl TaskRouteManager {
     /// Get all task ids that are reading from this table
-    pub async fn get(&self, table_id: TableId) -> MetaResult<Vec<TaskId>> {
+    pub async fn get_tasks(&self, table_id: TableId) -> MetaResult<Vec<TaskId>> {
         // get all task ids that are writing to this table
         todo!()
     }
 
     /// Set a task to read from this table
-    pub async fn set(&self, table_id: TableId, task_id: TaskId) -> MetaResult<()> {
+    pub async fn set_tasks(&self, table_id: TableId, task_ids: Vec<TaskId>) -> MetaResult<()> {
         // set a task id to write to this table
+        todo!()
+    }
+
+    /// Get flow node metadata by node id
+    pub async fn get_node_metadata(&self, node_id: FlowNodeId) -> MetaResult<FlowNodeMetadata> {
+        // get node metadata by node id
+        todo!()
+    }
+
+    pub async fn set_node_metadata(
+        &self,
+        node_id: FlowNodeId,
+        metadata: FlowNodeMetadata,
+    ) -> MetaResult<()> {
+        // set node metadata by node id
         todo!()
     }
 }
 
+pub struct FlowNodeMetadata {
+    tasks: Vec<TaskId>,
+    source_tables: Vec<TableId>,
+}
 pub struct TaskMetadataManager {
     task_id_to_metadata: KvBackendRef,
 }
