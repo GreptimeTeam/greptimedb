@@ -16,7 +16,10 @@ pub mod builder;
 
 use std::sync::Arc;
 
+use common_query::logical_plan::Expr;
+use datafusion_expr::Expr as DfExpr;
 use futures::{AsyncRead, AsyncSeek};
+use index::full_text_index::search::FullTextIndexSearcher;
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -169,6 +172,53 @@ impl SstIndexApplier {
 impl Drop for SstIndexApplier {
     fn drop(&mut self) {
         INDEX_APPLY_MEMORY_USAGE.sub(self.index_applier.memory_usage() as i64);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FullTextIndexApplier {
+    region_dir: String,
+    region_id: RegionId,
+    query: String,
+}
+
+impl FullTextIndexApplier {
+    pub fn new(region_dir: String, region_id: RegionId, filters: &[Expr]) -> Option<Self> {
+        let query = Self::extract_from_filter(filters)?;
+        Some(Self {
+            region_dir,
+            region_id,
+            query,
+        })
+    }
+
+    fn extract_from_filter(filters: &[Expr]) -> Option<String> {
+        common_telemetry::info!("[DEBUG] filters in scan request: {:?}", filters);
+        for filter in filters {
+            if let DfExpr::ScalarUDF(udf) = filter.df_expr()
+                && udf.fun.name == "matches"
+            {
+                let pattern = &udf.args[0];
+                if let DfExpr::Literal(literal) = pattern {
+                    return Some(literal.to_string());
+                } else {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the selected row number
+    pub fn apply(&self, file_id: FileId) -> Result<Vec<usize>> {
+        let index_path = format!(
+            "/tmp/greptimedb/{}index/{}/full_text_index",
+            self.region_dir, file_id
+        );
+        common_telemetry::info!("[DEBUG] open index at {index_path}");
+
+        let searcher = FullTextIndexSearcher::open(index_path).unwrap();
+        Ok(searcher.search(&self.query).unwrap())
     }
 }
 

@@ -29,7 +29,7 @@ use datafusion_common::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use itertools::Itertools;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection, RowSelector};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
@@ -50,7 +50,7 @@ use crate::metrics::{
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::file::FileHandle;
-use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::index::applier::{FullTextIndexApplier, SstIndexApplierRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
@@ -77,6 +77,8 @@ pub(crate) struct ParquetReaderBuilder {
     cache_manager: Option<CacheManagerRef>,
     /// Index applier.
     index_applier: Option<SstIndexApplierRef>,
+
+    full_text_index_applier: Option<FullTextIndexApplier>,
 }
 
 impl ParquetReaderBuilder {
@@ -95,6 +97,7 @@ impl ParquetReaderBuilder {
             projection: None,
             cache_manager: None,
             index_applier: None,
+            full_text_index_applier: None,
         }
     }
 
@@ -128,6 +131,15 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
         self.index_applier = index_applier;
+        self
+    }
+
+    #[must_use]
+    pub fn full_text_index_applier(
+        mut self,
+        full_text_index_applier: Option<FullTextIndexApplier>,
+    ) -> Self {
+        self.full_text_index_applier = full_text_index_applier;
         self
     }
 
@@ -280,6 +292,11 @@ impl ParquetReaderBuilder {
         }
         metrics.num_row_groups_before_filtering += num_row_groups;
 
+        if let Some(full_text_index_result) = self.prune_row_groups_by_full_text_index(parquet_meta)
+        {
+            return full_text_index_result;
+        }
+
         self.prune_row_groups_by_inverted_index(parquet_meta, metrics)
             .await
             .or_else(|| self.prune_row_groups_by_minmax(read_format, parquet_meta, metrics))
@@ -407,6 +424,59 @@ impl ParquetReaderBuilder {
         metrics.num_row_groups_min_max_filtered += filtered;
 
         Some(row_groups)
+    }
+
+    fn prune_row_groups_by_full_text_index(
+        &self,
+        parquet_meta: &ParquetMetaData,
+    ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
+        let applier = self.full_text_index_applier.as_ref()?;
+        let file_id = self.file_handle.file_id();
+        let mut selected_row = applier.apply(file_id).unwrap();
+
+        common_telemetry::info!("[DEBUG] selected_row: {:?}", selected_row.len());
+
+        // Let's assume that the number of rows in the first row group
+        // can represent the `row_group_size` of the Parquet file.
+        //
+        // If the file contains only one row group, i.e. the number of rows
+        // less than the `row_group_size`, the calculation of `row_group_id`
+        // and `rg_begin_row_id` is still correct.
+        let row_group_size = parquet_meta.row_group(0).num_rows() as usize;
+        if row_group_size == 0 {
+            return None;
+        }
+
+        // translate `selected_row` into row groups selection
+        selected_row.sort_unstable();
+        let mut row_groups_selected = BTreeMap::new();
+        for row_id in selected_row.iter() {
+            let row_group_id = row_id / row_group_size;
+            let rg_row_id = row_id % row_group_size;
+
+            row_groups_selected
+                .entry(row_group_id)
+                .or_insert_with(Vec::new)
+                .push(rg_row_id);
+        }
+        let row_group = row_groups_selected
+            .into_iter()
+            .map(|(row_group_id, row_ids)| {
+                let mut current_row = 0;
+                let mut selection = vec![];
+                for row_id in row_ids {
+                    selection.push(RowSelector::skip(row_id - current_row));
+                    selection.push(RowSelector::select(1));
+                    current_row = row_id + 1;
+                }
+
+                (row_group_id, Some(RowSelection::from(selection)))
+            })
+            .collect();
+
+        // common_telemetry::info!("[DEBUG] row_group: {:?}", row_group);
+
+        Some(row_group)
     }
 }
 

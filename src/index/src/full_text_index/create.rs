@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use snafu::ResultExt;
-use tantivy::schema::{OwnedValue, Schema, INDEXED, STORED, TEXT};
-use tantivy::{Document, Index, IndexWriter, TantivyDocument};
+use tantivy::schema::{Schema, INDEXED, STORED, TEXT};
+use tantivy::store::{Compressor, ZstdCompressor};
+use tantivy::{Index, IndexWriter, TantivyDocument};
 
 use super::error::TantivySnafu;
 use crate::full_text_index::error::Result;
@@ -43,12 +43,20 @@ impl FullTextIndexCreater {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
 
+        // create path
+        std::fs::create_dir_all(&path).unwrap();
+        common_telemetry::info!("[DEBUG] create full text index in {:?}", path.as_ref());
+
         // build index
-        let index = Index::create_in_dir(path, schema).context(TantivySnafu)?;
+        let mut index = Index::create_in_dir(path, schema).context(TantivySnafu)?;
+
+        // tune
+        index.settings_mut().docstore_compression = Compressor::Zstd(ZstdCompressor::default());
+        index.settings_mut().docstore_blocksize = 65_536;
 
         // build writer
         // 100 MB
-        let writer = index.writer(100_000_000).context(TantivySnafu)?;
+        let writer = index.writer(400_000_000).context(TantivySnafu)?;
 
         Ok(Self {
             index,
@@ -67,11 +75,14 @@ impl FullTextIndexCreater {
         self.writer.add_document(doc).context(TantivySnafu)?;
         self.row_count += 1;
 
-        self.writer.commit().context(TantivySnafu)?;
         Ok(())
     }
 
     pub fn finish(&mut self) -> Result<()> {
+        common_telemetry::info!(
+            "[DEBUG] full text index finish with {} entries",
+            self.row_count
+        );
         self.row_count = 0;
         self.writer.commit().context(TantivySnafu)?;
         Ok(())

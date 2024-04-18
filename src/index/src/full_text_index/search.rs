@@ -55,7 +55,7 @@ impl FullTextIndexSearcher {
         let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
         let query = query_parser.parse_query(query).context(ParseQuerySnafu)?;
         let top_docs = searcher
-            .search(&query, &tantivy::collector::TopDocs::with_limit(100))
+            .search(&query, &tantivy::collector::TopDocs::with_limit(1000_0000))
             .context(TantivySnafu)?;
         let mut result = HashSet::new();
         for (_score, doc_address) in top_docs {

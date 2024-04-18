@@ -16,6 +16,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use common_function::scalars::matches::MatchesFunction;
+use common_function::scalars::udf::create_udf;
+use common_function::state::FunctionState;
 use datafusion::catalog::CatalogList;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -24,6 +27,7 @@ use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use prost::Message;
+use session::context::QueryContext;
 use snafu::ResultExt;
 use substrait_proto::proto::Plan;
 
@@ -50,6 +54,13 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         let state = SessionState::new_with_config_rt(state_config, Arc::new(RuntimeEnv::default()))
             .with_serializer_registry(Arc::new(ExtensionSerializer));
         let mut context = SessionContext::new_with_state(state);
+
+        let udf = create_udf(
+            Arc::new(MatchesFunction),
+            QueryContext::arc(),
+            Arc::new(FunctionState::default()),
+        );
+        context.register_udf(udf.into());
         context.register_catalog_list(catalog_list);
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
         let df_plan = from_substrait_plan(&mut context, &plan)
@@ -64,6 +75,13 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
             SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
                 .with_serializer_registry(Arc::new(ExtensionSerializer));
         let context = SessionContext::new_with_state(session_state);
+
+        let udf = create_udf(
+            Arc::new(MatchesFunction),
+            QueryContext::arc(),
+            Arc::new(FunctionState::default()),
+        );
+        context.register_udf(udf.into());
 
         let substrait_plan = to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;

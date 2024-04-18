@@ -39,7 +39,7 @@ use crate::read::{compat, Batch, Source};
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
-use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::index::applier::{FullTextIndexApplier, SstIndexApplierRef};
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -269,6 +269,7 @@ impl ScanRegion {
         );
 
         let index_applier = self.build_index_applier();
+        let full_text_index_applier = self.build_full_text_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -283,6 +284,7 @@ impl ScanRegion {
             .with_files(files)
             .with_cache(self.cache_manager)
             .with_index_applier(index_applier)
+            .with_full_index_applier(full_text_index_applier)
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
@@ -337,9 +339,12 @@ impl ScanRegion {
         .map(Arc::new)
     }
 
-    fn build_full_text_index_applier(&self) -> Option<SstIndexApplierRef> {
-        // start here
-        todo!()
+    fn build_full_text_index_applier(&self) -> Option<FullTextIndexApplier> {
+        FullTextIndexApplier::new(
+            self.access_layer.region_dir().to_string(),
+            self.version.metadata.region_id,
+            &self.request.filters,
+        )
     }
 }
 
@@ -398,6 +403,8 @@ pub(crate) struct ScanInput {
     pub(crate) append_mode: bool,
     /// Whether to remove deletion markers.
     pub(crate) filter_deleted: bool,
+
+    full_text_index_applier: Option<FullTextIndexApplier>,
 }
 
 impl ScanInput {
@@ -418,6 +425,7 @@ impl ScanInput {
             query_start: None,
             append_mode: false,
             filter_deleted: true,
+            full_text_index_applier: None,
         }
     }
 
@@ -477,6 +485,15 @@ impl ScanInput {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_full_index_applier(
+        mut self,
+        index_applier: Option<FullTextIndexApplier>,
+    ) -> Self {
+        self.full_text_index_applier = index_applier;
+        self
+    }
+
     /// Sets start time of the query.
     #[must_use]
     pub(crate) fn with_start_time(mut self, now: Option<Instant>) -> Self {
@@ -514,6 +531,7 @@ impl ScanInput {
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())
                 .index_applier(self.index_applier.clone())
+                .full_text_index_applier(self.full_text_index_applier.clone())
                 .build()
                 .await;
             let reader = match maybe_reader {

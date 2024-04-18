@@ -31,6 +31,7 @@ pub use pow::PowFunction;
 pub use rate::RateFunction;
 use snafu::ResultExt;
 
+use super::matches::MatchesFunction;
 use crate::function::{Function, FunctionContext};
 use crate::function_registry::FunctionRegistry;
 use crate::scalars::math::modulo::ModuloFunction;
@@ -44,6 +45,7 @@ impl MathFunction {
         registry.register(Arc::new(RateFunction));
         registry.register(Arc::new(RangeFunction));
         registry.register(Arc::new(ClampFunction));
+        registry.register(Arc::new(MatchesFunction));
     }
 }
 

@@ -96,6 +96,13 @@ impl AccessLayer {
                 })?;
         }
 
+        let full_text_index_dir = format!(
+            "/tmp/greptimedb/{}index/{}/full_text_index",
+            self.region_dir, file_meta.file_id
+        );
+        common_telemetry::info!("[DEBUG] removing {}", full_text_index_dir);
+        tokio::fs::remove_dir(full_text_index_dir).await.unwrap();
+
         Ok(())
     }
 

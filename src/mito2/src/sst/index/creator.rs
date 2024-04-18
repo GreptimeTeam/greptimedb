@@ -121,9 +121,11 @@ impl SstIndexCreator {
         );
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
-        let full_text_index_path = format!("{file_path}/full_text_index");
-        let full_text_index_creater =
-            FullTextIndexCreater::new(segment_row_count.get(), full_text_index_path).unwrap();
+        let file_id = file_path.trim_end_matches(".puffin");
+        let full_text_index_path = format!("/tmp/greptimedb/{file_id}/full_text_index");
+        // let full_text_index_creater =
+        //     FullTextIndexCreater::new(segment_row_count.get(), full_text_index_path).unwrap();
+        let full_text_index_creater = FullTextIndexCreater::new(1, full_text_index_path).unwrap();
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
         Self {
@@ -250,6 +252,7 @@ impl SstIndexCreator {
         }
 
         // try find column named "log" and update it into full text index
+        common_telemetry::info!("[DEBUG] do_update: log_column_id: {:?}", self.log_column_id);
         if let Some(log_column_id) = self.log_column_id {
             for col in batch.fields() {
                 if col.column_id == log_column_id {

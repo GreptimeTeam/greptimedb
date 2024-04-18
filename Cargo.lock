@@ -2550,7 +2550,6 @@ checksum = "7e962a19be5cfc3f3bf6dd8f61eb50107f356ad6270fbb3ed41476571db78be5"
 [[package]]
 name = "datafusion"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2597,7 +2596,6 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2615,7 +2613,6 @@ dependencies = [
 [[package]]
 name = "datafusion-execution"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "arrow",
  "chrono",
@@ -2635,7 +2632,6 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2649,7 +2645,6 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2666,7 +2661,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2699,7 +2693,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "ahash 0.8.6",
  "arrow",
@@ -2729,7 +2722,6 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2742,7 +2734,6 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "32.0.0"
-source = "git+https://github.com/apache/arrow-datafusion.git?rev=26e43acac3a96cec8dd4c8365f22dfb1a84306e9#26e43acac3a96cec8dd4c8365f22dfb1a84306e9"
 dependencies = [
  "async-recursion",
  "chrono",
@@ -9934,6 +9925,7 @@ dependencies = [
  "bytes",
  "catalog",
  "common-error",
+ "common-function",
  "common-macro",
  "datafusion",
  "datafusion-common",
@@ -9942,6 +9934,7 @@ dependencies = [
  "datatypes",
  "promql",
  "prost 0.12.3",
+ "session",
  "snafu",
  "substrait 0.17.1",
  "tokio",
@@ -10183,6 +10176,7 @@ dependencies = [
  "time",
  "uuid",
  "winapi",
+ "zstd 0.13.0",
 ]
 
 [[package]]

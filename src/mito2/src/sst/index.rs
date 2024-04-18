@@ -63,6 +63,8 @@ impl Indexer {
                 // Skip index creation if error occurs.
                 self.inner = None;
             }
+        } else {
+            common_telemetry::info!("[DEBUG] Indexer::update: inner is None");
         }
 
         if let Some(creator) = self.inner.as_ref() {
