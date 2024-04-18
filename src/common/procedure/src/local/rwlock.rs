@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
-// Override warnings that the `Guard` is not accessed.
+// Override warnings that those fields are not accessed.
 #[allow(dead_code)]
 pub enum OwnedKeyRwLockGuard {
     Read(OwnedRwLockReadGuard<()>),
