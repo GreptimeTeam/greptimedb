@@ -17,6 +17,7 @@ common-time.workspace = true
 datafusion-substrait.workspace = true
 datatypes.workspace = true
 enum_dispatch = "0.3"
+table.workspace = true
 # This fork is simply for keeping our dependency in our org, and pin the version
 # it is the same with upstream repo
 common-meta.workspace = true
