@@ -164,9 +164,7 @@ impl Helper {
                 let item_type = ConcreteDataType::try_from(&array.value_type())?;
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
-                    .with_context(|_| ConvertArrowArrayToScalarsSnafu {
-                        array: array as ArrayRef,
-                    })?
+                    .context(ConvertArrowArrayToScalarsSnafu)?
                     .into_iter()
                     .flatten()
                     .map(ScalarValue::try_into)

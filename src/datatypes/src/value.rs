@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
-use arrow_array::{Array, ArrayRef, ListArray};
+use arrow_array::{Array, ListArray};
 use common_base::bytes::{Bytes, StringBytes};
 use common_decimal::Decimal128;
 use common_telemetry::logging;
@@ -817,9 +817,7 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::List(array) => {
                 let datatype = ConcreteDataType::try_from(array.data_type())?;
                 let items = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
-                    .with_context(|_| ConvertArrowArrayToScalarsSnafu {
-                        array: array as ArrayRef,
-                    })?
+                    .context(ConvertArrowArrayToScalarsSnafu)?
                     .into_iter()
                     .flatten()
                     .map(|x| x.try_into())

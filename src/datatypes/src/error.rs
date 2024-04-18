@@ -14,7 +14,6 @@
 
 use std::any::Any;
 
-use arrow_array::ArrayRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -141,9 +140,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert Arrow array {:?} to scalars", array))]
+    #[snafu(display("Failed to convert Arrow array to scalars"))]
     ConvertArrowArrayToScalars {
-        array: ArrayRef,
         #[snafu(source)]
         error: datafusion_common::DataFusionError,
         location: Location,
