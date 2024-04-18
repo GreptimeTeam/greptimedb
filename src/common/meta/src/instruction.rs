@@ -21,6 +21,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
 
+use crate::key::schema_name::SchemaName;
 use crate::table_name::TableName;
 use crate::{ClusterId, DatanodeId};
 
@@ -156,6 +157,7 @@ pub struct UpgradeRegion {
 pub enum CacheIdent {
     TableId(TableId),
     TableName(TableName),
+    SchemaName(SchemaName),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]

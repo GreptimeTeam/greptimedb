@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
+use super::txn_helper::TxnOpGetResponseSet;
 use crate::error::Result;
 use crate::key::{
     txn_helper, DeserializedValueWithBytes, TableMetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX,
 };
-use crate::kv_backend::txn::{Txn, TxnOpResponse};
+use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
 use crate::table_name::TableName;
@@ -109,7 +110,9 @@ impl TableInfoManager {
         table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
+        impl FnOnce(
+            &mut TxnOpGetResponseSet,
+        ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -119,7 +122,10 @@ impl TableInfoManager {
             table_info_value.try_as_raw_value()?,
         );
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Builds a update table info transaction, it expected the remote value equals the `current_current_table_info_value`.
@@ -131,7 +137,9 @@ impl TableInfoManager {
         new_table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
+        impl FnOnce(
+            &mut TxnOpGetResponseSet,
+        ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -140,7 +148,10 @@ impl TableInfoManager {
 
         let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     pub async fn get(

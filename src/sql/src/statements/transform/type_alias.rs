@@ -35,6 +35,7 @@ use crate::statements::{sql_data_type_to_concrete_data_type, TimezoneInfo};
 ///  - `INT32` for `int`
 ///  - `INT64` for `bigint`
 ///  -  And `UINT8`, `UINT16` etc. for `UnsignedTinyint` etc.
+///  -  TinyText, MediumText, LongText for `Text`.
 pub(crate) struct TypeAliasTransformRule;
 
 impl TransformRule for TypeAliasTransformRule {
@@ -178,6 +179,8 @@ pub fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "UINT64" => Some(DataType::UnsignedBigInt(None)),
         "FLOAT32" => Some(DataType::Float(None)),
         "FLOAT64" => Some(DataType::Double),
+        // String type alias
+        "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Some(DataType::Text),
         _ => None,
     }
 }
@@ -281,6 +284,18 @@ mod tests {
             get_data_type_by_alias_name("Timestamp_ns"),
             Some(DataType::Timestamp(Some(9), TimezoneInfo::None))
         );
+        assert_eq!(
+            get_data_type_by_alias_name("TinyText"),
+            Some(DataType::Text)
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("MediumText"),
+            Some(DataType::Text)
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("LongText"),
+            Some(DataType::Text)
+        );
     }
 
     fn test_timestamp_alias(alias: &str, expected: &str) {
@@ -323,6 +338,9 @@ mod tests {
         let sql = r#"
 CREATE TABLE data_types (
   s string,
+  tt tinytext,
+  mt mediumtext,
+  lt longtext,
   tint int8,
   sint int16,
   i int32,
@@ -349,6 +367,9 @@ CREATE TABLE data_types (
             Statement::CreateTable(c) => {
                 let expected = r#"CREATE TABLE  data_types (
   s STRING,
+  tt TEXT,
+  mt TEXT,
+  lt TEXT,
   tint INT8,
   sint SMALLINT,
   i INT,
