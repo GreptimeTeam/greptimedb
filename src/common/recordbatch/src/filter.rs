@@ -22,7 +22,7 @@ use datafusion_common::ScalarValue;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
-use crate::error::{ArrowComputeSnafu, Result, UnsupportedOperationSnafu};
+use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOperationSnafu};
 
 /// An inplace expr evaluator for simple filter. Only support
 /// - `col` `op` `literal`
@@ -69,9 +69,10 @@ impl SimpleFilterEvaluator {
                     _ => return None,
                 };
 
+                let literal = rhs.to_scalar().ok()?;
                 Some(Self {
                     column_name: lhs.name.clone(),
-                    literal: rhs.clone().to_scalar(),
+                    literal,
                     op,
                 })
             }
@@ -85,7 +86,10 @@ impl SimpleFilterEvaluator {
     }
 
     pub fn evaluate_scalar(&self, input: &ScalarValue) -> Result<bool> {
-        let result = self.evaluate_datum(&input.to_scalar())?;
+        let input = input
+            .to_scalar()
+            .with_context(|_| ToArrowScalarSnafu { v: input.clone() })?;
+        let result = self.evaluate_datum(&input)?;
         Ok(result.value(0))
     }
 

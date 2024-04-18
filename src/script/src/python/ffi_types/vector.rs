@@ -525,17 +525,12 @@ pub fn val_to_pyobj(val: value::Value, vm: &VirtualMachine) -> PyResult {
         // FIXME(dennis): lose the timestamp unit here
         Value::Timestamp(v) => vm.ctx.new_int(v.value()).into(),
         value::Value::List(list) => {
-            let list = list.items().as_ref();
-            match list {
-                Some(list) => {
-                    let list: Vec<_> = list
-                        .iter()
-                        .map(|v| val_to_pyobj(v.clone(), vm))
-                        .collect::<Result<_, _>>()?;
-                    vm.ctx.new_list(list).into()
-                }
-                None => vm.ctx.new_list(Vec::new()).into(),
-            }
+            let list: Vec<_> = list
+                .items()
+                .iter()
+                .map(|v| val_to_pyobj(v.clone(), vm))
+                .collect::<Result<_, _>>()?;
+            vm.ctx.new_list(list).into()
         }
         #[allow(unreachable_patterns)]
         _ => return Err(vm.new_type_error(format!("Convert from {val:?} is not supported yet"))),

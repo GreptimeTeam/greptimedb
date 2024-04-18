@@ -83,14 +83,14 @@ impl<'a> ParserContext<'a> {
     }
 
     pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {
-        let raw_table_name = self
-            .parser
-            .parse_object_name()
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a table name",
-                actual: self.parser.peek_token().to_string(),
-            })?;
+        let raw_table_name =
+            self.parser
+                .parse_object_name(false)
+                .context(error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.parser.peek_token().to_string(),
+                })?;
         Ok(Self::canonicalize_object_name(raw_table_name))
     }
 
@@ -100,7 +100,7 @@ impl<'a> ParserContext<'a> {
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        let function_name = parser.parse_identifier().context(SyntaxSnafu)?;
+        let function_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
         parser
             .parse_function(ObjectName(vec![function_name]))
             .context(SyntaxSnafu)
@@ -221,6 +221,22 @@ impl<'a> ParserContext<'a> {
                 .map(Self::canonicalize_identifier)
                 .collect(),
         )
+    }
+
+    /// Simply a shortcut for sqlparser's same name method `parse_object_name`,
+    /// but with constant argument "false".
+    /// Because the argument is always "false" for us (it's introduced by BigQuery),
+    /// we don't want to write it again and again.
+    pub(crate) fn parse_object_name(&mut self) -> std::result::Result<ObjectName, ParserError> {
+        self.parser.parse_object_name(false)
+    }
+
+    /// Simply a shortcut for sqlparser's same name method `parse_identifier`,
+    /// but with constant argument "false".
+    /// Because the argument is always "false" for us (it's introduced by BigQuery),
+    /// we don't want to write it again and again.
+    pub(crate) fn parse_identifier(&mut self) -> std::result::Result<Ident, ParserError> {
+        self.parser.parse_identifier(false)
     }
 }
 

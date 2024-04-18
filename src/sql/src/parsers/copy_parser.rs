@@ -47,14 +47,13 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parser_copy_database(&mut self) -> Result<CopyDatabase> {
-        let database_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a database name",
-                    actual: self.peek_token_as_string(),
-                })?;
+        let database_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a database name",
+                actual: self.peek_token_as_string(),
+            })?;
 
         let req = if self.parser.parse_keyword(Keyword::TO) {
             let (with, connection, location) = self.parse_copy_parameters()?;
@@ -82,14 +81,13 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_copy_table(&mut self) -> Result<CopyTable> {
-        let raw_table_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
+        let raw_table_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
         let table_name = Self::canonicalize_object_name(raw_table_name);
 
         if self.parser.parse_keyword(Keyword::TO) {

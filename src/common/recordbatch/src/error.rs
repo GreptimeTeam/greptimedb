@@ -18,6 +18,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 
@@ -69,8 +70,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to init Recordbatch stream"))]
-    InitRecordbatchStream {
+    #[snafu(display("Failed to convert {v:?} to Arrow scalar"))]
+    ToArrowScalar {
+        v: ScalarValue,
         #[snafu(source)]
         error: datafusion_common::DataFusionError,
         location: Location,
@@ -128,7 +130,7 @@ impl ErrorExt for Error {
             | Error::CreateRecordBatches { .. }
             | Error::PollStream { .. }
             | Error::Format { .. }
-            | Error::InitRecordbatchStream { .. }
+            | Error::ToArrowScalar { .. }
             | Error::ColumnNotExists { .. }
             | Error::ProjectArrowRecordBatch { .. }
             | Error::ArrowCompute { .. } => StatusCode::Internal,

@@ -50,7 +50,7 @@ impl<'a> Display for TableReference<'a> {
     }
 }
 
-impl<'a> From<TableReference<'a>> for DfTableReference<'a> {
+impl<'a> From<TableReference<'a>> for DfTableReference {
     fn from(val: TableReference<'a>) -> Self {
         DfTableReference::full(val.catalog, val.schema, val.table)
     }

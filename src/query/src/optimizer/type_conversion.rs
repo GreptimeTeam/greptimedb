@@ -48,8 +48,8 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                     schema: filter.input.schema().clone(),
                     query_ctx: ctx.query_ctx(),
                 };
-                let rewritten = filter.predicate.clone().rewrite(&mut converter)?;
-                Ok(Transformed::Yes(LogicalPlan::Filter(Filter::try_new(
+                let rewritten = filter.predicate.clone().rewrite(&mut converter)?.data;
+                Ok(Transformed::yes(LogicalPlan::Filter(Filter::try_new(
                     rewritten,
                     filter.input,
                 )?)))
@@ -68,9 +68,9 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 };
                 let rewrite_filters = filters
                     .into_iter()
-                    .map(|e| e.rewrite(&mut converter))
+                    .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(Transformed::Yes(LogicalPlan::TableScan(TableScan {
+                Ok(Transformed::yes(LogicalPlan::TableScan(TableScan {
                     table_name: table_name.clone(),
                     source: source.clone(),
                     projection,
@@ -100,10 +100,10 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 let expr = plan
                     .expressions()
                     .into_iter()
-                    .map(|e| e.rewrite(&mut converter))
+                    .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                     .collect::<Result<Vec<_>>>()?;
 
-                plan.with_new_exprs(expr, &inputs).map(Transformed::Yes)
+                plan.with_new_exprs(expr, inputs).map(Transformed::yes)
             }
 
             LogicalPlan::Subquery { .. }
@@ -116,8 +116,10 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Unnest(_)
             | LogicalPlan::Statement(_)
             | LogicalPlan::Ddl(_)
-            | LogicalPlan::Copy(_) => Ok(Transformed::No(plan)),
+            | LogicalPlan::Copy(_)
+            | LogicalPlan::RecursiveQuery(_) => Ok(Transformed::no(plan)),
         })
+        .map(|x| x.data)
     }
 
     fn name(&self) -> &str {
@@ -155,9 +157,9 @@ impl TypeConverter {
                 _ => Ok(ScalarValue::Boolean(None)),
             },
             (target_type, value) => {
-                let value_arr = value.to_array();
-                let arr =
-                    compute::cast(&value_arr, target_type).map_err(DataFusionError::ArrowError)?;
+                let value_arr = value.to_array()?;
+                let arr = compute::cast(&value_arr, target_type)
+                    .map_err(|e| DataFusionError::ArrowError(e, None))?;
 
                 ScalarValue::try_from_array(
                     &arr,
@@ -207,9 +209,9 @@ impl TypeConverter {
 }
 
 impl TreeNodeRewriter for TypeConverter {
-    type N = Expr;
+    type Node = Expr;
 
-    fn mutate(&mut self, expr: Expr) -> Result<Expr> {
+    fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
         let new_expr = match expr {
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
                 Operator::Eq
@@ -275,7 +277,7 @@ impl TreeNodeRewriter for TypeConverter {
             },
             expr => expr,
         };
-        Ok(new_expr)
+        Ok(Transformed::yes(new_expr))
     }
 }
 
@@ -310,7 +312,9 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::logical_expr::expr::AggregateFunction as AggrExpr;
-    use datafusion_common::{Column, DFField, DFSchema};
+    use datafusion_common::arrow::datatypes::Field;
+    use datafusion_common::{Column, DFSchema};
+    use datafusion_expr::expr::AggregateFunctionDefinition;
     use datafusion_expr::{AggregateFunction, LogicalPlanBuilder};
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
@@ -390,11 +394,13 @@ mod tests {
 
         let schema = Arc::new(
             DFSchema::new_with_metadata(
-                vec![DFField::new(
+                vec![(
                     None::<TableReference>,
-                    "ts",
-                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    true,
+                    Arc::new(Field::new(
+                        "ts",
+                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                        true,
+                    )),
                 )],
                 HashMap::new(),
             )
@@ -411,12 +417,13 @@ mod tests {
                 None
             ))),
             converter
-                .mutate(
+                .f_up(
                     Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
                         Some("2020-09-08T05:42:29+08:00".to_string()),
                     )))
                 )
                 .unwrap()
+                .data
         );
     }
 
@@ -425,11 +432,9 @@ mod tests {
         let col_name = "is_valid";
         let schema = Arc::new(
             DFSchema::new_with_metadata(
-                vec![DFField::new(
+                vec![(
                     None::<TableReference>,
-                    col_name,
-                    DataType::Boolean,
-                    false,
+                    Arc::new(Field::new(col_name, DataType::Boolean, false)),
                 )],
                 HashMap::new(),
             )
@@ -444,11 +449,12 @@ mod tests {
             Expr::Column(Column::from_name(col_name))
                 .eq(Expr::Literal(ScalarValue::Boolean(Some(true)))),
             converter
-                .mutate(
+                .f_up(
                     Expr::Column(Column::from_name(col_name))
                         .eq(Expr::Literal(ScalarValue::Utf8(Some("true".to_string()))))
                 )
                 .unwrap()
+                .data
         );
     }
 
@@ -475,11 +481,12 @@ mod tests {
             .aggregate(
                 Vec::<Expr>::new(),
                 vec![Expr::AggregateFunction(AggrExpr {
-                    fun: AggregateFunction::Count,
+                    func_def: AggregateFunctionDefinition::BuiltIn(AggregateFunction::Count),
                     args: vec![Expr::Column(Column::from_name("column1"))],
                     distinct: false,
                     filter: None,
                     order_by: None,
+                    null_treatment: None,
                 })],
             )
             .unwrap()

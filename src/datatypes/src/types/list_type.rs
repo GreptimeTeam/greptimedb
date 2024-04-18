@@ -61,7 +61,7 @@ impl DataType for ListType {
     }
 
     fn default_value(&self) -> Value {
-        Value::List(ListValue::new(None, *self.item_type.clone()))
+        Value::List(ListValue::new(vec![], *self.item_type.clone()))
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
@@ -95,7 +95,7 @@ mod tests {
         assert_eq!("List<Boolean>", t.name());
         assert_eq!(LogicalTypeId::List, t.logical_type_id());
         assert_eq!(
-            Value::List(ListValue::new(None, ConcreteDataType::boolean_datatype())),
+            Value::List(ListValue::new(vec![], ConcreteDataType::boolean_datatype())),
             t.default_value()
         );
         assert_eq!(

@@ -72,6 +72,7 @@ pub fn create_aggregate_function(
 mod tests {
     use std::sync::Arc;
 
+    use datafusion_common::DFSchema;
     use datafusion_expr::{
         ColumnarValue as DfColumnarValue, ScalarUDF as DfScalarUDF,
         TypeSignature as DfTypeSignature,
@@ -135,15 +136,17 @@ mod tests {
 
         // test into_df_udf
         let df_udf: DfScalarUDF = udf.into();
-        assert_eq!("and", df_udf.name);
+        assert_eq!("and", df_udf.name());
 
         let types = vec![DataType::Boolean, DataType::Boolean];
         assert!(
-            matches!(&df_udf.signature.type_signature, DfTypeSignature::Exact(ts) if ts.clone() == types)
+            matches!(&df_udf.signature().type_signature, DfTypeSignature::Exact(ts) if ts.clone() == types)
         );
         assert_eq!(
-            Arc::new(DataType::Boolean),
-            (df_udf.return_type)(&[]).unwrap()
+            DataType::Boolean,
+            df_udf
+                .return_type_from_exprs(&[], &DFSchema::empty(), &[])
+                .unwrap()
         );
 
         let args = vec![
@@ -152,7 +155,7 @@ mod tests {
         ];
 
         // call the function
-        let result = (df_udf.fun)(&args).unwrap();
+        let result = (df_udf.fun())(&args).unwrap();
 
         match result {
             DfColumnarValue::Array(arr) => {

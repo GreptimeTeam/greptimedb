@@ -144,7 +144,9 @@ coprocessor = copr
             // could generate a call in python code and use Python::run to run it, just like in RustPython
             // Expect either: a PyVector Or a List/Tuple of PyVector
             py.run(&script, Some(globals), Some(locals))?;
-            let result = locals.get_item("_return_from_coprocessor").ok_or_else(|| PyValueError::new_err("Can't find return value of coprocessor function"))?;
+            let result = locals.get_item("_return_from_coprocessor")?.ok_or_else(||
+                PyValueError::new_err(format!("cannot find the return value of script '{script}'"))
+            )?;
 
             let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
             py_any_to_vec(result, col_len)

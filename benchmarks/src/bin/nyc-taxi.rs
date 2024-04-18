@@ -215,37 +215,7 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
                 ColumnDataType::String,
             )
         }
-        DataType::Null
-        | DataType::Boolean
-        | DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64
-        | DataType::Float16
-        | DataType::Float32
-        | DataType::Date32
-        | DataType::Date64
-        | DataType::Time32(_)
-        | DataType::Time64(_)
-        | DataType::Duration(_)
-        | DataType::Interval(_)
-        | DataType::Binary
-        | DataType::FixedSizeBinary(_)
-        | DataType::LargeBinary
-        | DataType::LargeUtf8
-        | DataType::List(_)
-        | DataType::FixedSizeList(_, _)
-        | DataType::LargeList(_)
-        | DataType::Struct(_)
-        | DataType::Union(_, _)
-        | DataType::Dictionary(_, _)
-        | DataType::Decimal128(_, _)
-        | DataType::Decimal256(_, _)
-        | DataType::RunEndEncoded(_, _)
-        | DataType::Map(_, _) => todo!(),
+        _ => unimplemented!(),
     }
 }
 
@@ -444,7 +414,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
 fn query_set(table_name: &str) -> HashMap<String, String> {
     HashMap::from([
         (
-            "count_all".to_string(), 
+            "count_all".to_string(),
             format!("SELECT COUNT(*) FROM {table_name};"),
         ),
         (

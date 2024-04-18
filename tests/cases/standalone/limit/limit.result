@@ -9,7 +9,7 @@ EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT
 | plan_type     | plan                             |
 +---------------+----------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false] |
-| physical_plan | EmptyExec: produce_one_row=false |
+| physical_plan | EmptyExec                        |
 |               |                                  |
 +---------------+----------------------------------+
 
@@ -19,7 +19,7 @@ EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) WHERE
 | plan_type     | plan                             |
 +---------------+----------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false] |
-| physical_plan | EmptyExec: produce_one_row=false |
+| physical_plan | EmptyExec                        |
 |               |                                  |
 +---------------+----------------------------------+
 

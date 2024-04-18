@@ -49,10 +49,7 @@ impl DfTableSourceProvider {
         }
     }
 
-    pub fn resolve_table_ref<'a>(
-        &'a self,
-        table_ref: TableReference<'a>,
-    ) -> Result<ResolvedTableReference<'a>> {
+    pub fn resolve_table_ref(&self, table_ref: TableReference) -> Result<ResolvedTableReference> {
         if self.disallow_cross_catalog_query {
             match &table_ref {
                 TableReference::Bare { .. } => (),
@@ -76,7 +73,7 @@ impl DfTableSourceProvider {
 
     pub async fn resolve_table(
         &mut self,
-        table_ref: TableReference<'_>,
+        table_ref: TableReference,
     ) -> Result<Arc<dyn TableSource>> {
         let table_ref = self.resolve_table_ref(table_ref)?;
 
@@ -106,8 +103,6 @@ impl DfTableSourceProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use session::context::QueryContext;
 
     use super::*;
@@ -120,68 +115,37 @@ mod tests {
         let table_provider =
             DfTableSourceProvider::new(MemoryCatalogManager::with_default_setup(), true, query_ctx);
 
-        let table_ref = TableReference::Bare {
-            table: Cow::Borrowed("table_name"),
-        };
+        let table_ref = TableReference::bare("table_name");
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_ok());
 
-        let table_ref = TableReference::Partial {
-            schema: Cow::Borrowed("public"),
-            table: Cow::Borrowed("table_name"),
-        };
+        let table_ref = TableReference::partial("public", "table_name");
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_ok());
 
-        let table_ref = TableReference::Partial {
-            schema: Cow::Borrowed("wrong_schema"),
-            table: Cow::Borrowed("table_name"),
-        };
+        let table_ref = TableReference::partial("wrong_schema", "table_name");
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_ok());
 
-        let table_ref = TableReference::Full {
-            catalog: Cow::Borrowed("greptime"),
-            schema: Cow::Borrowed("public"),
-            table: Cow::Borrowed("table_name"),
-        };
+        let table_ref = TableReference::full("greptime", "public", "table_name");
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_ok());
 
-        let table_ref = TableReference::Full {
-            catalog: Cow::Borrowed("wrong_catalog"),
-            schema: Cow::Borrowed("public"),
-            table: Cow::Borrowed("table_name"),
-        };
+        let table_ref = TableReference::full("wrong_catalog", "public", "table_name");
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_err());
 
-        let table_ref = TableReference::Partial {
-            schema: Cow::Borrowed("information_schema"),
-            table: Cow::Borrowed("columns"),
-        };
+        let table_ref = TableReference::partial("information_schema", "columns");
         let result = table_provider.resolve_table_ref(table_ref);
         assert!(result.is_ok());
 
-        let table_ref = TableReference::Full {
-            catalog: Cow::Borrowed("greptime"),
-            schema: Cow::Borrowed("information_schema"),
-            table: Cow::Borrowed("columns"),
-        };
+        let table_ref = TableReference::full("greptime", "information_schema", "columns");
         assert!(table_provider.resolve_table_ref(table_ref).is_ok());
 
-        let table_ref = TableReference::Full {
-            catalog: Cow::Borrowed("dummy"),
-            schema: Cow::Borrowed("information_schema"),
-            table: Cow::Borrowed("columns"),
-        };
+        let table_ref = TableReference::full("dummy", "information_schema", "columns");
         assert!(table_provider.resolve_table_ref(table_ref).is_err());
 
-        let table_ref = TableReference::Full {
-            catalog: Cow::Borrowed("greptime"),
-            schema: Cow::Borrowed("greptime_private"),
-            table: Cow::Borrowed("columns"),
-        };
+        let table_ref = TableReference::full("greptime", "greptime_private", "columns");
         assert!(table_provider.resolve_table_ref(table_ref).is_ok());
     }
 }

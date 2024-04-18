@@ -9,73 +9,73 @@ select timestamp '1970-01-01';
 
 select '290309-12-22 (BC) 00:00:00'::timestamp;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select '290309-12-21 (BC) 12:59:59.999999'::timestamp;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-21 (BC) 12:59:59.999999': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-21 (BC) 12:59:59.999999': error parsing date
 
 select '290309-12-22 (BC) 00:00:00'::timestamp + interval '1 day';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select '290309-12-22 (BC) 00:00:00'::timestamp - interval '1 microsecond';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select '290309-12-22 (BC) 00:00:00'::timestamp - interval '1 second';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select '290309-12-22 (BC) 00:00:00'::timestamp - interval '1 day';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select '290309-12-22 (BC) 00:00:00'::timestamp - interval '1 month';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select '290309-12-22 (BC) 00:00:00'::timestamp - interval '1 year';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775807';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775807': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775807': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806' + interval '1 microsecond';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806' + interval '1 second';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806' + interval '1 hour';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806' + interval '1 day';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806' + interval '1 month';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 select timestamp '294247-01-10 04:00:54.775806' + interval '1 year';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54.775806': error parsing date
 
 SELECT '290309-12-22 (BC) 00:00:00+07:00'::TIMESTAMP;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00+07:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '290309-12-22 (BC) 00:00:00+07:00': error parsing date
 
 SELECT '294247-01-10 04:00:54-07:00'::TIMESTAMP;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '294247-01-10 04:00:54-07:00': error parsing date
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '294247-01-10 04:00:54-07:00': error parsing date
 
