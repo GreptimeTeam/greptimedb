@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use common_wal::options::WalOptions;
 use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
@@ -356,6 +356,13 @@ impl ManifestContext {
 
         // Executes the applier. We MUST holds the write lock.
         applier();
+
+        if self.state.load() == RegionState::ReadOnly {
+            warn!(
+                "Region {} becomes read-only while updating manifest which may cause inconsistency",
+                manifest.metadata.region_id
+            );
+        }
 
         Ok(())
     }
