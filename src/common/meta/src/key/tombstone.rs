@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::{ensure, OptionExt};
+use std::collections::HashMap;
 
-use super::TableMetaKeyGetTxnOp;
+use snafu::ensure;
+
 use crate::error::{self, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::BatchGetRequest;
 
 /// [TombstoneManager] provides the ability to:
 /// - logically delete values
@@ -29,130 +31,14 @@ pub(crate) struct TombstoneManager {
 
 const TOMBSTONE_PREFIX: &str = "__tombstone/";
 
-pub(crate) struct TombstoneKey<T>(T);
+pub(crate) struct TombstoneKeyValue {
+    pub(crate) origin_key: Vec<u8>,
+    pub(crate) tombstone_key: Vec<u8>,
+    pub(crate) value: Vec<u8>,
+}
 
 fn to_tombstone(key: &[u8]) -> Vec<u8> {
     [TOMBSTONE_PREFIX.as_bytes(), key].concat()
-}
-
-impl TombstoneKey<&Vec<u8>> {
-    /// Returns the origin key and tombstone key.
-    fn to_keys(&self) -> (Vec<u8>, Vec<u8>) {
-        let key = self.0;
-        let tombstone_key = to_tombstone(key);
-        (key.clone(), tombstone_key)
-    }
-
-    /// Returns the origin key and tombstone key.
-    fn into_keys(self) -> (Vec<u8>, Vec<u8>) {
-        self.to_keys()
-    }
-
-    /// Returns the tombstone key.
-    fn to_tombstone_key(&self) -> Vec<u8> {
-        let key = self.0;
-        to_tombstone(key)
-    }
-}
-
-impl TableMetaKeyGetTxnOp for TombstoneKey<&Vec<u8>> {
-    fn build_get_op(
-        &self,
-    ) -> (
-        TxnOp,
-        impl FnMut(&'_ mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
-    ) {
-        TxnOpGetResponseSet::build_get_op(to_tombstone(self.0))
-    }
-}
-
-/// The key used in the [TombstoneManager].
-pub(crate) struct Key {
-    bytes: Vec<u8>,
-    // Atomic Key:
-    // The value corresponding to the key remains consistent between two transactions.
-    atomic: bool,
-}
-
-impl Key {
-    /// Returns a new atomic key.
-    pub(crate) fn compare_and_swap<T: Into<Vec<u8>>>(key: T) -> Self {
-        Self {
-            bytes: key.into(),
-            atomic: true,
-        }
-    }
-
-    /// Returns a new normal key.
-    pub(crate) fn new<T: Into<Vec<u8>>>(key: T) -> Self {
-        Self {
-            bytes: key.into(),
-            atomic: false,
-        }
-    }
-
-    /// Into bytes
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-
-    fn get_inner(&self) -> &Vec<u8> {
-        &self.bytes
-    }
-
-    fn is_atomic(&self) -> bool {
-        self.atomic
-    }
-}
-
-impl TableMetaKeyGetTxnOp for Key {
-    fn build_get_op(
-        &self,
-    ) -> (
-        TxnOp,
-        impl FnMut(&'_ mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
-    ) {
-        let key = self.get_inner().clone();
-        (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
-    }
-}
-
-fn format_on_failure_error_message<F: FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>>(
-    mut set: TxnOpGetResponseSet,
-    on_failure_kv_and_filters: Vec<(Vec<u8>, Vec<u8>, F)>,
-) -> String {
-    on_failure_kv_and_filters
-        .into_iter()
-        .flat_map(|(key, value, mut filter)| {
-            let got = filter(&mut set);
-            let Some(got) = got else {
-                return Some(format!(
-                    "For key: {} was expected: {}, but value does not exists",
-                    String::from_utf8_lossy(&key),
-                    String::from_utf8_lossy(&value),
-                ));
-            };
-
-            if got != value {
-                Some(format!(
-                    "For key: {} was expected: {}, but got: {}",
-                    String::from_utf8_lossy(&key),
-                    String::from_utf8_lossy(&value),
-                    String::from_utf8_lossy(&got),
-                ))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn format_keys(keys: &[Key]) -> String {
-    keys.iter()
-        .map(|key| String::from_utf8_lossy(&key.bytes))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 impl TombstoneManager {
@@ -161,175 +47,144 @@ impl TombstoneManager {
         Self { kv_backend }
     }
 
+    /// Moves value to `dest_key`.
+    ///
+    /// Puts `value` to `dest_key` if the value of `src_key` equals `value`.
+    ///
+    /// Otherwise retrieves the value of `src_key`.
+    fn build_move_value_txn(
+        &self,
+        src_key: Vec<u8>,
+        value: Vec<u8>,
+        dest_key: Vec<u8>,
+    ) -> (Txn, impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>) {
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                src_key.clone(),
+                CompareOp::Equal,
+                value.clone(),
+            )])
+            .and_then(vec![
+                TxnOp::Put(dest_key.clone(), value.clone()),
+                TxnOp::Delete(src_key.clone()),
+            ])
+            .or_else(vec![TxnOp::Get(src_key.clone())]);
+
+        (txn, TxnOpGetResponseSet::filter(src_key))
+    }
+
+    async fn move_values_inner(&self, keys: &[Vec<u8>], dest_keys: &[Vec<u8>]) -> Result<()> {
+        ensure!(
+            keys.len() == dest_keys.len(),
+            error::UnexpectedSnafu {
+                err_msg: "The length of keys does not match the length of dest_keys."
+            }
+        );
+        // The key -> dest key mapping.
+        let lookup_table = keys.iter().zip(dest_keys.iter()).collect::<HashMap<_, _>>();
+
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest::new().with_keys(keys.to_vec()))
+            .await?;
+        let mut results = resp
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<_, _>>();
+
+        const MAX_RETRIES: usize = 8;
+        for _ in 0..MAX_RETRIES {
+            let (txns, (keys, filters)): (Vec<_>, (Vec<_>, Vec<_>)) = results
+                .iter()
+                .map(|(key, value)| {
+                    let (txn, filter) = self.build_move_value_txn(
+                        key.clone(),
+                        value.clone(),
+                        lookup_table[&key].clone(),
+                    );
+                    (txn, (key.clone(), filter))
+                })
+                .unzip();
+            let mut resp = self.kv_backend.txn(Txn::merge_all(txns)).await?;
+            if resp.succeeded {
+                return Ok(());
+            }
+            let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            // Updates results.
+            for (idx, mut filter) in filters.into_iter().enumerate() {
+                if let Some(value) = filter(&mut set) {
+                    results.insert(keys[idx].clone(), value);
+                } else {
+                    results.remove(&keys[idx]);
+                }
+            }
+        }
+
+        error::MoveValuesSnafu {
+            err_msg: format!(
+                "keys: {:?}",
+                keys.iter().map(|key| String::from_utf8_lossy(key)),
+            ),
+        }
+        .fail()
+    }
+
+    /// Moves values to `dest_key`.
+    async fn move_values(&self, keys: Vec<Vec<u8>>, dest_keys: Vec<Vec<u8>>) -> Result<()> {
+        let chunk_size = self.kv_backend.max_txn_ops() / 2;
+        if keys.len() > chunk_size {
+            let keys_chunks = keys.chunks(chunk_size).collect::<Vec<_>>();
+            let dest_keys_chunks = keys.chunks(chunk_size).collect::<Vec<_>>();
+            for (keys, dest_keys) in keys_chunks.into_iter().zip(dest_keys_chunks) {
+                self.move_values_inner(keys, dest_keys).await?;
+            }
+
+            Ok(())
+        } else {
+            self.move_values_inner(&keys, &dest_keys).await
+        }
+    }
+
     /// Creates tombstones for keys.
     ///
     /// Preforms to:
-    /// - retrieve all values corresponding `keys`.
+    /// - deletes origin values.
     /// - stores tombstone values.
-    pub(crate) async fn create(&self, keys: Vec<Key>) -> Result<()> {
-        // Builds transaction to retrieve all values
-        let (operations, mut filters): (Vec<_>, Vec<_>) =
-            keys.iter().map(|key| key.build_get_op()).unzip();
+    pub(crate) async fn create(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .map(|key| {
+                let tombstone_key = to_tombstone(&key);
+                (key, tombstone_key)
+            })
+            .unzip();
 
-        let txn = Txn::new().and_then(operations);
-        let mut resp = self.kv_backend.txn(txn).await?;
-        ensure!(
-            resp.succeeded,
-            error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Failed to retrieves the metadata, keys: {}",
-                    format_keys(&keys)
-                ),
-            }
-        );
-
-        let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
-        // Builds the create tombstone transaction.
-        let mut tombstone_operations = Vec::with_capacity(keys.len() * 2);
-        let mut tombstone_comparison = vec![];
-        let mut on_failure_operations = vec![];
-        let mut on_failure_kv_and_filters = vec![];
-        for (idx, key) in keys.iter().enumerate() {
-            let filter = &mut filters[idx];
-            let value = filter(&mut set).with_context(|| error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Missing value, key: {}",
-                    String::from_utf8_lossy(key.get_inner())
-                ),
-            })?;
-            let (origin_key, tombstone_key) = TombstoneKey(key.get_inner()).into_keys();
-            // Compares the atomic key.
-            if key.is_atomic() {
-                tombstone_comparison.push(Compare::with_not_exist_value(
-                    tombstone_key.clone(),
-                    CompareOp::Equal,
-                ));
-                tombstone_comparison.push(Compare::with_value(
-                    origin_key.clone(),
-                    CompareOp::Equal,
-                    value.clone(),
-                ));
-                let (op, filter) = TxnOpGetResponseSet::build_get_op(origin_key.clone());
-                on_failure_operations.push(op);
-                on_failure_kv_and_filters.push((origin_key.clone(), value.clone(), filter));
-            }
-            tombstone_operations.push(TxnOp::Delete(origin_key));
-            tombstone_operations.push(TxnOp::Put(tombstone_key, value));
-        }
-
-        let txn = if !tombstone_comparison.is_empty() {
-            Txn::new().when(tombstone_comparison)
-        } else {
-            Txn::new()
-        }
-        .and_then(tombstone_operations);
-
-        let txn = if !on_failure_operations.is_empty() {
-            txn.or_else(on_failure_operations)
-        } else {
-            txn
-        };
-
-        let mut resp = self.kv_backend.txn(txn).await?;
-        // TODO(weny): add tests for atomic key changed.
-        if !resp.succeeded {
-            let set = TxnOpGetResponseSet::from(&mut resp.responses);
-            let err_msg = format_on_failure_error_message(set, on_failure_kv_and_filters);
-            return error::CasKeyChangedSnafu { err_msg }.fail();
-        }
-        Ok(())
+        self.move_values(keys, dest_keys).await
     }
 
     /// Restores tombstones for keys.
     ///
     /// Preforms to:
-    /// - retrieve all tombstone values corresponding `keys`.
-    /// - stores tombstone values.
-    pub(crate) async fn restore(&self, keys: Vec<Key>) -> Result<()> {
-        // Builds transaction to retrieve all tombstone values
-        let tombstone_keys = keys
-            .iter()
-            .map(|key| TombstoneKey(key.get_inner()))
-            .collect::<Vec<_>>();
-        let (operations, mut filters): (Vec<_>, Vec<_>) =
-            tombstone_keys.iter().map(|key| key.build_get_op()).unzip();
+    /// - restore origin value.
+    /// - deletes tombstone values.
+    pub(crate) async fn restore(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .map(|key| {
+                let tombstone_key = to_tombstone(&key);
+                (tombstone_key, key)
+            })
+            .unzip();
 
-        let txn = Txn::new().and_then(operations);
-        let mut resp = self.kv_backend.txn(txn).await?;
-        ensure!(
-            resp.succeeded,
-            error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Failed to retrieves the metadata, keys: {}",
-                    format_keys(&keys)
-                ),
-            }
-        );
-
-        let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
-
-        // Builds the restore tombstone transaction.
-        let mut tombstone_operations = Vec::with_capacity(keys.len() * 2);
-        let mut tombstone_comparison = vec![];
-        let mut on_failure_operations = vec![];
-        let mut on_failure_kv_and_filters = vec![];
-        for (idx, key) in keys.iter().enumerate() {
-            let filter = &mut filters[idx];
-            let value = filter(&mut set).with_context(|| error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Missing value, key: {}",
-                    String::from_utf8_lossy(key.get_inner())
-                ),
-            })?;
-            let (origin_key, tombstone_key) = tombstone_keys[idx].to_keys();
-            // Compares the atomic key.
-            if key.is_atomic() {
-                tombstone_comparison.push(Compare::with_not_exist_value(
-                    origin_key.clone(),
-                    CompareOp::Equal,
-                ));
-                tombstone_comparison.push(Compare::with_value(
-                    tombstone_key.clone(),
-                    CompareOp::Equal,
-                    value.clone(),
-                ));
-                let (op, filter) = tombstone_keys[idx].build_get_op();
-                on_failure_operations.push(op);
-                on_failure_kv_and_filters.push((tombstone_key.clone(), value.clone(), filter));
-            }
-            tombstone_operations.push(TxnOp::Delete(tombstone_key));
-            tombstone_operations.push(TxnOp::Put(origin_key, value));
-        }
-
-        let txn = if !tombstone_comparison.is_empty() {
-            Txn::new().when(tombstone_comparison)
-        } else {
-            Txn::new()
-        }
-        .and_then(tombstone_operations);
-
-        let txn = if !on_failure_operations.is_empty() {
-            txn.or_else(on_failure_operations)
-        } else {
-            txn
-        };
-
-        let mut resp = self.kv_backend.txn(txn).await?;
-        // TODO(weny): add tests for atomic key changed.
-        if !resp.succeeded {
-            let set = TxnOpGetResponseSet::from(&mut resp.responses);
-            let err_msg = format_on_failure_error_message(set, on_failure_kv_and_filters);
-            return error::CasKeyChangedSnafu { err_msg }.fail();
-        }
-
-        Ok(())
+        self.move_values(keys, dest_keys).await
     }
 
-    /// Deletes tombstones for keys.
+    /// Deletes tombstones values for the specified `keys`.
     pub(crate) async fn delete(&self, keys: Vec<Vec<u8>>) -> Result<()> {
         let operations = keys
             .iter()
-            .map(|key| TxnOp::Delete(TombstoneKey(key).to_tombstone_key()))
+            .map(|key| TxnOp::Delete(to_tombstone(key)))
             .collect::<Vec<_>>();
 
         let txn = Txn::new().and_then(operations);
@@ -342,12 +197,40 @@ impl TombstoneManager {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use crate::key::tombstone::{Key, TombstoneKey, TombstoneManager};
+    use super::to_tombstone;
+    use crate::error::Error;
+    use crate::key::tombstone::TombstoneManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
     use crate::rpc::store::PutRequest;
+
+    #[derive(Debug, Clone)]
+    struct MoveValue {
+        key: Vec<u8>,
+        dest_key: Vec<u8>,
+        value: Vec<u8>,
+    }
+
+    async fn check_moved_values(
+        kv_backend: Arc<MemoryKvBackend<Error>>,
+        move_values: &[MoveValue],
+    ) {
+        for MoveValue {
+            key,
+            dest_key,
+            value,
+        } in move_values
+        {
+            assert!(kv_backend.get(key).await.unwrap().is_none());
+            assert_eq!(
+                &kv_backend.get(dest_key).await.unwrap().unwrap().value,
+                value,
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_create_tombstone() {
@@ -362,14 +245,14 @@ mod tests {
             .await
             .unwrap();
         tombstone_manager
-            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
+            .create(vec![b"bar".to_vec(), b"foo".to_vec()])
             .await
             .unwrap();
         assert!(!kv_backend.exists(b"bar").await.unwrap());
         assert!(!kv_backend.exists(b"foo").await.unwrap());
         assert_eq!(
             kv_backend
-                .get(&TombstoneKey(&"bar".into()).to_tombstone_key())
+                .get(&to_tombstone(b"bar"))
                 .await
                 .unwrap()
                 .unwrap()
@@ -378,7 +261,7 @@ mod tests {
         );
         assert_eq!(
             kv_backend
-                .get(&TombstoneKey(&"foo".into()).to_tombstone_key())
+                .get(&to_tombstone(b"foo"))
                 .await
                 .unwrap()
                 .unwrap()
@@ -389,9 +272,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_tombstone_without_atomic_key() {
+    async fn test_create_tombstone_with_non_exist_values() {
         let kv_backend = Arc::new(MemoryKvBackend::default());
         let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+
         kv_backend
             .put(PutRequest::new().with_key("bar").with_value("baz"))
             .await
@@ -400,52 +284,20 @@ mod tests {
             .put(PutRequest::new().with_key("foo").with_value("hi"))
             .await
             .unwrap();
+
         tombstone_manager
-            .create(vec![Key::new("bar"), Key::new("foo")])
+            .create(vec![b"bar".to_vec(), b"baz".to_vec()])
             .await
             .unwrap();
-        assert!(!kv_backend.exists(b"bar").await.unwrap());
-        assert!(!kv_backend.exists(b"foo").await.unwrap());
-        assert_eq!(
-            kv_backend
-                .get(&TombstoneKey(&"bar".into()).to_tombstone_key())
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
-            b"baz"
-        );
-        assert_eq!(
-            kv_backend
-                .get(&TombstoneKey(&"foo".into()).to_tombstone_key())
-                .await
-                .unwrap()
-                .unwrap()
-                .value,
-            b"hi"
-        );
-        assert_eq!(kv_backend.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_create_tombstone_origin_value_not_found_err() {
-        let kv_backend = Arc::new(MemoryKvBackend::default());
-        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
-
-        kv_backend
-            .put(PutRequest::new().with_key("bar").with_value("baz"))
-            .await
-            .unwrap();
-        kv_backend
-            .put(PutRequest::new().with_key("foo").with_value("hi"))
-            .await
-            .unwrap();
-
-        let err = tombstone_manager
-            .create(vec![Key::compare_and_swap("bar"), Key::new("baz")])
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("Missing value"));
+        check_moved_values(
+            kv_backend.clone(),
+            &[MoveValue {
+                key: b"bar".to_vec(),
+                dest_key: to_tombstone(b"bar"),
+                value: b"baz".to_vec(),
+            }],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -462,61 +314,14 @@ mod tests {
             .unwrap();
         let expected_kvs = kv_backend.dump();
         tombstone_manager
-            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
+            .create(vec![b"bar".to_vec(), b"foo".to_vec()])
             .await
             .unwrap();
         tombstone_manager
-            .restore(vec![Key::compare_and_swap("bar"), Key::new("foo")])
+            .restore(vec![b"bar".to_vec(), b"foo".to_vec()])
             .await
             .unwrap();
         assert_eq!(expected_kvs, kv_backend.dump());
-    }
-
-    #[tokio::test]
-    async fn test_restore_tombstone_without_atomic_key() {
-        let kv_backend = Arc::new(MemoryKvBackend::default());
-        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
-        kv_backend
-            .put(PutRequest::new().with_key("bar").with_value("baz"))
-            .await
-            .unwrap();
-        kv_backend
-            .put(PutRequest::new().with_key("foo").with_value("hi"))
-            .await
-            .unwrap();
-        let expected_kvs = kv_backend.dump();
-        tombstone_manager
-            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
-            .await
-            .unwrap();
-        tombstone_manager
-            .restore(vec![Key::new("bar"), Key::new("foo")])
-            .await
-            .unwrap();
-        assert_eq!(expected_kvs, kv_backend.dump());
-    }
-
-    #[tokio::test]
-    async fn test_restore_tombstone_origin_value_not_found_err() {
-        let kv_backend = Arc::new(MemoryKvBackend::default());
-        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
-        kv_backend
-            .put(PutRequest::new().with_key("bar").with_value("baz"))
-            .await
-            .unwrap();
-        kv_backend
-            .put(PutRequest::new().with_key("foo").with_value("hi"))
-            .await
-            .unwrap();
-        tombstone_manager
-            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
-            .await
-            .unwrap();
-        let err = tombstone_manager
-            .restore(vec![Key::new("bar"), Key::new("baz")])
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("Missing value"));
     }
 
     #[tokio::test]
@@ -532,7 +337,7 @@ mod tests {
             .await
             .unwrap();
         tombstone_manager
-            .create(vec![Key::compare_and_swap("bar"), Key::new("foo")])
+            .create(vec![b"bar".to_vec(), b"foo".to_vec()])
             .await
             .unwrap();
         tombstone_manager
@@ -540,5 +345,217 @@ mod tests {
             .await
             .unwrap();
         assert!(kv_backend.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_move_values() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        tombstone_manager
+            .move_values(keys.clone(), dest_keys.clone())
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+        // Moves again
+        tombstone_manager
+            .move_values(keys.clone(), dest_keys.clone())
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+    }
+
+    #[tokio::test]
+    async fn test_move_values_with_non_exists_values() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (mut keys, mut dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        keys.push(b"non-exists".to_vec());
+        dest_keys.push(b"hi/non-exists".to_vec());
+        tombstone_manager
+            .move_values(keys.clone(), dest_keys.clone())
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+        // Moves again
+        tombstone_manager
+            .move_values(keys.clone(), dest_keys.clone())
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+    }
+
+    #[tokio::test]
+    async fn test_move_values_changed() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        kv_backend
+            .put(PutRequest::new().with_key("baz").with_value("changed"))
+            .await
+            .unwrap();
+
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        tombstone_manager
+            .move_values(keys, dest_keys)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_move_values_overwrite_dest_values() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"baz".to_vec()),
+            (b"foo".to_vec(), b"hi".to_vec()),
+            (b"baz".to_vec(), b"hello".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Prepares
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        tombstone_manager
+            .move_values(keys, dest_keys)
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
+
+        // Overwrites existing dest keys.
+        let kvs = HashMap::from([
+            (b"bar".to_vec(), b"new baz".to_vec()),
+            (b"foo".to_vec(), b"new hi".to_vec()),
+            (b"baz".to_vec(), b"new baz".to_vec()),
+        ]);
+        for (key, value) in &kvs {
+            kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        let move_values = kvs
+            .iter()
+            .map(|(key, value)| MoveValue {
+                key: key.clone(),
+                dest_key: to_tombstone(key),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = move_values
+            .clone()
+            .into_iter()
+            .map(|kv| (kv.key, kv.dest_key))
+            .unzip();
+        tombstone_manager
+            .move_values(keys, dest_keys)
+            .await
+            .unwrap();
+        check_moved_values(kv_backend.clone(), &move_values).await;
     }
 }

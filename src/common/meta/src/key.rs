@@ -88,13 +88,13 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
-use crate::error::{self, Result, SerdeJsonSnafu, UnexpectedSnafu};
+use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::table_route::TableRouteKey;
-use crate::key::tombstone::Key;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::rpc::store::BatchDeleteRequest;
 use crate::table_name::TableName;
 use crate::DatanodeId;
 
@@ -582,7 +582,7 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
-    ) -> Result<Vec<Key>> {
+    ) -> Result<Vec<Vec<u8>>> {
         // Builds keys
         let datanode_ids = if table_route_value.is_physical() {
             region_distribution(table_route_value.region_routes()?)
@@ -604,11 +604,11 @@ impl TableMetadataManager {
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<HashSet<_>>();
 
-        keys.push(Key::compare_and_swap(table_name.as_raw_key()));
-        keys.push(Key::new(table_info_key.as_raw_key()));
-        keys.push(Key::new(table_route_key.as_raw_key()));
+        keys.push(table_name.as_raw_key());
+        keys.push(table_info_key.as_raw_key());
+        keys.push(table_route_key.as_raw_key());
         for key in &datanode_table_keys {
-            keys.push(Key::new(key.as_raw_key()));
+            keys.push(key.as_raw_key());
         }
         Ok(keys)
     }
@@ -622,8 +622,7 @@ impl TableMetadataManager {
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
         let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        self.tombstone_manager.create(keys).await?;
-        Ok(())
+        self.tombstone_manager.create(keys).await
     }
 
     /// Deletes metadata tombstone for table **permanently**.
@@ -634,11 +633,7 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let keys = self
-            .table_metadata_keys(table_id, table_name, table_route_value)?
-            .into_iter()
-            .map(|key| key.into_bytes())
-            .collect::<Vec<_>>();
+        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
         self.tombstone_manager.delete(keys).await
     }
 
@@ -651,8 +646,7 @@ impl TableMetadataManager {
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
         let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        self.tombstone_manager.restore(keys).await?;
-        Ok(())
+        self.tombstone_manager.restore(keys).await
     }
 
     /// Deletes metadata for table **permanently**.
@@ -663,21 +657,11 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let operations = self
-            .table_metadata_keys(table_id, table_name, table_route_value)?
-            .into_iter()
-            .map(|key| TxnOp::Delete(key.into_bytes()))
-            .collect::<Vec<_>>();
-
-        let txn = Txn::new().and_then(operations);
-        let resp = self.kv_backend.txn(txn).await?;
-        ensure!(
-            resp.succeeded,
-            UnexpectedSnafu {
-                err_msg: format!("Failed to destroy table metadata: {table_id}")
-            }
-        );
-
+        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        let _ = self
+            .kv_backend
+            .batch_delete(BatchDeleteRequest::new().with_keys(keys))
+            .await?;
         Ok(())
     }
 
@@ -1286,14 +1270,17 @@ mod tests {
             .delete_table_metadata(table_id, &table_name, table_route_value)
             .await
             .unwrap();
-
+        // Should be ignored.
+        table_metadata_manager
+            .delete_table_metadata(table_id, &table_name, table_route_value)
+            .await
+            .unwrap();
         assert!(table_metadata_manager
             .table_info_manager()
             .get(table_id)
             .await
             .unwrap()
             .is_none());
-
         assert!(table_metadata_manager
             .table_route_manager()
             .table_route_storage()
@@ -1301,7 +1288,6 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-
         assert!(table_metadata_manager
             .datanode_table_manager()
             .tables(datanode_id)
@@ -1316,7 +1302,6 @@ mod tests {
             .await
             .unwrap();
         assert!(table_info.is_none());
-
         let table_route = table_metadata_manager
             .table_route_manager()
             .table_route_storage()
@@ -1786,6 +1771,13 @@ mod tests {
             .delete_table_metadata(table_id, &table_name, &table_route_value)
             .await
             .unwrap();
+        table_metadata_manager
+            .restore_table_metadata(table_id, &table_name, &table_route_value)
+            .await
+            .unwrap();
+        let kvs = mem_kv.dump();
+        assert_eq!(kvs, expected_result);
+        // Should be ignored.
         table_metadata_manager
             .restore_table_metadata(table_id, &table_name, &table_route_value)
             .await
