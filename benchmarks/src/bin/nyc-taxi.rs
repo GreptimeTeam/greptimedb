@@ -215,7 +215,7 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
                 ColumnDataType::String,
             )
         }
-        _ => todo!(),
+        _ => unimplemented!(),
     }
 }
 
