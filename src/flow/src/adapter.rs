@@ -16,3 +16,27 @@
 //! and communicating with other parts of the database
 
 pub(crate) mod error;
+use common_meta::error::Result as MetaResult;
+use common_meta::kv_backend::KvBackendRef;
+use serde::{Deserialize, Serialize};
+
+pub struct FlowTaskMetadataManager {
+    /// table_name: Vec<String> to a list of task ids(u64)
+    source_table_to_tasks: KvBackendRef,
+    /// task_id: u64 -> flow node id: u64
+    task_to_node: KvBackendRef,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TaskId(pub usize);
+
+impl FlowTaskMetadataManager {
+    pub async fn create_flow_task(&self, sql: &str) -> MetaResult<TaskId> {
+        // TODO: send sql to flow node, which will try to parse it into a flow task
+        // Then it will return task metadata including source table used
+        todo!()
+    }
+    pub async fn remove_flow_task(id: TaskId) -> MetaResult<()> {
+        Ok(())
+    }
+}
