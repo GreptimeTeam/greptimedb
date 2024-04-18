@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::usize;
 
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;

@@ -79,6 +79,8 @@ fn decode_kv(kv: KeyValue) -> Result<(String, Vec<u8>)> {
     Ok((key, value))
 }
 
+// Override warnings that those fields are not accessed.
+#[allow(dead_code)]
 enum SplitValue<'a> {
     Single(&'a [u8]),
     Multiple(Vec<&'a [u8]>),

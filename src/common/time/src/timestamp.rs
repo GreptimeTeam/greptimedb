@@ -381,7 +381,7 @@ impl Timestamp {
 
     pub fn from_chrono_datetime(ndt: NaiveDateTime) -> Option<Self> {
         let sec = ndt.and_utc().timestamp();
-        let nsec = ndt.timestamp_subsec_nanos();
+        let nsec = ndt.and_utc().timestamp_subsec_nanos();
         Timestamp::from_splits(sec, nsec)
     }
 

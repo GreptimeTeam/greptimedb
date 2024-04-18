@@ -497,9 +497,7 @@ impl FlushScheduler {
         &mut self,
         region_id: RegionId,
     ) -> Option<(Vec<SenderDdlRequest>, Vec<SenderWriteRequest>)> {
-        let Some(flush_status) = self.region_status.get_mut(&region_id) else {
-            return None;
-        };
+        let flush_status = self.region_status.get_mut(&region_id)?;
 
         // This region doesn't have running flush job.
         flush_status.flushing = false;

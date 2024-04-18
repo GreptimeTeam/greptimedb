@@ -164,7 +164,7 @@ impl Inner {
 
             let req = CompareAndPutRequest {
                 key: key.to_vec(),
-                expect,
+                expect: expect.clone(),
                 value: value.to_vec(),
             };
 
@@ -172,7 +172,7 @@ impl Inner {
 
             if !res.success {
                 if let Some(kv) = res.prev_kv {
-                    expect = kv.value.clone();
+                    expect.clone_from(&kv.value);
 
                     let v: [u8; 8] = match kv.value.try_into() {
                         Ok(a) => a,

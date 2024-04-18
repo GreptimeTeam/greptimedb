@@ -70,6 +70,7 @@ license = "Apache-2.0"
 clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
 clippy.implicit_clone = "warn"
+clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
 
 [workspace.dependencies]
