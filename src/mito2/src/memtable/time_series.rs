@@ -36,10 +36,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::{
-    ComputeArrowSnafu, ConvertVectorSnafu, CreateFilterFromPredicateSnafu,
-    PrimaryKeyLengthMismatchSnafu, Result,
-};
+use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
@@ -437,11 +434,9 @@ impl Iter {
                 predicate
                     .exprs()
                     .iter()
-                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()).transpose())
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .context(CreateFilterFromPredicateSnafu { predicate })
+                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
+                    .collect::<Vec<_>>()
             })
-            .transpose()?
             .unwrap_or_default();
         Ok(Self {
             metadata,

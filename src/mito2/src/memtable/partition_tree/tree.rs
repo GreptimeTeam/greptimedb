@@ -30,9 +30,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::{
-    CreateFilterFromPredicateSnafu, PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu,
-};
+use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::metrics::WriteMetrics;
@@ -217,11 +215,9 @@ impl PartitionTree {
                 predicate
                     .exprs()
                     .iter()
-                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()).transpose())
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .context(CreateFilterFromPredicateSnafu { predicate })
+                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
+                    .collect::<Vec<_>>()
             })
-            .transpose()?
             .unwrap_or_default();
 
         let mut tree_iter_metric = TreeIterMetrics::default();

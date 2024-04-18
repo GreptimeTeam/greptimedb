@@ -40,8 +40,8 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheManagerRef;
 use crate::error::{
-    ArrowReaderSnafu, CreateFilterFromPredicateSnafu, FieldTypeMismatchSnafu,
-    FilterRecordBatchSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
+    ArrowReaderSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, InvalidMetadataSnafu,
+    InvalidParquetSnafu, ReadParquetSnafu, Result,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
@@ -184,11 +184,8 @@ impl ParquetReaderBuilder {
             predicate
                 .exprs()
                 .iter()
-                .filter_map(|expr| SimpleFilterEvaluator::try_new(expr.df_expr()).transpose())
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|_| CreateFilterFromPredicateSnafu {
-                    predicate: predicate.clone(),
-                })?
+                .filter_map(|expr| SimpleFilterEvaluator::try_new(expr.df_expr()))
+                .collect::<Vec<_>>()
         } else {
             vec![]
         };

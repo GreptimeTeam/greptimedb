@@ -414,7 +414,7 @@ fn create_table_expr(table_name: &str) -> CreateTableExpr {
 fn query_set(table_name: &str) -> HashMap<String, String> {
     HashMap::from([
         (
-            "count_all".to_string(), 
+            "count_all".to_string(),
             format!("SELECT COUNT(*) FROM {table_name};"),
         ),
         (

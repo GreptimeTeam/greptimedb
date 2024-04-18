@@ -43,7 +43,7 @@ pub struct SimpleFilterEvaluator {
 }
 
 impl SimpleFilterEvaluator {
-    pub fn try_new(predicate: &Expr) -> Result<Option<Self>> {
+    pub fn try_new(predicate: &Expr) -> Option<Self> {
         match predicate {
             Expr::BinaryExpr(binary) => {
                 // check if the expr is in the supported form
@@ -54,7 +54,7 @@ impl SimpleFilterEvaluator {
                     | Operator::LtEq
                     | Operator::Gt
                     | Operator::GtEq => {}
-                    _ => return Ok(None),
+                    _ => return None,
                 }
 
                 // swap the expr if it is in the form of `literal` `op` `col`
@@ -66,19 +66,17 @@ impl SimpleFilterEvaluator {
                         op = op.swap().unwrap();
                         (col, lit)
                     }
-                    _ => return Ok(None),
+                    _ => return None,
                 };
 
-                let literal = rhs
-                    .to_scalar()
-                    .with_context(|_| ToArrowScalarSnafu { v: rhs.clone() })?;
-                Ok(Some(Self {
+                let literal = rhs.to_scalar().ok()?;
+                Some(Self {
                     column_name: lhs.name.clone(),
                     literal,
                     op,
-                }))
+                })
             }
-            _ => Ok(None),
+            _ => None,
         }
     }
 
@@ -145,7 +143,7 @@ mod test {
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
 
         // two literal is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -153,7 +151,7 @@ mod test {
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
 
         // two column is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -167,7 +165,7 @@ mod test {
                 name: "bar".to_string(),
             })),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
 
         // compound expr is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -182,7 +180,7 @@ mod test {
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        assert!(SimpleFilterEvaluator::try_new(&expr).unwrap().is_none());
+        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
     }
 
     #[test]
@@ -207,7 +205,7 @@ mod test {
                 name: "foo".to_string(),
             })),
         });
-        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap().unwrap();
+        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
         assert_eq!(evaluator.op, Operator::Gt);
         assert_eq!(evaluator.column_name, "foo".to_string());
     }
@@ -222,7 +220,7 @@ mod test {
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap().unwrap();
+        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
 
         let input_1 = Arc::new(datatypes::arrow::array::Int64Array::from(vec![1, 2, 3])) as _;
         let result = evaluator.evaluate_array(&input_1).unwrap();
@@ -247,7 +245,7 @@ mod test {
             op: Operator::Lt,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
-        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap().unwrap();
+        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
 
         let input_1 = ScalarValue::Int64(Some(1));
         let result = evaluator.evaluate_scalar(&input_1).unwrap();
