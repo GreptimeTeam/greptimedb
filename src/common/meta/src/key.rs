@@ -45,6 +45,7 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
+pub mod flow_task;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
