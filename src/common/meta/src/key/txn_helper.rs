@@ -21,7 +21,7 @@ use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::rpc::KeyValue;
 
 /// The response set of [TxnOpResponse::ResponseGet]
-pub(crate) struct TxnOpGetResponseSet(Vec<KeyValue>);
+pub struct TxnOpGetResponseSet(Vec<KeyValue>);
 
 impl TxnOpGetResponseSet {
     /// Returns a [TxnOp] to retrieve the value corresponding `key` and
@@ -77,30 +77,6 @@ impl From<&mut Vec<TxnOpResponse>> for TxnOpGetResponseSet {
             })
             .collect::<Vec<_>>();
         TxnOpGetResponseSet(value)
-    }
-}
-
-// TODO(weny): using `TxnOpGetResponseSet`.
-pub(crate) fn build_txn_response_decoder_fn<T>(
-    raw_key: Vec<u8>,
-) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<T>>>
-where
-    T: Serialize + DeserializeOwned + TableMetaValue,
-{
-    move |txn_res: &Vec<TxnOpResponse>| {
-        txn_res
-            .iter()
-            .filter_map(|resp| {
-                if let TxnOpResponse::ResponseGet(r) = resp {
-                    Some(r)
-                } else {
-                    None
-                }
-            })
-            .flat_map(|r| &r.kvs)
-            .find(|kv| kv.key == raw_key)
-            .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
-            .transpose()
     }
 }
 
