@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-12-19
+  RUST_TOOLCHAIN: nightly-2024-04-18
 
 jobs:
   sqlness:
