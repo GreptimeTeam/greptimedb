@@ -361,7 +361,7 @@ fn reduce_accum_subgraph(
     }
 
     let mut all_updates = Vec::with_capacity(key2vals.len());
-    let mut all_ouputs = Vec::with_capacity(key2vals.len());
+    let mut all_outputs = Vec::with_capacity(key2vals.len());
 
     // lock the arrange for write
     let mut arrange = arrange.write();
@@ -427,7 +427,7 @@ fn reduce_accum_subgraph(
             all_updates.push(((key.clone(), Row::new(new_accums)), now, 1));
             let mut key_val = key;
             key_val.extend(res_val_row);
-            all_ouputs.push((key_val, now, 1));
+            all_outputs.push((key_val, now, 1));
             Ok(())
         });
     }
@@ -445,7 +445,7 @@ fn reduce_accum_subgraph(
         .chain(std::iter::once(arrange));
     check_no_future_updates(all_arrange_used, err_collector, now);
 
-    send.give(all_ouputs);
+    send.give(all_outputs);
 }
 
 /// Eval simple aggregate functions with no distinct input
@@ -527,7 +527,7 @@ impl AccumOutput {
         }
 
         let accums = self.accum.into_values().collect_vec();
-        let new_accums = from_accums_to_offseted_accum(accums);
+        let new_accums = from_accums_to_offsetted_accum(accums);
         let output = self.output.into_values().collect_vec();
         Ok((new_accums, output))
     }
@@ -598,7 +598,7 @@ fn check_no_future_updates<'a>(
 }
 
 /// convert a list of accumulators to a vector of values with first value as offset of end of each accumulator
-fn from_accums_to_offseted_accum(new_accums: Vec<Vec<Value>>) -> Vec<Value> {
+fn from_accums_to_offsetted_accum(new_accums: Vec<Vec<Value>>) -> Vec<Value> {
     let offset = new_accums
         .iter()
         .map(|v| v.len() as u64)
@@ -879,7 +879,7 @@ mod test {
     /// |------|-------|
     /// | col  | Int64 |
     #[test]
-    fn test_compsite_reduce_distinct_accum() {
+    fn test_composite_reduce_distinct_accum() {
         let mut df = Hydroflow::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);

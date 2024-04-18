@@ -244,8 +244,6 @@ mod test {
                 assert_eq!(*output.borrow(), vec![], "at ts={}", now);
             };
             output.borrow_mut().clear();
-            // print future scheduled
-            let scheduled = state.get_scheduler();
         }
     }
 
