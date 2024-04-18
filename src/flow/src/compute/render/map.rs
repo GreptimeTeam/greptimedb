@@ -195,9 +195,9 @@ mod test {
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
         let rows = vec![
-            (Row::new(vec![1i64.into()]), 1, 1),
-            (Row::new(vec![2i64.into()]), 2, 1),
-            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 0, 1),
+            (Row::new(vec![2i64.into()]), 0, 1),
+            (Row::new(vec![3i64.into()]), 0, 1),
         ];
         let collection = ctx.render_constant(rows.clone());
         ctx.insert_global(GlobalId::User(1), collection);
@@ -286,25 +286,13 @@ mod test {
         let bundle = ctx
             .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
             .unwrap();
-        let collection = bundle.collection.clone(ctx.df);
 
-        ctx.df.add_subgraph_sink(
-            "test_render_constant",
-            collection.into_inner(),
-            move |_ctx, recv| {
-                let data = recv.take_inner();
-                let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
-                assert_eq!(
-                    res,
-                    vec![
-                        (Row::new(vec![2.into()]), 0, 1),
-                        (Row::new(vec![3.into()]), 0, 1),
-                    ]
-                )
-            },
-        );
+        let output = get_output_handle(&mut ctx, bundle);
         drop(ctx);
-
-        df.run_available();
+        let expected = BTreeMap::from([
+            (2, vec![(Row::new(vec![2.into()]), 2, 1)]),
+            (3, vec![(Row::new(vec![3.into()]), 3, 1)]),
+        ]);
+        run_and_check(&mut state, &mut df, 1..5, expected, output);
     }
 }

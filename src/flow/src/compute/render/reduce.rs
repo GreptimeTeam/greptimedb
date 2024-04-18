@@ -83,7 +83,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
             move |_ctx, recv, send| {
                 // mfp only need to passively receive updates from recvs
                 let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
-                dbg!("reduce subgraph");
+
                 reduce_subgraph(
                     &reduce_arrange,
                     data,
@@ -129,7 +129,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 } else {
                     Some(
                         (0..distinct_aggrs.len())
-                            .map(|_| self.compute_state.new_arrange(None))
+                            .map(|_| {
+                                let arr = self.compute_state.new_arrange(None);
+                                arr.set_full_arrangement(true);
+                                arr
+                            })
                             .collect(),
                     )
                 }
@@ -455,7 +459,11 @@ fn eval_simple_aggrs(
 ) {
     for (output_idx, input_idx, aggr_fn) in simple_aggrs {
         let cur_accum_range = accum_ranges[*output_idx].clone(); // range of current accum
-        let cur_old_accum = accums[cur_accum_range].iter().cloned();
+        let cur_old_accum = accums
+            .get(cur_accum_range)
+            .unwrap_or_default()
+            .iter()
+            .cloned();
         let cur_col_diff = col_diffs[*input_idx].iter().cloned();
 
         // actual eval aggregation function
@@ -470,6 +478,7 @@ fn eval_simple_aggrs(
     }
 }
 
+#[derive(Debug)]
 struct AccumOutput {
     accum: BTreeMap<usize, Vec<Value>>,
     output: BTreeMap<usize, Value>,
@@ -541,19 +550,26 @@ fn eval_distinct_aggrs(
 ) {
     for (output_idx, input_idx, aggr_fn) in distinct_aggrs {
         let cur_accum_range = accum_ranges[*output_idx].clone(); // range of current accum
-        let cur_old_accum = accums[cur_accum_range].iter().cloned();
+        let cur_old_accum = accums
+            .get(cur_accum_range)
+            .unwrap_or_default()
+            .iter()
+            .cloned();
         let cur_col_diff = col_diffs[*input_idx].iter().cloned();
         // first filter input with distinct
         let input_arrange = distinct_input
             .as_ref()
             .and_then(|v| v[*input_idx].clone_full_arrange())
-            .unwrap();
+            .expect("A full distinct input arrangement should exist");
         let kv = cur_col_diff.map(|(v, d)| ((Row::new(vec![v]), Row::empty()), now, d));
         let col_diff_distinct =
             update_reduce_distinct_arrange(&input_arrange, kv, now, err_collector).map(
                 |(row, _ts, diff)| (row.get(0).expect("Row should not be empty").clone(), diff),
             );
-
+        let col_diff_distinct = {
+            let res = col_diff_distinct.collect_vec();
+            res.into_iter()
+        };
         // actual eval aggregation function
         let (res, new_accum) = aggr_fn
             .func
@@ -581,11 +597,16 @@ fn check_no_future_updates<'a>(
     }
 }
 
-/// convert a list of accumulators to a vector of values with first value as offset
+/// convert a list of accumulators to a vector of values with first value as offset of end of each accumulator
 fn from_accums_to_offseted_accum(new_accums: Vec<Vec<Value>>) -> Vec<Value> {
     let offset = new_accums
         .iter()
-        .map(|v| Value::from((v.len() + 1) as u64))
+        .map(|v| v.len() as u64)
+        .scan(1, |state, x| {
+            *state += x;
+            Some(*state)
+        })
+        .map(Value::from)
         .collect::<Vec<_>>();
     let first = ListValue::new(Some(Box::new(offset)), ConcreteDataType::uint64_datatype());
     let first = Value::List(first);
@@ -635,13 +656,18 @@ fn from_val_to_slice_idx(
             .fail()
         }
     } else {
-        Ok(vec![0usize; expected_len])
+        Ok(vec![1usize; expected_len])
     }?;
     let accum_ranges = (0..expected_len)
         .map(|idx| {
             if idx == 0 {
                 // note that the first element is the offset list
-                1.min(offset_end[0])..offset_end[0]
+                debug_assert!(
+                    offset_end[0] >= 1,
+                    "Offset should be at least 1: {:?}",
+                    &offset_end
+                );
+                1..offset_end[0]
             } else {
                 offset_end[idx - 1]..offset_end[idx]
             }
@@ -651,6 +677,7 @@ fn from_val_to_slice_idx(
 }
 
 // mainly for reduce's test
+// TODO: add tests for accum ser/de
 #[cfg(test)]
 mod test {
     use std::cell::RefCell;
@@ -664,6 +691,12 @@ mod test {
     use crate::compute::state::DataflowState;
     use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject};
 
+    /// SELECT DISTINCT col FROM table
+    ///
+    /// table schema:
+    /// | name | type  |
+    /// |------|-------|
+    /// | col  | Int64 |
     #[test]
     fn test_basic_distinct() {
         let mut df = Hydroflow::new();
@@ -705,6 +738,12 @@ mod test {
         run_and_check(&mut state, &mut df, 6..7, expected, output);
     }
 
+    /// SELECT SUM(col) FROM table
+    ///
+    /// table schema:
+    /// | name | type  |
+    /// |------|-------|
+    /// | col  | Int64 |
     #[test]
     fn test_basic_reduce_accum() {
         let mut df = Hydroflow::new();
@@ -762,6 +801,155 @@ mod test {
             (4, vec![(Row::new(vec![7i64.into()]), 4, 1)]),
             (5, vec![(Row::new(vec![9i64.into()]), 5, 1)]),
             (6, vec![(Row::new(vec![12i64.into()]), 6, 1)]),
+        ]);
+        run_and_check(&mut state, &mut df, 1..7, expected, output);
+    }
+
+    /// SELECT SUM(DISTINCT col) FROM table
+    ///
+    /// table schema:
+    /// | name | type  |
+    /// |------|-------|
+    /// | col  | Int64 |
+    #[test]
+    fn test_basic_reduce_distinct_accum() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 4, 1),
+            (Row::new(vec![2i64.into()]), 5, 1),
+            (Row::new(vec![3i64.into()]), 6, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        let key_val_plan = KeyValPlan {
+            key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
+            val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
+        };
+
+        let distinct_aggrs = vec![(
+            0,
+            0,
+            AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+        )];
+        let accum_plan = AccumulablePlan {
+            full_aggrs: vec![AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: true,
+            }],
+            simple_aggrs: vec![],
+            distinct_aggrs,
+        };
+
+        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let bundle = ctx
+            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        let expected = BTreeMap::from([
+            (1, vec![(Row::new(vec![1i64.into()]), 1, 1)]),
+            (2, vec![(Row::new(vec![3i64.into()]), 2, 1)]),
+            (3, vec![(Row::new(vec![6i64.into()]), 3, 1)]),
+            (4, vec![(Row::new(vec![6i64.into()]), 4, 1)]),
+            (5, vec![(Row::new(vec![6i64.into()]), 5, 1)]),
+            (6, vec![(Row::new(vec![6i64.into()]), 6, 1)]),
+        ]);
+        run_and_check(&mut state, &mut df, 1..7, expected, output);
+    }
+
+    /// SELECT SUM(col), SUM(DISTINCT col) FROM table
+    ///
+    /// table schema:
+    /// | name | type  |
+    /// |------|-------|
+    /// | col  | Int64 |
+    #[test]
+    fn test_compsite_reduce_distinct_accum() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![2i64.into()]), 2, 1),
+            (Row::new(vec![3i64.into()]), 3, 1),
+            (Row::new(vec![1i64.into()]), 4, 1),
+            (Row::new(vec![2i64.into()]), 5, 1),
+            (Row::new(vec![3i64.into()]), 6, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        let key_val_plan = KeyValPlan {
+            key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
+            val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
+        };
+        let simple_aggrs = vec![(
+            0,
+            0,
+            AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+        )];
+        let distinct_aggrs = vec![(
+            1,
+            0,
+            AggregateExpr {
+                func: AggregateFunc::SumInt64,
+                expr: ScalarExpr::Column(0),
+                distinct: true,
+            },
+        )];
+        let accum_plan = AccumulablePlan {
+            full_aggrs: vec![
+                AggregateExpr {
+                    func: AggregateFunc::SumInt64,
+                    expr: ScalarExpr::Column(0),
+                    distinct: false,
+                },
+                AggregateExpr {
+                    func: AggregateFunc::SumInt64,
+                    expr: ScalarExpr::Column(0),
+                    distinct: true,
+                },
+            ],
+            simple_aggrs,
+            distinct_aggrs,
+        };
+
+        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let bundle = ctx
+            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        let expected = BTreeMap::from([
+            (1, vec![(Row::new(vec![1i64.into(), 1i64.into()]), 1, 1)]),
+            (2, vec![(Row::new(vec![3i64.into(), 3i64.into()]), 2, 1)]),
+            (3, vec![(Row::new(vec![6i64.into(), 6i64.into()]), 3, 1)]),
+            (4, vec![(Row::new(vec![7i64.into(), 6i64.into()]), 4, 1)]),
+            (5, vec![(Row::new(vec![9i64.into(), 6i64.into()]), 5, 1)]),
+            (6, vec![(Row::new(vec![12i64.into(), 6i64.into()]), 6, 1)]),
         ]);
         run_and_check(&mut state, &mut df, 1..7, expected, output);
     }

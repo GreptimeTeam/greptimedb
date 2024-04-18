@@ -512,14 +512,21 @@ impl ArrangeHandler {
     ///
     /// it's a cheap operation, since it's `Arc-ed` and only clone the `Arc`
     pub fn clone_full_arrange(&self) -> Option<Self> {
-        if self.read().is_written {
-            return None;
+        {
+            let zelf = self.read();
+            if !zelf.full_arrangement && zelf.is_written {
+                return None;
+            }
         }
 
         self.write().full_arrangement = true;
         Some(Self {
             inner: self.inner.clone(),
         })
+    }
+
+    pub fn set_full_arrangement(&self, full: bool) {
+        self.write().full_arrangement = full;
     }
 }
 
@@ -583,7 +590,7 @@ mod test {
         }
 
         let arr2 = arr.clone_full_arrange();
-        assert!(arr2.is_none());
+        assert!(arr2.is_some());
         {
             let mut arr = arr.write();
             assert_eq!(arr.spine.len(), 3);

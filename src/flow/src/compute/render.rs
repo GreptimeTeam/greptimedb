@@ -148,7 +148,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     // swap
                     std::mem::swap(&mut per_time, &mut after);
                     let not_great_than_now = after;
-                    dbg!(&not_great_than_now);
+
                     not_great_than_now.into_iter().for_each(|(_ts, rows)| {
                         send_port.give(rows);
                     });
@@ -246,7 +246,6 @@ mod test {
             output.borrow_mut().clear();
             // print future scheduled
             let scheduled = state.get_scheduler();
-            dbg!(scheduled);
         }
     }
 
