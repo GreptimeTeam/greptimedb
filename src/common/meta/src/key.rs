@@ -91,7 +91,7 @@ use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
 use crate::rpc::store::BatchDeleteRequest;
@@ -466,17 +466,18 @@ impl TableMetadataManager {
             txn = txn.merge(create_datanode_table_txn);
         }
 
-        let r = self.kv_backend.txn(txn).await?;
+        let mut r = self.kv_backend.txn(txn).await?;
 
         // Checks whether metadata was already created.
         if !r.succeeded {
-            let remote_table_info = on_create_table_info_failure(&r.responses)?
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let remote_table_info = on_create_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table info during the create table metadata",
                 })?
                 .into_inner();
 
-            let remote_table_route = on_create_table_route_failure(&r.responses)?
+            let remote_table_route = on_create_table_route_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table route during the create table metadata",
                 })?
@@ -505,8 +506,8 @@ impl TableMetadataManager {
         let mut txns = Vec::with_capacity(3 * len);
         struct OnFailure<F1, R1, F2, R2>
         where
-            F1: FnOnce(&Vec<TxnOpResponse>) -> R1,
-            F2: FnOnce(&Vec<TxnOpResponse>) -> R2,
+            F1: FnOnce(&mut TxnOpGetResponseSet) -> R1,
+            F2: FnOnce(&mut TxnOpGetResponseSet) -> R2,
         {
             table_info_value: TableInfoValue,
             on_create_table_info_failure: F1,
@@ -551,18 +552,19 @@ impl TableMetadataManager {
         }
 
         let txn = Txn::merge_all(txns);
-        let r = self.kv_backend.txn(txn).await?;
+        let mut r = self.kv_backend.txn(txn).await?;
 
         // Checks whether metadata was already created.
         if !r.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             for on_failure in on_failures {
-                let remote_table_info = (on_failure.on_create_table_info_failure)(&r.responses)?
+                let remote_table_info = (on_failure.on_create_table_info_failure)(&mut set)?
                     .context(error::UnexpectedSnafu {
                         err_msg: "Reads the empty table info during the create table metadata",
                     })?
                     .into_inner();
 
-                let remote_table_route = (on_failure.on_create_table_route_failure)(&r.responses)?
+                let remote_table_route = (on_failure.on_create_table_route_failure)(&mut set)?
                     .context(error::UnexpectedSnafu {
                         err_msg: "Reads the empty table route during the create table metadata",
                     })?
@@ -708,11 +710,12 @@ impl TableMetadataManager {
 
         let txn = Txn::merge_all(vec![update_table_name_txn, update_table_info_txn]);
 
-        let r = self.kv_backend.txn(txn).await?;
+        let mut r = self.kv_backend.txn(txn).await?;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_info = on_update_table_info_failure(&r.responses)?
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let remote_table_info = on_update_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table info during the rename table metadata",
                 })?
@@ -740,11 +743,12 @@ impl TableMetadataManager {
             .table_info_manager()
             .build_update_txn(table_id, current_table_info_value, &new_table_info_value)?;
 
-        let r = self.kv_backend.txn(update_table_info_txn).await?;
+        let mut r = self.kv_backend.txn(update_table_info_txn).await?;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_info = on_update_table_info_failure(&r.responses)?
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let remote_table_info = on_update_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table info during the updating table info",
                 })?
@@ -768,7 +772,7 @@ impl TableMetadataManager {
         let mut txns = Vec::with_capacity(len);
         struct OnFailure<F, R>
         where
-            F: FnOnce(&Vec<TxnOpResponse>) -> R,
+            F: FnOnce(&mut TxnOpGetResponseSet) -> R,
         {
             table_info_value: TableInfoValue,
             on_update_table_info_failure: F,
@@ -796,11 +800,12 @@ impl TableMetadataManager {
         }
 
         let txn = Txn::merge_all(txns);
-        let r = self.kv_backend.txn(txn).await?;
+        let mut r = self.kv_backend.txn(txn).await?;
 
         if !r.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             for on_failure in on_failures {
-                let remote_table_info = (on_failure.on_update_table_info_failure)(&r.responses)?
+                let remote_table_info = (on_failure.on_update_table_info_failure)(&mut set)?
                     .context(error::UnexpectedSnafu {
                         err_msg: "Reads the empty table info during the updating table info",
                     })?
@@ -847,11 +852,12 @@ impl TableMetadataManager {
 
         let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
 
-        let r = self.kv_backend.txn(txn).await?;
+        let mut r = self.kv_backend.txn(txn).await?;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_route = on_update_table_route_failure(&r.responses)?
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let remote_table_route = on_update_table_route_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table route during the updating table route",
                 })?
@@ -898,11 +904,12 @@ impl TableMetadataManager {
             .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
-        let r = self.kv_backend.txn(update_table_route_txn).await?;
+        let mut r = self.kv_backend.txn(update_table_route_txn).await?;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_route = on_update_table_route_failure(&r.responses)?
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let remote_table_route = on_update_table_route_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table route during the updating leader region status",
                 })?

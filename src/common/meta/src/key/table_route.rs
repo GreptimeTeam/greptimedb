@@ -20,13 +20,16 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue};
 use crate::error::{
     self, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
     UnexpectedLogicalRouteTableSnafu,
 };
-use crate::key::{RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
-use crate::kv_backend::txn::{Txn, TxnOpResponse};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, RegionDistribution, TableMetaKey, TableMetaValue,
+    TABLE_ROUTE_PREFIX,
+};
+use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::rpc::store::BatchGetRequest;
@@ -454,7 +457,9 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(
+            &mut TxnOpGetResponseSet,
+        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -464,7 +469,10 @@ impl TableRouteStorage {
             table_route_value.try_as_raw_value()?,
         );
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Builds a update table route transaction,
@@ -477,7 +485,9 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(
+            &mut TxnOpGetResponseSet,
+        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -486,7 +496,10 @@ impl TableRouteStorage {
 
         let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Returns the [`TableRouteValue`].
