@@ -18,7 +18,10 @@ use rand::Rng;
 use serde::Serialize;
 use snafu::ResultExt;
 use tests_fuzz::context::TableContextRef;
-use tests_fuzz::fake::WordGenerator;
+use tests_fuzz::fake::{
+    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
+    MappedGenerator, WordGenerator,
+};
 use tests_fuzz::generator::alter_expr::{
     AlterExprAddColumnGeneratorBuilder, AlterExprDropColumnGeneratorBuilder,
     AlterExprRenameGeneratorBuilder,
@@ -63,7 +66,10 @@ pub(crate) fn render_config_file<C: Serialize>(template_path: &str, context: &C)
 pub(crate) fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> CreateTableExpr {
     let columns = rng.gen_range(2..30);
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
-        .name_generator(Box::new(WordGenerator))
+        .name_generator(Box::new(MappedGenerator::new(
+            WordGenerator,
+            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+        )))
         .columns(columns)
         .engine("mito")
         .build()
