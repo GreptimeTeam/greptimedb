@@ -22,7 +22,7 @@ use store_api::data_source::DataSourceRef;
 use store_api::storage::ScanRequest;
 
 use crate::error::{Result, TablesRecordBatchSnafu};
-use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
+use crate::metadata::{FilterPushDownType, TableInfoRef, TableType};
 
 pub mod adapter;
 mod metrics;
@@ -30,13 +30,6 @@ pub mod numbers;
 pub mod scan;
 
 pub type TableRef = Arc<Table>;
-
-#[async_trait::async_trait]
-pub trait TableIdProvider {
-    async fn next_table_id(&self) -> Result<TableId>;
-}
-
-pub type TableIdProviderRef = Arc<dyn TableIdProvider + Send + Sync>;
 
 /// Table handle.
 pub struct Table {
