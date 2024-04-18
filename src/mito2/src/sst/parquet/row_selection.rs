@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_non_contiguous_ranges() {
-        let ranges = vec![1..3, 5..8];
+        let ranges = [1..3, 5..8];
         let (selection, skipped) = row_selection_from_row_ranges(ranges.iter().cloned(), 10);
         let expected = RowSelection::from(vec![
             RowSelector::skip(1),
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_empty_range() {
-        let ranges = vec![];
+        let ranges = [];
         let (selection, skipped) = row_selection_from_row_ranges(ranges.iter().cloned(), 10);
         let expected = RowSelection::from(vec![]);
         assert_eq!(selection, expected);
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn test_adjacent_ranges() {
-        let ranges = vec![1..2, 2..3];
+        let ranges = [1..2, 2..3];
         let (selection, skipped) = row_selection_from_row_ranges(ranges.iter().cloned(), 10);
         let expected = RowSelection::from(vec![RowSelector::skip(1), RowSelector::select(2)]);
         assert_eq!(selection, expected);
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_large_gap_between_ranges() {
-        let ranges = vec![1..2, 100..101];
+        let ranges = [1..2, 100..101];
         let (selection, skipped) = row_selection_from_row_ranges(ranges.iter().cloned(), 10240);
         let expected = RowSelection::from(vec![
             RowSelector::skip(1),

@@ -557,12 +557,12 @@ mod test {
 
         let mut options = HashMap::new();
         options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "value".to_string());
-        request.options = options.clone();
+        request.options.clone_from(&options);
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_ok());
 
         options.insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "value".to_string());
-        request.options = options.clone();
+        request.options.clone_from(&options);
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_err());
 
@@ -620,7 +620,7 @@ mod test {
             data_region_request.primary_key,
             vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
         );
-        assert!(data_region_request.options.get("ttl").is_some());
+        assert!(data_region_request.options.contains_key("ttl"));
 
         // check create metadata region request
         let metadata_region_request = engine_inner.create_request_for_metadata_region(&request);
@@ -628,6 +628,6 @@ mod test {
             metadata_region_request.region_dir,
             "/test_dir/metadata/".to_string()
         );
-        assert!(metadata_region_request.options.get("ttl").is_none());
+        assert!(!metadata_region_request.options.contains_key("ttl"));
     }
 }

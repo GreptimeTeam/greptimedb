@@ -1065,7 +1065,7 @@ mod tests {
         let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let time = DateTime::from_timestamp(sec, nsec).unwrap().naive_utc();
         assert_eq!(sec, time.and_utc().timestamp());
-        assert_eq!(nsec, time.timestamp_subsec_nanos());
+        assert_eq!(nsec, time.and_utc().timestamp_subsec_nanos());
     }
 
     #[test]

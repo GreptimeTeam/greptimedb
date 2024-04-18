@@ -510,9 +510,6 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{HeartbeatRequest, Peer};
-    use meta_srv::metasrv::SelectorContext;
-    use meta_srv::selector::{Namespace, Selector, SelectorOptions};
-    use meta_srv::Result as MetaResult;
 
     use super::*;
     use crate::{error, mocks};
@@ -660,36 +657,6 @@ mod tests {
                 assert_eq!(1000, res.header.unwrap().cluster_id);
             }
         });
-    }
-
-    struct MockSelector;
-
-    #[async_trait::async_trait]
-    impl Selector for MockSelector {
-        type Context = SelectorContext;
-        type Output = Vec<Peer>;
-
-        async fn select(
-            &self,
-            _ns: Namespace,
-            _ctx: &Self::Context,
-            _opts: SelectorOptions,
-        ) -> MetaResult<Self::Output> {
-            Ok(vec![
-                Peer {
-                    id: 0,
-                    addr: "peer0".to_string(),
-                },
-                Peer {
-                    id: 1,
-                    addr: "peer1".to_string(),
-                },
-                Peer {
-                    id: 2,
-                    addr: "peer2".to_string(),
-                },
-            ])
-        }
     }
 
     #[tokio::test]
