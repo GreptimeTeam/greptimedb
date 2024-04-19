@@ -88,6 +88,10 @@ fn generate_create_logical_table_expr<R: Rng + 'static>(
     let if_not_exists = rng.gen_bool(0.5);
     let columns = rng.gen_range(2..30);
     let overlapped_columns = rng.gen_range(0..table_ctx.columns.len() - 1);
+
+    // Sometimes the name of the table is like `table_name` with backticks, we need to remove them in the with clause
+    let physical_table_name = table_ctx.name.to_string().replace('`', "");
+
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
@@ -96,7 +100,7 @@ fn generate_create_logical_table_expr<R: Rng + 'static>(
         .columns(columns)
         .engine("metric")
         .if_not_exists(if_not_exists)
-        .with_clause([("on_physical_table".to_string(), table_ctx.name.to_string())])
+        .with_clause([("on_physical_table".to_string(), physical_table_name)])
         .build()
         .unwrap();
 
