@@ -47,6 +47,21 @@ macro_rules! format_list_comma {
     };
 }
 
+macro_rules! format_sorted_hashmap {
+    ($hashmap:expr) => {{
+        let hashmap = $hashmap;
+        let mut sorted_keys: Vec<&String> = hashmap.keys().collect();
+        sorted_keys.sort();
+        let mut result = String::new();
+        for key in sorted_keys {
+            if let Some(val) = hashmap.get(key) {
+                result.push_str(&format!("{} = {}, ", key, val));
+            }
+        }
+        result
+    }};
+}
+
 /// Time index name, used in table constraints.
 pub const TIME_INDEX: &str = "__time_index";
 
@@ -214,6 +229,27 @@ impl CreateDatabase {
             if_not_exists,
         }
     }
+
+    pub fn name(&self) -> &ObjectName {
+        &self.name
+    }
+
+    #[inline]
+    fn format_if_not_exists(&self) -> &str {
+        if self.if_not_exists {
+            "IF NOT EXISTS"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for CreateDatabase {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let if_not_exists = self.format_if_not_exists();
+        let name = self.name();
+        write!(f, r#"CREATE DATABASE {if_not_exists} {name}"#)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
@@ -229,12 +265,82 @@ pub struct CreateExternalTable {
     pub engine: String,
 }
 
+impl CreateExternalTable {
+    fn format_constraints(&self) -> String {
+        self.constraints
+            .iter()
+            .map(|c| {
+                if is_time_index(c) {
+                    let TableConstraint::Unique { columns, .. } = c else {
+                        unreachable!()
+                    };
+
+                    format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
+                } else {
+                    format_indent!(c)
+                }
+            })
+            .join(LINE_SEP)
+    }
+
+    #[inline]
+    fn format_if_not_exists(&self) -> &str {
+        if self.if_not_exists {
+            "IF NOT EXISTS"
+        } else {
+            ""
+        }
+    }
+
+    #[inline]
+    fn format_options(&self) -> String {
+        if self.options.map.is_empty() {
+            String::default()
+        } else {
+            let options = format_sorted_hashmap!(&self.options.map);
+            format!(
+                r#"WITH(
+{options}
+)"#
+            )
+        }
+    }
+}
+
+impl Display for CreateExternalTable {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let name = &self.name;
+        let columns = format_list_indent!(self.columns);
+        let constraints = self.format_constraints();
+        let options = self.format_options();
+        let if_not_exists = self.format_if_not_exists();
+        let engine = &self.engine;
+        write!(
+            f,
+            r#"CREATE EXTERNAL TABLE {if_not_exists} {name} (
+{columns},
+{constraints}
+)
+ENGINE={engine}
+{options}"#
+        )
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateTableLike {
     /// Table name
     pub table_name: ObjectName,
     /// The table that is designated to be imitated by `Like`
     pub source_name: ObjectName,
+}
+
+impl Display for CreateTableLike {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let table_name = &self.table_name;
+        let source_name = &self.source_name;
+        write!(f, r#"CREATE TABLE {table_name} LIKE {source_name}"#)
+    }
 }
 
 #[cfg(test)]

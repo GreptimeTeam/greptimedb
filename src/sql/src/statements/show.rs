@@ -1,5 +1,3 @@
-// Copyright 2023 Greptime Team
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::fmt::{self, Display};
 
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -51,6 +49,48 @@ pub struct ShowColumns {
     pub full: bool,
 }
 
+impl ShowColumns {
+    pub fn kind(&self) -> &ShowKind {
+        &self.kind
+    }
+
+    pub fn table(&self) -> &String {
+        &self.table
+    }
+
+    #[inline]
+    fn format_table(&self) -> String {
+        format!("IN {}", self.table)
+    }
+
+    #[inline]
+    fn format_database(&self) -> String {
+        match &self.database {
+            Some(database) => format!("IN {}", database),
+            None => String::default(),
+        }
+    }
+
+    #[inline]
+    fn format_full(&self) -> &str {
+        if self.full {
+            "FULL"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for ShowColumns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = self.kind();
+        let table = self.format_table();
+        let database = self.format_database();
+        let full = self.format_full();
+        write!(f, r#"SHOW {full} {table} {database} {kind}"#)
+    }
+}
+
 /// The SQL `SHOW INDEX` statement
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowIndex {
@@ -59,10 +99,49 @@ pub struct ShowIndex {
     pub database: Option<String>,
 }
 
+impl ShowIndex {
+    pub fn kind(&self) -> &ShowKind {
+        &self.kind
+    }
+
+    #[inline]
+    fn format_table(&self) -> String {
+        format!("IN {}", self.table)
+    }
+
+    #[inline]
+    fn format_database(&self) -> String {
+        match &self.database {
+            Some(database) => format!("IN {}", database),
+            None => String::default(),
+        }
+    }
+}
+
+impl Display for ShowIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = self.kind();
+        let table = self.format_table();
+        let database = self.format_database();
+        write!(f, r#"SHOW INDEX {table} {database} {kind}"#)
+    }
+}
+
 impl ShowDatabases {
     /// Creates a statement for `SHOW DATABASES`
     pub fn new(kind: ShowKind) -> Self {
         ShowDatabases { kind }
+    }
+
+    pub fn kind(&self) -> &ShowKind {
+        &self.kind
+    }
+}
+
+impl Display for ShowDatabases {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = self.kind();
+        write!(f, r#"SHOW DATABASES {kind}"#)
     }
 }
 
@@ -74,16 +153,76 @@ pub struct ShowTables {
     pub full: bool,
 }
 
+impl ShowTables {
+    pub fn kind(&self) -> &ShowKind {
+        &self.kind
+    }
+
+    #[inline]
+    fn format_database(&self) -> String {
+        match &self.database {
+            None => String::default(),
+            Some(database) => {
+                format!("IN {}", database)
+            }
+        }
+    }
+
+    #[inline]
+    fn format_full(&self) -> &str {
+        if self.full {
+            "FULL"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for ShowTables {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let full = self.format_full();
+        let database = self.format_database();
+        let kind = self.kind();
+        write!(f, r#"SHOW {full} TABLES {database} {kind}"#)
+    }
+}
+
 /// SQL structure for `SHOW CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowCreateTable {
     pub table_name: ObjectName,
 }
 
+impl ShowCreateTable {
+    fn table_name(&self) -> &ObjectName {
+        &self.table_name
+    }
+}
+
+impl Display for ShowCreateTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let table_name = self.table_name();
+        write!(f, r#"SHOW CREATE {table_name}"#)
+    }
+}
+
 /// SQL structure for `SHOW VARIABLES xxx`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowVariables {
     pub variable: ObjectName,
+}
+
+impl ShowVariables {
+    fn variable(&self) -> &ObjectName {
+        &self.variable
+    }
+}
+
+impl Display for ShowVariables {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let variable = self.variable();
+        write!(f, r#"SHOW VARIABLES {variable}"#)
+    }
 }
 
 #[cfg(test)]

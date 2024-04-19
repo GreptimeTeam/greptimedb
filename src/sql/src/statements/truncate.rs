@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -29,5 +31,12 @@ impl TruncateTable {
 
     pub fn table_name(&self) -> &ObjectName {
         &self.table_name
+    }
+}
+
+impl Display for TruncateTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let table_name = self.table_name();
+        write!(f, r#"TRUNCATE TABLE {table_name}"#)
     }
 }

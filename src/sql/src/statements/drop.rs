@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -39,6 +41,23 @@ impl DropTable {
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
     }
+
+    #[inline]
+    fn format_if_exists(&self) -> &str {
+        if self.drop_if_exists {
+            "IF EXISTS"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for DropTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let if_exists = self.format_if_exists();
+        let table_name = self.table_name();
+        write!(f, r#"DROP TABLE {if_exists} {table_name}"#)
+    }
 }
 
 /// DROP DATABASE statement.
@@ -64,5 +83,22 @@ impl DropDatabase {
 
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
+    }
+
+    #[inline]
+    fn format_if_exists(&self) -> &str {
+        if self.drop_if_exists {
+            "IF EXISTS"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for DropDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let if_exists = self.format_if_exists();
+        let name = self.name();
+        write!(f, r#"DROP DATABASE {if_exists} {name}"#)
     }
 }

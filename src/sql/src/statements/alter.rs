@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Display};
+
 use common_query::AddColumnLocation;
 use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
@@ -39,6 +41,14 @@ impl AlterTable {
     }
 }
 
+impl Display for AlterTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let table_name = self.table_name();
+        let alter_operation = self.alter_operation();
+        write!(f, r#"ALTER TABLE {table_name} {alter_operation}"#)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
@@ -52,4 +62,26 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: String },
+}
+
+impl Display for AlterTableOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AlterTableOperation::AddConstraint(constraint) => write!(f, r#"ADD {constraint}"#),
+            AlterTableOperation::AddColumn {
+                column_def,
+                location,
+            } => {
+                if let Some(location) = location {
+                    write!(f, r#"ADD {column_def} {location}"#)
+                } else {
+                    write!(f, r#"ADD {column_def}"#)
+                }
+            }
+            AlterTableOperation::DropColumn { name } => write!(f, r#"DROP COLUMN {name}"#),
+            AlterTableOperation::RenameTable { new_table_name } => {
+                write!(f, r#"RENAME {new_table_name}"#)
+            }
+        }
+    }
 }

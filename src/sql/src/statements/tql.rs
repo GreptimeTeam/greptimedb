@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
@@ -19,6 +21,16 @@ pub enum Tql {
     Eval(TqlEval),
     Explain(TqlExplain),
     Analyze(TqlAnalyze),
+}
+
+impl Display for Tql {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Tql::Eval(t) => t.fmt(f),
+            Tql::Explain(t) => t.fmt(f),
+            Tql::Analyze(t) => t.fmt(f),
+        }
+    }
 }
 
 /// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
@@ -29,6 +41,28 @@ pub struct TqlEval {
     pub step: String,
     pub lookback: Option<String>,
     pub query: String,
+}
+
+impl TqlEval {
+    #[inline]
+    fn format_lookback(&self) -> String {
+        if let Some(lookback) = &self.lookback {
+            format!(", {}\n", lookback)
+        } else {
+            String::default()
+        }
+    }
+}
+
+impl Display for TqlEval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let start = &self.start;
+        let end = &self;
+        let step = &self;
+        let lookback = self.format_lookback();
+        let query = &self.query;
+        write!(f, "TQL EVAL ({start}, {end}, {step}{lookback}) {query}")
+    }
 }
 
 /// TQL EXPLAIN [VERBOSE] [<start>, <end>, <step>, [lookback]] <promql>
@@ -43,6 +77,41 @@ pub struct TqlExplain {
     pub is_verbose: bool,
 }
 
+impl TqlExplain {
+    #[inline]
+    fn format_lookback(&self) -> String {
+        if let Some(lookback) = &self.lookback {
+            format!(", {}\n", lookback)
+        } else {
+            String::default()
+        }
+    }
+
+    #[inline]
+    fn format_is_verbose(&self) -> &str {
+        if self.is_verbose {
+            "VERBOSE"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for TqlExplain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let start = &self.start;
+        let end = &self.end;
+        let step = &self.step;
+        let lookback = self.format_lookback();
+        let query = &self.query;
+        let is_verbose = self.format_is_verbose();
+        write!(
+            f,
+            "TQL EXPLAIN {is_verbose} ({start}, {end}, {step}{lookback}) {query}"
+        )
+    }
+}
+
 /// TQL ANALYZE [VERBOSE] (<start>, <end>, <step>, [lookback]) <promql>
 /// executes the plan and tells the detailed per-step execution time (similar to SQL ANALYZE).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
@@ -53,6 +122,41 @@ pub struct TqlAnalyze {
     pub lookback: Option<String>,
     pub query: String,
     pub is_verbose: bool,
+}
+
+impl TqlAnalyze {
+    #[inline]
+    fn format_lookback(&self) -> String {
+        if let Some(lookback) = &self.lookback {
+            format!(", {}\n", lookback)
+        } else {
+            String::default()
+        }
+    }
+
+    #[inline]
+    fn format_is_verbose(&self) -> &str {
+        if self.is_verbose {
+            "VERBOSE"
+        } else {
+            ""
+        }
+    }
+}
+
+impl Display for TqlAnalyze {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let start = &self.start;
+        let end = &self.end;
+        let step = &self.step;
+        let lookback = self.format_lookback();
+        let query = &self.query;
+        let is_verbose = self.format_is_verbose();
+        write!(
+            f,
+            "TQL ANALYZE {is_verbose} ({start}, {end}, {step}{lookback}) {query}"
+        )
+    }
 }
 
 /// Intermediate structure used to unify parameter mappings for various TQL operations.

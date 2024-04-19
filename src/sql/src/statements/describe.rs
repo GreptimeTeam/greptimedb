@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -29,6 +31,13 @@ impl DescribeTable {
 
     pub fn name(&self) -> &ObjectName {
         &self.name
+    }
+}
+
+impl Display for DescribeTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = self.name();
+        write!(f, r#"DESCRIBEE TABLE {name}"#)
     }
 }
 
