@@ -52,12 +52,14 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             .context(InfluxdbLineProtocolSnafu)?;
 
         let mut multi_table_data = MultiTableData::new();
+        let precision = unwrap_or_default_precision(value.precision);
 
         for line in &lines {
             let table_name = line.series.measurement.as_str();
             let tags = &line.series.tag_set;
             let fields = &line.field_set;
             let ts = line.timestamp;
+            ensure_precision_match(ts, precision)?;
             // tags.len + fields.len + timestamp(+1)
             let num_columns = tags.as_ref().map(|x| x.len()).unwrap_or(0) + fields.len() + 1;
 
@@ -87,7 +89,6 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             row_writer::write_fields(table_data, fields, &mut one_row)?;
 
             // timestamp
-            let precision = unwrap_or_default_precision(value.precision);
             row_writer::write_ts_precision(
                 table_data,
                 INFLUXDB_TIMESTAMP_COLUMN_NAME,
@@ -100,6 +101,51 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
         }
 
         Ok(multi_table_data.into_row_insert_requests().0)
+    }
+}
+
+fn ensure_precision_match(
+    ts: Option<i64>,
+    provided_precision: Precision,
+) -> crate::error::Result<()> {
+    match ts {
+        Some(val) => {
+            let precision = find_actual_precision(&count_digits(val));
+            if provided_precision == precision {
+                Ok(())
+            } else {
+                Err(Error::Internal {
+                    err_msg: format!(
+                        "time {} outside of precision range {}",
+                        val, provided_precision
+                    ),
+                })
+            }
+        }
+        None => Ok(()),
+    }
+}
+
+fn count_digits(mut number: i64) -> u32 {
+    if number == 0 {
+        return 1;
+    }
+    let mut digits = 0;
+    while number != 0 {
+        number /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn find_actual_precision(timestamp: &u32) -> Precision {
+    match timestamp {
+        17..=19 => Precision::Nanosecond,
+        14..=16 => Precision::Microsecond,
+        11..=13 => Precision::Millisecond,
+        8..=10 => Precision::Second,
+        5..=7 => Precision::Minute,
+        _ => Precision::Hour,
     }
 }
 
@@ -143,6 +189,27 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                 _ => panic!(),
             }
         }
+    }
+
+    #[test]
+    fn test_precision_overflow() {
+        let lines = r"
+monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
+monitor1,host=host2 memory=1027 1663840496400340001
+monitor2,host=host3 cpu=66.5 1663840496100023102
+monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
+
+        let influxdb_req = InfluxdbRequest {
+            precision: Some(Precision::Second),
+            lines: lines.to_string(),
+        };
+
+        let into: Result<RowInsertRequests, Error> = influxdb_req.try_into();
+        assert!(into.is_err());
+        let error = into.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("time 1663840496100023100 outside of precision range Precision::Second"));
     }
 
     fn assert_monitor1_rows(rows: &Option<Rows>) {
