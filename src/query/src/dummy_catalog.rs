@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::DfPhysicalPlan;
+use common_recordbatch::OrderOption;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
@@ -128,7 +129,7 @@ impl SchemaProvider for DummySchemaProvider {
 
 /// For [TableProvider](TableProvider) and [DummyCatalogList]
 #[derive(Clone)]
-struct DummyTableProvider {
+pub struct DummyTableProvider {
     region_id: RegionId,
     engine: RegionEngineRef,
     metadata: RegionMetadataRef,
@@ -183,6 +184,29 @@ impl TableProvider for DummyTableProvider {
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+    }
+}
+
+impl DummyTableProvider {
+    /// Creates a new provider.
+    pub fn new(region_id: RegionId, engine: RegionEngineRef, metadata: RegionMetadataRef) -> Self {
+        Self {
+            region_id,
+            engine,
+            metadata,
+            scan_request: Default::default(),
+        }
+    }
+
+    /// Sets the ordering hint of the query to the provider.
+    pub fn with_ordering_hint(&self, order_opts: &[OrderOption]) {
+        self.scan_request.lock().unwrap().output_ordering = Some(order_opts.to_vec());
+    }
+
+    /// Gets the scan request of the provider.
+    #[cfg(test)]
+    pub fn scan_request(&self) -> ScanRequest {
+        self.scan_request.lock().unwrap().clone()
     }
 }
 
