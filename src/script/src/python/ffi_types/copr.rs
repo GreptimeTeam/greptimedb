@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod compile;
 pub mod parse;
 
 use std::collections::HashMap;
@@ -27,12 +26,10 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
-// use crate::python::builtins::greptime_builtin;
 use parse::DecoratorArgs;
 use pyo3::pyclass as pyo3class;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
-use rustpython_compiler::CodeObject;
 #[cfg(test)]
 use serde::Deserialize;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -77,11 +74,6 @@ pub struct Coprocessor {
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
     pub script: String,
-    // We must use option here, because we use `serde` to deserialize coprocessor
-    // from ron file and `Deserialize` requires Coprocessor implementing `Default` trait,
-    // but CodeObject doesn't.
-    #[cfg_attr(test, serde(skip))]
-    pub code_obj: Option<CodeObject>,
     #[cfg_attr(test, serde(skip))]
     pub query_engine: Option<QueryEngineWeakRef>,
     /// Use which backend to run this script
@@ -494,6 +486,5 @@ def test(a, b, c, **params):
         assert_eq!(copr.return_types, vec![None]);
         assert_eq!(copr.kwarg, Some("params".to_string()));
         assert_eq!(copr.script, script);
-        assert!(copr.code_obj.is_some());
     }
 }

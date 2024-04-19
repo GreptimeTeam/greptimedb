@@ -25,7 +25,7 @@ use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
-use crate::python::ffi_types::copr::{compile, AnnotationInfo, BackendType, Coprocessor};
+use crate::python::ffi_types::copr::{AnnotationInfo, BackendType, Coprocessor};
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DecoratorArgs {
@@ -515,12 +515,6 @@ pub fn parse_and_compile_copr(
                     .as_ref()
                     .map(|arg| arg.arg.as_str().to_owned());
                 coprocessor = Some(Coprocessor {
-                    code_obj: Some(compile::compile_script(
-                        name.as_str(),
-                        &deco_args,
-                        &kwarg,
-                        script,
-                    )?),
                     name: name.to_string(),
                     deco_args,
                     arg_types,
