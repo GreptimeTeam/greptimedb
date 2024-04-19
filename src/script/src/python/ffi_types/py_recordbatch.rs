@@ -17,11 +17,8 @@
 //! access the columns of the RecordBatch.
 
 use common_recordbatch::RecordBatch;
-use crossbeam_utils::atomic::AtomicCell;
-use pyo3::{
-    exceptions::{PyKeyError, PyRuntimeError},
-    pyclass as pyo3class, pymethods, PyObject, PyResult, Python,
-};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError};
+use pyo3::{pyclass as pyo3class, pymethods, PyObject, PyResult, Python};
 
 use crate::python::ffi_types::PyVector;
 
@@ -36,6 +33,10 @@ impl PyRecordBatch {
     pub fn new(record_batch: RecordBatch) -> Self {
         Self { record_batch }
     }
+
+    fn len(&self) -> usize {
+        self.record_batch.num_rows()
+    }
 }
 
 impl From<RecordBatch> for PyRecordBatch {
@@ -43,7 +44,6 @@ impl From<RecordBatch> for PyRecordBatch {
         Self::new(record_batch)
     }
 }
-
 
 #[pymethods]
 impl PyRecordBatch {
@@ -76,52 +76,5 @@ impl PyRecordBatch {
     }
     fn __len__(&self) -> PyResult<usize> {
         Ok(self.len())
-    }
-}
-
-impl PyRecordBatch {
-    fn len(&self) -> usize {
-        self.record_batch.num_rows()
-    }
-    fn get_item(&self, needle: &RsPyObject, vm: &VirtualMachine) -> RsPyResult {
-        if let Ok(index) = needle.try_to_value::<usize>(vm) {
-            let column = self.record_batch.column(index);
-            let v = PyVector::from(column.clone());
-            Ok(v.into_pyobject(vm))
-        } else if let Ok(index) = needle.try_to_value::<String>(vm) {
-            let key = index.as_str();
-
-            let v = self.record_batch.column_by_name(key).ok_or_else(|| {
-                vm.new_key_error(PyStr::from(format!("Column {} not found", key)).into_pyobject(vm))
-            })?;
-            let v: PyVector = v.clone().into();
-            Ok(v.into_pyobject(vm))
-        } else {
-            Err(vm.new_key_error(
-                PyStr::from(format!("Expect either str or int, found {needle:?}"))
-                    .into_pyobject(vm),
-            ))
-        }
-    }
-}
-
-#[rspyclass(with(AsMapping))]
-impl PyRecordBatch {
-    #[pymethod(name = "__repr__")]
-    fn rspy_repr(&self) -> String {
-        format!("{:#?}", &self.record_batch.df_record_batch())
-    }
-}
-
-impl AsMapping for PyRecordBatch {
-    fn as_mapping() -> &'static PyMappingMethods {
-        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
-            length: atomic_func!(|mapping, _vm| Ok(PyRecordBatch::mapping_downcast(mapping).len())),
-            subscript: atomic_func!(
-                |mapping, needle, vm| PyRecordBatch::mapping_downcast(mapping).get_item(needle, vm)
-            ),
-            ass_subscript: AtomicCell::new(None),
-        };
-        &AS_MAPPING
     }
 }

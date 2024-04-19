@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Deref;
 use std::sync::Arc;
 
 use arrow::array::Datum;
@@ -47,6 +46,8 @@ impl From<VectorRef> for PyVector {
 }
 
 /// Performs `val - arr`.
+/// TODO: figure out whether pyo3 backend can support this
+#[allow(dead_code)]
 pub(crate) fn arrow_rsub(arr: &dyn Datum, val: &dyn Datum) -> Result<ArrayRef, String> {
     numeric::sub(val, arr).map_err(|e| format!("rsub error: {e}"))
 }
@@ -57,6 +58,8 @@ pub(crate) fn arrow_rtruediv(arr: &dyn Datum, val: &dyn Datum) -> Result<ArrayRe
 }
 
 /// Performs `val / arr`, but cast to i64.
+/// TODO: figure out whether pyo3 backend can support this
+#[allow(dead_code)]
 pub(crate) fn arrow_rfloordiv(arr: &dyn Datum, val: &dyn Datum) -> Result<ArrayRef, String> {
     let array = numeric::div(val, arr).map_err(|e| format!("rfloordiv divide error: {e}"))?;
     compute::cast(&array, &ArrowDataType::Int64).map_err(|e| format!("rfloordiv cast error: {e}"))

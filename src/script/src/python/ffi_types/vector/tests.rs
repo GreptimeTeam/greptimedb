@@ -22,12 +22,12 @@ use std::sync::Arc;
 
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
-
-use pyo3::{types::PyDict, Python};
+use pyo3::types::PyDict;
+use pyo3::Python;
 
 use crate::python::ffi_types::PyVector;
-
-use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
+use crate::python::pyo3::init_cpython_interpreter;
+use crate::python::pyo3::vector_impl::into_pyo3_cell;
 
 #[derive(Debug, Clone)]
 struct TestCase {

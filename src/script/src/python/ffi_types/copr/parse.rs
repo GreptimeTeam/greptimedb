@@ -34,7 +34,7 @@ pub struct DecoratorArgs {
     pub sql: Option<String>,
     #[cfg_attr(test, serde(skip))]
     pub backend: BackendType, // maybe add a URL for connecting or what?
-    // also predicate for timed triggered or conditional triggered?
+                              // also predicate for timed triggered or conditional triggered?
 }
 
 /// Return a CoprParseSnafu for you to chain fail() to return correct err Result type
@@ -55,10 +55,10 @@ macro_rules! fail_parse_error {
 
 fn py_str_to_string(s: &located_ast::Expr) -> Result<String> {
     if let located_ast::Expr::Constant(located_ast::ExprConstant {
-                                           value: located_ast::Constant::Str(v),
-                                           kind: _,
-                                           range: _,
-                                       }) = s
+        value: located_ast::Constant::Str(v),
+        kind: _,
+        range: _,
+    }) = s
     {
         Ok(v.clone())
     } else {
@@ -123,58 +123,49 @@ fn parse_native_type(sub: &located_ast::Expr) -> Result<AnnotationInfo> {
 
 /// check if binary op expr is legal(with one typename and one `None`)
 fn check_bin_op(bin_op: &located_ast::ExprBinOp) -> Result<()> {
-    if let located_ast::ExprBinOp {
+    let located_ast::ExprBinOp {
         left,
         op: _,
         right,
         range,
-    } = bin_op
-    {
-        // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
-        let is_none = |node: &located_ast::Expr| -> bool {
-            matches!(
-                &node,
-                located_ast::Expr::Constant(located_ast::ExprConstant {
-                    value: located_ast::Constant::None,
-                    ..
-                })
-            )
-        };
-        let is_type = |node: &located_ast::Expr| {
-            if let located_ast::Expr::Name(located_ast::ExprName { id, .. }) = node {
-                try_into_datatype(id, &range.start).is_ok()
-            } else {
-                false
-            }
-        };
-        let left_is_ty = is_type(left);
-        let left_is_none = is_none(left);
-        let right_is_ty = is_type(right);
-        let right_is_none = is_none(right);
-        if left_is_ty && right_is_ty || left_is_none && right_is_none {
-            fail_parse_error!(
-                "Expect one typenames and one `None`".to_string(),
-                Some(range.start)
-            )?;
-        } else if !(left_is_none && right_is_ty || left_is_ty && right_is_none) {
-            fail_parse_error!(
-                format!(
-                    "Expect a type name and a `None`, found left: \n{:#?} \nand right: \n{:#?}",
-                    left, right
-                ),
-                Some(range.start)
-            )?;
+    } = bin_op;
+
+    // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
+    let is_none = |node: &located_ast::Expr| -> bool {
+        matches!(
+            &node,
+            located_ast::Expr::Constant(located_ast::ExprConstant {
+                value: located_ast::Constant::None,
+                ..
+            })
+        )
+    };
+    let is_type = |node: &located_ast::Expr| {
+        if let located_ast::Expr::Name(located_ast::ExprName { id, .. }) = node {
+            try_into_datatype(id, &range.start).is_ok()
+        } else {
+            false
         }
-        Ok(())
-    } else {
+    };
+    let left_is_ty = is_type(left);
+    let left_is_none = is_none(left);
+    let right_is_ty = is_type(right);
+    let right_is_none = is_none(right);
+    if left_is_ty && right_is_ty || left_is_none && right_is_none {
+        fail_parse_error!(
+            "Expect one typenames and one `None`".to_string(),
+            Some(range.start)
+        )?;
+    } else if !(left_is_none && right_is_ty || left_is_ty && right_is_none) {
         fail_parse_error!(
             format!(
-                "Expect binary ops like `DataType | None`, found \n{:#?}",
-                bin_op
+                "Expect a type name and a `None`, found left: \n{:#?} \nand right: \n{:#?}",
+                left, right
             ),
-            Some(bin_op.location())
-        )
+            Some(range.start)
+        )?;
     }
+    Ok(())
 }
 
 /// parse a `DataType | None` or a single `DataType`
@@ -199,7 +190,7 @@ fn parse_bin_op(bin_op: &located_ast::ExprBinOp) -> Result<AnnotationInfo> {
         };
         // because check_bin_op assure a `None` exist
         ty_anno.is_nullable = true;
-        return Ok(ty_anno);
+        Ok(ty_anno)
     }
 }
 
@@ -354,7 +345,7 @@ fn parse_decorator(decorator: &located_ast::Expr) -> Result<DecoratorArgs> {
                 loc: Some(func.location())
             }
         );
-        parse_keywords(&keywords)
+        parse_keywords(keywords)
     } else {
         fail_parse_error!(
             format!(
@@ -450,15 +441,15 @@ pub fn parse_and_compile_copr(
 
     for stmt in python_ast.body {
         if let located_ast::Stmt::FunctionDef(located_ast::StmtFunctionDef {
-                                                  name,
-                                                  args: fn_args,
-                                                  body: _,
-                                                  decorator_list,
-                                                  returns,
-                                                  type_comment: _,
-                                                  type_params: _,
-                                                  range,
-                                              }) = &stmt
+            name,
+            args: fn_args,
+            body: _,
+            decorator_list,
+            returns,
+            type_comment: _,
+            type_params: _,
+            range,
+        }) = &stmt
         {
             if !decorator_list.is_empty() {
                 ensure!(coprocessor.is_none(),

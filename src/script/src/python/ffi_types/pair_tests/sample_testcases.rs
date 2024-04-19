@@ -17,10 +17,8 @@ use std::f64::consts;
 use std::sync::Arc;
 
 use datatypes::prelude::ScalarVector;
-
-use datatypes::vectors::UInt32Vector;
 use datatypes::vectors::{
-    BooleanVector, Float64Vector, Int32Vector, Int64Vector, StringVector, VectorRef,
+    BooleanVector, Float64Vector, Int32Vector, Int64Vector, StringVector, UInt32Vector, VectorRef,
 };
 
 use crate::python::ffi_types::pair_tests::{CodeBlockTestCase, CoprTestCase};

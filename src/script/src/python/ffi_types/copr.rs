@@ -30,9 +30,9 @@ use datatypes::vectors::{Helper, VectorRef};
 // use crate::python::builtins::greptime_builtin;
 use parse::DecoratorArgs;
 use pyo3::pyclass as pyo3class;
-use rustpython_compiler::CodeObject;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
+use rustpython_compiler::CodeObject;
 #[cfg(test)]
 use serde::Deserialize;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -494,6 +494,6 @@ def test(a, b, c, **params):
         assert_eq!(copr.return_types, vec![None]);
         assert_eq!(copr.kwarg, Some("params".to_string()));
         assert_eq!(copr.script, script);
-        let _ = copr.code_obj.unwrap();
+        assert!(copr.code_obj.is_some());
     }
 }

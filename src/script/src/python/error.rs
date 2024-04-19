@@ -28,10 +28,6 @@ use snafu::prelude::Snafu;
 use snafu::Location as SnafuLocation;
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
-    OtherSnafu { reason }
-}
-
 #[derive(Snafu)]
 #[snafu(visibility(pub(crate)))]
 #[stack_trace_debug]

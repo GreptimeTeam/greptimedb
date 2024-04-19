@@ -25,8 +25,8 @@ use datafusion::arrow::compute;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::VectorRef;
-
-use pyo3::{types::PyDict, Python};
+use pyo3::types::PyDict;
+use pyo3::Python;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::engine::sample_script_engine;
@@ -34,8 +34,8 @@ use crate::python::ffi_types::pair_tests::sample_testcases::{
     generate_copr_intgrate_tests, sample_test_case,
 };
 use crate::python::ffi_types::PyVector;
-
-use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
+use crate::python::pyo3::init_cpython_interpreter;
+use crate::python::pyo3::vector_impl::into_pyo3_cell;
 
 // TODO(discord9): paired test for slicing Vector
 // & slice tests & lit() function for dataframe & test with full coprocessor&query engine ability

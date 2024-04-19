@@ -17,6 +17,6 @@ pub(crate) mod py_recordbatch;
 pub(crate) mod utils;
 pub(crate) mod vector;
 pub(crate) use copr::{check_args_anno_real_type, select_from_rb, Coprocessor};
-pub(crate) use vector::{PyVector, PyVectorRef};
+pub(crate) use vector::PyVector;
 #[cfg(test)]
 mod pair_tests;

@@ -20,9 +20,8 @@ use rustpython_compiler::parser::source_code::{OneIndexed, SourceLocation, Sourc
 use rustpython_compiler::{CodeObject, CompileOpts, Mode};
 use snafu::ResultExt;
 
-use crate::fail_parse_error;
 use crate::python::error::{PyCompileSnafu, Result};
-use crate::python::ffi_types::copr::parse::{ret_parse_error, DecoratorArgs};
+use crate::python::ffi_types::copr::parse::{DecoratorArgs};
 
 /// generate a call to the coprocessor function
 /// with arguments given in decorator's `args` list
@@ -37,7 +36,7 @@ fn gen_call(
     loc.row = loc.row.saturating_add(1);
     loc.column = OneIndexed::from_zero_indexed(0);
 
-    let range = SourceRange::new(loc.clone(), loc.clone());
+    let range = SourceRange::new(loc, loc);
     // adding a line to avoid confusing if any error occurs when calling the function
     // then the pretty print will point to the last line in code
     // instead of point to any of existing code written by user.
@@ -96,70 +95,67 @@ pub fn compile_script(
     let mut top = super::parse::parse_interactive(script)?;
 
     // erase decorator
-
-    if let located_ast::ModInteractive { body, .. } = &mut top {
-        let stmts = body;
-        let mut loc = None;
-        for stmt in stmts.iter_mut() {
-            if let located_ast::Stmt::FunctionDef(located_ast::StmtFunctionDef {
-                                                      name: _,
-                                                      args,
-                                                      body: _,
-                                                      decorator_list,
-                                                      returns,
-                                                      type_comment: __main__,
-                                                      type_params: _,
-                                                      range,
-                                                  }) = stmt
-            {
-                // Rewrite kwargs in coprocessor, make it as a positional argument
-                if !decorator_list.is_empty() {
-                    if let Some(kwarg) = kwarg {
-                        args.kwarg = None;
-                        let kwarg = located_ast::ArgWithDefault {
-                            range: (*range).into(),
-                            def: located_ast::Arg {
-                                range: *range,
-                                arg: Identifier::from(kwarg.clone()),
-                                annotation: None,
-                                type_comment: Some("kwargs".to_string()),
-                            },
-                            default: None,
-                        };
-                        args.args.push(kwarg);
-                    }
+    let located_ast::ModInteractive { body, .. } = &mut top;
+    let stmts = body;
+    let mut loc = None;
+    for stmt in stmts.iter_mut() {
+        if let located_ast::Stmt::FunctionDef(located_ast::StmtFunctionDef {
+            name: _,
+            args,
+            body: _,
+            decorator_list,
+            returns,
+            type_comment: __main__,
+            type_params: _,
+            range,
+        }) = stmt
+        {
+            // Rewrite kwargs in coprocessor, make it as a positional argument
+            if !decorator_list.is_empty() {
+                if let Some(kwarg) = kwarg {
+                    args.kwarg = None;
+                    let kwarg = located_ast::ArgWithDefault {
+                        range: (*range).into(),
+                        def: located_ast::Arg {
+                            range: *range,
+                            arg: Identifier::from(kwarg.clone()),
+                            annotation: None,
+                            type_comment: Some("kwargs".to_string()),
+                        },
+                        default: None,
+                    };
+                    args.args.push(kwarg);
                 }
-
-                *decorator_list = Vec::new();
-                // strip type annotation
-                // def a(b: int, c:int) -> int
-                // will became
-                // def a(b, c)
-                *returns = None;
-                for arg in &mut args.args {
-                    arg.def.annotation = None;
-                }
-            } else if matches!(
-                stmt,
-                located_ast::Stmt::Import { .. } | located_ast::Stmt::ImportFrom { .. }
-            ) {
-                // import statements are allowed.
-            } else {
-                // already checked in parser
-                unreachable!()
             }
-            loc = Some(stmt.location());
 
-            // This manually construct ast has no corresponding code
-            // in the script, so just give it a location that don't exist in original script
-            // (which doesn't matter because Location usually only used in pretty print errors)
+            *decorator_list = Vec::new();
+            // strip type annotation
+            // def a(b: int, c:int) -> int
+            // will became
+            // def a(b, c)
+            *returns = None;
+            for arg in &mut args.args {
+                arg.def.annotation = None;
+            }
+        } else if matches!(
+            stmt,
+            located_ast::Stmt::Import { .. } | located_ast::Stmt::ImportFrom { .. }
+        ) {
+            // import statements are allowed.
+        } else {
+            // already checked in parser
+            unreachable!()
         }
-        // Append statement which calling coprocessor function.
-        // It's safe to unwrap loc, it is always exists.
-        stmts.push(gen_call(name, deco_args, kwarg, &loc.unwrap()));
-    } else {
-        return fail_parse_error!(format!("Expect statement in script, found: {top:?}"), None);
+        loc = Some(stmt.location());
+
+        // This manually construct ast has no corresponding code
+        // in the script, so just give it a location that don't exist in original script
+        // (which doesn't matter because Location usually only used in pretty print errors)
     }
+    // Append statement which calling coprocessor function.
+    // It's safe to unwrap loc, it is always exists.
+    stmts.push(gen_call(name, deco_args, kwarg, &loc.unwrap()));
+
     // use `compile::Mode::BlockExpr` so it return the result of statement
     compile_top(
         &located_ast::Mod::Interactive(top),
@@ -167,5 +163,5 @@ pub fn compile_script(
         Mode::BlockExpr,
         CompileOpts { optimize: 0 },
     )
-        .context(PyCompileSnafu)
+    .context(PyCompileSnafu)
 }
