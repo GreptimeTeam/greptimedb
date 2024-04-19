@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::DfPhysicalPlan;
 use datafusion::catalog::schema::SchemaProvider;
-use datafusion::catalog::{CatalogList, CatalogProvider};
+use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
@@ -40,6 +40,7 @@ struct DummyCatalogList {
 }
 
 impl DummyCatalogList {
+    /// Creates a new catalog list with the given table provider.
     fn with_table_provider(table_provider: Arc<dyn TableProvider>) -> Self {
         let schema_provider = DummySchemaProvider {
             table: table_provider,
@@ -53,7 +54,7 @@ impl DummyCatalogList {
     }
 }
 
-impl CatalogList for DummyCatalogList {
+impl CatalogProviderList for DummyCatalogList {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -75,7 +76,7 @@ impl CatalogList for DummyCatalogList {
     }
 }
 
-/// For [DummyCatalogList].
+/// A dummy catalog provider for [DummyCatalogList].
 #[derive(Clone)]
 struct DummyCatalogProvider {
     schema: DummySchemaProvider,
@@ -95,7 +96,7 @@ impl CatalogProvider for DummyCatalogProvider {
     }
 }
 
-/// For [DummyCatalogList].
+/// A dummy schema provider for [DummyCatalogList].
 #[derive(Clone)]
 struct DummySchemaProvider {
     table: Arc<dyn TableProvider>,
@@ -111,8 +112,8 @@ impl SchemaProvider for DummySchemaProvider {
         vec![]
     }
 
-    async fn table(&self, _name: &str) -> Option<Arc<dyn TableProvider>> {
-        Some(self.table.clone())
+    async fn table(&self, _name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
+        Ok(Some(self.table.clone()))
     }
 
     fn table_exist(&self, _name: &str) -> bool {
@@ -133,8 +134,6 @@ struct DummyTableProvider {
 #[async_trait]
 impl TableProvider for DummyTableProvider {
     fn as_any(&self) -> &dyn Any {
-        common_telemetry::info!("DummyTableProvider as any");
-
         self
     }
 
@@ -153,9 +152,11 @@ impl TableProvider for DummyTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn DfPhysicalPlan>> {
-        common_telemetry::info!("DummyTableProvider scan");
         let mut request = self.scan_request.lock().unwrap().clone();
-        request.projection = projection.cloned();
+        request.projection = match projection {
+            Some(x) if !x.is_empty() => Some(x.clone()),
+            _ => None,
+        };
         request.filters = filters
             .iter()
             .map(|e| common_query::logical_plan::Expr::from(e.clone()))
