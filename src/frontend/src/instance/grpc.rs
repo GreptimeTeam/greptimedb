@@ -117,11 +117,17 @@ impl GrpcQueryHandler for Instance {
                     }
                     DdlExpr::Alter(expr) => self.statement_executor.alter_table_inner(expr).await?,
                     DdlExpr::CreateDatabase(expr) => {
+                        let options = if expr.options.is_empty() {
+                            None
+                        } else {
+                            Some(expr.options)
+                        };
                         self.statement_executor
                             .create_database(
                                 ctx.current_catalog(),
                                 &expr.schema_name,
                                 expr.create_if_not_exists,
+                                options,
                             )
                             .await?
                     }

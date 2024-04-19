@@ -22,7 +22,6 @@ mod set;
 mod show;
 mod tql;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -196,9 +195,9 @@ impl StatementExecutor {
             }
             Statement::CreateDatabase(stmt) => {
                 let options = if stmt.options.map.is_empty() {
-                    Some(stmt.options.map.clone())
-                } else {
                     None
+                } else {
+                    Some(stmt.options.map.clone())
                 };
                 self.create_database(
                     query_ctx.current_catalog(),
