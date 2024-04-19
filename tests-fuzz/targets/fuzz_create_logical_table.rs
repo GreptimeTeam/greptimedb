@@ -148,7 +148,7 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
         columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
         validator::column::assert_eq(&column_entries, &columns)?;
 
-        // Cleans up
+        // Cleans up logical table
         let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
         let result = sqlx::query(&sql)
             .execute(&ctx.greptime)
@@ -159,6 +159,18 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
             create_logical_table_expr.table_name
         );
     }
+
+    // Cleans up physical table
+    let sql = format!("DROP TABLE {}", create_physical_table_expr.table_name);
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    info!(
+        "Drop table: {}, result: {result:?}",
+        create_physical_table_expr.table_name
+    );
+
     ctx.close().await;
 
     Ok(())
