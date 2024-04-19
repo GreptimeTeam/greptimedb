@@ -182,7 +182,7 @@ pub async fn instant_query(
         lookback: params
             .lookback
             .or(form_params.lookback)
-            .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
+            .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;
@@ -225,7 +225,7 @@ pub async fn range_query(
         lookback: params
             .lookback
             .or(form_params.lookback)
-            .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
+            .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
     let result = handler.do_query(&prom_query, query_ctx).await;
@@ -324,7 +324,7 @@ pub async fn labels_query(
     let lookback = params
         .lookback
         .or(form_params.lookback)
-        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string());
+        .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
 
     let mut labels = HashSet::new();
     let _ = labels.insert(METRIC_NAME.to_string());
@@ -607,7 +607,7 @@ pub async fn label_values_query(
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let lookback = params
         .lookback
-        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string());
+        .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
 
     let mut label_values = HashSet::new();
 
@@ -752,7 +752,7 @@ pub async fn series_query(
     let lookback = params
         .lookback
         .or(form_params.lookback)
-        .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string());
+        .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
 
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();

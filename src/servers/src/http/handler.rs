@@ -218,7 +218,7 @@ impl From<PromqlQuery> for PromQuery {
             step: query.step,
             lookback: query
                 .lookback
-                .unwrap_or(DEFAULT_LOOKBACK_STRING.to_string()),
+                .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
         }
     }
 }
