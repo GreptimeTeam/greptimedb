@@ -72,6 +72,7 @@ pub struct Bool {
 }
 
 impl Bool {
+    /// Expect two `Diff` type values, one for `true` and one for `false`.
     pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
     where
         I: Iterator<Item = Value>,
@@ -171,6 +172,9 @@ pub struct SimpleNumber {
 }
 
 impl SimpleNumber {
+    /// Expect one `Decimal128` and one `Diff` type values.
+    /// The `Decimal128` type is used to store the sum of all non-NULL values.
+    /// The `Diff` type is used to count the number of non-NULL values.
     pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
     where
         I: Iterator<Item = Value>,
@@ -295,6 +299,8 @@ pub struct Float {
 }
 
 impl Float {
+    /// Expect first value to be `OrderedF64` and the rest four values to be `Diff` type values.
+    ///
     pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
     where
         I: Iterator<Item = Value>,
@@ -312,7 +318,7 @@ impl Float {
                 .map_err(err_try_from_val)?,
         };
 
-        // This prevent counter-intuitive behavior of summing over no values
+        // This prevent counter-intuitive behavior of summing over no values having non-zero results
         if ret.non_nulls == 0 {
             ret.accum = OrderedFloat::from(0.0);
         }

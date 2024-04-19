@@ -39,15 +39,24 @@ pub struct DataflowState {
     /// error collector local to this `ComputeState`,
     /// useful for distinguishing errors from different `Hydroflow`
     err_collector: ErrCollector,
+    /// save all used arrange in this dataflow, since usually there is no delete operation
+    /// we can just keep track of all used arrange and schedule subgraph when they need to be updated
+    arrange_used: Vec<ArrangeHandler>,
 }
 
 impl DataflowState {
     pub fn new_arrange(&mut self, name: Option<Vec<String>>) -> ArrangeHandler {
-        let arrange = Arrangement::new();
+        let arrange = name
+            .map(Arrangement::new_with_name)
+            .unwrap_or_else(Arrangement::new);
 
-        let _ = name;
-        // TODO: add handler to compute state for monitoring and debugging
-        ArrangeHandler::from(arrange)
+        let arr = ArrangeHandler::from(arrange);
+        // mark this arrange as used in this dataflow
+        self.arrange_used.push(
+            arr.clone_future_only()
+                .expect("No write happening at this point"),
+        );
+        arr
     }
 
     /// schedule all subgraph that need to run with time <= `as_of` and run_available()

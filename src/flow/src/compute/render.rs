@@ -44,7 +44,6 @@ use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, Arrangement};
 
 mod map;
-mod reduce;
 
 /// The Context for build a Operator with id of `GlobalId`
 pub struct Context<'referred, 'df> {
@@ -103,14 +102,12 @@ impl<'referred, 'df> Context<'referred, 'df> {
             Plan::Constant { rows } => Ok(self.render_constant(rows)),
             Plan::Get { id } => self.get_by_id(id),
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
-            Plan::Mfp { input, mfp } => {
-                self.render_map_filter_project_into_executable_dataflow(input, mfp)
-            }
+            Plan::Mfp { input, mfp } => self.render_mfp(input, mfp),
             Plan::Reduce {
-                input,
-                key_val_plan,
-                reduce_plan,
-            } => self.render_reduce(input, key_val_plan, reduce_plan),
+                input: _,
+                key_val_plan: _,
+                reduce_plan: _,
+            } => todo!(),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP".to_string(),
             }

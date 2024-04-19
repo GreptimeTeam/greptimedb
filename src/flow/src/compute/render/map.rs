@@ -36,7 +36,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
     /// ***or*** when a future update in it's output buffer(a `Arrangement`) is supposed to emit now.
     // There is a false positive in using `Vec<ScalarExpr>` as key due to `Value` have `bytes` variant
     #[allow(clippy::mutable_key_type)]
-    pub fn render_map_filter_project_into_executable_dataflow(
+    pub fn render_mfp(
         &mut self,
         input: Box<Plan>,
         mfp: MapFilterProject,
@@ -226,9 +226,7 @@ mod test {
             ])
             .unwrap();
 
-        let bundle = ctx
-            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
-            .unwrap();
+        let bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
         let output = get_output_handle(&mut ctx, bundle);
         // drop ctx here to simulate actual process of compile first, run later scenario
         drop(ctx);
@@ -283,9 +281,7 @@ mod test {
                 BinaryFunc::Gt,
             )])
             .unwrap();
-        let bundle = ctx
-            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
-            .unwrap();
+        let bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
         drop(ctx);
