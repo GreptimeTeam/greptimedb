@@ -14,21 +14,6 @@
 
 use common_runtime::JoinHandle;
 use futures::Future;
-use rustpython_vm::builtins::PyBaseExceptionRef;
-use rustpython_vm::VirtualMachine;
-
-use crate::python::error;
-
-pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error::Error {
-    let mut msg = String::new();
-    if let Err(e) = vm.write_exception(&mut msg, &excep) {
-        return error::PyRuntimeSnafu {
-            msg: format!("Failed to write exception msg, err: {e}"),
-        }
-        .build();
-    }
-    error::PyRuntimeSnafu { msg }.build()
-}
 
 /// just like [`tokio::task::spawn_blocking`] but using a dedicated runtime(runtime `bg`) using by `scripts` crate
 pub fn spawn_blocking_script<F, R>(f: F) -> JoinHandle<R>

@@ -303,12 +303,11 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                         match value.as_str() {
                             // although this is default option to use RustPython for interpreter
                             // but that could change in the future
-                            "rspy" => ret_args.backend = BackendType::RustPython,
                             "pyo3" => ret_args.backend = BackendType::CPython,
                             _ => {
                                 return fail_parse_error!(
                                     format!(
-                                    "backend type can only be of `rspy` and `pyo3`, found {value}"
+                                    "backend type can only be `pyo3`, found {value}"
                                 ),
                                     Some(kw.location),
                                 )

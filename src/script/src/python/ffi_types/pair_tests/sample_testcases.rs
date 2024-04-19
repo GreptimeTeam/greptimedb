@@ -17,7 +17,7 @@ use std::f64::consts;
 use std::sync::Arc;
 
 use datatypes::prelude::ScalarVector;
-#[cfg(feature = "pyo3_backend")]
+
 use datatypes::vectors::UInt32Vector;
 use datatypes::vectors::{
     BooleanVector, Float64Vector, Int32Vector, Int64Vector, StringVector, VectorRef,
@@ -50,7 +50,7 @@ def hello() -> vector[str]:
     .to_string(),
     expect: Some(ronish!("msg": vector!(StringVector, &["hello, GreptimeDB"]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 @coprocessor(returns=['msg'], backend="pyo3")
@@ -72,7 +72,7 @@ def add_vectors(n1, n2) -> vector[i32]:
     .to_string(),
     expect: Some(ronish!("value": vector!(Int32Vector, [0, 2, 4, 6, 8]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 @copr(args=["n1", "n2"],
@@ -95,7 +95,7 @@ def answer() -> vector[i64]:
     .to_string(),
     expect: Some(ronish!("value": vector!(Int64Vector, [42]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -117,7 +117,7 @@ def answer() -> (vector[i64]):
     .to_string(),
     expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -143,7 +143,7 @@ def boolean_array() -> vector[f64]:
     .to_string(),
     expect: Some(ronish!("value": vector!(Float64Vector, [2.0]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -170,7 +170,7 @@ def compare() -> vector[bool]:
     .to_string(),
     expect: Some(ronish!("value": vector!(BooleanVector, &[false, false, true]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -196,7 +196,7 @@ def compare_vectors() -> vector[bool]:
     .to_string(),
     expect: Some(ronish!("value": vector!(BooleanVector, &[false, false, true]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -223,7 +223,7 @@ def list_comprehension() -> (vector[f64]):
     .to_string(),
     expect: Some(ronish!("value": vector!(Float64Vector, &[3.0 ,4.0]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -251,7 +251,7 @@ def select_elements() -> (vector[f64]):
     .to_string(),
     expect: Some(ronish!("value": vector!(Float64Vector, &[2.0, 3.0]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -277,7 +277,7 @@ def add_vectors(a, b) -> vector[i64]:
     .to_string(),
     expect: Some(ronish!("value": vector!(Int64Vector, &[0, 2, 4, 6, 8]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 @coprocessor(args=["a", "b"],
@@ -303,7 +303,7 @@ def normalize(n1, n2, n3) -> vector[i64]:
     .to_string(),
     expect: Some(ronish!("value": vector!(Int64Vector, &[0, 1, 8, 27, 64]))),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 @coprocessor(args=["number", "number", "number"],
@@ -336,7 +336,7 @@ def return_vectors() -> (vector[i64], vector[str], vector[f64]):
         "c": vector!(Float64Vector, &[42.0, 43.0, 44.0])
     )),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -374,7 +374,7 @@ def return_vectors() -> (vector[i64], vector[str], vector[i64]):
         "c": vector!(Float64Vector, &[42.0])
     )),
 },
-#[cfg(feature = "pyo3_backend")]
+
 CoprTestCase {
     script: r#"
 from greptime import vector
@@ -408,7 +408,7 @@ def boolean_array() -> vector[f64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -464,7 +464,7 @@ def boolean_array() -> vector[f64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -485,7 +485,7 @@ def boolean_array() -> vector[f64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(UInt32Vector, [0, 1, 2, 3, 4]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -509,7 +509,7 @@ def add_vecs(n1, n2) -> vector[i32]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int32Vector, [0, 2, 4, 6, 8]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(args=["number", "number"],
@@ -531,7 +531,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -542,7 +542,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -559,7 +559,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -588,7 +588,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("number": vector!(Int64Vector, [1, 2]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(args=[], returns = ["number"], sql = "select * from numbers", backend="pyo3")
@@ -602,7 +602,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("number": vector!(Int64Vector, [1, 2]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -620,7 +620,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42]))),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 @copr(returns=["value"], backend="pyo3")
@@ -690,7 +690,7 @@ def normalize(v) -> vector[i64]:
                 "value": vector!(Int64Vector, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
             )),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 import math
@@ -715,7 +715,7 @@ def normalize(v) -> vector[i64]:
                 "value": vector!(Int64Vector, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
             )),
         },
-        #[cfg(feature = "pyo3_backend")]
+
         CoprTestCase {
             script: r#"
 import math

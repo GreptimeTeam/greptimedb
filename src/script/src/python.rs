@@ -16,13 +16,9 @@
 
 mod engine;
 pub mod error;
+mod ffi_types;
 pub(crate) mod metric;
+mod pyo3;
 pub(crate) mod utils;
 
 pub use self::engine::{PyEngine, PyScript};
-
-mod ffi_types;
-
-#[cfg(feature = "pyo3_backend")]
-mod pyo3;
-mod rspython;

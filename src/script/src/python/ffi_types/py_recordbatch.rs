@@ -18,25 +18,16 @@
 
 use common_recordbatch::RecordBatch;
 use crossbeam_utils::atomic::AtomicCell;
-#[cfg(feature = "pyo3_backend")]
 use pyo3::{
     exceptions::{PyKeyError, PyRuntimeError},
     pyclass as pyo3class, pymethods, PyObject, PyResult, Python,
-};
-use rustpython_vm::builtins::PyStr;
-use rustpython_vm::protocol::PyMappingMethods;
-use rustpython_vm::types::AsMapping;
-use rustpython_vm::{
-    atomic_func, pyclass as rspyclass, PyObject as RsPyObject, PyPayload, PyResult as RsPyResult,
-    VirtualMachine,
 };
 
 use crate::python::ffi_types::PyVector;
 
 /// This is a Wrapper around a RecordBatch, impl PyMapping Protocol so you can do both `a[0]` and `a["number"]` to retrieve column.
-#[cfg_attr(feature = "pyo3_backend", pyo3class(name = "PyRecordBatch"))]
-#[rspyclass(module = false, name = "PyRecordBatch")]
-#[derive(Debug, PyPayload)]
+#[pyo3class(name = "PyRecordBatch")]
+#[derive(Debug)]
 pub(crate) struct PyRecordBatch {
     record_batch: RecordBatch,
 }
@@ -53,7 +44,7 @@ impl From<RecordBatch> for PyRecordBatch {
     }
 }
 
-#[cfg(feature = "pyo3_backend")]
+
 #[pymethods]
 impl PyRecordBatch {
     fn __repr__(&self) -> String {

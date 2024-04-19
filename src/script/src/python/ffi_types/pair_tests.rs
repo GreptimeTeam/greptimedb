@@ -25,9 +25,8 @@ use datafusion::arrow::compute;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::VectorRef;
-#[cfg(feature = "pyo3_backend")]
+
 use pyo3::{types::PyDict, Python};
-use rustpython_compiler::Mode;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use crate::python::engine::sample_script_engine;
@@ -35,13 +34,11 @@ use crate::python::ffi_types::pair_tests::sample_testcases::{
     generate_copr_intgrate_tests, sample_test_case,
 };
 use crate::python::ffi_types::PyVector;
-#[cfg(feature = "pyo3_backend")]
+
 use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
-use crate::python::rspython::init_interpreter;
 
 // TODO(discord9): paired test for slicing Vector
 // & slice tests & lit() function for dataframe & test with full coprocessor&query engine ability
-/// generate testcases that should be tested in paired both in RustPython and CPython
 #[derive(Debug, Clone)]
 struct CodeBlockTestCase {
     input: HashMap<String, VectorRef>,
@@ -114,12 +111,10 @@ async fn integrated_py_copr_test() {
 
 #[allow(clippy::print_stdout)]
 #[test]
-fn pyo3_rspy_test_in_pairs() {
+fn pyo3_test_in_pairs() {
     let testcases = sample_test_case();
     for case in testcases {
         println!("Testcase: {}", case.script);
-        eval_rspy(case.clone());
-        #[cfg(feature = "pyo3_backend")]
         eval_pyo3(case);
     }
 }
@@ -155,43 +150,6 @@ fn check_equal(v0: VectorRef, v1: VectorRef) -> bool {
     }
 }
 
-/// will panic if something is wrong, used in tests only
-fn eval_rspy(case: CodeBlockTestCase) {
-    let interpreter = init_interpreter();
-    interpreter.enter(|vm| {
-        let scope = vm.new_scope_with_builtins();
-        for (k, v) in case.input {
-            let v = PyVector::from(v);
-            scope.locals.set_item(&k, vm.new_pyobj(v), vm).unwrap();
-        }
-        let code_obj = vm
-            .compile(&case.script, Mode::BlockExpr, "<embedded>".to_owned())
-            .map_err(|err| {
-                dbg!(&err);
-                vm.new_syntax_error(&err)
-            })
-            .unwrap();
-        let result_vector = vm
-            .run_code_obj(code_obj, scope)
-            .map_err(|e| {
-                dbg!(&e);
-                dbg!(&case.script);
-                e
-            })
-            .unwrap()
-            .downcast::<PyVector>()
-            .unwrap();
-
-        if !check_equal(result_vector.as_vector_ref(), case.expect.clone()) {
-            panic!(
-                "(RsPy)code:{}\nReal: {:?}!=Expected: {:?}",
-                case.script, result_vector, case.expect
-            )
-        }
-    });
-}
-
-#[cfg(feature = "pyo3_backend")]
 fn eval_pyo3(case: CodeBlockTestCase) {
     init_cpython_interpreter().unwrap();
     Python::with_gil(|py| {

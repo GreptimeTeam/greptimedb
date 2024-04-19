@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Here are pair-tests for vector types in both rustpython and cpython
+//! Here are pair-tests for vector types in cpython
 //!
 
 // TODO: sample record batch
@@ -22,15 +22,12 @@ use std::sync::Arc;
 
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, Int64Vector, VectorRef};
-#[cfg(feature = "pyo3_backend")]
+
 use pyo3::{types::PyDict, Python};
-use rustpython_compiler::Mode;
-use rustpython_vm::AsObject;
 
 use crate::python::ffi_types::PyVector;
-#[cfg(feature = "pyo3_backend")]
+
 use crate::python::pyo3::{init_cpython_interpreter, vector_impl::into_pyo3_cell};
-use crate::python::rspython::init_interpreter;
 
 #[derive(Debug, Clone)]
 struct TestCase {
@@ -48,9 +45,7 @@ fn test_eval_py_vector_in_pairs() {
     let testcases = get_test_cases();
 
     for testcase in testcases {
-        #[cfg(feature = "pyo3_backend")]
         eval_pyo3(testcase.clone(), locals.clone());
-        eval_rspy(testcase, locals.clone())
     }
 }
 
@@ -131,7 +126,7 @@ fn get_test_cases() -> Vec<TestCase> {
     ];
     Vec::from(testcases)
 }
-#[cfg(feature = "pyo3_backend")]
+
 fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
     init_cpython_interpreter().unwrap();
     Python::with_gil(|py| {
@@ -152,35 +147,4 @@ fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
             panic!("{raw_arr:?}!={expect_arr:?}")
         }
     })
-}
-
-fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
-    init_interpreter().enter(|vm| {
-        let scope = vm.new_scope_with_builtins();
-        locals.into_iter().for_each(|(k, v)| {
-            scope
-                .locals
-                .as_object()
-                .set_item(&k, vm.new_pyobj(v), vm)
-                .unwrap();
-        });
-        let code_obj = vm
-            .compile(&testcase.eval, Mode::Eval, "<embedded>".to_string())
-            .map_err(|err| vm.new_syntax_error(&err))
-            .unwrap();
-        let obj = vm
-            .run_code_obj(code_obj, scope)
-            .map_err(|e| {
-                let mut output = String::new();
-                vm.write_exception(&mut output, &e).unwrap();
-                (e, output)
-            })
-            .unwrap();
-        let v = obj.downcast::<PyVector>().unwrap();
-        let result_arr = v.to_arrow_array();
-        let expect_arr = testcase.result.to_arrow_array();
-        if *result_arr != *expect_arr {
-            panic!("{result_arr:?}!={expect_arr:?}")
-        }
-    });
 }

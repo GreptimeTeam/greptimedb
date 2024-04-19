@@ -33,7 +33,6 @@ lazy_static! {
     .unwrap();
 }
 
-#[cfg(feature = "pyo3_backend")]
 lazy_static! {
     pub static ref METRIC_PYO3_EXEC_ELAPSED: Histogram = register_histogram!(
         "greptime_script_pyo3_exec_elapsed",

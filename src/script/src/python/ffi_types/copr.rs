@@ -29,28 +29,21 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
 // use crate::python::builtins::greptime_builtin;
 use parse::DecoratorArgs;
-#[cfg(feature = "pyo3_backend")]
 use pyo3::pyclass as pyo3class;
+use rustpython_compiler::CodeObject;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
-use rustpython_compiler_core::CodeObject;
-use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use vm::convert::ToPyObject;
-use vm::{pyclass as rspyclass, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
-use super::py_recordbatch::PyRecordBatch;
 use crate::engine::EvalContext;
 use crate::python::error::{
     ensure, ArrowSnafu, DataFusionSnafu, OtherSnafu, Result, TypeCastSnafu,
 };
 use crate::python::ffi_types::PyVector;
-#[cfg(feature = "pyo3_backend")]
 use crate::python::pyo3::pyo3_exec_parsed;
-use crate::python::rspython::rspy_exec_parsed;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,9 +58,6 @@ pub struct AnnotationInfo {
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum BackendType {
     #[default]
-    RustPython,
-    // TODO(discord9): intergral test
-    #[allow(unused)]
     CPython,
 }
 
@@ -362,9 +352,8 @@ pub fn exec_coprocessor(
     exec_parsed(&copr, rb, &HashMap::new(), eval_ctx)
 }
 
-#[cfg_attr(feature = "pyo3_backend", pyo3class(name = "query_engine"))]
-#[rspyclass(module = false, name = "query_engine")]
-#[derive(Debug, PyPayload, Clone)]
+#[pyo3class(name = "query_engine")]
+#[derive(Debug, Clone)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
     query_ctx: QueryContextRef,
@@ -393,7 +382,6 @@ impl PyQueryEngine {
     }
 }
 
-#[rspyclass]
 impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef, query_ctx: QueryContextRef) -> Self {
         Self { inner, query_ctx }
@@ -443,34 +431,6 @@ impl PyQueryEngine {
             .join()
             .map_err(|e| format!("Dedicated thread for sql query panic: {e:?}"))?
     }
-    // TODO(discord9): find a better way to call sql query api, now we don't if we are in async context or not
-    /// - return sql query results in `PyRecordBatch`,  or
-    /// - a empty `PyDict` if query results is empty
-    /// - or number of AffectedRows
-    #[pymethod]
-    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        self.query_with_new_thread(s)
-            .map_err(|e| vm.new_system_error(e))
-            .map(|rbs| match rbs {
-                Either::Rb(rbs) => {
-                    let rb = compute::concat_batches(
-                        rbs.schema().arrow_schema(),
-                        rbs.iter().map(|rb| rb.df_record_batch()),
-                    )
-                    .map_err(|e| {
-                        vm.new_runtime_error(format!("Failed to concat batches: {e:#?}"))
-                    })?;
-                    let rb =
-                        RecordBatch::try_from_df_record_batch(rbs.schema(), rb).map_err(|e| {
-                            vm.new_runtime_error(format!("Failed to cast recordbatch: {e:#?}"))
-                        })?;
-                    let rb = PyRecordBatch::new(rb);
-
-                    Ok(rb.to_pyobject(vm))
-                }
-                Either::AffectedRows(cnt) => Ok(vm.ctx.new_int(cnt).to_pyobject(vm)),
-            })?
-    }
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
@@ -481,21 +441,7 @@ pub fn exec_parsed(
     eval_ctx: &EvalContext,
 ) -> Result<RecordBatch> {
     match copr.backend {
-        BackendType::RustPython => rspy_exec_parsed(copr, rb, params, eval_ctx),
-        BackendType::CPython => {
-            #[cfg(feature = "pyo3_backend")]
-            {
-                pyo3_exec_parsed(copr, rb, params, eval_ctx)
-            }
-            #[cfg(not(feature = "pyo3_backend"))]
-            {
-                OtherSnafu {
-                    reason: "`pyo3` feature is disabled, therefore can't run scripts in cpython"
-                        .to_string(),
-                }
-                .fail()
-            }
-        }
+        BackendType::CPython => pyo3_exec_parsed(copr, rb, params, eval_ctx),
     }
 }
 
