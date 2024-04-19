@@ -18,6 +18,7 @@ use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::statements::OptionMap;
+use crate::util::redact_sql_secrets;
 
 macro_rules! format_sorted_hashmap {
     ($hashmap:expr) => {{
@@ -27,6 +28,7 @@ macro_rules! format_sorted_hashmap {
         let mut result = String::new();
         for key in sorted_keys {
             if let Some(val) = hashmap.get(key) {
+                redact_sql_secrets(val);
                 result.push_str(&format!("{} = {}, ", key, val));
             }
         }
