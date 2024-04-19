@@ -134,23 +134,23 @@ impl StartCommand {
         )?;
 
         if let Some(dir) = &cli_options.log_dir {
-            opts.logging.dir = dir.clone();
+            opts.logging.dir.clone_from(dir);
         }
 
         if cli_options.log_level.is_some() {
-            opts.logging.level = cli_options.log_level.clone();
+            opts.logging.level.clone_from(&cli_options.log_level);
         }
 
         if let Some(addr) = &self.bind_addr {
-            opts.bind_addr = addr.clone();
+            opts.bind_addr.clone_from(addr);
         }
 
         if let Some(addr) = &self.server_addr {
-            opts.server_addr = addr.clone();
+            opts.server_addr.clone_from(addr);
         }
 
         if let Some(addr) = &self.store_addr {
-            opts.store_addr = addr.clone();
+            opts.store_addr.clone_from(addr);
         }
 
         if let Some(selector_type) = &self.selector {
@@ -168,7 +168,7 @@ impl StartCommand {
         }
 
         if let Some(http_addr) = &self.http_addr {
-            opts.http.addr = http_addr.clone();
+            opts.http.addr.clone_from(http_addr);
         }
 
         if let Some(http_timeout) = self.http_timeout {
@@ -176,11 +176,11 @@ impl StartCommand {
         }
 
         if let Some(data_home) = &self.data_home {
-            opts.data_home = data_home.clone();
+            opts.data_home.clone_from(data_home);
         }
 
         if !self.store_key_prefix.is_empty() {
-            opts.store_key_prefix = self.store_key_prefix.clone()
+            opts.store_key_prefix.clone_from(&self.store_key_prefix)
         }
 
         if let Some(max_txn_ops) = self.max_txn_ops {

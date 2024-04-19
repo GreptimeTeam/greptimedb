@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -24,42 +23,6 @@ use tokio::time;
 
 /// Check port every 0.1 second.
 const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
-const NULL_DATA_PLACEHOLDER: &str = "NULL";
-
-/// Helper struct for iterate over column with null_mask
-struct NullableColumnIter<N, B, D, T>
-where
-    N: Iterator<Item = B>,
-    B: AsRef<bool>,
-    D: Iterator<Item = T>,
-    T: Display,
-{
-    null_iter: N,
-    data_iter: D,
-}
-
-impl<N, B, D, T> Iterator for NullableColumnIter<N, B, D, T>
-where
-    N: Iterator<Item = B>,
-    B: AsRef<bool>,
-    D: Iterator<Item = T>,
-    T: Display,
-{
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // iter the null_mask first
-        if let Some(is_null) = self.null_iter.next() {
-            if *is_null.as_ref() {
-                Some(NULL_DATA_PLACEHOLDER.to_string())
-            } else {
-                self.data_iter.next().map(|data| data.to_string())
-            }
-        } else {
-            None
-        }
-    }
-}
 
 /// Get the dir of test cases. This function only works when the runner is run
 /// under the project's dir because it depends on some envs set by cargo.

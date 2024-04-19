@@ -65,7 +65,7 @@ use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
+use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
 use crate::table_meta_alloc::MetasrvPeerAllocator;
 
@@ -434,15 +434,5 @@ fn build_ddl_manager(
 impl Default for MetasrvBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-struct CheckLeaderByElection(Option<ElectionRef>);
-
-impl CheckLeader for CheckLeaderByElection {
-    fn check(&self) -> bool {
-        self.0
-            .as_ref()
-            .map_or(false, |election| election.is_leader())
     }
 }

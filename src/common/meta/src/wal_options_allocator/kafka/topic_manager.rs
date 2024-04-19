@@ -291,7 +291,7 @@ mod tests {
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
                 let mut manager = TopicManager::new(config.clone(), kv_backend);
                 // Replaces the default topic pool with the constructed topics.
-                manager.topic_pool = topics.clone();
+                manager.topic_pool.clone_from(&topics);
                 // Replaces the default selector with a round-robin selector without shuffled.
                 manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
                 manager.start().await.unwrap();

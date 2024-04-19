@@ -70,7 +70,10 @@ license = "Apache-2.0"
 clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
 clippy.implicit_clone = "warn"
+clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
+# Remove this after https://github.com/PyO3/pyo3/issues/4094
+rust.non_local_definitions = "allow"
 
 [workspace.dependencies]
 # We turn off default-features for some dependencies here so the workspaces which inherit them can
