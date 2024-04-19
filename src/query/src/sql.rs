@@ -470,6 +470,7 @@ pub async fn show_tables(
     .await
 }
 
+/// Execute `SHOW COLLATION` statement and returns the `Output` if success.
 pub async fn show_collations(
     kind: ShowKind,
     query_engine: &QueryEngineRef,
@@ -505,6 +506,7 @@ pub async fn show_collations(
     .await
 }
 
+/// Execute `SHOW CHARSET` statement and returns the `Output` if success.
 pub async fn show_charsets(
     kind: ShowKind,
     query_engine: &QueryEngineRef,
