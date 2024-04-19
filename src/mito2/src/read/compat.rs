@@ -86,7 +86,7 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
     }
 
     for (left_col, right_col) in left.column_metadatas.iter().zip(&right.column_metadatas) {
-        if left_col != right_col {
+        if left_col.column_id != right_col.column_id || !left_col.is_same_datatype(right_col) {
             return false;
         }
         debug_assert_eq!(

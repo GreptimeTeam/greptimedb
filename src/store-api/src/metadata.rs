@@ -105,6 +105,10 @@ impl ColumnMetadata {
     pub fn decode_list(bytes: &[u8]) -> serde_json::Result<Vec<Self>> {
         serde_json::from_slice(bytes)
     }
+
+    pub fn is_same_datatype(&self, other: &Self) -> bool {
+        self.column_schema.data_type == other.column_schema.data_type
+    }
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
