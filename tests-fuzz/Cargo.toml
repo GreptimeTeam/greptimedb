@@ -51,6 +51,13 @@ bench = false
 doc = false
 
 [[bin]]
+name = "fuzz_create_logical_table"
+path = "targets/fuzz_create_logical_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
 name = "fuzz_insert"
 path = "targets/fuzz_insert.rs"
 test = false
