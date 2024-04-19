@@ -17,11 +17,12 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use console::{style, Style};
 use datafusion::error::DataFusionError;
-use rustpython_compiler::codegen::error::CodegenError;
-use rustpython_compiler::parser::ParseError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
+use rustpython_compiler::codegen::error::CodegenError;
+use rustpython_compiler::parser::source_code::{LocatedError, SourceLocation};
+use rustpython_compiler::parser::ParseErrorType;
 pub use snafu::ensure;
 use snafu::prelude::Snafu;
 use snafu::Location as SnafuLocation;
@@ -51,7 +52,7 @@ pub enum Error {
     PyParse {
         location: SnafuLocation,
         #[snafu(source)]
-        error: ParseError,
+        error: LocatedError<ParseErrorType>,
     },
 
     #[snafu(display("Failed to compile script"))]
@@ -93,7 +94,7 @@ pub enum Error {
         location: SnafuLocation,
         reason: String,
         // location is option because maybe errors can't give a clear location?
-        loc: Option<Location>,
+        loc: Option<SourceLocation>,
     },
 
     /// Other types of error that isn't any of above
@@ -176,14 +177,14 @@ pub fn pretty_print_error_in_src(
 /// `ln_offset` is line offset number that added to `loc`'s `row`, `filename` is the file's name display with it's row and columns info.
 pub fn visualize_loc(
     script: &str,
-    loc: &Location,
+    loc: &SourceLocation,
     err_ty: &str,
     desc: &str,
     ln_offset: usize,
     filename: &str,
 ) -> String {
     let lines: Vec<&str> = script.split('\n').collect();
-    let (row, col) = (loc.row(), loc.column());
+    let (row, col) = (loc.row.to_zero_indexed_usize(), loc.column.to_usize());
     let red_bold = Style::new().red().bold();
     let blue_bold = Style::new().blue().bold();
     let col_space = (ln_offset + row).to_string().len().max(1);
@@ -201,8 +202,8 @@ pub fn visualize_loc(
         filename = filename,
         row = ln_offset + row,
         col = col,
-        line = lines[loc.row() - 1],
-        pad = loc.column(),
+        line = lines[loc.row.to_zero_indexed_usize()],
+        pad = loc.column.to_usize(),
         arrow = red_bold.apply_to("^"),
         desc = red_bold.apply_to(desc),
         ln_pad = blue_bold.apply_to("|"),
@@ -213,13 +214,13 @@ pub fn visualize_loc(
 }
 
 /// extract a reason for [`Error`] in string format, also return a location if possible
-pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
+pub fn get_error_reason_loc(err: &Error) -> (String, Option<SourceLocation>) {
     match err {
         Error::CoprParse { reason, loc, .. } => (reason.clone(), *loc),
         Error::Other { reason, .. } => (reason.clone(), None),
         Error::PyRuntime { msg, .. } => (msg.clone(), None),
-        Error::PyParse { error, .. } => (error.error.to_string(), Some(error.location)),
-        Error::PyCompile { error, .. } => (error.error.to_string(), Some(error.location)),
+        Error::PyParse { error, .. } => (error.error.to_string(), error.location),
+        Error::PyCompile { error, .. } => (error.error.to_string(), error.location),
         _ => (format!("Unknown error: {err:?}"), None),
     }
 }

@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
 use query::QueryEngineRef;
-use rustpython_parser::ast::{Arguments, Location};
-use rustpython_parser::{ast, parse_program};
+use rustpython_compiler::parser::ast::located as located_ast;
+use rustpython_compiler::parser::ast::located::Located;
+use rustpython_compiler::parser::source_code::{LinearLocator, SourceLocation};
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
@@ -33,14 +34,14 @@ pub struct DecoratorArgs {
     pub sql: Option<String>,
     #[cfg_attr(test, serde(skip))]
     pub backend: BackendType, // maybe add a URL for connecting or what?
-                              // also predicate for timed triggered or conditional triggered?
+    // also predicate for timed triggered or conditional triggered?
 }
 
 /// Return a CoprParseSnafu for you to chain fail() to return correct err Result type
 pub(crate) fn ret_parse_error(
     reason: String,
-    loc: Option<Location>,
-) -> CoprParseSnafu<String, Option<Location>> {
+    loc: Option<SourceLocation>,
+) -> CoprParseSnafu<String, Option<SourceLocation>> {
     CoprParseSnafu { reason, loc }
 }
 
@@ -52,38 +53,39 @@ macro_rules! fail_parse_error {
     };
 }
 
-fn py_str_to_string(s: &ast::Expr<()>) -> Result<String> {
-    if let ast::ExprKind::Constant {
-        value: ast::Constant::Str(v),
-        kind: _,
-    } = &s.node
+fn py_str_to_string(s: &located_ast::Expr) -> Result<String> {
+    if let located_ast::Expr::Constant(located_ast::ExprConstant {
+                                           value: located_ast::Constant::Str(v),
+                                           kind: _,
+                                           range: _,
+                                       }) = s
     {
         Ok(v.clone())
     } else {
         fail_parse_error!(
             format!(
                 "Expect a list of String, found one element to be: \n{:#?}",
-                &s.node
+                s
             ),
-            Some(s.location)
+            Some(s.location())
         )
     }
 }
 
 /// turn a python list of string in ast form(a `ast::Expr`) of string into a `Vec<String>`
-fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
-    if let ast::ExprKind::List { elts, ctx: _ } = &lst.node {
+fn pylist_to_vec(lst: &located_ast::Expr) -> Result<Vec<String>> {
+    if let located_ast::Expr::List(located_ast::ExprList { elts, .. }) = &lst {
         let ret = elts.iter().map(py_str_to_string).collect::<Result<_>>()?;
         Ok(ret)
     } else {
         fail_parse_error!(
-            format!("Expect a list, found \n{:#?}", &lst.node),
-            Some(lst.location)
+            format!("Expect a list, found \n{:#?}", lst),
+            Some(lst.location())
         )
     }
 }
 
-fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<ConcreteDataType>> {
+fn try_into_datatype(ty: &str, loc: &SourceLocation) -> Result<Option<ConcreteDataType>> {
     match ty {
         "bool" => Ok(Some(ConcreteDataType::boolean_datatype())),
         "u8" => Ok(Some(ConcreteDataType::uint8_datatype())),
@@ -106,35 +108,41 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<ConcreteDataType
 
 /// Item => NativeType
 /// default to be not nullable
-fn parse_native_type(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
-    match &sub.node {
-        ast::ExprKind::Name { id, .. } => Ok(AnnotationInfo {
-            datatype: try_into_datatype(id, &sub.location)?,
+fn parse_native_type(sub: &located_ast::Expr) -> Result<AnnotationInfo> {
+    match sub {
+        located_ast::Expr::Name(located_ast::ExprName { id, range, .. }) => Ok(AnnotationInfo {
+            datatype: try_into_datatype(id, &range.start)?,
             is_nullable: false,
         }),
         _ => fail_parse_error!(
-            format!("Expect types' name, found \n{:#?}", &sub.node),
-            Some(sub.location)
+            format!("Expect types' name, found \n{:#?}", sub),
+            Some(sub.location())
         ),
     }
 }
 
 /// check if binary op expr is legal(with one typename and one `None`)
-fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
-    if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
+fn check_bin_op(bin_op: &located_ast::ExprBinOp) -> Result<()> {
+    if let located_ast::ExprBinOp {
+        left,
+        op: _,
+        right,
+        range,
+    } = bin_op
+    {
         // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
-        let is_none = |node: &ast::Expr<()>| -> bool {
+        let is_none = |node: &located_ast::Expr| -> bool {
             matches!(
-                &node.node,
-                ast::ExprKind::Constant {
-                    value: ast::Constant::None,
-                    kind: _,
-                }
+                &node,
+                located_ast::Expr::Constant(located_ast::ExprConstant {
+                    value: located_ast::Constant::None,
+                    ..
+                })
             )
         };
-        let is_type = |node: &ast::Expr<()>| {
-            if let ast::ExprKind::Name { id, ctx: _ } = &node.node {
-                try_into_datatype(id, &node.location).is_ok()
+        let is_type = |node: &located_ast::Expr| {
+            if let located_ast::Expr::Name(located_ast::ExprName { id, .. }) = node {
+                try_into_datatype(id, &range.start).is_ok()
             } else {
                 false
             }
@@ -146,15 +154,15 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
         if left_is_ty && right_is_ty || left_is_none && right_is_none {
             fail_parse_error!(
                 "Expect one typenames and one `None`".to_string(),
-                Some(bin_op.location)
+                Some(range.start)
             )?;
         } else if !(left_is_none && right_is_ty || left_is_ty && right_is_none) {
             fail_parse_error!(
                 format!(
                     "Expect a type name and a `None`, found left: \n{:#?} \nand right: \n{:#?}",
-                    &left.node, &right.node
+                    left, right
                 ),
-                Some(bin_op.location)
+                Some(range.start)
             )?;
         }
         Ok(())
@@ -162,18 +170,19 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
         fail_parse_error!(
             format!(
                 "Expect binary ops like `DataType | None`, found \n{:#?}",
-                bin_op.node
+                bin_op
             ),
-            Some(bin_op.location)
+            Some(bin_op.location())
         )
     }
 }
 
 /// parse a `DataType | None` or a single `DataType`
-fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
+fn parse_bin_op(bin_op: &located_ast::ExprBinOp) -> Result<AnnotationInfo> {
     // 1. first check if this BinOp is legal(Have one typename and(optional) a None)
     check_bin_op(bin_op)?;
-    if let ast::ExprKind::BinOp { left, op: _, right } = &bin_op.node {
+    let located_ast::ExprBinOp { left, right, .. } = bin_op;
+    {
         // then get types from this BinOp
         let left_ty = parse_native_type(left).ok();
         let right_ty = parse_native_type(right).ok();
@@ -185,44 +194,38 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
             // deal with errors anyway in case code above changed but forget to modify
             return fail_parse_error!(
                 "Expect a type name, not two `None`".into(),
-                Some(bin_op.location),
+                Some(bin_op.location()),
             );
         };
         // because check_bin_op assure a `None` exist
         ty_anno.is_nullable = true;
         return Ok(ty_anno);
     }
-    unreachable!()
 }
 
 /// check for the grammar correctness of annotation, also return the slice of subscript for further parsing
-fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
+fn check_annotation_ret_slice(sub: &located_ast::Expr) -> Result<&located_ast::Expr> {
     // TODO(discord9): allow a single annotation like `vector`
-    if let ast::ExprKind::Subscript {
-        value,
-        slice,
-        ctx: _,
-    } = &sub.node
-    {
-        if let ast::ExprKind::Name { id, ctx: _ } = &value.node {
+    if let located_ast::Expr::Subscript(located_ast::ExprSubscript { value, slice, .. }) = &sub {
+        if let located_ast::Expr::Name(located_ast::ExprName { id, .. }) = value.as_ref() {
             ensure!(
-                id == "vector",
+                id.as_str() == "vector",
                 ret_parse_error(
                     format!("Wrong type annotation, expect `vector[...]`, found `{id}`"),
-                    Some(value.location)
+                    Some(value.location())
                 )
             );
         } else {
             return fail_parse_error!(
-                format!("Expect \"vector\", found \n{:#?}", &value.node),
-                Some(value.location)
+                format!("Expect \"vector\", found \n{:#?}", &value),
+                Some(value.location())
             );
         }
         Ok(slice)
     } else {
         fail_parse_error!(
             format!("Expect type annotation, found \n{:#?}", &sub),
-            Some(sub.location)
+            Some(sub.location())
         )
     }
 }
@@ -234,22 +237,18 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
 /// TYPE => Item | Item `|` None
 ///
 /// Item => NativeType
-fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
+fn parse_annotation(sub: &located_ast::Expr) -> Result<AnnotationInfo> {
     let slice = check_annotation_ret_slice(sub)?;
 
     {
         // i.e: vector[f64]
-        match &slice.node {
-            ast::ExprKind::Name { .. } => parse_native_type(slice),
-            ast::ExprKind::BinOp {
-                left: _,
-                op: _,
-                right: _,
-            } => parse_bin_op(slice),
+        match slice {
+            located_ast::Expr::Name(_) => parse_native_type(slice),
+            located_ast::Expr::BinOp(bin_op) => parse_bin_op(bin_op),
             _ => {
                 fail_parse_error!(
-                    format!("Expect type in `vector[...]`, found \n{:#?}", &slice.node),
-                    Some(slice.location),
+                    format!("Expect type in `vector[...]`, found \n{:#?}", slice),
+                    Some(slice.location()),
                 )
             }
         }
@@ -257,7 +256,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 }
 
 /// parse a list of keyword and return args and returns list from keywords
-fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
+fn parse_keywords(keywords: &Vec<located_ast::Keyword>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns", "sql", "backend"]);
     let opt_keys = HashSet::from(["sql", "args", "backend"]);
@@ -272,34 +271,34 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                 "Expect between {len_min} and {len_max} keyword argument, found {}.",
                 keywords.len()
             ),
-            loc: keywords.first().map(|s| s.location)
+            loc: keywords.first().map(|s| s.location())
         }
     );
     let mut ret_args = DecoratorArgs::default();
     for kw in keywords {
-        match &kw.node.arg {
+        match &kw.arg {
             Some(s) => {
                 let s = s.as_str();
                 if visited_key.contains(s) {
                     return fail_parse_error!(
                         format!("`{s}` occur multiple times in decorator's arguments' list."),
-                        Some(kw.location),
+                        Some(kw.location()),
                     );
                 }
                 if !avail_key.contains(s) {
                     return fail_parse_error!(
                         format!("Expect one of {:?}, found `{}`", &avail_key, s),
-                        Some(kw.location),
+                        Some(kw.location()),
                     );
                 } else {
                     let _ = visited_key.insert(s);
                 }
                 match s {
-                    "args" => ret_args.arg_names = Some(pylist_to_vec(&kw.node.value)?),
-                    "returns" => ret_args.ret_names = pylist_to_vec(&kw.node.value)?,
-                    "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
+                    "args" => ret_args.arg_names = Some(pylist_to_vec(&kw.value)?),
+                    "returns" => ret_args.ret_names = pylist_to_vec(&kw.value)?,
+                    "sql" => ret_args.sql = Some(py_str_to_string(&kw.value)?),
                     "backend" => {
-                        let value = py_str_to_string(&kw.node.value)?;
+                        let value = py_str_to_string(&kw.value)?;
                         match value.as_str() {
                             // although this is default option to use RustPython for interpreter
                             // but that could change in the future
@@ -307,9 +306,9 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                             _ => {
                                 return fail_parse_error!(
                                     format!(
-                                    "backend type can only be `pyo3`, found {value}"
+                                    "backend type can only be of `rspy` and `pyo3`, found {value}"
                                 ),
-                                    Some(kw.location),
+                                    Some(kw.location()),
                                 )
                             }
                         }
@@ -321,14 +320,14 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                 return fail_parse_error!(
                     format!(
                         "Expect explicitly set both `args` and `returns`, found \n{:#?}",
-                        &kw.node
+                        kw
                     ),
-                    Some(kw.location),
+                    Some(kw.location()),
                 )
             }
         }
     }
-    let loc = keywords[0].location;
+    let loc = keywords[0].location();
     for key in avail_key {
         if !visited_key.contains(key) && !opt_keys.contains(key) {
             return fail_parse_error!(format!("Expect `{key}` keyword"), Some(loc));
@@ -338,52 +337,42 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
 }
 
 /// returns args and returns in Vec of String
-fn parse_decorator(decorator: &ast::Expr<()>) -> Result<DecoratorArgs> {
+fn parse_decorator(decorator: &located_ast::Expr) -> Result<DecoratorArgs> {
     //check_decorator(decorator)?;
-    if let ast::ExprKind::Call {
-        func,
-        args: _,
-        keywords,
-    } = &decorator.node
-    {
+    if let located_ast::Expr::Call(located_ast::ExprCall { func, keywords, .. }) = &decorator {
         ensure!(
-            func.node
-                == ast::ExprKind::Name {
-                    id: "copr".to_string(),
-                    ctx: ast::ExprContext::Load
-                }
-                || func.node
-                    == ast::ExprKind::Name {
-                        id: "coprocessor".to_string(),
-                        ctx: ast::ExprContext::Load
-                    },
+            matches!(std::ops::Deref::deref(func), located_ast::Expr::Name(located_ast::ExprName {
+                    id,
+                    ctx: located_ast::ExprContext::Load,
+                    ..
+                }) if ["copr", "coprocessor"].contains(&id.as_str())),
             CoprParseSnafu {
                 reason: format!(
                     "Expect decorator with name `copr` or `coprocessor`, found \n{:#?}",
-                    &func.node
+                    func
                 ),
-                loc: Some(func.location)
+                loc: Some(func.location())
             }
         );
-        parse_keywords(keywords)
+        parse_keywords(&keywords)
     } else {
         fail_parse_error!(
             format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found \n{:#?}",
-                decorator.node
+                decorator
             ),
-            Some(decorator.location),
+            Some(decorator.location()),
         )
     }
 }
 
 // get type annotation in arguments
-fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
+fn get_arg_annotations(args: &located_ast::Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
     args.args
         .iter()
         .map(|arg| {
-            if let Some(anno) = &arg.node.annotation {
+            if let Some(anno) = &arg.def.annotation {
                 // for there is error handling for parse_annotation
                 parse_annotation(anno).map(Some)
             } else {
@@ -393,48 +382,61 @@ fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> 
         .collect::<Result<Vec<Option<_>>>>()
 }
 
-fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationInfo>>> {
-    let mut return_types = Vec::with_capacity(match &rets.node {
-        ast::ExprKind::Tuple { elts, ctx: _ } => elts.len(),
-        ast::ExprKind::Subscript {
-            value: _,
-            slice: _,
-            ctx: _,
-        } => 1,
+fn get_return_annotations(rets: &located_ast::Expr) -> Result<Vec<Option<AnnotationInfo>>> {
+    let mut return_types = Vec::with_capacity(match &rets {
+        located_ast::Expr::Tuple(located_ast::ExprTuple { elts, .. }) => elts.len(),
+        located_ast::Expr::Subscript(located_ast::ExprSubscript { .. }) => 1,
         _ => {
             return fail_parse_error!(
                 format!(
                     "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found \n{:#?}",
-                    &rets.node
+                    rets
                 ),
-                Some(rets.location),
+                Some(rets.location()),
             )
         }
     });
-    match &rets.node {
+    match &rets {
         // python: ->(vector[...], vector[...], ...)
-        ast::ExprKind::Tuple { elts, .. } => {
+        located_ast::Expr::Tuple(located_ast::ExprTuple { elts, .. }) => {
             for elem in elts {
                 return_types.push(Some(parse_annotation(elem)?))
             }
         }
         // python: -> vector[...]
-        ast::ExprKind::Subscript {
-            value: _,
-            slice: _,
-            ctx: _,
-        } => return_types.push(Some(parse_annotation(rets)?)),
+        located_ast::Expr::Subscript(_) => return_types.push(Some(parse_annotation(rets)?)),
         _ => {
             return fail_parse_error!(
                 format!(
                     "Expect one or many type annotation for the return type, found \n{:#?}",
-                    &rets.node
+                    &rets
                 ),
-                Some(rets.location),
+                Some(rets.location()),
             )
         }
     }
     Ok(return_types)
+}
+
+pub fn parse_interactive(script: &str) -> Result<located_ast::ModInteractive> {
+    use rustpython_compiler::parser::ast::{Fold, Mod, ModInteractive};
+    use rustpython_compiler::parser::source_code::LocatedError;
+    use rustpython_compiler::parser::{Parse, ParseErrorType};
+    // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
+    let mut locator = LinearLocator::new(script);
+    let top = ModInteractive::parse(script, "<embedded>")
+        .map_err(|e| {
+            let located_error: LocatedError<ParseErrorType> = locator.locate_error(e);
+            located_error
+        })
+        .context(PyParseSnafu)?;
+    let top = locator
+        .fold_mod(Mod::Interactive(top))
+        .unwrap_or_else(|e| match e {});
+    match top {
+        located_ast::Mod::Interactive(top) => Ok(top),
+        _ => unreachable!(),
+    }
 }
 
 /// parse script and return `Coprocessor` struct with info extract from ast
@@ -442,32 +444,34 @@ pub fn parse_and_compile_copr(
     script: &str,
     query_engine: Option<QueryEngineRef>,
 ) -> Result<Coprocessor> {
-    let python_ast = parse_program(script, "<embedded>").context(PyParseSnafu)?;
+    let python_ast = parse_interactive(script)?;
 
     let mut coprocessor = None;
 
-    for stmt in python_ast {
-        if let ast::StmtKind::FunctionDef {
-            name,
-            args: fn_args,
-            body: _,
-            decorator_list,
-            returns,
-            type_comment: _,
-        } = &stmt.node
+    for stmt in python_ast.body {
+        if let located_ast::Stmt::FunctionDef(located_ast::StmtFunctionDef {
+                                                  name,
+                                                  args: fn_args,
+                                                  body: _,
+                                                  decorator_list,
+                                                  returns,
+                                                  type_comment: _,
+                                                  type_params: _,
+                                                  range,
+                                              }) = &stmt
         {
             if !decorator_list.is_empty() {
                 ensure!(coprocessor.is_none(),
                         CoprParseSnafu {
                             reason: "Expect one and only one python function with `@coprocessor` or `@cpor` decorator",
-                            loc: stmt.location,
+                            loc: range.start,
                         }
                 );
                 ensure!(
                     decorator_list.len() == 1,
                     CoprParseSnafu {
                         reason: "Expect one decorator",
-                        loc: decorator_list.first().map(|s| s.location)
+                        loc: decorator_list.first().map(|s| s.location())
                     }
                 );
 
@@ -515,9 +519,17 @@ pub fn parse_and_compile_copr(
                 );
 
                 let backend = deco_args.backend.clone();
-                let kwarg = fn_args.kwarg.as_ref().map(|arg| arg.node.arg.clone());
+                let kwarg = fn_args
+                    .kwarg
+                    .as_ref()
+                    .map(|arg| arg.arg.as_str().to_owned());
                 coprocessor = Some(Coprocessor {
-                    code_obj: Some(compile::compile_script(name, &deco_args, &kwarg, script)?),
+                    code_obj: Some(compile::compile_script(
+                        name.as_str(),
+                        &deco_args,
+                        &kwarg,
+                        script,
+                    )?),
                     name: name.to_string(),
                     deco_args,
                     arg_types,
@@ -529,17 +541,14 @@ pub fn parse_and_compile_copr(
                 });
             }
         } else if matches!(
-            stmt.node,
-            ast::StmtKind::Import { .. } | ast::StmtKind::ImportFrom { .. }
+            stmt,
+            located_ast::Stmt::Import(_) | located_ast::Stmt::ImportFrom(_)
         ) {
             // import statements are allowed.
         } else {
             return fail_parse_error!(
-                format!(
-                    "Expect a function definition, but found a \n{:#?}",
-                    &stmt.node
-                ),
-                Some(stmt.location),
+                format!("Expect a function definition, but found a \n{:#?}", &stmt),
+                Some(stmt.location()),
             );
         }
     }
