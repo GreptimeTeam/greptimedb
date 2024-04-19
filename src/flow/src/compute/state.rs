@@ -21,6 +21,7 @@ use hydroflow::scheduled::SubgraphId;
 
 use crate::compute::types::ErrCollector;
 use crate::repr::{self, Timestamp};
+use crate::utils::{ArrangeHandler, Arrangement};
 
 /// input/output of a dataflow
 /// One `ComputeState` manage the input/output/schedule of one `Hydroflow`
@@ -41,6 +42,14 @@ pub struct DataflowState {
 }
 
 impl DataflowState {
+    pub fn new_arrange(&mut self, name: Option<Vec<String>>) -> ArrangeHandler {
+        let arrange = Arrangement::new();
+
+        let _ = name;
+        // TODO: add handler to compute state for monitoring and debugging
+        ArrangeHandler::from(arrange)
+    }
+
     /// schedule all subgraph that need to run with time <= `as_of` and run_available()
     ///
     /// return true if any subgraph actually executed
@@ -85,8 +94,9 @@ impl DataflowState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Scheduler {
+    // this scheduler is shared with `DataflowState`, so it can schedule subgraph
     schedule_subgraph: Rc<RefCell<BTreeMap<Timestamp, VecDeque<SubgraphId>>>>,
     cur_subgraph: Rc<RefCell<Option<SubgraphId>>>,
 }
@@ -98,6 +108,12 @@ impl Scheduler {
         let subgraph = subgraph.as_ref().expect("Set SubgraphId before schedule");
         let subgraph_queue = schedule_subgraph.entry(next_run_time).or_default();
         subgraph_queue.push_back(*subgraph);
+    }
+
+    pub fn schedule_for_arrange(&self, arrange: &Arrangement, now: Timestamp) {
+        if let Some(i) = arrange.get_next_update_time(&now) {
+            self.schedule_at(i)
+        }
     }
 
     pub fn set_cur_subgraph(&self, subgraph: SubgraphId) {

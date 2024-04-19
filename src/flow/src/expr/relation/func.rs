@@ -112,18 +112,21 @@ impl AggregateFunc {
     /// Expect self to be accumulable aggregate function, i.e. sum/count
     ///
     /// TODO(discord9): deal with overflow&better accumulator
-    pub fn eval_diff_accumulable<I>(
+    pub fn eval_diff_accumulable<A, I>(
         &self,
-        accum: Vec<Value>,
+        accum: A,
         value_diffs: I,
     ) -> Result<(Value, Vec<Value>), EvalError>
     where
+        A: IntoIterator<Item = Value>,
         I: IntoIterator<Item = (Value, Diff)>,
     {
-        let mut accum = if accum.is_empty() {
+        let mut accum = accum.into_iter().peekable();
+
+        let mut accum = if accum.peek().is_none() {
             Accum::new_accum(self)?
         } else {
-            Accum::try_into_accum(self, accum)?
+            Accum::try_from_iter(self, &mut accum)?
         };
         accum.update_batch(self, value_diffs)?;
         let res = accum.eval(self)?;
