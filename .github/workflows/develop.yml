@@ -127,7 +127,7 @@ jobs:
   fuzztest:
     name: Fuzz Test
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database" ]
@@ -147,7 +147,7 @@ jobs:
       - name: Set Rust Fuzz
         shell: bash
         run: |
-          sudo apt update && sudo apt install -y libfuzzer-14-dev
+          sudo apt update && sudo apt install -y libfuzzer-12-dev
           cargo install cargo-fuzz
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
