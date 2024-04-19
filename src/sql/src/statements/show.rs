@@ -72,24 +72,18 @@ impl ShowColumns {
             None => String::default(),
         }
     }
-
-    #[inline]
-    fn format_full(&self) -> &str {
-        if self.full {
-            "FULL"
-        } else {
-            ""
-        }
-    }
 }
 
 impl Display for ShowColumns {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SHOW")?;
+        if self.full {
+            f.write_str(" FULL")?;
+        }
         let kind = self.kind();
         let table = self.format_table();
         let database = self.format_database();
-        let full = self.format_full();
-        write!(f, r#"SHOW {full} {table} {database} {kind}"#)
+        write!(f, r#" {table} {database} {kind}"#)
     }
 }
 
@@ -169,23 +163,17 @@ impl ShowTables {
             }
         }
     }
-
-    #[inline]
-    fn format_full(&self) -> &str {
-        if self.full {
-            "FULL"
-        } else {
-            ""
-        }
-    }
 }
 
 impl Display for ShowTables {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let full = self.format_full();
+        f.write_str("SHOW")?;
+        if self.full {
+            f.write_str(" FULL")?;
+        }
         let database = self.format_database();
         let kind = self.kind();
-        write!(f, r#"SHOW {full} TABLES {database} {kind}"#)
+        write!(f, r#" {database} {kind}"#)
     }
 }
 

@@ -30,6 +30,7 @@ impl SetVariables {
     }
 
     pub fn format_value(&self) -> String {
+        // The number of value is always one.
         self.value
             .iter()
             .map(|expr| format!("{}", expr))

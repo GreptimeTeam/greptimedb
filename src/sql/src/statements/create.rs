@@ -233,22 +233,16 @@ impl CreateDatabase {
     pub fn name(&self) -> &ObjectName {
         &self.name
     }
-
-    #[inline]
-    fn format_if_not_exists(&self) -> &str {
-        if self.if_not_exists {
-            "IF NOT EXISTS"
-        } else {
-            ""
-        }
-    }
 }
 
 impl Display for CreateDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let if_not_exists = self.format_if_not_exists();
+        f.write_str("CREATE DATABASE")?;
+        if self.if_not_exists {
+            f.write_str(" IF NOT EXISTS")?;
+        }
         let name = self.name();
-        write!(f, r#"CREATE DATABASE {if_not_exists} {name}"#)
+        write!(f, r#" {name}"#)
     }
 }
 

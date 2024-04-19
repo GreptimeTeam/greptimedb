@@ -41,22 +41,16 @@ impl DropTable {
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
     }
-
-    #[inline]
-    fn format_if_exists(&self) -> &str {
-        if self.drop_if_exists {
-            "IF EXISTS"
-        } else {
-            ""
-        }
-    }
 }
 
 impl Display for DropTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let if_exists = self.format_if_exists();
+        f.write_str("DROP TABLE")?;
+        if self.drop_if_exists() {
+            f.write_str(" IF EXISTS")?;
+        }
         let table_name = self.table_name();
-        write!(f, r#"DROP TABLE {if_exists} {table_name}"#)
+        write!(f, r#" {table_name}"#)
     }
 }
 
@@ -84,21 +78,15 @@ impl DropDatabase {
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
     }
-
-    #[inline]
-    fn format_if_exists(&self) -> &str {
-        if self.drop_if_exists {
-            "IF EXISTS"
-        } else {
-            ""
-        }
-    }
 }
 
 impl Display for DropDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let if_exists = self.format_if_exists();
+        f.write_str("DROP DATABASE")?;
+        if self.drop_if_exists() {
+            f.write_str(" IF EXISTS")?;
+        }
         let name = self.name();
-        write!(f, r#"DROP DATABASE {if_exists} {name}"#)
+        write!(f, r#" {name}"#)
     }
 }
