@@ -22,6 +22,7 @@ use common_procedure::store::util::multiple_value_stream;
 use common_procedure::Result as ProcedureResult;
 use futures::future::try_join_all;
 use futures::StreamExt;
+use itertools::Itertools;
 use snafu::ResultExt;
 
 use crate::error::Result;
@@ -79,19 +80,21 @@ fn decode_kv(kv: KeyValue) -> Result<(String, Vec<u8>)> {
     Ok((key, value))
 }
 
-// Override warnings that those fields are not accessed.
-#[allow(dead_code)]
-enum SplitValue<'a> {
-    Single(&'a [u8]),
-    Multiple(Vec<&'a [u8]>),
+enum SplitValue {
+    Single(Vec<u8>),
+    Multiple(Vec<Vec<u8>>),
 }
 
-fn split_value(value: &[u8], max_value_size: Option<usize>) -> SplitValue<'_> {
+fn split_value(value: Vec<u8>, max_value_size: Option<usize>) -> SplitValue {
     if let Some(max_value_size) = max_value_size {
         if value.len() <= max_value_size {
             SplitValue::Single(value)
         } else {
-            SplitValue::Multiple(value.chunks(max_value_size).collect::<Vec<_>>())
+            let mut values = vec![];
+            for chunk in value.into_iter().chunks(max_value_size).into_iter() {
+                values.push(chunk.collect());
+            }
+            SplitValue::Multiple(values)
         }
     } else {
         SplitValue::Single(value)
@@ -101,10 +104,10 @@ fn split_value(value: &[u8], max_value_size: Option<usize>) -> SplitValue<'_> {
 #[async_trait]
 impl StateStore for KvStateStore {
     async fn put(&self, key: &str, value: Vec<u8>) -> ProcedureResult<()> {
-        let split = split_value(&value, self.max_value_size);
+        let split = split_value(value, self.max_value_size);
         let key = with_prefix(key);
         match split {
-            SplitValue::Single(_) => {
+            SplitValue::Single(value) => {
                 self.kv_backend
                     .put(
                         PutRequest::new()
