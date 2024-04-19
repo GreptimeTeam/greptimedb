@@ -30,6 +30,7 @@ pub mod instruction;
 pub mod key;
 pub mod kv_backend;
 pub mod lock_key;
+pub mod metadata;
 pub mod metrics;
 pub mod peer;
 pub mod range_stream;
@@ -43,7 +44,11 @@ pub mod test_util;
 pub mod util;
 pub mod wal_options_allocator;
 
+// The id of the cluster.
 pub type ClusterId = u64;
+// The id of the datanode.
 pub type DatanodeId = u64;
+// The id of the flownode.
+pub type FlownodeId = u64;
 
 pub use instruction::RegionIdent;

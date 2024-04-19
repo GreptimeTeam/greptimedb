@@ -36,6 +36,16 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
+//! 6. Flow task key: `__flow_task/{task_id}`
+//!     - Stores metadata of the task.
+//!
+//! 7. Flownode task key: `__flownode_task/{flownode_id}/{task_id}`
+//!     - Mapping {flownode_id} to {task_id}
+//!
+//! 8. Table task key: `__table_task/{table_id}/{node_id}`
+//!     - Mapping {table_id} to {node_id}
+//!     - Used in `Flownode` booting.
+//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -45,9 +55,12 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
+pub mod flow_task;
+pub mod flownode_task;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
+pub mod table_task;
 // TODO(weny): removes it.
 #[allow(deprecated)]
 pub mod table_region;
@@ -59,7 +72,7 @@ pub mod test_utils;
 // TODO(weny): remove it.
 #[allow(dead_code)]
 mod tombstone;
-mod txn_helper;
+pub(crate) mod txn_helper;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
@@ -84,6 +97,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
+use self::flow_task::FlowTaskValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
@@ -103,7 +117,9 @@ pub const MAINTENANCE_KEY: &str = "maintenance";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
-
+pub const TABLE_TASK_KEY_PREFIX: &str = "__table_task";
+pub const FLOWNODE_TASK_KEY_PREFIX: &str = "__flownode_task";
+pub const FLOW_TASK_KEY_PREFIX: &str = "__flow_task";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
@@ -119,9 +135,24 @@ pub const CACHE_KEY_PREFIXES: [&str; 4] = [
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
+/// The id of task.
+pub type TaskId = u32;
+
+lazy_static! {
+    static ref FLOWNODE_TASK_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{FLOWNODE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)$")).unwrap();
+}
+
+lazy_static! {
+    static ref TABLE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{TABLE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)$"
+    ))
+    .unwrap();
+}
+
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9])/([0-9])$")).unwrap();
+        Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9]*)/([0-9]*)$")).unwrap();
 }
 
 lazy_static! {
@@ -199,6 +230,7 @@ pub struct TableMetadataManager {
     kv_backend: KvBackendRef,
 }
 
+#[macro_export]
 macro_rules! ensure_values {
     ($got:expr, $expected_value:expr, $name:expr) => {
         ensure!(
@@ -1007,7 +1039,8 @@ macro_rules! impl_optional_meta_value {
 impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
-    DatanodeTableValue
+    DatanodeTableValue,
+    FlowTaskValue
 }
 
 impl_optional_meta_value! {
