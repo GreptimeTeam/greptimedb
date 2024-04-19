@@ -296,9 +296,7 @@ fn parse_keywords(keywords: &Vec<located_ast::Keyword>) -> Result<DecoratorArgs>
                             "pyo3" => ret_args.backend = BackendType::CPython,
                             _ => {
                                 return fail_parse_error!(
-                                    format!(
-                                    "backend type can only be of `rspy` and `pyo3`, found {value}"
-                                ),
+                                    format!("backend type can only be `pyo3`, found {value}"),
                                     Some(kw.location()),
                                 )
                             }

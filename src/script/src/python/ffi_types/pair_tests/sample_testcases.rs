@@ -430,38 +430,6 @@ def boolean_array() -> vector[f64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
         },
-        CoprTestCase {
-            script: r#"
-@copr(returns=["value"], backend="rspy")
-def boolean_array() -> vector[f64]:
-    from greptime import vector, col
-    from greptime import query, PyDataFrame
-    
-    df = PyDataFrame.from_sql("select number from numbers limit 5")
-    print("df from sql=", df)
-    collected = df.collect()
-    print("df.collect()=", collected)
-    assert len(collected[0]) == 5
-    df = PyDataFrame.from_sql("select number from numbers limit 5").filter(col("number") > 2)
-    collected = df.collect()
-    assert len(collected[0]) == 2
-    assert collected[0] == collected["number"]
-    print("query()=", query())
-
-    assert "query_engine object at" in repr(query())
-    rb = query().sql(
-        "select number from numbers limit 5"
-    )
-    print(rb)
-    assert len(rb) == 5
-
-    v = vector([1.0, 2.0, 3.0])
-    # This returns a vector([2.0])
-    return v[(v > 1) & (v < 3)]
-"#
-            .to_string(),
-            expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
-        },
 
         CoprTestCase {
             script: r#"
@@ -495,17 +463,6 @@ def boolean_array() -> vector[f64]:
 "#
             .to_string(),
             expect: Some(ronish!("value": vector!(Float64Vector, [2.0f64]))),
-        },
-        CoprTestCase {
-            script: r#"
-@copr(args=["number", "number"],
-    returns=["value"],
-    sql="select number from numbers limit 5", backend="rspy")
-def add_vecs(n1, n2) -> vector[i32]:
-    return n1 + n2
-"#
-            .to_string(),
-            expect: Some(ronish!("value": vector!(Int32Vector, [0, 2, 4, 6, 8]))),
         },
 
         CoprTestCase {
@@ -574,18 +531,6 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42, 43, 44]))),
         },
-        CoprTestCase {
-            script: r#"
-@copr(args=[], returns = ["number"], sql = "select * from numbers", backend="rspy")
-def answer() -> vector[i64]:
-    from greptime import vector, col, lit, PyDataFrame
-    expr_0 = (col("number")<lit(3)) & (col("number")>0)
-    ret = PyDataFrame.from_sql("select * from numbers").select([col("number")]).filter(expr_0).collect()[0]
-    return ret
-"#
-            .to_string(),
-            expect: Some(ronish!("number": vector!(Int64Vector, [1, 2]))),
-        },
 
         CoprTestCase {
             script: r#"
@@ -641,54 +586,7 @@ def answer() -> vector[i64]:
             .to_string(),
             expect: Some(ronish!("value": vector!(Int64Vector, [42]))),
         },
-        CoprTestCase {
-            script: r#"
-@copr(returns=["value"], backend="rspy")
-def answer() -> vector[i64]:
-    from greptime import vector
-    a = vector([42, 43, 44])
-    # slicing test
-    assert a[0:2] == a[:-1]
-    assert len(a[:-1]) == vector([42,44])
-    assert a[0:1] == a[:-2] 
-    assert a[0:1] == vector([42])
-    assert a[:-2] == vector([42])
-    assert a[:-1:2] == vector([42])
-    assert a[::2] == vector([42,44])
-    # negative step
-    assert a[-1::-2] == vector([44, 42])
-    assert a[-2::-2] == vector([44])
-    return a[-2:-1]
-"#
-            .to_string(),
-            expect: Some(ronish!("value": vector!(Int64Vector, [43]))),
-        },
         // normalize.py
-        CoprTestCase {
-            script: r#"
-import math
-
-def normalize0(x):
-    if x is None or math.isnan(x):
-        return 0
-    elif x > 100:
-        return 100
-    elif x < 0:
-        return 0
-    else:
-        return x
-
-@coprocessor(args=["number"], sql="select number from numbers limit 10", returns=["value"], backend="rspy")
-def normalize(v) -> vector[i64]:
-    return [normalize0(x) for x in v]
-            
-"#
-            .to_string(),
-            expect: Some(ronish!(
-                "value": vector!(Int64Vector, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,])
-            )),
-        },
-
         CoprTestCase {
             script: r#"
 import math

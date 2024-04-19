@@ -170,33 +170,17 @@ fn criterion_benchmark(c: &mut Criterion) {
         .unwrap();
 
     let _ = c
-        .bench_function("fib 20 rspy", |b| {
-            b.to_async(tokio::runtime::Runtime::new().unwrap())
-                .iter(|| fibonacci(black_box(20), "rspy"))
-        })
         .bench_function("fib 20 pyo3", |b| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| fibonacci(black_box(20), "pyo3"))
-        })
-        .bench_function("par fib 20 rspy", |b| {
-            b.to_async(tokio::runtime::Runtime::new().unwrap())
-                .iter(|| parallel_fibonacci(black_box(20), "rspy", &pool))
         })
         .bench_function("par fib 20 pyo3", |b| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| parallel_fibonacci(black_box(20), "pyo3", &pool))
         })
-        .bench_function("loop 1M rspy", |b| {
-            b.to_async(tokio::runtime::Runtime::new().unwrap())
-                .iter(|| loop_1_million(black_box("rspy")))
-        })
         .bench_function("loop 1M pyo3", |b| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| loop_1_million(black_box("pyo3")))
-        })
-        .bench_function("api heavy rspy", |b| {
-            b.to_async(tokio::runtime::Runtime::new().unwrap())
-                .iter(|| api_heavy(black_box("rspy")))
         })
         .bench_function("api heavy pyo3", |b| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())

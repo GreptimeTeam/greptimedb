@@ -13,25 +13,7 @@
 // limitations under the License.
 
 use lazy_static::lazy_static;
-use prometheus::*;
-
-lazy_static! {
-    pub static ref METRIC_RSPY_INIT_ELAPSED: Histogram = register_histogram!(
-        "greptime_script_rspy_init_elapsed",
-        "script rspy init elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_RSPY_EXEC_ELAPSED: Histogram = register_histogram!(
-        "greptime_script_rspy_exec_elapsed",
-        "script rspy exec elapsed"
-    )
-    .unwrap();
-    pub static ref METRIC_RSPY_EXEC_TOTAL_ELAPSED: Histogram = register_histogram!(
-        "greptime_script_rspy_exec_total_elapsed",
-        "script rspy exec total elapsed"
-    )
-    .unwrap();
-}
+use prometheus::{register_histogram, Histogram};
 
 lazy_static! {
     pub static ref METRIC_PYO3_EXEC_ELAPSED: Histogram = register_histogram!(
