@@ -27,11 +27,14 @@ use snafu::{ensure, ResultExt};
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
 use tests_fuzz::context::TableContext;
+use tests_fuzz::ir::AlterTableOperation;
+use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::validator;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use utils::generate_alter_table_expr;
 mod bare;
 mod error;
 mod utils;
@@ -97,7 +100,7 @@ async fn run_test<R: Rng + 'static>(
         return Ok(());
     }
 
-    let table_ctx = TableContext::from(&expr);
+    let mut table_ctx = Arc::new(TableContext::from(&expr));
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&expr).unwrap();
     let result = sqlx::query(&sql).execute(client).await;
@@ -115,6 +118,43 @@ async fn run_test<R: Rng + 'static>(
                 }
             );
             created_table.insert(table_name);
+        }
+    }
+
+    let actions = rng.gen_range(1..20);
+
+    for _ in 0..actions {
+        let expr = generate_alter_table_expr(table_ctx.clone(), rng);
+        if let AlterTableOperation::RenameTable { new_table_name } = &expr.alter_options {
+            let table_name = new_table_name.to_string();
+            if created_table.contains(&table_name) {
+                warn!("ignores altering to same name table: {table_name}");
+                continue;
+            }
+        };
+
+        let translator = AlterTableExprTranslator;
+        let sql = translator.translate(&expr).unwrap();
+        let result = sqlx::query(&sql).execute(client).await;
+        match result {
+            Ok(result) => {
+                info!("alter table: {sql}, result: {result:?}");
+                let table_name = table_ctx.name.to_string();
+                created_table.remove(&table_name);
+                table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
+                validate_mysql(client, state, &table_ctx).await;
+                let table_name = table_ctx.name.to_string();
+                created_table.insert(table_name);
+            }
+            Err(err) => {
+                ensure!(
+                    state.killed.load(Ordering::Relaxed),
+                    error::UnexpectedSnafu {
+                        err_msg: err.to_string(),
+                    }
+                );
+                break;
+            }
         }
     }
 

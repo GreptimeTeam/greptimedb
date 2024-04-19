@@ -21,7 +21,7 @@ pub(crate) mod select_expr;
 
 use core::fmt;
 
-pub use alter_expr::AlterTableExpr;
+pub use alter_expr::{AlterTableExpr, AlterTableOperation};
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, DateTime, Interval, Timestamp};
 pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
