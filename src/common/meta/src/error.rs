@@ -406,6 +406,31 @@ pub enum Error {
 
     #[snafu(display("Create logical tables invalid arguments: {}", err_msg))]
     CreateLogicalTablesInvalidArguments { err_msg: String, location: Location },
+
+    #[snafu(display("Invalid  node info key: {}", key))]
+    InvalidNodeInfoKey { key: String, location: Location },
+
+    #[snafu(display("Failed to parse number: {}", err_msg))]
+    ParseNum {
+        err_msg: String,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid role: {}", role))]
+    InvalidRole { role: i32, location: Location },
+
+    #[snafu(display("Failed to move values: {err_msg}"))]
+    MoveValues { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to parse {} from utf8", name))]
+    FromUtf8 {
+        name: String,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -418,7 +443,8 @@ impl ErrorExt for Error {
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
             | EtcdTxnFailed { .. }
-            | ConnectEtcd { .. } => StatusCode::Internal,
+            | ConnectEtcd { .. }
+            | MoveValues { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | ParseOption { .. }
@@ -452,6 +478,7 @@ impl ErrorExt for Error {
             | EmptyTopicPool { .. }
             | UnexpectedLogicalRouteTable { .. }
             | ProcedureOutput { .. }
+            | FromUtf8 { .. }
             | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
@@ -486,6 +513,9 @@ impl ErrorExt for Error {
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
             | SchemaNotFound { .. }
+            | InvalidNodeInfoKey { .. }
+            | ParseNum { .. }
+            | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
         }
     }

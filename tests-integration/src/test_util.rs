@@ -346,7 +346,6 @@ pub(crate) fn create_datanode_opts(
             data_home: home_dir,
             providers,
             store: default_store,
-            ..Default::default()
         },
         mode,
         wal: wal_config,
@@ -457,12 +456,13 @@ pub async fn setup_test_prom_app_with_frontend(
         ..Default::default()
     };
     let frontend_ref = instance.instance.clone();
+    let is_strict_mode = true;
     let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(
             ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
             Some(frontend_ref.clone()),
         )
-        .with_prom_handler(frontend_ref.clone(), true)
+        .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.mix_options.datanode.to_toml_string())
         .build();

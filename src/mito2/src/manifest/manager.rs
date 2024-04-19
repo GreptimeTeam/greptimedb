@@ -18,17 +18,17 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
-use tokio::sync::RwLock;
 
-use crate::error::{self, Result};
+use crate::error::{self, RegionStoppedSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
 };
 use crate::manifest::storage::{file_version, is_delta_file, ManifestObjectStore};
+use crate::metrics::MANIFEST_OP_ELAPSED;
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -110,95 +110,18 @@ pub struct RegionManifestOptions {
 /// ```
 #[derive(Debug)]
 pub struct RegionManifestManager {
-    inner: RwLock<RegionManifestManagerInner>,
-}
-
-impl RegionManifestManager {
-    /// Construct a region's manifest and persist it.
-    pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
-        let inner = RegionManifestManagerInner::new(metadata, options).await?;
-        Ok(Self {
-            inner: RwLock::new(inner),
-        })
-    }
-
-    /// Open an existing manifest.
-    pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
-        if let Some(inner) = RegionManifestManagerInner::open(options).await? {
-            Ok(Some(Self {
-                inner: RwLock::new(inner),
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Stop background tasks gracefully.
-    pub async fn stop(&self) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        inner.stop().await
-    }
-
-    /// Update the manifest. Return the current manifest version number.
-    pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
-        let mut inner = self.inner.write().await;
-        inner.update(action_list).await
-    }
-
-    /// Retrieve the current [RegionManifest].
-    pub async fn manifest(&self) -> Arc<RegionManifest> {
-        let inner = self.inner.read().await;
-        inner.manifest.clone()
-    }
-
-    #[cfg(test)]
-    pub async fn store(&self) -> ManifestObjectStore {
-        let inner = self.inner.read().await;
-        inner.store.clone()
-    }
-
-    /// Returns total manifest size.
-    pub async fn manifest_usage(&self) -> u64 {
-        let inner = self.inner.read().await;
-        inner.total_manifest_size()
-    }
-
-    /// Returns true if a newer version manifest file is found.
-    pub async fn has_update(&self) -> Result<bool> {
-        let inner = self.inner.read().await;
-        inner.has_update().await
-    }
-}
-
-#[cfg(test)]
-impl RegionManifestManager {
-    pub(crate) async fn validate_manifest(
-        &self,
-        expect: &RegionMetadataRef,
-        last_version: ManifestVersion,
-    ) {
-        let manifest = self.manifest().await;
-        assert_eq!(manifest.metadata, *expect);
-
-        let inner = self.inner.read().await;
-        assert_eq!(inner.manifest.manifest_version, inner.last_version);
-        assert_eq!(last_version, inner.last_version);
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RegionManifestManagerInner {
     store: ManifestObjectStore,
     options: RegionManifestOptions,
     last_version: ManifestVersion,
     /// The last version included in checkpoint file.
     last_checkpoint_version: ManifestVersion,
     manifest: Arc<RegionManifest>,
+    stopped: bool,
 }
 
-impl RegionManifestManagerInner {
-    /// Creates a new manifest.
-    async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
+impl RegionManifestManager {
+    /// Constructs a region's manifest and persist it.
+    pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
         // construct storage
         let mut store = ManifestObjectStore::new(
             &options.manifest_dir,
@@ -238,13 +161,18 @@ impl RegionManifestManagerInner {
             last_version: version,
             last_checkpoint_version: MIN_VERSION,
             manifest: Arc::new(manifest),
+            stopped: false,
         })
     }
 
     /// Opens an existing manifest.
     ///
     /// Returns `Ok(None)` if no such manifest.
-    async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
+    pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["open"])
+            .start_timer();
+
         // construct storage
         let mut store = ManifestObjectStore::new(
             &options.manifest_dir,
@@ -324,15 +252,29 @@ impl RegionManifestManagerInner {
             last_version: version,
             last_checkpoint_version,
             manifest: Arc::new(manifest),
+            stopped: false,
         }))
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    /// Stops the manager.
+    pub async fn stop(&mut self) -> Result<()> {
+        self.stopped = true;
         Ok(())
     }
 
-    /// Updates the manifest. Return the current manifest version number.
-    async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+    /// Updates the manifest. Returns the current manifest version number.
+    pub async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["update"])
+            .start_timer();
+
+        ensure!(
+            !self.stopped,
+            RegionStoppedSnafu {
+                region_id: self.manifest.metadata.region_id,
+            }
+        );
+
         let version = self.increase_version();
         self.store.save(version, &action_list.encode()?).await?;
 
@@ -364,20 +306,56 @@ impl RegionManifestManagerInner {
         Ok(version)
     }
 
+    /// Retrieves the current [RegionManifest].
+    pub fn manifest(&self) -> Arc<RegionManifest> {
+        self.manifest.clone()
+    }
+
     /// Returns total manifest size.
-    pub(crate) fn total_manifest_size(&self) -> u64 {
+    pub fn manifest_usage(&self) -> u64 {
         self.store.total_manifest_size()
     }
-}
 
-impl RegionManifestManagerInner {
+    /// Returns true if a newer version manifest file is found.
+    ///
+    /// It is typically used in read-only regions to catch up with manifest.
+    /// It doesn't lock the manifest directory in the object store so the result
+    /// may be inaccurate if there are concurrent writes.
+    pub async fn has_update(&self) -> Result<bool> {
+        let last_version = self.last_version;
+
+        let streamer =
+            self.store
+                .manifest_lister()
+                .await?
+                .context(error::EmptyManifestDirSnafu {
+                    manifest_dir: self.store.manifest_dir(),
+                })?;
+
+        let need_update = streamer
+            .try_any(|entry| async move {
+                let file_name = entry.name();
+                if is_delta_file(file_name) {
+                    let version = file_version(file_name);
+                    if version > last_version {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .context(error::OpenDalSnafu)?;
+
+        Ok(need_update)
+    }
+
     /// Increases last version and returns the increased version.
     fn increase_version(&mut self) -> ManifestVersion {
         self.last_version += 1;
         self.last_version
     }
 
-    pub(crate) async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
+    async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
         if version - self.last_checkpoint_version >= self.options.checkpoint_distance
             && self.options.checkpoint_distance != 0
         {
@@ -395,6 +373,10 @@ impl RegionManifestManagerInner {
 
     /// Makes a new checkpoint. Return the fresh one if there are some actions to compact.
     async fn do_checkpoint(&mut self) -> Result<Option<RegionCheckpoint>> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["checkpoint"])
+            .start_timer();
+
         let last_checkpoint = Self::last_checkpoint(&mut self.store).await?;
         let current_version = self.last_version;
 
@@ -480,36 +462,19 @@ impl RegionManifestManagerInner {
             Ok(None)
         }
     }
+}
 
-    /// Returns true if a newer version manifest file is found.
-    ///
-    /// It is typically used in read-only regions to catch up with manifest.
-    pub(crate) async fn has_update(&self) -> Result<bool> {
-        let last_version = self.last_version;
+#[cfg(test)]
+impl RegionManifestManager {
+    fn validate_manifest(&self, expect: &RegionMetadataRef, last_version: ManifestVersion) {
+        let manifest = self.manifest();
+        assert_eq!(manifest.metadata, *expect);
+        assert_eq!(self.manifest.manifest_version, self.last_version);
+        assert_eq!(last_version, self.last_version);
+    }
 
-        let streamer =
-            self.store
-                .manifest_lister()
-                .await?
-                .context(error::EmptyManifestDirSnafu {
-                    manifest_dir: self.store.manifest_dir(),
-                })?;
-
-        let need_update = streamer
-            .try_any(|entry| async move {
-                let file_name = entry.name();
-                if is_delta_file(file_name) {
-                    let version = file_version(file_name);
-                    if version > last_version {
-                        return true;
-                    }
-                }
-                false
-            })
-            .await
-            .context(error::OpenDalSnafu)?;
-
-        Ok(need_update)
+    pub fn store(&self) -> ManifestObjectStore {
+        self.store.clone()
     }
 }
 
@@ -538,7 +503,7 @@ mod test {
             .unwrap()
             .unwrap();
 
-        manager.validate_manifest(&metadata, 0).await;
+        manager.validate_manifest(&metadata, 0);
     }
 
     #[tokio::test]
@@ -553,7 +518,7 @@ mod test {
 
         // Creates a manifest.
         let metadata = Arc::new(basic_region_metadata());
-        let manager = env
+        let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap()
@@ -568,14 +533,14 @@ mod test {
             .unwrap()
             .unwrap();
 
-        manager.validate_manifest(&metadata, 0).await;
+        manager.validate_manifest(&metadata, 0);
     }
 
     #[tokio::test]
     async fn region_change_add_column() {
         let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new();
-        let manager = env
+        let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap()
@@ -596,7 +561,7 @@ mod test {
 
         let current_version = manager.update(action_list).await.unwrap();
         assert_eq!(current_version, 1);
-        manager.validate_manifest(&new_metadata, 1).await;
+        manager.validate_manifest(&new_metadata, 1);
 
         // Reopen the manager.
         manager.stop().await.unwrap();
@@ -605,7 +570,7 @@ mod test {
             .await
             .unwrap()
             .unwrap();
-        manager.validate_manifest(&new_metadata, 1).await;
+        manager.validate_manifest(&new_metadata, 1);
     }
 
     /// Just for test, refer to wal_dir_usage in src/store-api/src/logstore.rs.
@@ -637,7 +602,7 @@ mod test {
 
         let manifest_dir = format!("{}/manifest", data_home_path);
 
-        let manager = env
+        let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
             .unwrap()
@@ -658,10 +623,10 @@ mod test {
 
         let current_version = manager.update(action_list).await.unwrap();
         assert_eq!(current_version, 1);
-        manager.validate_manifest(&new_metadata, 1).await;
+        manager.validate_manifest(&new_metadata, 1);
 
         // get manifest size
-        let manifest_size = manager.manifest_usage().await;
+        let manifest_size = manager.manifest_usage();
         assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
 
         // update 10 times nop_action to trigger checkpoint
@@ -681,7 +646,7 @@ mod test {
         }
 
         // check manifest size again
-        let manifest_size = manager.manifest_usage().await;
+        let manifest_size = manager.manifest_usage();
         assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
 
         // Reopen the manager,
@@ -692,10 +657,10 @@ mod test {
             .await
             .unwrap()
             .unwrap();
-        manager.validate_manifest(&new_metadata, 11).await;
+        manager.validate_manifest(&new_metadata, 11);
 
         // get manifest size again
-        let manifest_size = manager.manifest_usage().await;
+        let manifest_size = manager.manifest_usage();
         assert_eq!(manifest_size, 1312);
     }
 }

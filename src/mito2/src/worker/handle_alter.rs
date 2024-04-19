@@ -138,7 +138,12 @@ async fn alter_region_schema(
         metadata: new_meta.clone(),
     };
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-    region.manifest_manager.update(action_list).await?;
+    region
+        .manifest_manager
+        .write()
+        .await
+        .update(action_list)
+        .await?;
 
     // Apply the metadata to region's version.
     region

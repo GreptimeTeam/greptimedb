@@ -440,7 +440,7 @@ mod tests {
     // No need to add compatible tests for RegionOptions since the above tests already check for compatibility.
     #[test]
     fn test_with_any_wal_options() {
-        let all_wal_options = vec![
+        let all_wal_options = [
             WalOptions::RaftEngine,
             WalOptions::Kafka(KafkaWalOptions {
                 topic: "test_topic".to_string(),

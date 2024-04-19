@@ -21,8 +21,10 @@ use etcd_client::LeaderKey;
 use tokio::sync::broadcast::Receiver;
 
 use crate::error::Result;
+use crate::metasrv::LeaderValue;
 
-pub const ELECTION_KEY: &str = "__meta_srv_election";
+pub const ELECTION_KEY: &str = "__metasrv_election";
+pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
 #[derive(Debug, Clone)]
 pub enum LeaderChangeMessage {
@@ -64,6 +66,12 @@ pub trait Election: Send + Sync {
     ///
     /// note: a new leader will only return true on the first call.
     fn in_infancy(&self) -> bool;
+
+    /// Registers a candidate for the election.
+    async fn register_candidate(&self) -> Result<()>;
+
+    /// Gets all candidates in the election.
+    async fn all_candidates(&self) -> Result<Vec<LeaderValue>>;
 
     /// Campaign waits to acquire leadership in an election.
     ///

@@ -22,6 +22,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{CacheIdent, Instruction};
+use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::TableMetaKey;
 use partition::manager::TableRouteCacheInvalidator;
@@ -51,6 +52,27 @@ impl TableRouteCacheInvalidator for MockTableRouteCacheInvalidator {
     async fn invalidate_table_route(&self, table_id: TableId) {
         let _ = self.inner.lock().unwrap().remove(&table_id);
     }
+}
+
+pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
+    MessageMeta {
+        id,
+        subject: subject.to_string(),
+        to: to.to_string(),
+        from: from.to_string(),
+    }
+}
+
+async fn handle_instruction(
+    executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
+    mailbox: Arc<HeartbeatMailbox>,
+    instruction: Instruction,
+) {
+    let response = HeartbeatResponse::default();
+    let mut ctx: HeartbeatResponseHandlerContext =
+        HeartbeatResponseHandlerContext::new(mailbox, response);
+    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
+    executor.handle(ctx).await.unwrap();
 }
 
 #[tokio::test]
@@ -92,23 +114,45 @@ async fn test_invalidate_table_cache_handler() {
     .await;
 }
 
-pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
-    MessageMeta {
-        id,
-        subject: subject.to_string(),
-        to: to.to_string(),
-        from: from.to_string(),
-    }
-}
+#[tokio::test]
+async fn test_invalidate_schema_key_handler() {
+    let (catalog, schema) = ("foo", "bar");
+    let schema_key = SchemaNameKey { catalog, schema };
+    let inner = HashMap::from([(schema_key.as_raw_key(), 1)]);
+    let backend = Arc::new(MockKvCacheInvalidator {
+        inner: Mutex::new(inner),
+    });
 
-async fn handle_instruction(
-    executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
-    mailbox: Arc<HeartbeatMailbox>,
-    instruction: Instruction,
-) {
-    let response = HeartbeatResponse::default();
-    let mut ctx: HeartbeatResponseHandlerContext =
-        HeartbeatResponseHandlerContext::new(mailbox, response);
-    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
-    executor.handle(ctx).await.unwrap();
+    let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
+        InvalidateTableCacheHandler::new(backend.clone()),
+    )]));
+
+    let (tx, _) = mpsc::channel(8);
+    let mailbox = Arc::new(HeartbeatMailbox::new(tx));
+
+    // removes a valid key
+    let valid_key = SchemaName {
+        catalog_name: catalog.to_string(),
+        schema_name: schema.to_string(),
+    };
+    handle_instruction(
+        executor.clone(),
+        mailbox.clone(),
+        Instruction::InvalidateCaches(vec![CacheIdent::SchemaName(valid_key.clone())]),
+    )
+    .await;
+
+    assert!(!backend
+        .inner
+        .lock()
+        .unwrap()
+        .contains_key(&schema_key.as_raw_key()));
+
+    // removes a invalid key
+    handle_instruction(
+        executor,
+        mailbox,
+        Instruction::InvalidateCaches(vec![CacheIdent::SchemaName(valid_key)]),
+    )
+    .await;
 }

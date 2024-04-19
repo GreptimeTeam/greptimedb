@@ -16,27 +16,31 @@ SELECT a FROM test LIMIT 1;
 
 SELECT a FROM test LIMIT 1.25;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT a FROM test LIMIT 2-1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
++-------------------------+
+| a                       |
++-------------------------+
+| 1970-01-01T00:00:00.011 |
++-------------------------+
 
 SELECT a FROM test LIMIT a;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT a FROM test LIMIT a+1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT a FROM test LIMIT SUM(42);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT a FROM test LIMIT row_number() OVER ();
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 CREATE TABLE test2 (a STRING, ts TIMESTAMP TIME INDEX);
 
@@ -56,7 +60,7 @@ SELECT * FROM test2 LIMIT 3;
 
 select 1 limit date '1992-01-01';
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 CREATE TABLE integers(i TIMESTAMP TIME INDEX);
 
@@ -89,7 +93,7 @@ SELECT * FROM integers LIMIT 4;
 
 SELECT * FROM integers as int LIMIT (SELECT MIN(integers.i) FROM integers);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT * FROM integers as int OFFSET (SELECT MIN(integers.i) FROM integers);
 
@@ -101,23 +105,23 @@ Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected ex
 
 SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT * FROM integers as int LIMIT (SELECT NULL);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT * FROM integers as int LIMIT (SELECT -1);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 SELECT * FROM integers as int LIMIT (SELECT 'ab');
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: LIMIT must not be negative
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Unexpected expression in LIMIT clause
 
 DROP TABLE integers;
 

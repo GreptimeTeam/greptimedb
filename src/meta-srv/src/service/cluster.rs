@@ -14,18 +14,19 @@
 
 use api::v1::meta::{
     cluster_server, BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
-    Error, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
+    Error, MetasrvPeersRequest, MetasrvPeersResponse, Peer, RangeRequest as PbRangeRequest,
+    RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_telemetry::warn;
 use snafu::ResultExt;
 use tonic::{Request, Response};
 
 use crate::error;
-use crate::metasrv::MetaSrv;
+use crate::metasrv::Metasrv;
 use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
-impl cluster_server::Cluster for MetaSrv {
+impl cluster_server::Cluster for Metasrv {
     async fn batch_get(&self, req: Request<PbBatchGetRequest>) -> GrpcResult<PbBatchGetResponse> {
         if !self.is_leader() {
             let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
@@ -34,7 +35,7 @@ impl cluster_server::Cluster for MetaSrv {
                 ..Default::default()
             };
 
-            warn!("The current meta is not leader, but a batch_get request have reached the meta. Detail: {:?}.", req);
+            warn!("The current meta is not leader, but a `batch_get` request have reached the meta. Detail: {:?}.", req);
             return Ok(Response::new(resp));
         }
 
@@ -57,7 +58,7 @@ impl cluster_server::Cluster for MetaSrv {
                 ..Default::default()
             };
 
-            warn!("The current meta is not leader, but a range request have reached the meta. Detail: {:?}.", req);
+            warn!("The current meta is not leader, but a `range` request have reached the meta. Detail: {:?}.", req);
             return Ok(Response::new(resp));
         }
 
@@ -71,9 +72,61 @@ impl cluster_server::Cluster for MetaSrv {
         let resp = res.to_proto_resp(ResponseHeader::success(0));
         Ok(Response::new(resp))
     }
+
+    async fn metasrv_peers(
+        &self,
+        req: Request<MetasrvPeersRequest>,
+    ) -> GrpcResult<MetasrvPeersResponse> {
+        if !self.is_leader() {
+            let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
+            let resp = MetasrvPeersResponse {
+                header: Some(is_not_leader),
+                ..Default::default()
+            };
+
+            warn!("The current meta is not leader, but a `metasrv_peers` request have reached the meta. Detail: {:?}.", req);
+            return Ok(Response::new(resp));
+        }
+
+        let (leader, followers) = match self.election() {
+            Some(election) => {
+                let leader = election.leader().await?;
+                let peers = election.all_candidates().await?;
+                let followers = peers
+                    .into_iter()
+                    .filter(|peer| peer.0 != leader.0)
+                    .map(|peer| Peer {
+                        addr: peer.0,
+                        ..Default::default()
+                    })
+                    .collect();
+                (
+                    Some(Peer {
+                        addr: leader.0,
+                        ..Default::default()
+                    }),
+                    followers,
+                )
+            }
+            None => (
+                Some(Peer {
+                    addr: self.options().server_addr.clone(),
+                    ..Default::default()
+                }),
+                vec![],
+            ),
+        };
+
+        let resp = MetasrvPeersResponse {
+            header: Some(ResponseHeader::success(0)),
+            leader,
+            followers,
+        };
+        Ok(Response::new(resp))
+    }
 }
 
-impl MetaSrv {
+impl Metasrv {
     pub fn is_leader(&self) -> bool {
         self.election().map(|x| x.is_leader()).unwrap_or(false)
     }

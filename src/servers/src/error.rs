@@ -347,7 +347,7 @@ pub enum Error {
 
     #[snafu(display("Failed to parse PromQL: {query:?}"))]
     ParsePromQL {
-        query: PromQuery,
+        query: Box<PromQuery>,
         location: Location,
         source: query::error::Error,
     },

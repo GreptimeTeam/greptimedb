@@ -21,6 +21,7 @@ pub mod prom_store {
     }
 }
 
+pub mod region;
 pub mod v1;
 
 pub use greptime_proto;

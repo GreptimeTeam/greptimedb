@@ -76,6 +76,7 @@ tikv-jemallocator = "0.5"
 common-test-util.workspace = true
 serde.workspace = true
 temp-env = "0.3"
+tempfile.workspace = true
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rexpect = "0.5"

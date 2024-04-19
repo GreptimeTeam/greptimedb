@@ -30,15 +30,20 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-12-19
+  RUST_TOOLCHAIN: nightly-2024-04-18
 
 jobs:
-  typos:
-    name: Spell Check with Typos
+  check-typos-and-docs:
+    name: Check typos and docs
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
       - uses: crate-ci/typos@v1.13.10
+      - name: Check the config docs
+        run: |
+          make config-docs && \
+          git diff --name-only --exit-code ./config/config.md  \
+          || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   check:
     name: Check
@@ -93,6 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -123,10 +130,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ "fuzz_create_table", "fuzz_alter_table" ]
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database" ]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -305,10 +314,10 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
-          GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
-          GT_S3_REGION: ${{ secrets.S3_REGION }}
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           UNITTEST_LOG_DIR: "__unittest_logs"

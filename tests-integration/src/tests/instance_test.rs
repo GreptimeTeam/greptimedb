@@ -411,11 +411,9 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2(ts) select memory from demo1")
             .await
-            .unwrap_err(),
-        Error::TableOperation {
-            source: OperatorError::PlanStatement { .. },
-            ..
-        }
+            .unwrap()
+            .data,
+        OutputData::AffectedRows(2),
     ));
 
     let output = execute_sql(&instance, "insert into demo2 select * from demo1")
@@ -427,12 +425,14 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expected = "\
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+";
++-------+------+--------+-------------------------+
+| host  | cpu  | memory | ts                      |
++-------+------+--------+-------------------------+
+|       |      |        | 1970-01-01T00:00:00.333 |
+|       |      |        | 1970-01-01T00:00:01.024 |
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37     |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38     |
++-------+------+--------+-------------------------+";
     check_output_stream(output, expected).await;
 }
 
@@ -727,7 +727,7 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 | 4     | 4.4       |          | false  |            |                     | 1970-01-01T00:00:00 |
 | 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 | 1970-01-01T00:00:00 |
 | 4     | 4000000.0 |          | false  |            |                     | 1970-01-01T00:00:00 |
-| 4     | 4.0e-6    |          | false  |            |                     | 1970-01-01T00:00:00 |
+| 4     | 4e-6      |          | false  |            |                     | 1970-01-01T00:00:00 |
 +-------+-----------+----------+--------+------------+---------------------+---------------------+";
     check_output_stream(output, expect).await;
 
@@ -939,7 +939,7 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 | 4     | 4.4       |          | false  |            |                     | 1970-01-01T00:00:00 |
 | 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 | 1970-01-01T00:00:00 |
 | 4     | 4000000.0 |          | false  |            |                     | 1970-01-01T00:00:00 |
-| 4     | 4.0e-6    |          | false  |            |                     | 1970-01-01T00:00:00 |
+| 4     | 4e-6      |          | false  |            |                     | 1970-01-01T00:00:00 |
 +-------+-----------+----------+--------+------------+---------------------+---------------------+";
     check_output_stream(output, expect).await;
 }
@@ -1054,22 +1054,22 @@ async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn Mo
         .await
         .data;
     let expect = "\
-+-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+
-| a               | b    | c     | d    | e                   | f             | g                   | ts                  |
-+-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+
-| 1               | 2.0  | false | 4    | 2023-04-12T17:09:53 | 1.02          | 2012-04-23T18:25:43 | 1970-01-01T00:00:00 |
-| -10             | -3.5 | true  | 4    | 2023-04-13T03:26:33 | -0.3          | 2016-04-23T18:25:43 | 1970-01-01T00:00:00 |
-| 2               | 0.6  | false | text | 2023-04-12T19:56:33 | 1377.223      |                     | 1970-01-01T00:00:00 |
-| 1               | 2.0  | false | 4    |                     | 1337.009      |                     | 1970-01-01T00:00:00 |
-| 7               | -3.5 | true  | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
-| 1               | 0.6  | false | text |                     | 1338.0        | 2018-10-23T18:33:16 | 1970-01-01T00:00:00 |
-| 1               | 2.0  | false | 4    |                     | 1.23458291e13 |                     | 1970-01-01T00:00:00 |
-| 5               | -3.5 | true  | 4    |                     | 99999999.99   |                     | 1970-01-01T00:00:00 |
-| 1               | 0.6  | false | text |                     | 1.0           |                     | 1970-01-01T00:00:00 |
-| 1               | 2.0  | false | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
-| 1               | -3.5 | true  | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
-| 100000000000000 | 0.6  | false | text |                     | 1.0           |                     | 1970-01-01T00:00:00 |
-+-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+";
++-----------------+------+-------+------+---------------------+------------------+---------------------+---------------------+
+| a               | b    | c     | d    | e                   | f                | g                   | ts                  |
++-----------------+------+-------+------+---------------------+------------------+---------------------+---------------------+
+| 1               | 2.0  | false | 4    | 2023-04-12T17:09:53 | 1.02             | 2012-04-23T18:25:43 | 1970-01-01T00:00:00 |
+| -10             | -3.5 | true  | 4    | 2023-04-13T03:26:33 | -0.3             | 2016-04-23T18:25:43 | 1970-01-01T00:00:00 |
+| 2               | 0.6  | false | text | 2023-04-12T19:56:33 | 1377.223         |                     | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |                     | 1337.009         |                     | 1970-01-01T00:00:00 |
+| 7               | -3.5 | true  | 4    |                     | 1.0              |                     | 1970-01-01T00:00:00 |
+| 1               | 0.6  | false | text |                     | 1338.0           | 2018-10-23T18:33:16 | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |                     | 12345829100000.0 |                     | 1970-01-01T00:00:00 |
+| 5               | -3.5 | true  | 4    |                     | 99999999.99      |                     | 1970-01-01T00:00:00 |
+| 1               | 0.6  | false | text |                     | 1.0              |                     | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |                     | 1.0              |                     | 1970-01-01T00:00:00 |
+| 1               | -3.5 | true  | 4    |                     | 1.0              |                     | 1970-01-01T00:00:00 |
+| 100000000000000 | 0.6  | false | text |                     | 1.0              |                     | 1970-01-01T00:00:00 |
++-----------------+------+-------+------+---------------------+------------------+---------------------+---------------------+";
     check_output_stream(output, expect).await;
 }
 
@@ -1897,57 +1897,85 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
-    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns where table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name";
+    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns where table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name, column_name";
 
     let output = execute_sql(&instance, sql).await.data;
     let expected = "\
-+---------------+--------------------+------------+----------------+-----------+---------------+
-| table_catalog | table_schema       | table_name | column_name    | data_type | semantic_type |
-+---------------+--------------------+------------+----------------+-----------+---------------+
-| greptime      | information_schema | columns    | table_catalog  | String    | FIELD         |
-| greptime      | information_schema | columns    | table_schema   | String    | FIELD         |
-| greptime      | information_schema | columns    | table_name     | String    | FIELD         |
-| greptime      | information_schema | columns    | column_name    | String    | FIELD         |
-| greptime      | information_schema | columns    | data_type      | String    | FIELD         |
-| greptime      | information_schema | columns    | semantic_type  | String    | FIELD         |
-| greptime      | information_schema | columns    | column_default | String    | FIELD         |
-| greptime      | information_schema | columns    | is_nullable    | String    | FIELD         |
-| greptime      | information_schema | columns    | column_type    | String    | FIELD         |
-| greptime      | information_schema | columns    | column_comment | String    | FIELD         |
-| greptime      | public             | numbers    | number         | UInt32    | TAG           |
-| greptime      | information_schema | tables     | table_catalog  | String    | FIELD         |
-| greptime      | information_schema | tables     | table_schema   | String    | FIELD         |
-| greptime      | information_schema | tables     | table_name     | String    | FIELD         |
-| greptime      | information_schema | tables     | table_type     | String    | FIELD         |
-| greptime      | information_schema | tables     | table_id       | UInt32    | FIELD         |
-| greptime      | information_schema | tables     | engine         | String    | FIELD         |
-+---------------+--------------------+------------+----------------+-----------+---------------+";
++---------------+--------------------+------------+--------------------------+--------------+---------------+
+| table_catalog | table_schema       | table_name | column_name              | data_type    | semantic_type |
++---------------+--------------------+------------+--------------------------+--------------+---------------+
+| greptime      | information_schema | columns    | character_maximum_length | bigint       | FIELD         |
+| greptime      | information_schema | columns    | character_octet_length   | bigint       | FIELD         |
+| greptime      | information_schema | columns    | character_set_name       | string       | FIELD         |
+| greptime      | information_schema | columns    | collation_name           | string       | FIELD         |
+| greptime      | information_schema | columns    | column_comment           | string       | FIELD         |
+| greptime      | information_schema | columns    | column_default           | string       | FIELD         |
+| greptime      | information_schema | columns    | column_key               | string       | FIELD         |
+| greptime      | information_schema | columns    | column_name              | string       | FIELD         |
+| greptime      | information_schema | columns    | column_type              | string       | FIELD         |
+| greptime      | information_schema | columns    | data_type                | string       | FIELD         |
+| greptime      | information_schema | columns    | datetime_precision       | bigint       | FIELD         |
+| greptime      | information_schema | columns    | extra                    | string       | FIELD         |
+| greptime      | information_schema | columns    | generation_expression    | string       | FIELD         |
+| greptime      | information_schema | columns    | greptime_data_type       | string       | FIELD         |
+| greptime      | information_schema | columns    | is_nullable              | string       | FIELD         |
+| greptime      | information_schema | columns    | numeric_precision        | bigint       | FIELD         |
+| greptime      | information_schema | columns    | numeric_scale            | bigint       | FIELD         |
+| greptime      | information_schema | columns    | ordinal_position         | bigint       | FIELD         |
+| greptime      | information_schema | columns    | privileges               | string       | FIELD         |
+| greptime      | information_schema | columns    | semantic_type            | string       | FIELD         |
+| greptime      | information_schema | columns    | srs_id                   | bigint       | FIELD         |
+| greptime      | information_schema | columns    | table_catalog            | string       | FIELD         |
+| greptime      | information_schema | columns    | table_name               | string       | FIELD         |
+| greptime      | information_schema | columns    | table_schema             | string       | FIELD         |
+| greptime      | public             | numbers    | number                   | int unsigned | TAG           |
+| greptime      | information_schema | tables     | engine                   | string       | FIELD         |
+| greptime      | information_schema | tables     | table_catalog            | string       | FIELD         |
+| greptime      | information_schema | tables     | table_id                 | int unsigned | FIELD         |
+| greptime      | information_schema | tables     | table_name               | string       | FIELD         |
+| greptime      | information_schema | tables     | table_schema             | string       | FIELD         |
+| greptime      | information_schema | tables     | table_type               | string       | FIELD         |
++---------------+--------------------+------------+--------------------------+--------------+---------------+";
 
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await.data;
     let expected = "\
-+-----------------+--------------------+---------------+----------------+----------------------+---------------+
-| table_catalog   | table_schema       | table_name    | column_name    | data_type            | semantic_type |
-+-----------------+--------------------+---------------+----------------+----------------------+---------------+
-| another_catalog | another_schema     | another_table | i              | TimestampMillisecond | TIMESTAMP     |
-| another_catalog | information_schema | columns       | table_catalog  | String               | FIELD         |
-| another_catalog | information_schema | columns       | table_schema   | String               | FIELD         |
-| another_catalog | information_schema | columns       | table_name     | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_name    | String               | FIELD         |
-| another_catalog | information_schema | columns       | data_type      | String               | FIELD         |
-| another_catalog | information_schema | columns       | semantic_type  | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_default | String               | FIELD         |
-| another_catalog | information_schema | columns       | is_nullable    | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_type    | String               | FIELD         |
-| another_catalog | information_schema | columns       | column_comment | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_catalog  | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_schema   | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_name     | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_type     | String               | FIELD         |
-| another_catalog | information_schema | tables        | table_id       | UInt32               | FIELD         |
-| another_catalog | information_schema | tables        | engine         | String               | FIELD         |
-+-----------------+--------------------+---------------+----------------+----------------------+---------------+";
++-----------------+--------------------+---------------+--------------------------+--------------+---------------+
+| table_catalog   | table_schema       | table_name    | column_name              | data_type    | semantic_type |
++-----------------+--------------------+---------------+--------------------------+--------------+---------------+
+| another_catalog | another_schema     | another_table | i                        | timestamp(3) | TIMESTAMP     |
+| another_catalog | information_schema | columns       | character_maximum_length | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | character_octet_length   | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | character_set_name       | string       | FIELD         |
+| another_catalog | information_schema | columns       | collation_name           | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_comment           | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_default           | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_key               | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_name              | string       | FIELD         |
+| another_catalog | information_schema | columns       | column_type              | string       | FIELD         |
+| another_catalog | information_schema | columns       | data_type                | string       | FIELD         |
+| another_catalog | information_schema | columns       | datetime_precision       | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | extra                    | string       | FIELD         |
+| another_catalog | information_schema | columns       | generation_expression    | string       | FIELD         |
+| another_catalog | information_schema | columns       | greptime_data_type       | string       | FIELD         |
+| another_catalog | information_schema | columns       | is_nullable              | string       | FIELD         |
+| another_catalog | information_schema | columns       | numeric_precision        | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | numeric_scale            | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | ordinal_position         | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | privileges               | string       | FIELD         |
+| another_catalog | information_schema | columns       | semantic_type            | string       | FIELD         |
+| another_catalog | information_schema | columns       | srs_id                   | bigint       | FIELD         |
+| another_catalog | information_schema | columns       | table_catalog            | string       | FIELD         |
+| another_catalog | information_schema | columns       | table_name               | string       | FIELD         |
+| another_catalog | information_schema | columns       | table_schema             | string       | FIELD         |
+| another_catalog | information_schema | tables        | engine                   | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_catalog            | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_id                 | int unsigned | FIELD         |
+| another_catalog | information_schema | tables        | table_name               | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_schema             | string       | FIELD         |
+| another_catalog | information_schema | tables        | table_type               | string       | FIELD         |
++-----------------+--------------------+---------------+--------------------------+--------------+---------------+";
 
     check_output_stream(output, expected).await;
 }

@@ -107,14 +107,11 @@ impl TableMetadataBencher {
                     .unwrap();
                 let start = Instant::now();
                 let table_info = table_info.unwrap();
+                let table_route = table_route.unwrap();
                 let table_id = table_info.table_info.ident.table_id;
                 let _ = self
                     .table_metadata_manager
-                    .delete_table_metadata(
-                        table_id,
-                        &table_info.table_name(),
-                        table_route.unwrap().region_routes().unwrap(),
-                    )
+                    .delete_table_metadata(table_id, &table_info.table_name(), &table_route)
                     .await;
                 start.elapsed()
             },
@@ -140,7 +137,7 @@ impl TableMetadataBencher {
                 let start = Instant::now();
                 let _ = self
                     .table_metadata_manager
-                    .rename_table(table_info.unwrap(), new_table_name)
+                    .rename_table(&table_info.unwrap(), new_table_name)
                     .await;
 
                 start.elapsed()

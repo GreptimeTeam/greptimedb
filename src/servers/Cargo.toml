@@ -50,7 +50,8 @@ derive_builder.workspace = true
 futures = "0.3"
 hashbrown = "0.14"
 headers = "0.3"
-hostname = "0.3.1"
+hostname = "0.3"
+http = "0.2"
 http-body = "0.4"
 humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
@@ -98,7 +99,7 @@ tokio.workspace = true
 tokio-rustls = "0.25"
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
-tonic-reflection = "0.10"
+tonic-reflection = "0.11"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
@@ -109,7 +110,6 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
-axum-test-helper = "0.3"
 catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-base.workspace = true

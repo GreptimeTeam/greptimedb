@@ -89,8 +89,7 @@ impl Predicate {
             .exprs
             .iter()
             .filter_map(|expr| {
-                create_physical_expr(expr.df_expr(), df_schema.as_ref(), schema, execution_props)
-                    .ok()
+                create_physical_expr(expr.df_expr(), df_schema.as_ref(), execution_props).ok()
             })
             .collect::<Vec<_>>())
     }
@@ -284,7 +283,11 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             | Operator::BitwiseShiftLeft
             | Operator::StringConcat
             | Operator::ArrowAt
-            | Operator::AtArrow => None,
+            | Operator::AtArrow
+            | Operator::LikeMatch
+            | Operator::ILikeMatch
+            | Operator::NotLikeMatch
+            | Operator::NotILikeMatch => None,
         }
     }
 
@@ -570,6 +573,7 @@ mod tests {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(path.clone())
             .unwrap();
 

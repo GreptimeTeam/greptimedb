@@ -70,6 +70,25 @@ impl<T> MemoryKvBackend<T> {
         let mut kvs = self.kvs.write().unwrap();
         kvs.clear();
     }
+
+    #[cfg(test)]
+    /// Returns true if the `kvs` is empty.
+    pub fn is_empty(&self) -> bool {
+        self.kvs.read().unwrap().is_empty()
+    }
+
+    #[cfg(test)]
+    /// Returns the `kvs`.
+    pub fn dump(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let kvs = self.kvs.read().unwrap();
+        kvs.clone()
+    }
+
+    #[cfg(test)]
+    /// Returns the length of `kvs`
+    pub fn len(&self) -> usize {
+        self.kvs.read().unwrap().len()
+    }
 }
 
 #[async_trait]
@@ -357,14 +376,14 @@ mod tests {
     async fn test_put() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_put(kv_backend).await;
+        test_kv_put(&kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_range() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_range(kv_backend).await;
+        test_kv_range(&kv_backend).await;
     }
 
     #[tokio::test]
@@ -378,7 +397,7 @@ mod tests {
     async fn test_batch_get() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_get(kv_backend).await;
+        test_kv_batch_get(&kv_backend).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

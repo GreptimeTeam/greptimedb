@@ -21,6 +21,7 @@ use crate::adapter::error::{InvalidQuerySnafu, Result};
 /// a set of column indices that are "keys" for the collection.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct Key {
+    /// indicate whose column form key
     pub column_indices: Vec<usize>,
 }
 
@@ -122,6 +123,7 @@ impl RelationType {
         self
     }
 
+    /// Adds new keys for the relation. Also sorts the key indices.
     pub fn with_keys(mut self, keys: Vec<Vec<usize>>) -> Self {
         for key in keys {
             self = self.with_key(key)
@@ -192,6 +194,35 @@ pub struct ColumnType {
     /// Whether this datum can be null.
     #[serde(default = "return_true")]
     pub nullable: bool,
+}
+
+impl ColumnType {
+    /// Constructs a new `ColumnType` from a scalar type and a nullability flag.
+    pub fn new(scalar_type: ConcreteDataType, nullable: bool) -> Self {
+        ColumnType {
+            scalar_type,
+            nullable,
+        }
+    }
+
+    /// Constructs a new `ColumnType` from a scalar type, with nullability set to
+    /// ***true***
+    pub fn new_nullable(scalar_type: ConcreteDataType) -> Self {
+        ColumnType {
+            scalar_type,
+            nullable: true,
+        }
+    }
+
+    /// Returns the scalar type of this column.
+    pub fn scalar_type(&self) -> &ConcreteDataType {
+        &self.scalar_type
+    }
+
+    /// Returns true if this column can be null.
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
 }
 
 /// This method exists solely for the purpose of making ColumnType nullable by

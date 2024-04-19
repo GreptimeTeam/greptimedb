@@ -33,6 +33,7 @@ impl HttpHandler for NodeLeaseHandler {
     async fn handle(
         &self,
         _: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         let cluster_id = util::extract_cluster_id(params)?;

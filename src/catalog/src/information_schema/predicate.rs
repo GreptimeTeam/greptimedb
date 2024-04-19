@@ -109,11 +109,7 @@ impl Predicate {
                 };
             }
             Predicate::Not(p) => {
-                let Some(b) = p.eval(row) else {
-                    return None;
-                };
-
-                return Some(!b);
+                return Some(!p.eval(row)?);
             }
         }
 
@@ -125,13 +121,7 @@ impl Predicate {
     fn from_expr(expr: DfExpr) -> Option<Predicate> {
         match expr {
             // NOT expr
-            DfExpr::Not(expr) => {
-                let Some(p) = Self::from_expr(*expr) else {
-                    return None;
-                };
-
-                Some(Predicate::Not(Box::new(p)))
-            }
+            DfExpr::Not(expr) => Some(Predicate::Not(Box::new(Self::from_expr(*expr)?))),
             // expr LIKE pattern
             DfExpr::Like(Like {
                 negated,
@@ -178,25 +168,15 @@ impl Predicate {
                 }
                 // left AND right
                 (left, Operator::And, right) => {
-                    let Some(left) = Self::from_expr(left) else {
-                        return None;
-                    };
-
-                    let Some(right) = Self::from_expr(right) else {
-                        return None;
-                    };
+                    let left = Self::from_expr(left)?;
+                    let right = Self::from_expr(right)?;
 
                     Some(Predicate::And(Box::new(left), Box::new(right)))
                 }
                 // left OR right
                 (left, Operator::Or, right) => {
-                    let Some(left) = Self::from_expr(left) else {
-                        return None;
-                    };
-
-                    let Some(right) = Self::from_expr(right) else {
-                        return None;
-                    };
+                    let left = Self::from_expr(left)?;
+                    let right = Self::from_expr(right)?;
 
                     Some(Predicate::Or(Box::new(left), Box::new(right)))
                 }

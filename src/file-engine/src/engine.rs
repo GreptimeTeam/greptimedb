@@ -16,6 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
 use common_error::ext::BoxedError;
@@ -24,7 +25,7 @@ use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
     RegionRequest,
@@ -60,7 +61,7 @@ impl RegionEngine for FileRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResult, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await
@@ -154,7 +155,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> EngineResult<RegionHandleResult> {
+    ) -> EngineResult<RegionResponse> {
         let result = match request {
             RegionRequest::Create(req) => self.handle_create(region_id, req).await,
             RegionRequest::Drop(req) => self.handle_drop(region_id, req).await,
@@ -165,7 +166,7 @@ impl EngineInner {
             }
             .fail(),
         };
-        result.map(RegionHandleResult::new)
+        result.map(RegionResponse::new)
     }
 
     async fn stop(&self) -> EngineResult<()> {

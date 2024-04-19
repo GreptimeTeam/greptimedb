@@ -20,13 +20,16 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue};
 use crate::error::{
     self, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
     UnexpectedLogicalRouteTableSnafu,
 };
-use crate::key::{RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
-use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, RegionDistribution, TableMetaKey, TableMetaValue,
+    TABLE_ROUTE_PREFIX,
+};
+use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::rpc::store::BatchGetRequest;
@@ -61,6 +64,27 @@ pub struct LogicalTableRouteValue {
 }
 
 impl TableRouteValue {
+    /// Returns a [TableRouteValue::Physical] if `table_id` equals `physical_table_id`.
+    /// Otherwise returns a [TableRouteValue::Logical].
+    pub(crate) fn new(
+        table_id: TableId,
+        physical_table_id: TableId,
+        region_routes: Vec<RegionRoute>,
+    ) -> Self {
+        if table_id == physical_table_id {
+            TableRouteValue::physical(region_routes)
+        } else {
+            let region_routes = region_routes
+                .into_iter()
+                .map(|region| {
+                    debug_assert_eq!(region.region.id.table_id(), physical_table_id);
+                    RegionId::new(table_id, region.region.id.region_number())
+                })
+                .collect::<Vec<_>>();
+            TableRouteValue::logical(physical_table_id, region_routes)
+        }
+    }
+
     pub fn physical(region_routes: Vec<RegionRoute>) -> Self {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
@@ -425,21 +449,6 @@ impl TableRouteStorage {
         Self { kv_backend }
     }
 
-    /// Builds a get table route transaction(readonly).
-    pub(crate) fn build_get_txn(
-        &self,
-        table_id: TableId,
-    ) -> (
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
-    ) {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
-
-        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
-    }
-
     /// Builds a create table route transaction,
     /// it expected the `__table_route/{table_id}` wasn't occupied.
     pub fn build_create_txn(
@@ -448,7 +457,9 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(
+            &mut TxnOpGetResponseSet,
+        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -458,7 +469,10 @@ impl TableRouteStorage {
             table_route_value.try_as_raw_value()?,
         );
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Builds a update table route transaction,
@@ -471,7 +485,9 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(
+            &mut TxnOpGetResponseSet,
+        ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -480,18 +496,10 @@ impl TableRouteStorage {
 
         let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
-    }
-
-    /// Builds a delete table route transaction,
-    /// it expected the remote value equals the `table_route_value`.
-    pub(crate) fn build_delete_txn(&self, table_id: TableId) -> Result<Txn> {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
-
-        Ok(txn)
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Returns the [`TableRouteValue`].
@@ -515,6 +523,37 @@ impl TableRouteStorage {
             .await?
             .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
+    }
+
+    /// Returns the physical `DeserializedValueWithBytes<TableRouteValue>` recursively.
+    ///
+    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
+    /// - the physical table(`logical_or_physical_table_id`) does not exist
+    /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exist.
+    pub async fn get_raw_physical_table_route(
+        &self,
+        logical_or_physical_table_id: TableId,
+    ) -> Result<(TableId, DeserializedValueWithBytes<TableRouteValue>)> {
+        let table_route =
+            self.get_raw(logical_or_physical_table_id)
+                .await?
+                .context(TableRouteNotFoundSnafu {
+                    table_id: logical_or_physical_table_id,
+                })?;
+
+        match table_route.get_inner_ref() {
+            TableRouteValue::Physical(_) => Ok((logical_or_physical_table_id, table_route)),
+            TableRouteValue::Logical(x) => {
+                let physical_table_id = x.physical_table_id();
+                let physical_table_route =
+                    self.get_raw(physical_table_id)
+                        .await?
+                        .context(TableRouteNotFoundSnafu {
+                            table_id: physical_table_id,
+                        })?;
+                Ok((physical_table_id, physical_table_route))
+            }
+        }
     }
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.

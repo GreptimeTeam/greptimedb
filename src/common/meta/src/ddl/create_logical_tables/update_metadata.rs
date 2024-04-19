@@ -61,7 +61,7 @@ impl CreateLogicalTablesProcedure {
         // Update physical table's metadata
         self.context
             .table_metadata_manager
-            .update_table_info(physical_table_info, new_table_info)
+            .update_table_info(&physical_table_info, new_table_info)
             .await?;
 
         // Invalid physical table cache

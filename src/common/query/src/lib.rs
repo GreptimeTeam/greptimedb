@@ -94,8 +94,8 @@ impl Debug for OutputData {
             OutputData::RecordBatches(recordbatches) => {
                 write!(f, "OutputData::RecordBatches({recordbatches:?})")
             }
-            OutputData::Stream(_) => {
-                write!(f, "OutputData::Stream(<stream>)")
+            OutputData::Stream(s) => {
+                write!(f, "OutputData::Stream(<{}>)", s.name())
             }
         }
     }

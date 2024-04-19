@@ -77,7 +77,7 @@ impl Function for RangeFunction {
     /// `range_fn` will never been used. As long as a legal signature is returned, the specific content of the signature does not matter.
     /// In fact, the arguments loaded by `range_fn` are very complicated, and it is difficult to use `Signature` to describe
     fn signature(&self) -> Signature {
-        Signature::any(0, Volatility::Immutable)
+        Signature::variadic_any(Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {

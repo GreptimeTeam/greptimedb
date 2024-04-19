@@ -27,6 +27,7 @@ use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
+use tokio::sync::RwLock as TokioRwLock;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
@@ -74,7 +75,7 @@ pub(crate) struct MitoRegion {
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Manager to maintain manifest for this region.
-    pub(crate) manifest_manager: RegionManifestManager,
+    pub(crate) manifest_manager: TokioRwLock<RegionManifestManager>,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
     /// Wal options of this region.
@@ -94,7 +95,7 @@ pub(crate) type MitoRegionRef = Arc<MitoRegion>;
 impl MitoRegion {
     /// Stop background managers for this region.
     pub(crate) async fn stop(&self) -> Result<()> {
-        self.manifest_manager.stop().await?;
+        self.manifest_manager.write().await.stop().await?;
 
         info!(
             "Stopped region manifest manager, region_id: {}",
@@ -154,7 +155,7 @@ impl MitoRegion {
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
 
-        let manifest_usage = self.manifest_manager.manifest_usage().await;
+        let manifest_usage = self.manifest_manager.read().await.manifest_usage();
 
         RegionUsage {
             region_id,
@@ -178,6 +179,8 @@ impl MitoRegion {
         info!("Applying {edit:?} to region {}", self.region_id);
 
         self.manifest_manager
+            .write()
+            .await
             .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
                 edit.clone(),
             )))

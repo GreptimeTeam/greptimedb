@@ -31,7 +31,7 @@ use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
@@ -40,8 +40,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::logging::info;
-use common_telemetry::{error, tracing};
+use common_telemetry::{debug, error, info, tracing};
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
@@ -144,12 +143,14 @@ impl Instance {
         let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
-        let cluster_id = 0; // TODO(jeremy): read from config
-        let mut meta_client = MetaClientBuilder::new(cluster_id, 0, Role::Frontend)
+        let cluster_id = 0; // It is currently a reserved field and has not been enabled.
+        let member_id = 0; // Frontend does not need a member id.
+        let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
+            .enable_access_cluster_info()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();
@@ -322,7 +323,11 @@ impl SqlQueryHandler for Instance {
                         }
                         Err(e) => {
                             let redacted = sql::util::redact_sql_secrets(query.as_ref());
-                            error!(e; "Failed to execute query: {redacted}");
+                            if e.status_code().should_log_error() {
+                                error!(e; "Failed to execute query: {redacted}");
+                            } else {
+                                debug!("Failed to execute query: {redacted}, {e}");
+                            }
 
                             results.push(Err(e));
                             break;

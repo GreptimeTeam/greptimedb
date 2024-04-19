@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+//! Build and Compute the dataflow
 
-#[async_trait::async_trait]
-pub(crate) trait DslExecutor<T, U> {
-    type Error: Sync + Send + fmt::Debug;
-
-    async fn execute(&self, input: &T) -> Result<U, Self::Error>;
-}
+mod render;
+mod state;
+mod types;

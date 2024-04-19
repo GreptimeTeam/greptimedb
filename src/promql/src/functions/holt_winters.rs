@@ -68,15 +68,17 @@ impl HoltWinters {
     }
 
     pub fn scalar_udf(level: f64, trend: f64) -> ScalarUDF {
-        ScalarUDF {
-            name: Self::name().to_string(),
-            signature: Signature::new(
+        // TODO(LFC): Use the new Datafusion UDF impl.
+        #[allow(deprecated)]
+        ScalarUDF::new(
+            Self::name(),
+            &Signature::new(
                 TypeSignature::Exact(Self::input_type()),
                 Volatility::Immutable,
             ),
-            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-            fun: Arc::new(move |input| Self::new(level, trend).calc(input)),
-        }
+            &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
+            &(Arc::new(move |input: &_| Self::new(level, trend).calc(input)) as _),
+        )
     }
 
     fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {

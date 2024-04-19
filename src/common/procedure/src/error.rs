@@ -104,8 +104,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Rollback Procedure recovered: {error}"))]
+    RollbackProcedureRecovered { error: String, location: Location },
+
     #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
+        source: Arc<Error>,
+        procedure_id: ProcedureId,
+    },
+
+    #[snafu(display(
+        "Procedure rollback exceeded max times, procedure_id: {}",
+        procedure_id
+    ))]
+    RollbackTimesExceeded {
         source: Arc<Error>,
         procedure_id: ProcedureId,
     },
@@ -145,6 +157,9 @@ pub enum Error {
 
     #[snafu(display("Unexpected: {err_msg}"))]
     Unexpected { location: Location, err_msg: String },
+
+    #[snafu(display("Not support to rollback the procedure"))]
+    RollbackNotSupported { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -161,9 +176,12 @@ impl ErrorExt for Error {
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
             | Error::RetryTimesExceeded { .. }
+            | Error::RollbackTimesExceeded { .. }
             | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
-            | Error::ManagerNotStart { .. } => StatusCode::Internal,
+            | Error::ManagerNotStart { .. }
+            | Error::RollbackProcedureRecovered { .. }
+            | Error::RollbackNotSupported { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }

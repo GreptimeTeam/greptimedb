@@ -124,6 +124,7 @@ impl Deleter {
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: ctx.get_db_string(),
+            ..Default::default()
         });
 
         let tasks = self

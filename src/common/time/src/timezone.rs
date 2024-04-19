@@ -15,7 +15,7 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use chrono::{FixedOffset, NaiveDateTime, TimeZone};
+use chrono::{FixedOffset, TimeZone};
 use chrono_tz::{OffsetComponents, Tz};
 use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
@@ -114,7 +114,9 @@ impl Timezone {
         match self {
             Self::Offset(offset) => offset.local_minus_utc().into(),
             Self::Named(tz) => {
-                let datetime = NaiveDateTime::from_timestamp_opt(0, 0).unwrap();
+                let datetime = chrono::DateTime::from_timestamp(0, 0)
+                    .map(|x| x.naive_utc())
+                    .expect("invalid timestamp");
                 let datetime = tz.from_utc_datetime(&datetime);
                 let utc_offset = datetime.offset().base_utc_offset();
                 let dst_offset = datetime.offset().dst_offset();

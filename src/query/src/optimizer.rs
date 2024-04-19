@@ -29,9 +29,6 @@ pub trait ExtensionAnalyzerRule {
         ctx: &QueryEngineContext,
         config: &ConfigOptions,
     ) -> Result<LogicalPlan>;
-
-    /// A human readable name for this analyzer rule
-    fn name(&self) -> &str;
 }
 
 pub mod order_hint;

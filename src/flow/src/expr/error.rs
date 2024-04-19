@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Error handling for expression evaluation.
+
 use std::any::Any;
 
 use common_macro::stack_trace_debug;
@@ -58,9 +60,6 @@ pub enum EvalError {
 
     #[snafu(display("Optimize error: {reason}"))]
     Optimize { reason: String, location: Location },
-
-    #[snafu(display("Unsupported temporal filter: {reason}"))]
-    UnsupportedTemporalFilter { reason: String, location: Location },
 
     #[snafu(display("Overflowed during evaluation"))]
     Overflow { location: Location },

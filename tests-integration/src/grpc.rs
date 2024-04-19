@@ -73,7 +73,8 @@ mod test {
     async fn test_handle_ddl_request(instance: &Instance) {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
-                database_name: "database_created_through_grpc".to_string(),
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
                 create_if_not_exists: true,
                 options: Default::default(),
             })),
@@ -789,6 +790,7 @@ CREATE TABLE {table_name} (
                 start: "1672557973".to_owned(),
                 end: "1672557978".to_owned(),
                 step: "1s".to_owned(),
+                lookback: "5m".to_string(),
             })),
         });
         let output = query(instance, request).await;

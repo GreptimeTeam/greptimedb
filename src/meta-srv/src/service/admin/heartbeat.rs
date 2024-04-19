@@ -33,6 +33,7 @@ impl HttpHandler for HeartBeatHandler {
     async fn handle(
         &self,
         path: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         if path.ends_with("/help") {

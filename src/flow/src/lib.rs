@@ -12,11 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This crate manage dataflow in Greptime, including adapter, expr, plan, repr and utils.
+//! It can transform substrait plan into it's own plan and execute it.
+//! It also contains definition of expression, adapter and plan, and internal state management.
+
 #![allow(dead_code)]
 #![allow(unused_imports)]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+#![warn(clippy::too_many_lines)]
 // allow unused for now because it should be use later
 mod adapter;
+mod compute;
 mod expr;
 mod plan;
 mod repr;
+mod transform;
 mod utils;

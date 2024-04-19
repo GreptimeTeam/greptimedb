@@ -137,6 +137,6 @@ mod tests {
     fn test_parquet_meta_size() {
         let metadata = parquet_meta();
 
-        assert_eq!(948, parquet_meta_size(&metadata));
+        assert_eq!(964, parquet_meta_size(&metadata));
     }
 }

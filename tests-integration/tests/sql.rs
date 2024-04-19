@@ -147,7 +147,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
     .unwrap();
     for i in 0..10 {
         let dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
-            NaiveDateTime::from_timestamp_opt(60, i).unwrap(),
+            chrono::DateTime::from_timestamp(60, i).unwrap().naive_utc(),
             Utc,
         );
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
@@ -179,7 +179,9 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
         let expected_dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
-            NaiveDateTime::from_timestamp_opt(60, i as u32).unwrap(),
+            chrono::DateTime::from_timestamp(60, i as u32)
+                .unwrap()
+                .naive_utc(),
             Utc,
         );
         assert_eq!(
@@ -360,7 +362,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
 
     for i in 0..10 {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
-        let dt = d.and_hms_opt(0, 0, 0).unwrap().timestamp_millis();
+        let dt = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
 
         sqlx::query("insert into demo values($1, $2, $3, $4)")
             .bind(i)

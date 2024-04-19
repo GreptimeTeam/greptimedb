@@ -35,6 +35,7 @@ use crate::statements::{sql_data_type_to_concrete_data_type, TimezoneInfo};
 ///  - `INT32` for `int`
 ///  - `INT64` for `bigint`
 ///  -  And `UINT8`, `UINT16` etc. for `UnsignedTinyint` etc.
+///  -  TinyText, MediumText, LongText for `Text`.
 pub(crate) struct TypeAliasTransformRule;
 
 impl TransformRule for TypeAliasTransformRule {
@@ -57,28 +58,56 @@ impl TransformRule for TypeAliasTransformRule {
     }
 
     fn visit_expr(&self, expr: &mut Expr) -> ControlFlow<()> {
+        fn cast_expr_to_arrow_cast_func(expr: Expr, cast_type: String) -> Function {
+            Function {
+                name: ObjectName(vec![Ident::new("arrow_cast")]),
+                args: vec![
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                        Value::SingleQuotedString(cast_type),
+                    ))),
+                ],
+                filter: None,
+                null_treatment: None,
+                over: None,
+                distinct: false,
+                special: false,
+                order_by: vec![],
+            }
+        }
+
         match expr {
+            // In new sqlparser, the "INT64" is no longer parsed to custom datatype.
+            // The new "Int64" is not recognizable by Datafusion, cannot directly "CAST" to it.
+            // We have to replace the expr to "arrow_cast" function call here.
+            // Same for "FLOAT64".
+            Expr::Cast {
+                expr: cast_expr,
+                data_type,
+                ..
+            } if matches!(data_type, DataType::Int64 | DataType::Float64) => {
+                if let Some(new_type) = get_data_type_by_alias_name(&data_type.to_string()) {
+                    if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
+                        *expr = Expr::Function(cast_expr_to_arrow_cast_func(
+                            (**cast_expr).clone(),
+                            new_type.as_arrow_type().to_string(),
+                        ));
+                    }
+                }
+            }
+
             // Type alias
             Expr::Cast {
                 data_type: DataType::Custom(name, tokens),
                 expr: cast_expr,
+                ..
             } if name.0.len() == 1 && tokens.is_empty() => {
                 if let Some(new_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
-                    if let Ok(concrete_type) = sql_data_type_to_concrete_data_type(&new_type) {
-                        let new_type = concrete_type.as_arrow_type();
-                        *expr = Expr::Function(Function {
-                            name: ObjectName(vec![Ident::new("arrow_cast")]),
-                            args: vec![
-                                FunctionArg::Unnamed(FunctionArgExpr::Expr((**cast_expr).clone())),
-                                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                    Value::SingleQuotedString(new_type.to_string()),
-                                ))),
-                            ],
-                            over: None,
-                            distinct: false,
-                            special: false,
-                            order_by: vec![],
-                        });
+                    if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
+                        *expr = Expr::Function(cast_expr_to_arrow_cast_func(
+                            (**cast_expr).clone(),
+                            new_type.as_arrow_type().to_string(),
+                        ));
                     }
                 }
             }
@@ -88,24 +117,16 @@ impl TransformRule for TypeAliasTransformRule {
             Expr::Cast {
                 data_type: DataType::Timestamp(precision, zone),
                 expr: cast_expr,
+                ..
             } => {
                 if let Ok(concrete_type) =
                     sql_data_type_to_concrete_data_type(&DataType::Timestamp(*precision, *zone))
                 {
                     let new_type = concrete_type.as_arrow_type();
-                    *expr = Expr::Function(Function {
-                        name: ObjectName(vec![Ident::new("arrow_cast")]),
-                        args: vec![
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr((**cast_expr).clone())),
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                                Value::SingleQuotedString(new_type.to_string()),
-                            ))),
-                        ],
-                        over: None,
-                        distinct: false,
-                        special: false,
-                        order_by: vec![],
-                    });
+                    *expr = Expr::Function(cast_expr_to_arrow_cast_func(
+                        (**cast_expr).clone(),
+                        new_type.to_string(),
+                    ));
                 }
             }
 
@@ -158,6 +179,8 @@ pub fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "UINT64" => Some(DataType::UnsignedBigInt(None)),
         "FLOAT32" => Some(DataType::Float(None)),
         "FLOAT64" => Some(DataType::Double),
+        // String type alias
+        "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Some(DataType::Text),
         _ => None,
     }
 }
@@ -261,6 +284,18 @@ mod tests {
             get_data_type_by_alias_name("Timestamp_ns"),
             Some(DataType::Timestamp(Some(9), TimezoneInfo::None))
         );
+        assert_eq!(
+            get_data_type_by_alias_name("TinyText"),
+            Some(DataType::Text)
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("MediumText"),
+            Some(DataType::Text)
+        );
+        assert_eq!(
+            get_data_type_by_alias_name("LongText"),
+            Some(DataType::Text)
+        );
     }
 
     fn test_timestamp_alias(alias: &str, expected: &str) {
@@ -303,6 +338,9 @@ mod tests {
         let sql = r#"
 CREATE TABLE data_types (
   s string,
+  tt tinytext,
+  mt mediumtext,
+  lt longtext,
   tint int8,
   sint int16,
   i int32,
@@ -329,13 +367,16 @@ CREATE TABLE data_types (
             Statement::CreateTable(c) => {
                 let expected = r#"CREATE TABLE  data_types (
   s STRING,
+  tt TEXT,
+  mt TEXT,
+  lt TEXT,
   tint INT8,
   sint SMALLINT,
   i INT,
-  bint BIGINT,
+  bint INT64,
   v VARCHAR,
   f FLOAT,
-  d DOUBLE,
+  d FLOAT64,
   b BOOLEAN,
   vb VARBINARY,
   dt DATE,

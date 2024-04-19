@@ -15,7 +15,7 @@
 use arrow_schema::SortOptions;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan};
@@ -48,6 +48,7 @@ impl OrderHintRule {
         if let Some(order_expr) = visitor.order_expr.take() {
             plan.clone()
                 .transform_down(&|plan| Self::set_ordering_hint(plan, &order_expr))
+                .map(|x| x.data)
         } else {
             Ok(plan.clone())
         }
@@ -74,7 +75,7 @@ impl OrderHintRule {
                         for sort in order_expr {
                             let name = match sort.expr.try_into_col() {
                                 Ok(col) => col.name,
-                                Err(_) => return Ok(Transformed::No(plan)),
+                                Err(_) => return Ok(Transformed::no(plan)),
                             };
                             opts.push(OrderOption {
                                 name,
@@ -89,12 +90,12 @@ impl OrderHintRule {
                     }
                 }
                 if transformed {
-                    Ok(Transformed::Yes(plan))
+                    Ok(Transformed::yes(plan))
                 } else {
-                    Ok(Transformed::No(plan))
+                    Ok(Transformed::no(plan))
                 }
             }
-            _ => Ok(Transformed::No(plan)),
+            _ => Ok(Transformed::no(plan)),
         }
     }
 }
@@ -106,9 +107,9 @@ struct OrderHintVisitor {
 }
 
 impl TreeNodeVisitor for OrderHintVisitor {
-    type N = LogicalPlan;
+    type Node = LogicalPlan;
 
-    fn pre_visit(&mut self, node: &Self::N) -> DataFusionResult<VisitRecursion> {
+    fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
         if let LogicalPlan::Sort(sort) = node {
             let mut exprs = vec![];
             for expr in &sort.expr {
@@ -118,7 +119,7 @@ impl TreeNodeVisitor for OrderHintVisitor {
             }
             self.order_expr = Some(exprs);
         }
-        Ok(VisitRecursion::Continue)
+        Ok(TreeNodeRecursion::Continue)
     }
 }
 

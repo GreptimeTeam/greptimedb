@@ -55,6 +55,7 @@ pub struct RegionInfo {
     pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DatanodeTableKey {
     pub datanode_id: DatanodeId,
     pub table_id: TableId,
@@ -239,10 +240,14 @@ impl DatanodeTableManager {
                 // FIXME(weny): add unit tests.
                 let mut new_region_info = region_info.clone();
                 if need_update_options {
-                    new_region_info.region_options = new_region_options.clone();
+                    new_region_info
+                        .region_options
+                        .clone_from(new_region_options);
                 }
                 if need_update_wal_options {
-                    new_region_info.region_wal_options = new_region_wal_options.clone();
+                    new_region_info
+                        .region_wal_options
+                        .clone_from(new_region_wal_options);
                 }
                 let val = DatanodeTableValue::new(table_id, regions, new_region_info)
                     .try_as_raw_value()?;

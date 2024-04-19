@@ -44,9 +44,7 @@ pub fn build_filter_from_timestamp(
     ts_col_name: &str,
     time_range: Option<&TimestampRange>,
 ) -> Option<Expr> {
-    let Some(time_range) = time_range else {
-        return None;
-    };
+    let time_range = time_range?;
     let ts_col_expr = DfExpr::Column(Column {
         relation: None,
         name: ts_col_name.to_string(),
@@ -94,10 +92,10 @@ mod tests {
 
     #[test]
     fn test_from_df_expr() {
-        let df_expr = DfExpr::Wildcard;
+        let df_expr = DfExpr::Wildcard { qualifier: None };
 
         let expr: Expr = df_expr.into();
 
-        assert_eq!(DfExpr::Wildcard, *expr.df_expr());
+        assert_eq!(DfExpr::Wildcard { qualifier: None }, *expr.df_expr());
     }
 }

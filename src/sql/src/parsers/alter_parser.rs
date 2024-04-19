@@ -33,7 +33,7 @@ impl<'a> ParserContext<'a> {
         let parser = &mut self.parser;
         parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
 
-        let raw_table_name = parser.parse_object_name()?;
+        let raw_table_name = parser.parse_object_name(false)?;
         let table_name = Self::canonicalize_object_name(raw_table_name);
 
         let alter_operation = if parser.parse_keyword(Keyword::ADD) {
@@ -48,7 +48,7 @@ impl<'a> ParserContext<'a> {
                 } else if let Token::Word(word) = parser.peek_token().token {
                     if word.value.to_ascii_uppercase() == "AFTER" {
                         let _ = parser.next_token();
-                        let name = Self::canonicalize_identifier(parser.parse_identifier()?);
+                        let name = Self::canonicalize_identifier(self.parse_identifier()?);
                         Some(AddColumnLocation::After {
                             column_name: name.value,
                         })
@@ -65,7 +65,7 @@ impl<'a> ParserContext<'a> {
             }
         } else if parser.parse_keyword(Keyword::DROP) {
             if parser.parse_keyword(Keyword::COLUMN) {
-                let name = Self::canonicalize_identifier(self.parser.parse_identifier()?);
+                let name = Self::canonicalize_identifier(self.parse_identifier()?);
                 AlterTableOperation::DropColumn { name }
             } else {
                 return Err(ParserError::ParserError(format!(
@@ -74,7 +74,7 @@ impl<'a> ParserContext<'a> {
                 )));
             }
         } else if parser.parse_keyword(Keyword::RENAME) {
-            let new_table_name_obj_raw = parser.parse_object_name()?;
+            let new_table_name_obj_raw = self.parse_object_name()?;
             let new_table_name_obj = Self::canonicalize_object_name(new_table_name_obj_raw);
             let new_table_name = match &new_table_name_obj.0[..] {
                 [table] => table.value.clone(),
@@ -128,7 +128,7 @@ mod tests {
                         location,
                     } => {
                         assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String, column_def.data_type);
+                        assert_eq!(DataType::String(None), column_def.data_type);
                         assert!(column_def
                             .options
                             .iter()
@@ -164,7 +164,7 @@ mod tests {
                         location,
                     } => {
                         assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String, column_def.data_type);
+                        assert_eq!(DataType::String(None), column_def.data_type);
                         assert!(column_def
                             .options
                             .iter()
@@ -200,7 +200,7 @@ mod tests {
                         location,
                     } => {
                         assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String, column_def.data_type);
+                        assert_eq!(DataType::String(None), column_def.data_type);
                         assert!(column_def
                             .options
                             .iter()

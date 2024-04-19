@@ -26,7 +26,6 @@ use common_function::state::FunctionState;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
 use common_telemetry::warn;
-use datafusion::catalog::MemoryCatalogList;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
@@ -101,18 +100,14 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
-        let session_state = SessionState::new_with_config_rt_and_catalog_list(
-            session_config,
-            runtime_env,
-            Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
-        )
-        .with_serializer_registry(Arc::new(ExtensionSerializer))
-        .with_analyzer_rules(analyzer.rules)
-        .with_query_planner(Arc::new(DfQueryPlanner::new(
-            catalog_list.clone(),
-            region_query_handler,
-        )))
-        .with_optimizer_rules(optimizer.rules);
+        let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
+            .with_serializer_registry(Arc::new(ExtensionSerializer))
+            .with_analyzer_rules(analyzer.rules)
+            .with_query_planner(Arc::new(DfQueryPlanner::new(
+                catalog_list.clone(),
+                region_query_handler,
+            )))
+            .with_optimizer_rules(optimizer.rules);
 
         let df_context = SessionContext::new_with_state(session_state);
 

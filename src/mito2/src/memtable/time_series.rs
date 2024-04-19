@@ -238,7 +238,9 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        let iter = self.series_set.iter_series(projection, filters, self.dedup);
+        let iter = self
+            .series_set
+            .iter_series(projection, filters, self.dedup)?;
         Ok(Box::new(iter))
     }
 
@@ -348,7 +350,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
-    ) -> Iter {
+    ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
             .region_metadata
@@ -356,7 +358,7 @@ impl SeriesSet {
             .map(|pk| pk.column_schema.data_type.clone())
             .collect();
 
-        Iter::new(
+        Iter::try_new(
             self.region_metadata.clone(),
             self.series.clone(),
             projection,
@@ -417,7 +419,7 @@ struct Iter {
 
 impl Iter {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn try_new(
         metadata: RegionMetadataRef,
         series: Arc<SeriesRwLockMap>,
         projection: HashSet<ColumnId>,
@@ -426,27 +428,28 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<McmpRowCodec>,
         dedup: bool,
-    ) -> Self {
-        let simple_filters = predicate
-            .map(|p| {
-                p.exprs()
+    ) -> Result<Self> {
+        let predicate = predicate
+            .map(|predicate| {
+                predicate
+                    .exprs()
                     .iter()
                     .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        Self {
+        Ok(Self {
             metadata,
             series,
             projection,
             last_key: None,
-            predicate: simple_filters,
+            predicate,
             pk_schema,
             pk_datatypes,
             codec,
             dedup,
             metrics: Metrics::default(),
-        }
+        })
     }
 }
 

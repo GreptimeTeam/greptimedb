@@ -18,14 +18,14 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 
-use api::v1::region::{region_request, QueryRequest, RegionResponse};
+use api::region::RegionResponse;
+use api::v1::region::{region_request, QueryRequest, RegionResponse as RegionResponseV1};
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
-use common_meta::datanode_manager::HandleResponse;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, OutputData};
@@ -36,7 +36,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
-use datafusion::catalog::{CatalogList, CatalogProvider};
+use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
@@ -129,7 +129,7 @@ impl RegionServer {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<HandleResponse> {
+    ) -> Result<RegionResponse> {
         self.inner.handle_request(region_id, request).await
     }
 
@@ -218,7 +218,7 @@ impl RegionServer {
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
-    async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponse> {
+    async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
         let is_parallel = matches!(
             request,
             region_request::Body::Inserts(_) | region_request::Body::Deletes(_)
@@ -276,7 +276,7 @@ impl RegionServerHandler for RegionServer {
             extension.extend(result.extension);
         }
 
-        Ok(RegionResponse {
+        Ok(RegionResponseV1 {
             header: Some(ResponseHeader {
                 status: Some(Status {
                     status_code: StatusCode::Success as _,
@@ -465,7 +465,7 @@ impl RegionServerInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<HandleResponse> {
+    ) -> Result<RegionResponse> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])
@@ -490,7 +490,7 @@ impl RegionServerInner {
 
         let engine = match self.get_engine(region_id, &region_change)? {
             CurrentEngine::Engine(engine) => engine,
-            CurrentEngine::EarlyReturn(rows) => return Ok(HandleResponse::new(rows)),
+            CurrentEngine::EarlyReturn(rows) => return Ok(RegionResponse::new(rows)),
         };
 
         // Sets corresponding region status to registering/deregistering before the operation.
@@ -505,7 +505,7 @@ impl RegionServerInner {
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine, region_change)
                     .await?;
-                Ok(HandleResponse {
+                Ok(RegionResponse {
                     affected_rows: result.affected_rows,
                     extension: result.extension,
                 })
@@ -545,9 +545,7 @@ impl RegionServerInner {
         match region_change {
             RegionChange::None => {}
             RegionChange::Register(_, _) | RegionChange::Deregisters => {
-                self.region_map
-                    .remove(&region_id)
-                    .map(|(id, engine)| engine.set_writable(id, false));
+                self.region_map.remove(&region_id);
             }
         }
     }
@@ -645,10 +643,15 @@ impl RegionServerInner {
             .await?;
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
-
+        let query_engine_ctx = self.query_engine.engine_context(ctx.clone());
         // decode substrait plan to logical plan and execute it
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(Bytes::from(plan), catalog_list, "", "")
+            .decode(
+                Bytes::from(plan),
+                catalog_list,
+                query_engine_ctx.state().clone(),
+                ctx.clone(),
+            )
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
@@ -730,7 +733,7 @@ impl DummyCatalogList {
     }
 }
 
-impl CatalogList for DummyCatalogList {
+impl CatalogProviderList for DummyCatalogList {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -788,8 +791,8 @@ impl SchemaProvider for DummySchemaProvider {
         vec![]
     }
 
-    async fn table(&self, _name: &str) -> Option<Arc<dyn TableProvider>> {
-        Some(self.table.clone())
+    async fn table(&self, _name: &str) -> DfResult<Option<Arc<dyn TableProvider>>> {
+        Ok(Some(self.table.clone()))
     }
 
     fn table_exist(&self, _name: &str) -> bool {
@@ -829,7 +832,10 @@ impl TableProvider for DummyTableProvider {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
         let mut request = self.scan_request.lock().unwrap().clone();
-        request.projection = projection.cloned();
+        request.projection = match projection {
+            Some(x) if !x.is_empty() => Some(x.clone()),
+            _ => None,
+        };
         request.filters = filters.iter().map(|e| Expr::from(e.clone())).collect();
         request.limit = limit;
 

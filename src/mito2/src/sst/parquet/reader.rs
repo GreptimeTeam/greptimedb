@@ -180,11 +180,12 @@ impl ParquetReaderBuilder {
 
         metrics.build_cost = start.elapsed();
 
-        let predicate = if let Some(p) = &self.predicate {
-            p.exprs()
+        let predicate = if let Some(predicate) = &self.predicate {
+            predicate
+                .exprs()
                 .iter()
                 .filter_map(|expr| SimpleFilterEvaluator::try_new(expr.df_expr()))
-                .collect()
+                .collect::<Vec<_>>()
         } else {
             vec![]
         };
@@ -698,7 +699,12 @@ impl ParquetReader {
             };
             let result = match column_metadata.semantic_type {
                 SemanticType::Tag => {
-                    let pk_values = self.codec.decode(input.primary_key())?;
+                    let pk_values = if let Some(pk_values) = input.pk_values() {
+                        pk_values
+                    } else {
+                        input.set_pk_values(self.codec.decode(input.primary_key())?);
+                        input.pk_values().unwrap()
+                    };
                     // Safety: this is a primary key
                     let pk_index = self
                         .read_format
@@ -712,7 +718,6 @@ impl ParquetReader {
                         .evaluate_scalar(&pk_value)
                         .context(FilterRecordBatchSnafu)?
                     {
-                        input.set_pk_values(pk_values);
                         continue;
                     } else {
                         // PK not match means the entire batch is filtered out.

@@ -94,6 +94,9 @@ pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 pub mod table_result;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod test_helpers;
+
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
 /// Default http body limit (64M).
@@ -127,6 +130,8 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
+
+    pub is_strict_mode: bool,
 }
 
 impl Default for HttpOptions {
@@ -136,6 +141,7 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
+            is_strict_mode: false,
         }
     }
 }
@@ -502,11 +508,12 @@ impl HttpServerBuilder {
         self,
         handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
+        is_strict_mode: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
-                HttpServer::route_prom(handler, prom_store_with_metric_engine),
+                HttpServer::route_prom(handler, prom_store_with_metric_engine, is_strict_mode),
             ),
             ..self
         }
@@ -698,15 +705,31 @@ impl HttpServer {
     fn route_prom<S>(
         prom_handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
+        is_strict_mode: bool,
     ) -> Router<S> {
         let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
-        if prom_store_with_metric_engine {
-            router = router.route("/write", routing::post(prom_store::remote_write));
-        } else {
-            router = router.route(
-                "/write",
-                routing::post(prom_store::route_write_without_metric_engine),
-            );
+        match (prom_store_with_metric_engine, is_strict_mode) {
+            (true, true) => {
+                router = router.route("/write", routing::post(prom_store::remote_write))
+            }
+            (true, false) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::remote_write_without_strict_mode),
+                )
+            }
+            (false, true) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::route_write_without_metric_engine),
+                )
+            }
+            (false, false) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::route_write_without_metric_engine_and_strict_mode),
+                )
+            }
         }
         router.with_state(prom_handler)
     }
@@ -824,7 +847,6 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use axum_test_helper::TestClient;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
@@ -838,6 +860,7 @@ mod test {
 
     use super::*;
     use crate::error::Error;
+    use crate::http::test_helpers::TestClient;
     use crate::query_handler::grpc::GrpcQueryHandler;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 

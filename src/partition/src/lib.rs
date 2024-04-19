@@ -14,6 +14,8 @@
 
 #![feature(assert_matches)]
 
+//! Structs and traits for partitioning rule.   
+
 pub mod columns;
 pub mod error;
 pub mod expr;

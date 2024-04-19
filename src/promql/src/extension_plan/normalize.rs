@@ -23,10 +23,9 @@ use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Stat
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datatypes::arrow::array::TimestampMillisecondArray;
@@ -170,12 +169,8 @@ impl ExecutionPlan for SeriesNormalizeExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
+    fn properties(&self) -> &PlanProperties {
+        self.input.properties()
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -223,7 +218,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
+    fn statistics(&self) -> DataFusionResult<Statistics> {
         self.input.statistics()
     }
 }
@@ -299,7 +294,7 @@ impl SeriesNormalizeStream {
         }
 
         let result = compute::filter_record_batch(&ordered_batch, &BooleanArray::from(filter))
-            .map_err(DataFusionError::ArrowError)?;
+            .map_err(|e| DataFusionError::ArrowError(e, None))?;
         Ok(result)
     }
 }

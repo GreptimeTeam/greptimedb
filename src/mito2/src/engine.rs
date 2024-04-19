@@ -31,6 +31,8 @@ mod create_test;
 #[cfg(test)]
 mod drop_test;
 #[cfg(test)]
+mod filter_deleted_test;
+#[cfg(test)]
 mod flush_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
@@ -51,6 +53,7 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -59,7 +62,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -127,6 +130,10 @@ impl MitoEngine {
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["edit_region"])
+            .start_timer();
+
         ensure!(
             is_valid_region_edit(&edit),
             InvalidRequestSnafu {
@@ -215,10 +222,6 @@ impl EngineInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows> {
-        let _timer = HANDLE_REQUEST_ELAPSED
-            .with_label_values(&[request.type_name()])
-            .start_timer();
-
         let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
         self.workers.submit_to_worker(region_id, request).await?;
 
@@ -297,11 +300,15 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<RegionHandleResult, BoxedError> {
+    ) -> Result<RegionResponse, BoxedError> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&[request.request_type()])
+            .start_timer();
+
         self.inner
             .handle_request(region_id, request)
             .await
-            .map(RegionHandleResult::new)
+            .map(RegionResponse::new)
             .map_err(BoxedError::new)
     }
 
@@ -355,6 +362,10 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
     ) -> Result<SetReadonlyResponse, BoxedError> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["set_readonly_gracefully"])
+            .start_timer();
+
         self.inner
             .set_readonly_gracefully(region_id)
             .await

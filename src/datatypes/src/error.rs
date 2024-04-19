@@ -139,6 +139,13 @@ pub enum Error {
         error: arrow::error::ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert Arrow array to scalars"))]
+    ConvertArrowArrayToScalars {
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

@@ -21,7 +21,6 @@ use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
-use axum_test_helper::TestClient;
 use common_query::Output;
 use common_test_util::ports;
 use prost::Message;
@@ -30,6 +29,7 @@ use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
+use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_store;
 use servers::prom_store::{snappy_compress, Metrics};
@@ -135,10 +135,11 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         ..Default::default()
     };
 
+    let is_strict_mode = false;
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone(), None)
-        .with_prom_handler(instance, true)
+        .with_prom_handler(instance, true, is_strict_mode)
         .build();
     server.build(server.make_app())
 }

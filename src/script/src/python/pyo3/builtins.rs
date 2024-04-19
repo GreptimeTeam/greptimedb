@@ -19,7 +19,7 @@ use common_function::function_registry::FUNCTION_REGISTRY;
 use datafusion::arrow::array::{ArrayRef, NullArray};
 use datafusion::physical_plan::expressions;
 use datafusion_expr::ColumnarValue;
-use datafusion_physical_expr::{math_expressions, AggregateExpr};
+use datafusion_physical_expr::AggregateExpr;
 use datatypes::vectors::VectorRef;
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
@@ -133,7 +133,7 @@ fn get_globals(py: Python) -> PyResult<&PyDict> {
 fn dataframe(py: Python) -> PyResult<PyDataFrame> {
     let globals = get_globals(py)?;
     let df = globals
-        .get_item("__dataframe__")
+        .get_item("__dataframe__")?
         .ok_or_else(|| PyKeyError::new_err("No __dataframe__ variable is found"))?
         .extract::<PyDataFrame>()?;
     Ok(df)
@@ -144,7 +144,7 @@ fn dataframe(py: Python) -> PyResult<PyDataFrame> {
 pub(crate) fn query_engine(py: Python) -> PyResult<PyQueryEngine> {
     let globals = get_globals(py)?;
     let query = globals
-        .get_item("__query__")
+        .get_item("__query__")?
         .ok_or_else(|| PyKeyError::new_err("No __query__ variable is found"))?
         .extract::<PyQueryEngine>()?;
     Ok(query)
@@ -237,7 +237,9 @@ macro_rules! bind_call_unary_math_function {
         fn $DF_FUNC(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
             let args =
                 &[all_to_f64(try_into_columnar_value(py, val)?).map_err(PyValueError::new_err)?];
-            let res = math_expressions::$DF_FUNC(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+            let res = datafusion_functions::math::$DF_FUNC()
+                .invoke(args)
+                .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
             columnar_value_to_py_any(py, res)
         }
     )*
@@ -293,18 +295,19 @@ fn random(py: Python<'_>, len: usize) -> PyResult<PyObject> {
     // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
     let arg = NullArray::new(len);
     let args = &[ColumnarValue::Array(std::sync::Arc::new(arg) as _)];
-    let res =
-        math_expressions::random(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-
+    let res = datafusion_functions::math::random()
+        .invoke(args)
+        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
     columnar_value_to_py_any(py, res)
 }
 
 #[pyfunction]
 fn round(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
     let value = try_into_columnar_value(py, val)?;
-    let array = value.into_array(1);
-    let result =
-        math_expressions::round(&[array]).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+    let result = datafusion_functions::math::round()
+        .invoke(&[value])
+        .and_then(|x| x.into_array(1))
+        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
     columnar_value_to_py_any(py, ColumnarValue::Array(result))
 }
 
@@ -368,7 +371,19 @@ fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> Py
     )
 }
 
-bind_aggr_expr!(array_agg, ArrayAgg,[v0], v0, expr0=>0);
+#[pyfunction]
+fn array_agg(py: Python<'_>, v: &PyVector) -> PyResult<PyObject> {
+    eval_df_aggr_expr(
+        py,
+        expressions::ArrayAgg::new(
+            Arc::new(expressions::Column::new("expr0", 0)) as _,
+            "ArrayAgg",
+            v.arrow_data_type(),
+            true,
+        ),
+        &[v.to_arrow_array()],
+    )
+}
 
 bind_aggr_expr!(avg, Avg,[v0], v0, expr0=>0);
 

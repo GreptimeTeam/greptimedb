@@ -27,8 +27,8 @@ subgraph Frontend["Frontend"]
     end
 end
 
-MyTable --> MetaSrv
-MetaSrv --> ETCD
+MyTable --> Metasrv
+Metasrv --> ETCD
 
 MyTable-->TableEngine0
 MyTable-->TableEngine1
@@ -95,8 +95,8 @@ subgraph Frontend["Frontend"]
     end
 end
 
-MyTable --> MetaSrv
-MetaSrv --> ETCD
+MyTable --> Metasrv
+Metasrv --> ETCD
 
 MyTable-->RegionEngine
 MyTable-->RegionEngine1

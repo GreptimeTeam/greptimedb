@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::usize;
 
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
@@ -36,6 +35,7 @@ use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStre
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::Statistics;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
@@ -184,17 +184,17 @@ impl StatementExecutor {
         filename: &str,
         file_schema: SchemaRef,
     ) -> Result<DfSendableRecordBatchStream> {
+        let statistics = Statistics::new_unknown(file_schema.as_ref());
         let stream = FileStream::new(
             &FileScanConfig {
                 object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
                 file_schema,
                 file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-                statistics: Default::default(),
+                statistics,
                 projection: None,
                 limit: None,
                 table_partition_cols: vec![],
                 output_ordering: vec![],
-                infinite_source: false,
             },
             0,
             opener,

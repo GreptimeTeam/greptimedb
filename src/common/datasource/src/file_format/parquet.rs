@@ -215,10 +215,7 @@ impl BufferedWriter {
 
     /// Write a record batch to stream writer.
     pub async fn write(&mut self, arrow_batch: &RecordBatch) -> error::Result<()> {
-        self.inner.write(arrow_batch).await?;
-        self.inner.try_flush(false).await?;
-
-        Ok(())
+        self.inner.write(arrow_batch).await
     }
 
     /// Close parquet writer.

@@ -1,0 +1,143 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::cluster;
+use common_meta::cluster::{DatanodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
+use common_meta::peer::Peer;
+use common_meta::rpc::store::PutRequest;
+use snafu::ResultExt;
+use store_api::region_engine::RegionRole;
+
+use crate::error::{InvalidClusterInfoFormatSnafu, SaveClusterInfoSnafu};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
+use crate::metasrv::Context;
+use crate::Result;
+
+/// The handler to collect cluster info from the heartbeat request of frontend.
+pub struct CollectFrontendClusterInfoHandler;
+
+#[async_trait::async_trait]
+impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Frontend
+    }
+
+    async fn handle(
+        &self,
+        req: &HeartbeatRequest,
+        ctx: &mut Context,
+        _acc: &mut HeartbeatAccumulator,
+    ) -> Result<HandleControl> {
+        let Some((key, peer)) = extract_base_info(req, Role::Frontend) else {
+            return Ok(HandleControl::Continue);
+        };
+
+        let value = NodeInfo {
+            peer,
+            last_activity_ts: common_time::util::current_time_millis(),
+            status: NodeStatus::Frontend(FrontendStatus {}),
+        };
+
+        save_to_mem_store(key, value, ctx).await?;
+
+        Ok(HandleControl::Continue)
+    }
+}
+
+/// The handler to collect cluster info from the heartbeat request of datanode.
+pub struct CollectDatanodeClusterInfoHandler;
+
+#[async_trait::async_trait]
+impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Datanode
+    }
+
+    async fn handle(
+        &self,
+        req: &HeartbeatRequest,
+        ctx: &mut Context,
+        acc: &mut HeartbeatAccumulator,
+    ) -> Result<HandleControl> {
+        let Some((key, peer)) = extract_base_info(req, Role::Datanode) else {
+            return Ok(HandleControl::Continue);
+        };
+
+        let Some(stat) = &acc.stat else {
+            return Ok(HandleControl::Continue);
+        };
+
+        let leader_regions = stat
+            .region_stats
+            .iter()
+            .filter(|s| s.role == RegionRole::Leader)
+            .count();
+        let follower_regions = stat.region_stats.len() - leader_regions;
+
+        let value = NodeInfo {
+            peer,
+            last_activity_ts: stat.timestamp_millis,
+            status: NodeStatus::Datanode(DatanodeStatus {
+                rcus: stat.rcus,
+                wcus: stat.wcus,
+                leader_regions,
+                follower_regions,
+            }),
+        };
+
+        save_to_mem_store(key, value, ctx).await?;
+
+        Ok(HandleControl::Continue)
+    }
+}
+
+fn extract_base_info(req: &HeartbeatRequest, role: Role) -> Option<(NodeInfoKey, Peer)> {
+    let HeartbeatRequest { header, peer, .. } = req;
+    let Some(header) = &header else {
+        return None;
+    };
+    let Some(peer) = &peer else {
+        return None;
+    };
+
+    Some((
+        NodeInfoKey {
+            cluster_id: header.cluster_id,
+            role: match role {
+                Role::Datanode => cluster::Role::Datanode,
+                Role::Frontend => cluster::Role::Frontend,
+            },
+            node_id: peer.id,
+        },
+        Peer::from(peer.clone()),
+    ))
+}
+
+async fn save_to_mem_store(key: NodeInfoKey, value: NodeInfo, ctx: &mut Context) -> Result<()> {
+    let key = key.into();
+    let value = value.try_into().context(InvalidClusterInfoFormatSnafu)?;
+    let put_req = PutRequest {
+        key,
+        value,
+        ..Default::default()
+    };
+
+    ctx.in_memory
+        .put(put_req)
+        .await
+        .context(SaveClusterInfoSnafu)?;
+
+    Ok(())
+}

@@ -17,8 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_telemetry::logging;
-use meta_srv::bootstrap::MetaSrvInstance;
-use meta_srv::metasrv::MetaSrvOptions;
+use meta_srv::bootstrap::MetasrvInstance;
+use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartMetaServerSnafu};
@@ -26,11 +26,11 @@ use crate::options::{CliOptions, Options};
 use crate::App;
 
 pub struct Instance {
-    instance: MetaSrvInstance,
+    instance: MetasrvInstance,
 }
 
 impl Instance {
-    fn new(instance: MetaSrvInstance) -> Self {
+    fn new(instance: MetasrvInstance) -> Self {
         Self { instance }
     }
 }
@@ -42,7 +42,7 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        plugins::start_meta_srv_plugins(self.instance.plugins())
+        plugins::start_metasrv_plugins(self.instance.plugins())
             .await
             .context(StartMetaServerSnafu)?;
 
@@ -64,7 +64,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
+    pub async fn build(self, opts: MetasrvOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
@@ -79,7 +79,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
+    async fn build(self, opts: MetasrvOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
@@ -127,30 +127,30 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        let mut opts: MetaSrvOptions = Options::load_layered_options(
+        let mut opts: MetasrvOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            MetaSrvOptions::env_list_keys(),
+            MetasrvOptions::env_list_keys(),
         )?;
 
         if let Some(dir) = &cli_options.log_dir {
-            opts.logging.dir = dir.clone();
+            opts.logging.dir.clone_from(dir);
         }
 
         if cli_options.log_level.is_some() {
-            opts.logging.level = cli_options.log_level.clone();
+            opts.logging.level.clone_from(&cli_options.log_level);
         }
 
         if let Some(addr) = &self.bind_addr {
-            opts.bind_addr = addr.clone();
+            opts.bind_addr.clone_from(addr);
         }
 
         if let Some(addr) = &self.server_addr {
-            opts.server_addr = addr.clone();
+            opts.server_addr.clone_from(addr);
         }
 
         if let Some(addr) = &self.store_addr {
-            opts.store_addr = addr.clone();
+            opts.store_addr.clone_from(addr);
         }
 
         if let Some(selector_type) = &self.selector {
@@ -168,7 +168,7 @@ impl StartCommand {
         }
 
         if let Some(http_addr) = &self.http_addr {
-            opts.http.addr = http_addr.clone();
+            opts.http.addr.clone_from(http_addr);
         }
 
         if let Some(http_timeout) = self.http_timeout {
@@ -176,11 +176,11 @@ impl StartCommand {
         }
 
         if let Some(data_home) = &self.data_home {
-            opts.data_home = data_home.clone();
+            opts.data_home.clone_from(data_home);
         }
 
         if !self.store_key_prefix.is_empty() {
-            opts.store_key_prefix = self.store_key_prefix.clone()
+            opts.store_key_prefix.clone_from(&self.store_key_prefix)
         }
 
         if let Some(max_txn_ops) = self.max_txn_ops {
@@ -193,20 +193,20 @@ impl StartCommand {
         Ok(Options::Metasrv(Box::new(opts)))
     }
 
-    async fn build(self, mut opts: MetaSrvOptions) -> Result<Instance> {
-        let plugins = plugins::setup_meta_srv_plugins(&mut opts)
+    async fn build(self, mut opts: MetasrvOptions) -> Result<Instance> {
+        let plugins = plugins::setup_metasrv_plugins(&mut opts)
             .await
             .context(StartMetaServerSnafu)?;
 
-        logging::info!("MetaSrv start command: {:#?}", self);
-        logging::info!("MetaSrv options: {:#?}", opts);
+        logging::info!("Metasrv start command: {:#?}", self);
+        logging::info!("Metasrv options: {:#?}", opts);
 
         let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
             .await
             .context(error::BuildMetaServerSnafu)?;
         let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
 
-        let instance = MetaSrvInstance::new(opts, plugins, metasrv)
+        let instance = MetasrvInstance::new(opts, plugins, metasrv)
             .await
             .context(error::BuildMetaServerSnafu)?;
 

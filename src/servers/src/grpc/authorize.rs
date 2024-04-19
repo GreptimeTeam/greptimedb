@@ -20,7 +20,7 @@ use auth::UserProviderRef;
 use hyper::Body;
 use session::context::QueryContext;
 use tonic::body::BoxBody;
-use tonic::transport::NamedService;
+use tonic::server::NamedService;
 use tower::{Layer, Service};
 
 use crate::http::authorize::{extract_catalog_and_schema, extract_username_and_password};

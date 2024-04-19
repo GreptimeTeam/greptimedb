@@ -464,24 +464,25 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<NaiveDateTime>(idx, &client_type)?;
                 match server_type {
                     ConcreteDataType::Timestamp(unit) => match *unit {
-                        TimestampType::Second(_) => {
-                            ScalarValue::TimestampSecond(data.map(|ts| ts.timestamp()), None)
-                        }
+                        TimestampType::Second(_) => ScalarValue::TimestampSecond(
+                            data.map(|ts| ts.and_utc().timestamp()),
+                            None,
+                        ),
                         TimestampType::Millisecond(_) => ScalarValue::TimestampMillisecond(
-                            data.map(|ts| ts.timestamp_millis()),
+                            data.map(|ts| ts.and_utc().timestamp_millis()),
                             None,
                         ),
                         TimestampType::Microsecond(_) => ScalarValue::TimestampMicrosecond(
-                            data.map(|ts| ts.timestamp_micros()),
+                            data.map(|ts| ts.and_utc().timestamp_micros()),
                             None,
                         ),
                         TimestampType::Nanosecond(_) => ScalarValue::TimestampNanosecond(
-                            data.map(|ts| ts.timestamp_micros()),
+                            data.map(|ts| ts.and_utc().timestamp_micros()),
                             None,
                         ),
                     },
                     ConcreteDataType::DateTime(_) => {
-                        ScalarValue::Date64(data.map(|d| d.timestamp_millis()))
+                        ScalarValue::Date64(data.map(|d| d.and_utc().timestamp_millis()))
                     }
                     _ => {
                         return Err(invalid_parameter_error(
@@ -814,10 +815,7 @@ mod test {
 
         let err = encode_value(
             &query_context,
-            &Value::List(ListValue::new(
-                Some(Box::default()),
-                ConcreteDataType::int16_datatype(),
-            )),
+            &Value::List(ListValue::new(vec![], ConcreteDataType::int16_datatype())),
             &mut builder,
         )
         .unwrap_err();

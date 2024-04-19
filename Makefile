@@ -169,6 +169,10 @@ check: ## Cargo check all the targets.
 clippy: ## Check clippy rules.
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+.PHONY: fix-clippy
+fix-clippy: ## Fix clippy violations.
+	cargo clippy --workspace --all-targets --all-features --fix
+
 .PHONY: fmt-check
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check
@@ -187,6 +191,16 @@ run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v /tmp:/tmp \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
+
+##@ Docs
+config-docs: ## Generate configuration documentation from toml files.
+	docker run --rm \
+    -v ${PWD}:/greptimedb \
+    -w /greptimedb/config \
+    toml2docs/toml2docs:latest \
+    -p '##' \
+    -t ./config-docs-template.md \
+    -o ./config.md
 
 ##@ General
 

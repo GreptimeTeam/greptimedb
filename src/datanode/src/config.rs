@@ -14,8 +14,6 @@
 
 //! Datanode configurations
 
-use std::time::Duration;
-
 use common_base::readable_size::ReadableSize;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
@@ -65,13 +63,6 @@ impl ObjectStoreConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Retention period for all tables.
-    ///
-    /// Default value is `None`, which means no TTL.
-    ///
-    /// The precedence order is: ttl in table options > global ttl.
-    #[serde(with = "humantime_serde")]
-    pub global_ttl: Option<Duration>,
     /// The working directory of database
     pub data_home: String,
     #[serde(flatten)]
@@ -82,7 +73,6 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            global_ttl: None,
             data_home: DEFAULT_DATA_HOME.to_string(),
             store: ObjectStoreConfig::default(),
             providers: vec![],

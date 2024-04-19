@@ -707,7 +707,7 @@ from greptime import *
 sin(num)"#,
         expect: Ok((
             ty: Float64,
-            value: Float(0.8414709848078965)
+            value: FloatVec([0.8414709848078965])
         ))
     ),
     TestCase(
@@ -722,7 +722,7 @@ from greptime import *
 sin(num)"#,
         expect: Ok((
             ty: Float64,
-            value: Float(0.8414709848078965)
+            value: FloatVec([0.8414709848078965])
         ))
     ),
     TestCase(
@@ -732,7 +732,7 @@ from greptime import *
 sin(True)"#,
         expect: Ok((
             ty: Float64,
-            value: Float(0.8414709848078965)
+            value: FloatVec([0.8414709848078965])
         ))
     ),
     TestCase(
@@ -747,7 +747,7 @@ from greptime import *
 sin(num)"#,
         expect: Ok((
             ty: Float64,
-            value: Float(0.0)
+            value: FloatVec([0.0])
         ))
     ),
     // test if string returns error correctly
