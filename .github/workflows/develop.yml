@@ -35,7 +35,7 @@ env:
 jobs:
   check-typos-and-docs:
     name: Check typos and docs
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
       - uses: crate-ci/typos@v1.13.10
@@ -50,7 +50,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-latest, ubuntu-22.04 ]
+        os: [ windows-latest, ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +71,7 @@ jobs:
 
   toml:
     name: Toml Check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +93,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -149,6 +149,10 @@ jobs:
         run: |
           sudo apt update && sudo apt install -y libfuzzer-14-dev
           cargo install cargo-fuzz
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -172,7 +176,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -199,7 +203,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -225,7 +229,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -246,7 +250,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -268,7 +272,7 @@ jobs:
 
   coverage:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-22.04-8-cores
+    runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -333,7 +337,7 @@ jobs:
   compat:
     name: Compatibility Test
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
