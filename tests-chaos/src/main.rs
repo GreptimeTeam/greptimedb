@@ -57,7 +57,7 @@ async fn main() {
             let secs = rng.gen_range(100..300);
             moved_state.killed.store(false, Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(secs)).await;
-            warn!("After {secs}s, Killing pid: {pid}");
+            warn!("After {secs}ms, Killing pid: {pid}");
             moved_state.killed.store(true, Ordering::Relaxed);
             ProcessManager::kill(pid, Signal::SIGKILL).expect("Failed to kill");
         }
@@ -152,15 +152,31 @@ async fn start_database() -> Result<Pid> {
     let health_url = "http://127.0.0.1:4000/health";
 
     let process_manager = ProcessManager::new();
-    let pid = start_process(&process_manager, binary_path, test_dir, template_filename)
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(100), health_check(health_url))
-        .await
-        .expect("Failed to start GreptimeDB process");
-    info!("GreptimeDB started, pid: {pid}");
-
-    Ok(pid)
+    for _ in 0..3 {
+        let pid = start_process(&process_manager, binary_path, test_dir, template_filename)
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(10), health_check(health_url)).await {
+            Ok(_) => {
+                info!("GreptimeDB started, pid: {pid}");
+                return Ok(pid);
+            }
+            Err(_) => {
+                ensure!(
+                    process_manager.get(pid).unwrap().exited,
+                    error::UnexpectedSnafu {
+                        err_msg: format!("Failed to start database: pid: {pid}")
+                    }
+                );
+                // retry alter
+                warn!("Wait for staring timeout, retry later...");
+            }
+        };
+    }
+    error::UnexpectedSnafu {
+        err_msg: "Failed to start datanode",
+    }
+    .fail()
 }
 
 async fn start_process(

@@ -28,8 +28,8 @@ pub(crate) type Pid = u32;
 /// The state of a process.
 #[derive(Debug, Clone)]
 pub(crate) struct Process {
-    exit_status: Option<ExitStatus>,
-    exited: bool,
+    pub(crate) exit_status: Option<ExitStatus>,
+    pub(crate) exited: bool,
 }
 
 /// ProcessManager provides the ability to spawn/wait/kill a child process.
@@ -46,6 +46,10 @@ impl ProcessManager {
         Self {
             processes: Arc::new(Default::default()),
         }
+    }
+
+    pub(crate) fn get(&self, pid: Pid) -> Option<Process> {
+        self.processes.lock().unwrap().get(&pid).cloned()
     }
 
     fn wait<F>(&self, mut child: Child, f: F)
