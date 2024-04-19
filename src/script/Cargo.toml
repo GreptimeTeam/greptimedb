@@ -35,8 +35,8 @@ lazy_static.workspace = true
 once_cell.workspace = true
 paste.workspace = true
 prometheus.workspace = true
-query.workspace = true
 pyo3 = { version = "0.20", features = ["abi3", "abi3-py37"] }
+query.workspace = true
 rustpython-compiler = "0.3"
 servers.workspace = true
 session.workspace = true
