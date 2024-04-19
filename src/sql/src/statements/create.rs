@@ -168,14 +168,16 @@ pub struct CreateDatabase {
     pub name: ObjectName,
     /// Create if not exists
     pub if_not_exists: bool,
+    pub options: OptionMap,
 }
 
 impl CreateDatabase {
     /// Creates a statement for `CREATE DATABASE`
-    pub fn new(name: ObjectName, if_not_exists: bool) -> Self {
+    pub fn new(name: ObjectName, if_not_exists: bool, options: OptionMap) -> Self {
         Self {
             name,
             if_not_exists,
+            options,
         }
     }
 }

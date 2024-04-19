@@ -702,6 +702,7 @@ impl StatementExecutor {
         catalog: &str,
         database: &str,
         create_if_not_exists: bool,
+        options: Option<HashMap<String, String>>,
     ) -> Result<Output> {
         ensure!(
             NAME_PATTERN_REG.is_match(catalog),
@@ -727,6 +728,7 @@ impl StatementExecutor {
                 catalog.to_string(),
                 database.to_string(),
                 create_if_not_exists,
+                options,
             )
             .await?;
 
@@ -743,9 +745,10 @@ impl StatementExecutor {
         catalog: String,
         database: String,
         create_if_not_exists: bool,
+        options: Option<HashMap<String, String>>,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
-            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, None),
+            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
         };
 
         self.procedure_executor

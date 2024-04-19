@@ -22,6 +22,7 @@ mod set;
 mod show;
 mod tql;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -194,10 +195,16 @@ impl StatementExecutor {
                 self.truncate_table(table_name).await
             }
             Statement::CreateDatabase(stmt) => {
+                let options = if stmt.options.map.is_empty() {
+                    Some(stmt.options.map.clone())
+                } else {
+                    None
+                };
                 self.create_database(
                     query_ctx.current_catalog(),
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
+                    options,
                 )
                 .await
             }
