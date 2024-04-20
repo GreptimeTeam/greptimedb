@@ -63,6 +63,8 @@ lazy_static! {
         ConcreteDataType::date_datatype(),
         ConcreteDataType::datetime_datatype(),
     ];
+    pub static ref STRING_DATA_TYPES: Vec<ConcreteDataType> =
+        vec![ConcreteDataType::string_datatype(),];
 }
 
 impl_random!(ConcreteDataType, ColumnTypeGenerator, DATA_TYPES);
@@ -72,10 +74,16 @@ impl_random!(
     PartibleColumnTypeGenerator,
     PARTIBLE_DATA_TYPES
 );
+impl_random!(
+    ConcreteDataType,
+    StringColumnTypeGenerator,
+    STRING_DATA_TYPES
+);
 
 pub struct ColumnTypeGenerator;
 pub struct TsColumnTypeGenerator;
 pub struct PartibleColumnTypeGenerator;
+pub struct StringColumnTypeGenerator;
 
 /// Generates a random [Value].
 pub fn generate_random_value<R: Rng>(
@@ -316,6 +324,13 @@ pub fn ts_column_options_generator<R: Rng + 'static>(
     _: &ConcreteDataType,
 ) -> Vec<ColumnOption> {
     vec![ColumnOption::TimeIndex]
+}
+
+pub fn primary_key_column_options_generator<R: Rng + 'static>(
+    _: &mut R,
+    _: &ConcreteDataType,
+) -> Vec<ColumnOption> {
+    vec![ColumnOption::PrimaryKey, ColumnOption::NotNull]
 }
 
 /// Generates columns with given `names`.

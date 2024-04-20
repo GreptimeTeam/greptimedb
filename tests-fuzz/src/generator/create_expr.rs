@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use datatypes::value::Value;
 use derive_builder::Builder;
@@ -24,13 +25,17 @@ use snafu::{ensure, ResultExt};
 use super::Generator;
 use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
-use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
+use crate::fake::{
+    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
+    MappedGenerator, WordGenerator,
+};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::{ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder};
 use crate::ir::{
     column_options_generator, generate_columns, generate_random_value,
     partible_column_options_generator, ts_column_options_generator, ColumnTypeGenerator,
-    CreateDatabaseExpr, CreateTableExpr, Ident, PartibleColumnTypeGenerator, TsColumnTypeGenerator,
+    CreateDatabaseExpr, CreateTableExpr, Ident, PartibleColumnTypeGenerator,
+    StringColumnTypeGenerator, TsColumnTypeGenerator,
 };
 
 #[derive(Builder)]
@@ -201,67 +206,107 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
     }
 }
 
+/// Generates a physical table.
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
+    #[builder(default)]
+    _phantom: PhantomData<R>,
+}
+
+impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExprGenerator<R> {
+    type Error = Error;
+
+    fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
+        let if_not_exists = rng.gen_bool(0.5);
+        // Simply generates a physical table with two columns.
+        let create_physical_table_generator = CreateTableExprGeneratorBuilder::default()
+            .name_generator(Box::new(MappedGenerator::new(
+                WordGenerator,
+                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+            )))
+            .columns(2)
+            .engine("metric")
+            .if_not_exists(if_not_exists)
+            .with_clause([("physical_metric_table".to_string(), "".to_string())])
+            .build()
+            .unwrap();
+
+        create_physical_table_generator.generate(rng)
+    }
+}
+
 /// Generates a logical table based on an existing physical table.
 #[derive(Builder)]
 #[builder(pattern = "owned")]
 pub struct CreateLogicalTableExprGenerator<R: Rng + 'static> {
     table_ctx: TableContextRef,
-    table_generator: CreateTableExprGenerator<R>,
-    overlapped_columns: usize,
+    labels: usize,
+    #[builder(default)]
+    _phantom: PhantomData<R>,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprGenerator<R> {
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
+        // Currently we mock the usage of GreptimeDB as Prometheu's backend, the physical table must have two columns.
         ensure!(
-            self.overlapped_columns != 0 && self.overlapped_columns < self.table_ctx.columns.len(),
+            self.table_ctx.columns.len() == 2,
             error::UnexpectedSnafu {
-                violated: "The columns must larger than zero and less than the size of physical table columns"
+                violated: "The physical table must have two columns"
             }
         );
-
-        ensure!(
-            self.table_generator.engine == "metric",
-            error::UnexpectedSnafu {
-                violated: "The engine must be metric"
-            }
-        );
-
-        let mut table = self.table_generator.generate(rng)?;
 
         // Generates the logical table columns based on the physical table.
-        let mut columns = table.columns.clone();
-        // Change the ts column to which in the physical table.
-        let ts = self.table_ctx.columns.iter().position(|column| {
+        let physical_table_name = self.table_ctx.name.to_string().replace('`', "");
+        let table_generator = CreateTableExprGeneratorBuilder::default()
+            .name_generator(Box::new(MappedGenerator::new(
+                WordGenerator,
+                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+            )))
+            .columns(self.labels)
+            .engine("metric")
+            .column_type_generator(Box::new(StringColumnTypeGenerator))
+            .column_options_generator(Box::new(partible_column_options_generator))
+            .with_clause([(
+                "on_physical_table".to_string(),
+                physical_table_name.to_string(),
+            )])
+            .build()
+            .unwrap();
+
+        let mut table = table_generator.generate(rng)?;
+        let logical_ts = table.columns.iter().position(|column| {
             column
                 .options
                 .iter()
                 .any(|option| option == &ColumnOption::TimeIndex)
         });
-        columns[ts.unwrap()] = self.table_ctx.columns[ts.unwrap()].clone();
+        table.columns.remove(logical_ts.unwrap());
+        table.columns.iter_mut().for_each(|column| {
+            // Only keeps the primary key option for string columns.
+            column
+                .options
+                .retain(|option| option == &ColumnOption::PrimaryKey);
+            // Ensures the column name is unique.
+            while column.name == self.table_ctx.columns[0].name
+                || column.name == self.table_ctx.columns[1].name
+            {
+                column.name = table_generator.name_generator.gen(rng);
+            }
+        });
 
-        // Generates the overlapped columns.
-        let overlappable_columns = self
-            .table_ctx
-            .columns
-            .iter()
-            .filter(|column| {
-                !column
-                    .options
-                    .iter()
-                    .any(|option| option == &ColumnOption::TimeIndex)
-            })
-            .collect::<Vec<_>>()
-            .choose_multiple(rng, self.overlapped_columns)
-            .cloned()
-            .collect::<Vec<_>>();
+        table.columns.extend(self.table_ctx.columns.clone());
 
-        for column in overlappable_columns {
-            columns.push(column.clone());
+        let mut primary_keys = vec![];
+        for (idx, column) in table.columns.iter().enumerate() {
+            if column.is_primary_key() {
+                primary_keys.push(idx);
+            }
         }
-
-        table.columns = columns;
+        primary_keys.shuffle(rng);
+        table.primary_keys = primary_keys;
 
         Ok(table)
     }
@@ -305,6 +350,7 @@ impl<R: Rng + 'static> Generator<CreateDatabaseExpr, R> for CreateDatabaseExprGe
 mod tests {
     use std::sync::Arc;
 
+    use datatypes::data_type::ConcreteDataType;
     use datatypes::value::Value;
     use rand::SeedableRng;
 
@@ -370,97 +416,81 @@ mod tests {
     fn test_create_logical_table_expr_generator() {
         let mut rng = rand::thread_rng();
 
-        let physical_table_expr = CreateTableExprGeneratorBuilder::default()
-            .columns(10)
-            .partition(3)
-            .if_not_exists(true)
-            .engine("metric")
-            .with_clause([("physical_metric_table".to_string(), "".to_string())])
+        let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
             .build()
             .unwrap()
             .generate(&mut rng)
             .unwrap();
         assert_eq!(physical_table_expr.engine, "metric");
-        assert_eq!(physical_table_expr.columns.len(), 10);
+        assert_eq!(physical_table_expr.columns.len(), 2);
 
-        let table_ctx = Arc::new(TableContext::from(&physical_table_expr));
-
-        let table_generator = CreateTableExprGeneratorBuilder::default()
-            .columns(10)
-            .partition(3)
-            .if_not_exists(true)
-            .engine("metric")
-            .with_clause([("on_physical_table".to_string(), table_ctx.name.to_string())])
-            .build()
-            .unwrap();
-
-        let physical_ts = table_ctx.columns.iter().position(|column| {
+        let physical_ts = physical_table_expr.columns.iter().position(|column| {
             column
                 .options
                 .iter()
                 .any(|option| option == &ColumnOption::TimeIndex)
         });
-        let physical_ts_name = table_ctx.columns[physical_ts.unwrap()].name.clone();
+        let physical_ts_name = physical_table_expr.columns[physical_ts.unwrap()]
+            .name
+            .value
+            .to_string();
+
+        let table_ctx = Arc::new(TableContext::from(&physical_table_expr));
+
         let logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
             .table_ctx(table_ctx)
-            .table_generator(table_generator)
-            .overlapped_columns(5)
+            .labels(5)
             .build()
             .unwrap()
             .generate(&mut rng)
             .unwrap();
-
         let logical_ts = logical_table_expr.columns.iter().position(|column| {
             column
                 .options
                 .iter()
                 .any(|option| option == &ColumnOption::TimeIndex)
         });
-        let logical_ts_name = logical_table_expr.columns[logical_ts.unwrap()].name.clone();
+        let logical_ts_name = logical_table_expr.columns[logical_ts.unwrap()]
+            .name
+            .value
+            .to_string();
+
         assert_eq!(logical_table_expr.engine, "metric");
-        assert_eq!(logical_table_expr.columns.len(), 15);
+        assert_eq!(logical_table_expr.columns.len(), 6);
         assert_eq!(logical_ts_name, physical_ts_name);
+        assert!(logical_table_expr
+            .columns
+            .iter()
+            .all(
+                |column| column.column_type != ConcreteDataType::string_datatype()
+                    || column.options.contains(&ColumnOption::PrimaryKey)
+            ));
     }
 
     #[test]
     fn test_create_logical_table_expr_generator_deterministic() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
-        let physical_table_expr = CreateTableExprGeneratorBuilder::default()
-            .columns(5)
-            .partition(3)
-            .if_not_exists(true)
-            .engine("metric")
-            .with_clause([("physical_metric_table".to_string(), "".to_string())])
+        let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
             .build()
             .unwrap()
             .generate(&mut rng)
             .unwrap();
         let physical_table_serialized = serde_json::to_string(&physical_table_expr).unwrap();
-        let physical_table_expected = r#"{"table_name":{"value":"autem","quote_style":null},"columns":[{"name":{"value":"QUi","quote_style":null},"column_type":{"Date":null},"options":["PrimaryKey","Null"]},{"name":{"value":"moLesTIas","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"IMpeDiT","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.56425774}}]},{"name":{"value":"TOtAM","quote_style":null},"column_type":{"Float32":{}},"options":["PrimaryKey"]},{"name":{"value":"EXPEDItA","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.31315368}}]}],"if_not_exists":true,"partition":{"partition_columns":["QUi"],"partition_bounds":[{"Value":{"Date":-87604865}},{"Value":{"Date":53987475}},"MaxValue"]},"engine":"metric","options":{"physical_metric_table":{"String":""}},"primary_keys":[3,0]}"#;
+        let physical_table_expected = r#"{"table_name":{"value":"asSumENda","quote_style":"`"},"columns":[{"name":{"value":"TOtam","quote_style":"`"},"column_type":{"Timestamp":{"Second":null}},"options":["TimeIndex"]},{"name":{"value":"quI","quote_style":"`"},"column_type":{"Float64":{}},"options":[{"DefaultValue":{"Float64":0.9184293397424537}}]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"physical_metric_table":{"String":""}},"primary_keys":[]}"#;
         assert_eq!(physical_table_expected, physical_table_serialized);
 
         let table_ctx = Arc::new(TableContext::from(&physical_table_expr));
 
-        let table_generator = CreateTableExprGeneratorBuilder::default()
-            .columns(5)
-            .partition(3)
-            .if_not_exists(true)
-            .engine("metric")
-            .with_clause([("on_physical_table".to_string(), table_ctx.name.to_string())])
-            .build()
-            .unwrap();
-
         let logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
             .table_ctx(table_ctx)
-            .table_generator(table_generator)
-            .overlapped_columns(3)
+            .labels(5)
             .build()
             .unwrap()
             .generate(&mut rng)
             .unwrap();
 
         let logical_table_serialized = serde_json::to_string(&logical_table_expr).unwrap();
-        let logical_table_expected = r#"{"table_name":{"value":"veriTatiS","quote_style":null},"columns":[{"name":{"value":"iuSTO","quote_style":null},"column_type":{"Date":null},"options":["PrimaryKey","Null"]},{"name":{"value":"moLesTIas","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"qui","quote_style":null},"column_type":{"Int64":{}},"options":[{"DefaultValue":{"Int64":-8800140516050701022}}]},{"name":{"value":"Voluptates","quote_style":null},"column_type":{"Int32":{}},"options":[]},{"name":{"value":"Eum","quote_style":null},"column_type":{"Int64":{}},"options":[]},{"name":{"value":"IMpeDiT","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.56425774}}]},{"name":{"value":"QUi","quote_style":null},"column_type":{"Date":null},"options":["PrimaryKey","Null"]},{"name":{"value":"TOtAM","quote_style":null},"column_type":{"Float32":{}},"options":["PrimaryKey"]}],"if_not_exists":true,"partition":{"partition_columns":["iuSTO"],"partition_bounds":[{"Value":{"Date":-24781743}},{"Value":{"Date":-15437816}},"MaxValue"]},"engine":"metric","options":{"on_physical_table":{"String":"autem"}},"primary_keys":[0]}"#;
+        let logical_table_expected = r#"{"table_name":{"value":"Odit","quote_style":"`"},"columns":[{"name":{"value":"FUgIat","quote_style":"`"},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"sImilIQue","quote_style":"`"},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"qui","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"nECEsSItATiBuS","quote_style":"`"},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"TOtam","quote_style":"`"},"column_type":{"Timestamp":{"Second":null}},"options":["TimeIndex"]},{"name":{"value":"quI","quote_style":"`"},"column_type":{"Float64":{}},"options":[{"DefaultValue":{"Float64":0.9184293397424537}}]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"asSumENda"}},"primary_keys":[3,0,2,1]}"#;
         assert_eq!(logical_table_expected, logical_table_serialized);
     }
 
