@@ -116,6 +116,8 @@ impl Display for Statement {
             Statement::TruncateTable(s) => s.fmt(f),
             Statement::SetVariables(s) => s.fmt(f),
             Statement::ShowVariables(s) => s.fmt(f),
+            Statement::ShowCharset(s) => s.fmt(f),
+            Statement::ShowCollation(s) => s.fmt(f),
         }
     }
 }
