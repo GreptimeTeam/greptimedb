@@ -457,7 +457,7 @@ async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\
-        \n| job        | ts                  | lhs.lhs.lhs.SUM(http_requests.value) + rhs.MIN(http_requests.value) + http_requests.MAX(http_requests.value) + rhs.AVG(http_requests.value) |\
+        \n| job        | ts                  | lhs.rhs.lhs.SUM(http_requests.value) + rhs.MIN(http_requests.value) + http_requests.MAX(http_requests.value) + rhs.AVG(http_requests.value) |\
         \n+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\
         \n| api-server | 1970-01-01T00:00:00 | 1750.0                                                                                                                                      |\
         \n| app-server | 1970-01-01T00:00:00 | 4550.0                                                                                                                                      |\

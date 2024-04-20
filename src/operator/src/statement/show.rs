@@ -21,7 +21,9 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
-use sql::statements::show::{ShowColumns, ShowDatabases, ShowIndex, ShowTables, ShowVariables};
+use sql::statements::show::{
+    ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
+};
 use table::TableRef;
 
 use crate::error::{self, ExecuteStatementSnafu, Result};
@@ -96,6 +98,24 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub fn show_variable(&self, stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
         query::sql::show_variable(stmt, query_ctx).context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_collation(
+        &self,
+        kind: ShowKind,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_collations(kind, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_charset(&self, kind: ShowKind, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_charsets(kind, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
     }
 }
 

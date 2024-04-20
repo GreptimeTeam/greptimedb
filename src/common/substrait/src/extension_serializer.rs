@@ -19,7 +19,7 @@ use datafusion::execution::registry::SerializerRegistry;
 use datafusion_common::DataFusionError;
 use datafusion_expr::UserDefinedLogicalNode;
 use promql::extension_plan::{
-    EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+    EmptyMetric, InstantManipulate, RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize,
 };
 
 pub struct ExtensionSerializer;
@@ -49,6 +49,13 @@ impl SerializerRegistry for ExtensionSerializer {
                     .downcast_ref::<RangeManipulate>()
                     .expect("Failed to downcast to RangeManipulate");
                 Ok(range_manipulate.serialize())
+            }
+            name if name == ScalarCalculate::name() => {
+                let scalar_calculate = node
+                    .as_any()
+                    .downcast_ref::<ScalarCalculate>()
+                    .expect("Failed to downcast to ScalarCalculate");
+                Ok(scalar_calculate.serialize())
             }
             name if name == SeriesDivide::name() => {
                 let series_divide = node
@@ -91,6 +98,10 @@ impl SerializerRegistry for ExtensionSerializer {
             name if name == SeriesDivide::name() => {
                 let series_divide = SeriesDivide::deserialize(bytes)?;
                 Ok(Arc::new(series_divide))
+            }
+            name if name == ScalarCalculate::name() => {
+                let scalar_calculate = ScalarCalculate::deserialize(bytes)?;
+                Ok(Arc::new(scalar_calculate))
             }
             name if name == EmptyMetric::name() => Err(DataFusionError::Substrait(
                 "EmptyMetric should not be deserialized".to_string(),

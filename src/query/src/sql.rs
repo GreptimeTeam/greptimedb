@@ -18,7 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::information_schema::{
-    columns, key_column_usage, schemata, tables, COLUMNS, KEY_COLUMN_USAGE, SCHEMATA, TABLES,
+    columns, key_column_usage, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS,
+    KEY_COLUMN_USAGE, SCHEMATA, TABLES,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -465,6 +466,76 @@ pub async fn show_tables(
         like_field,
         sort,
         stmt.kind,
+    )
+    .await
+}
+
+/// Execute `SHOW COLLATION` statement and returns the `Output` if success.
+pub async fn show_collations(
+    kind: ShowKind,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    // Refer to https://dev.mysql.com/doc/refman/8.0/en/show-collation.html
+    let projects = vec![
+        ("collation_name", "Collation"),
+        ("character_set_name", "Charset"),
+        ("id", "Id"),
+        ("is_default", "Default"),
+        ("is_compiled", "Compiled"),
+        ("sortlen", "Sortlen"),
+    ];
+
+    let filters = vec![];
+    let like_field = Some("collation_name");
+    let sort = vec![];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        COLLATIONS,
+        vec![],
+        projects,
+        filters,
+        like_field,
+        sort,
+        kind,
+    )
+    .await
+}
+
+/// Execute `SHOW CHARSET` statement and returns the `Output` if success.
+pub async fn show_charsets(
+    kind: ShowKind,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    // Refer to https://dev.mysql.com/doc/refman/8.0/en/show-character-set.html
+    let projects = vec![
+        ("character_set_name", "Charset"),
+        ("description", "Description"),
+        ("default_collate_name", "Default collation"),
+        ("maxlen", "Maxlen"),
+    ];
+
+    let filters = vec![];
+    let like_field = Some("character_set_name");
+    let sort = vec![];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        CHARACTER_SETS,
+        vec![],
+        projects,
+        filters,
+        like_field,
+        sort,
+        kind,
     )
     .await
 }
