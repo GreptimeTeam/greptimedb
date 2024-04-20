@@ -1061,7 +1061,7 @@ mod tests {
         match &stmts.last().unwrap() {
             Statement::CreateDatabase(c) => {
                 assert_eq!(c.name, ObjectName(vec![Ident::with_quote('`', "fOo")]));
-                assert_eq!(c.if_not_exists, false);
+                assert!(!c.if_not_exists);
             }
             _ => unreachable!(),
         }
@@ -1073,7 +1073,7 @@ mod tests {
         match &stmts[0] {
             Statement::CreateDatabase(c) => {
                 assert_eq!(c.name.to_string(), "prometheus");
-                assert_eq!(c.if_not_exists, false);
+                assert!(!c.if_not_exists);
                 assert_eq!(
                     c.options.map.get_key_value("ttl"),
                     Some((&"ttl".to_string(), &"1h".to_string()))
