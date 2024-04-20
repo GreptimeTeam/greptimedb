@@ -85,6 +85,16 @@ pub fn redact_sql_secrets(sql: &str) -> String {
     s
 }
 
+/// Use regex to match and replace common seen secret values in SQL.
+pub fn redact_option_secret(key: &str, val: &str) -> String {
+    let pattern = Regex::new(r#"(?i)(access_key_id|secret_access_key)"#).unwrap();
+    if pattern.is_match(key) {
+        format!("{} = ******", key)
+    } else {
+        format!("{} = {}", key, val)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

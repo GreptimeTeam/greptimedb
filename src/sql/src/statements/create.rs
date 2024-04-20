@@ -21,7 +21,7 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
 use crate::statements::OptionMap;
-use crate::util::redact_sql_secrets;
+use crate::util::redact_option_secret;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -56,8 +56,7 @@ macro_rules! format_sorted_hashmap {
         let mut result = String::new();
         for key in sorted_keys {
             if let Some(val) = hashmap.get(key) {
-                redact_sql_secrets(val);
-                result.push_str(&format!("{} = {}, ", key, val));
+                result.push_str(&redact_option_secret(key, val));
             }
         }
         result
