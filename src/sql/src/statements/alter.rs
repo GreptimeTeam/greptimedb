@@ -73,14 +73,89 @@ impl Display for AlterTableOperation {
                 location,
             } => {
                 if let Some(location) = location {
-                    write!(f, r#"ADD {column_def} {location}"#)
+                    write!(f, r#"ADD COLUMN {column_def} {location}"#)
                 } else {
-                    write!(f, r#"ADD {column_def}"#)
+                    write!(f, r#"ADD COLUMN {column_def}"#)
                 }
             }
             AlterTableOperation::DropColumn { name } => write!(f, r#"DROP COLUMN {name}"#),
             AlterTableOperation::RenameTable { new_table_name } => {
                 write!(f, r#"RENAME {new_table_name}"#)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_display_alter() {
+        let sql = r"alter table monitor add column app string default 'shop' primary key;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"alter table monitor drop column load_15;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor DROP COLUMN load_15"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"alter table monitor rename monitor_new;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor RENAME monitor_new"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
             }
         }
     }

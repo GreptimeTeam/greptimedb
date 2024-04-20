@@ -493,4 +493,115 @@ ENGINE=mito
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert_matches!(result, Err(Error::InvalidTableOption { .. }))
     }
+
+    #[test]
+    fn test_display_create_database() {
+        let sql = r"create database test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::CreateDatabase { .. });
+
+        match &stmts[0] {
+            Statement::CreateDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+CREATE DATABASE test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"create database if not exists test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::CreateDatabase { .. });
+
+        match &stmts[0] {
+            Statement::CreateDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+CREATE DATABASE IF NOT EXISTS test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_create_table_like() {
+        let sql = r"create table t2 like t1;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::CreateTableLike { .. });
+
+        match &stmts[0] {
+            Statement::CreateTableLike(create) => {
+                let new_sql = format!("\n{}", create);
+                assert_eq!(
+                    r#"
+CREATE TABLE t2 LIKE t1"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_create_external_table() {
+        let sql = r#"CREATE EXTERNAL TABLE city (
+            host string,
+            ts timestamp,
+            cpu float64 default 0,
+            memory float64,
+            TIME INDEX (ts),
+            PRIMARY KEY(host)
+) WITH (location='/var/data/city.csv', format='csv');"#;
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::CreateExternalTable { .. });
+
+        match &stmts[0] {
+            Statement::CreateExternalTable(create) => {
+                let new_sql = format!("\n{}", create);
+                assert_eq!(
+                    r#"
+CREATE EXTERNAL TABLE  city (
+  host STRING,
+  ts TIMESTAMP,
+  cpu FLOAT64 DEFAULT 0,
+  memory FLOAT64,
+  TIME INDEX (ts),
+  PRIMARY KEY (host)
+)
+ENGINE=file
+WITH(
+format = csv,location = /var/data/city.csv,
+)"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
 }

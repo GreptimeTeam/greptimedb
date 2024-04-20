@@ -46,3 +46,36 @@ impl Display for SetVariables {
         write!(f, r#"SET {variable} = {value}"#)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_display_show_variables() {
+        let sql = r"set delayed_insert_timeout=300;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::SetVariables { .. });
+
+        match &stmts[0] {
+            Statement::SetVariables(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+SET delayed_insert_timeout = 300"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+}

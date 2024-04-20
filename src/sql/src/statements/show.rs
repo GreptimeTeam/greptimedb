@@ -83,7 +83,7 @@ impl Display for ShowColumns {
         let kind = self.kind();
         let table = self.format_table();
         let database = self.format_database();
-        write!(f, r#" {table} {database} {kind}"#)
+        write!(f, r#" COLUMNS {table} {database} {kind}"#)
     }
 }
 
@@ -173,7 +173,7 @@ impl Display for ShowTables {
         }
         let database = self.format_database();
         let kind = self.kind();
-        write!(f, r#" {database} {kind}"#)
+        write!(f, r#" TABLES {database} {kind}"#)
     }
 }
 
@@ -192,7 +192,7 @@ impl ShowCreateTable {
 impl Display for ShowCreateTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let table_name = self.table_name();
-        write!(f, r#"SHOW CREATE {table_name}"#)
+        write!(f, r#"SHOW CREATE TABLE {table_name}"#)
     }
 }
 
@@ -299,5 +299,143 @@ mod tests {
             ParseOptions::default()
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_display_show_variables() {
+        let sql = r"show variables v1;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowVariables { .. });
+        match &stmts[0] {
+            Statement::ShowVariables(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW VARIABLES v1"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_create_table() {
+        let sql = r"show create table monitor;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowCreateTable { .. });
+        match &stmts[0] {
+            Statement::ShowCreateTable(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW CREATE TABLE monitor"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_index() {
+        let sql = r"show index from t1 from d1;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowIndex { .. });
+        match &stmts[0] {
+            Statement::ShowIndex(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW INDEX IN t1 IN d1 ALL"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_columns() {
+        let sql = r"show full columns in t1 in d1;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowColumns { .. });
+        match &stmts[0] {
+            Statement::ShowColumns(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW FULL COLUMNS IN t1 IN d1 ALL"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_tables() {
+        let sql = r"show full tables in d1;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowTables { .. });
+        match &stmts[0] {
+            Statement::ShowTables(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW FULL TABLES IN d1 ALL"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_show_databases() {
+        let sql = r"show databases;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowDatabases { .. });
+        match &stmts[0] {
+            Statement::ShowDatabases(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW DATABASES ALL"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
     }
 }
