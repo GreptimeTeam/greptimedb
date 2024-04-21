@@ -74,6 +74,18 @@ pub enum Error {
         source: query::error::Error,
         location: Location,
     },
+
+    #[snafu(display("General catalog error"))]
+    Catalog {
+        location: Location,
+        source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to query by grpc"))]
+    GrpcQuery {
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -90,6 +102,8 @@ impl ErrorExt for Error {
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
+            GrpcQuery { source, .. } => source.status_code(),
         }
     }
 

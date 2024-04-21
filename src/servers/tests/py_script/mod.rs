@@ -19,7 +19,7 @@ use common_query::OutputData;
 use common_recordbatch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::{StringVector, VectorRef};
+use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
 use servers::error::Result;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::ScriptHandler;
@@ -38,17 +38,20 @@ async fn test_insert_py_udf_and_query() -> Result<()> {
 def hello() -> vector[str]:
     return 'hello';
 "#;
+    let version = 1;
 
     let column_schemas = vec![
         ColumnSchema::new("script", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("schema", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("version", ConcreteDataType::uint64_datatype(), false),
     ];
 
     let columns: Vec<VectorRef> = vec![
         Arc::new(StringVector::from(vec![script])),
         Arc::new(StringVector::from(vec![schema])),
         Arc::new(StringVector::from(vec![name])),
+        Arc::new(UInt64Vector::from_values(vec![version])),
     ];
 
     let raw_schema = Arc::new(Schema::new(column_schemas));

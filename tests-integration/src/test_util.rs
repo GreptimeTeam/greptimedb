@@ -54,6 +54,7 @@ use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
 
+use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
@@ -379,6 +380,23 @@ async fn setup_standalone_instance(
         .await
 }
 
+pub async fn setup_cluster(
+    cluster_name: &str,
+    store_type: StorageType,
+    datanodes: u32,
+    frontends: u32,
+) -> GreptimeDbCluster {
+    let (store_config, _guard) = get_test_store_config(&store_type);
+
+    let builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    builder
+        .with_datanodes(datanodes)
+        .with_frontends(frontends)
+        .with_store_config(store_config)
+        .build()
+        .await
+}
+
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -395,6 +413,27 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .with_greptime_config_options(instance.mix_options.datanode.to_toml_string())
         .build();
     (http_server.build(http_server.make_app()), instance.guard)
+}
+
+pub async fn setup_test_http_app_cluster(cluster: &GreptimeDbCluster) -> Vec<Router> {
+    let mut apps = Vec::with_capacity(cluster.frontend_instances.len());
+
+    for instance in &cluster.frontend_instances {
+        let http_opts = HttpOptions {
+            addr: format!("127.0.0.1:{}", ports::get_port()),
+            ..Default::default()
+        };
+        let http_server = HttpServerBuilder::new(http_opts)
+            .with_sql_handler(
+                ServerSqlQueryHandlerAdapter::arc(instance.clone()),
+                Some(instance.clone()),
+            )
+            .with_metrics_handler(MetricsHandler)
+            .build();
+
+        apps.push(http_server.build(http_server.make_app()))
+    }
+    apps
 }
 
 pub async fn setup_test_http_app_with_frontend(

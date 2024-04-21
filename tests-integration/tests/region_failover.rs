@@ -98,7 +98,7 @@ pub async fn test_region_failover(store_type: StorageType) {
         .build()
         .await;
 
-    let frontend = cluster.frontend.clone();
+    let frontend = cluster.frontend();
 
     let table_id = prepare_testing_table(&cluster).await;
 
@@ -142,7 +142,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     assert!(!has_route_cache(&frontend, table_id).await);
 
     // Inserts data to each datanode after failover
-    let frontend = cluster.frontend.clone();
+    let frontend = cluster.frontend();
     let results = insert_values(&frontend, logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
@@ -241,11 +241,11 @@ CREATE TABLE my_table (
     PARTITION r2 VALUES LESS THAN (50),
     PARTITION r3 VALUES LESS THAN (MAXVALUE),
 )";
-    let result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
+    let frontend = cluster.frontend();
+    let result = frontend.do_query(sql, QueryContext::arc()).await;
     result.first().unwrap().as_ref().unwrap();
 
-    let table = cluster
-        .frontend
+    let table = frontend
         .catalog_manager()
         .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table")
         .await

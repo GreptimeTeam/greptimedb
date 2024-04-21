@@ -133,7 +133,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
@@ -195,13 +195,13 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     .await;
 
     // Inserts more table.
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
-    assert_values(&cluster.frontend).await;
+    assert_values(&cluster.frontend()).await;
 
     // Triggers again.
     let procedure = region_migration_manager
@@ -259,7 +259,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
@@ -291,7 +291,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     info!("Started region procedure: {}!", procedure_id);
 
     // Waits condition by checking procedure state
-    let frontend = cluster.frontend.clone();
+    let frontend = cluster.frontend();
     wait_condition(
         Duration::from_secs(10),
         Box::pin(async move {
@@ -310,13 +310,13 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     .await;
 
     // Inserts more table.
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
-    assert_values(&cluster.frontend).await;
+    assert_values(&cluster.frontend()).await;
 
     // Triggers again.
     let procedure = region_migration_manager
@@ -382,7 +382,7 @@ pub async fn test_region_migration_multiple_regions(
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
@@ -454,13 +454,13 @@ pub async fn test_region_migration_multiple_regions(
     .await;
 
     // Inserts more table.
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
-    assert_values(&cluster.frontend).await;
+    assert_values(&cluster.frontend()).await;
 
     // Triggers again.
     let procedure = region_migration_manager
@@ -519,7 +519,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
@@ -584,13 +584,13 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     .await;
 
     // Inserts more table.
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
 
     // Asserts the writes.
-    assert_values(&cluster.frontend).await;
+    assert_values(&cluster.frontend()).await;
 
     // Triggers again.
     let procedure = region_migration_manager
@@ -651,7 +651,7 @@ pub async fn test_region_migration_incorrect_from_peer(
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
@@ -726,7 +726,7 @@ pub async fn test_region_migration_incorrect_region_id(
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_values(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend(), logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap().data, OutputData::AffectedRows(1)));
     }
@@ -822,12 +822,12 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
         i > 50
     )"
     );
-    let mut result = cluster.frontend.do_query(&sql, QueryContext::arc()).await;
+    let mut result = cluster.frontend().do_query(&sql, QueryContext::arc()).await;
     let output = result.remove(0).unwrap();
     assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
     let table = cluster
-        .frontend
+        .frontend()
         .catalog_manager()
         .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, TEST_TABLE_NAME)
         .await
@@ -853,7 +853,7 @@ async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionD
     let query_ctx = QueryContext::arc();
 
     let OutputData::Stream(stream) = run_sql(
-        &cluster.frontend,
+        &cluster.frontend(),
         &format!(r#"select b.peer_id as datanode_id,
                            a.greptime_partition_id as region_id
                     from information_schema.partitions a left join information_schema.greptime_region_peers b
@@ -902,7 +902,7 @@ async fn trigger_migration_by_sql(
     to_peer_id: u64,
 ) -> String {
     let OutputData::Stream(stream) = run_sql(
-        &cluster.frontend,
+        &cluster.frontend(),
         &format!("select migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
         QueryContext::arc(),
     )

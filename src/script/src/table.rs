@@ -21,10 +21,9 @@ use api::v1::{
     ColumnDataType, ColumnDef, ColumnSchema as PbColumnSchema, Row, RowInsertRequest,
     RowInsertRequests, Rows, SemanticType,
 };
-use catalog::error::CompileScriptInternalSnafu;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::OutputData;
-use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::util as record_util;
 use common_telemetry::logging;
 use common_time::util;
 use datafusion::datasource::DefaultTableSource;
@@ -32,7 +31,7 @@ use datafusion::logical_expr::{and, col, lit};
 use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{StringVector, Vector};
+use datatypes::vectors::{StringVector, UInt64Vector, Vector};
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
@@ -44,9 +43,8 @@ use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
-    FindColumnInScriptsTableSnafu, InsertScriptSnafu, Result, ScriptNotFoundSnafu,
+    InsertScriptSnafu, Result, ScriptNotFoundSnafu,
 };
-use crate::python::PyScript;
 
 pub const SCRIPTS_TABLE_NAME: &str = "scripts";
 
@@ -73,88 +71,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
         }
     }
 
-    fn get_str_col_by_name<'a>(record: &'a RecordBatch, name: &str) -> Result<&'a StringVector> {
-        let column = record
-            .column_by_name(name)
-            .with_context(|| FindColumnInScriptsTableSnafu { name })?;
-        let column = column
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .with_context(|| CastTypeSnafu {
-                msg: format!(
-                    "can't downcast {:?} array into string vector",
-                    column.data_type()
-                ),
-            })?;
-        Ok(column)
-    }
-    /// this is used as a callback function when scripts table is created. `table` should be `scripts` table.
-    /// the function will try it best to register all scripts, and ignore the error in parsing and register scripts
-    ///  if any, just emit a warning
-    /// TODO(discord9): rethink error handling here
-    pub async fn recompile_register_udf(
-        table: TableRef,
-        query_engine: QueryEngineRef,
-    ) -> catalog::error::Result<()> {
-        let table_info = table.table_info();
-
-        let rbs = Self::table_full_scan(table, &query_engine)
-            .await
-            .map_err(BoxedError::new)
-            .context(CompileScriptInternalSnafu)?;
-        let records = record_util::collect(rbs)
-            .await
-            .map_err(BoxedError::new)
-            .context(CompileScriptInternalSnafu)?;
-
-        let mut script_list: Vec<(String, String)> = Vec::new();
-        for record in records {
-            let names = Self::get_str_col_by_name(&record, "name")
-                .map_err(BoxedError::new)
-                .context(CompileScriptInternalSnafu)?;
-            let scripts = Self::get_str_col_by_name(&record, "script")
-                .map_err(BoxedError::new)
-                .context(CompileScriptInternalSnafu)?;
-
-            let part_of_scripts_list =
-                names
-                    .iter_data()
-                    .zip(scripts.iter_data())
-                    .filter_map(|i| match i {
-                        (Some(a), Some(b)) => Some((a.to_string(), b.to_string())),
-                        _ => None,
-                    });
-            script_list.extend(part_of_scripts_list);
-        }
-
-        logging::info!(
-            "Found {} scripts in {}",
-            script_list.len(),
-            table_info.full_table_name()
-        );
-
-        for (name, script) in script_list {
-            match PyScript::from_script(&script, query_engine.clone()) {
-                Ok(script) => {
-                    script.register_udf().await;
-                    logging::debug!(
-                        "Script in `scripts` system table re-register as UDF: {}",
-                        name
-                    );
-                }
-                Err(err) => {
-                    logging::warn!(
-                        r#"Failed to compile script "{}"" in `scripts` table: {}"#,
-                        name,
-                        err
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn insert(&self, schema: &str, name: &str, script: &str) -> Result<()> {
+    pub async fn insert(&self, schema: &str, name: &str, script: &str, version: u64) -> Result<()> {
         let now = util::current_time_millis();
 
         let table_info = self.table.table_info();
@@ -173,6 +90,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
                         // Timestamp in key part is intentionally left to 0
                         ValueData::TimestampMillisecondValue(0).into(),
                         ValueData::TimestampMillisecondValue(now).into(),
+                        ValueData::U64Value(version).into(),
                     ],
                 }],
             }),
@@ -199,7 +117,11 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
         Ok(())
     }
 
-    pub async fn find_script_by_name(&self, schema: &str, name: &str) -> Result<String> {
+    pub async fn find_script_and_version_by_name(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<(String, u64)> {
         let table_info = self.table.table_info();
 
         let table_name = TableReference::full(
@@ -218,7 +140,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
                 col("name").eq(lit(name)),
             ))
             .context(BuildDfLogicalPlanSnafu)?
-            .project(vec![col("script")])
+            .project(vec![col("script"), col("version")])
             .context(BuildDfLogicalPlanSnafu)?
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
@@ -241,7 +163,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
         ensure!(!records.is_empty(), ScriptNotFoundSnafu { name });
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].num_columns(), 1);
+        assert_eq!(records[0].num_columns(), 2);
 
         let script_column = records[0].column(0);
         let script_column = script_column
@@ -253,42 +175,25 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
                     script_column.data_type()
                 ),
             })?;
-
         assert_eq!(script_column.len(), 1);
 
+        let ver_column = records[0].column(1);
+        let ver_column = ver_column
+            .as_any()
+            .downcast_ref::<UInt64Vector>()
+            .with_context(|| CastTypeSnafu {
+                msg: format!(
+                    "can't downcast {:?} array into uint64 vector",
+                    ver_column.data_type()
+                ),
+            })?;
+        assert_eq!(ver_column.len(), 1);
+
         // Safety: asserted above
-        Ok(script_column.get_data(0).unwrap().to_string())
-    }
-
-    async fn table_full_scan(
-        table: TableRef,
-        query_engine: &QueryEngineRef,
-    ) -> Result<SendableRecordBatchStream> {
-        let table_info = table.table_info();
-        let table_name = TableReference::full(
-            table_info.catalog_name.clone(),
-            table_info.schema_name.clone(),
-            table_info.name.clone(),
-        );
-
-        let table_provider = Arc::new(DfTableProviderAdapter::new(table));
-        let table_source = Arc::new(DefaultTableSource::new(table_provider));
-
-        let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
-            .context(BuildDfLogicalPlanSnafu)?
-            .build()
-            .context(BuildDfLogicalPlanSnafu)?;
-
-        let output = query_engine
-            .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
-            .await
-            .context(ExecuteInternalStatementSnafu)?;
-        let stream = match output.data {
-            OutputData::Stream(stream) => stream,
-            OutputData::RecordBatches(record_batches) => record_batches.as_stream(),
-            _ => unreachable!(),
-        };
-        Ok(stream)
+        Ok((
+            script_column.get_data(0).unwrap().to_string(),
+            ver_column.get_data(0).unwrap(),
+        ))
     }
 }
 
@@ -329,6 +234,12 @@ fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
         PbColumnSchema {
             column_name: "gmt_modified".to_string(),
             datatype: ColumnDataType::TimestampMillisecond.into(),
+            semantic_type: SemanticType::Field.into(),
+            ..Default::default()
+        },
+        PbColumnSchema {
+            column_name: "version".to_string(),
+            datatype: ColumnDataType::Uint64.into(),
             semantic_type: SemanticType::Field.into(),
             ..Default::default()
         },

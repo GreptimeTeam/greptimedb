@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
+use session::context::QueryContextRef;
 
 use crate::function::FunctionRef;
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
@@ -28,10 +29,17 @@ use crate::scalars::timestamp::TimestampFunction;
 use crate::system::SystemFunction;
 use crate::table::TableFunction;
 
+pub trait FunctionProvider {
+    fn get_function(&self, name: &str, query_ctx: QueryContextRef) -> Option<FunctionRef>;
+}
+
+pub type FunctionProviderRef = Arc<dyn FunctionProvider + Sync + Send>;
+
 #[derive(Default)]
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, FunctionRef>>,
     aggregate_functions: RwLock<HashMap<String, AggregateFunctionMetaRef>>,
+    dynamic_providers: RwLock<Vec<FunctionProviderRef>>,
 }
 
 impl FunctionRegistry {
@@ -51,12 +59,30 @@ impl FunctionRegistry {
             .insert(func.name(), func);
     }
 
+    pub fn register_provider(&self, provider: FunctionProviderRef) {
+        self.dynamic_providers.write().unwrap().push(provider);
+    }
+
     pub fn get_aggr_function(&self, name: &str) -> Option<AggregateFunctionMetaRef> {
         self.aggregate_functions.read().unwrap().get(name).cloned()
     }
 
     pub fn get_function(&self, name: &str) -> Option<FunctionRef> {
         self.functions.read().unwrap().get(name).cloned()
+    }
+
+    pub fn get_function_fallback(
+        &self,
+        name: &str,
+        query_ctx: QueryContextRef,
+    ) -> Option<FunctionRef> {
+        for provider in self.dynamic_providers.read().unwrap().iter() {
+            let fun = provider.get_function(name, query_ctx.clone());
+            if fun.is_some() {
+                return fun;
+            }
+        }
+        None
     }
 
     pub fn functions(&self) -> Vec<FunctionRef> {

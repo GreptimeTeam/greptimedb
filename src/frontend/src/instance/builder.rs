@@ -21,6 +21,7 @@ use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
+use meta_client::client::MetaClientRef;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
@@ -46,6 +47,7 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     heartbeat_task: Option<HeartbeatTask>,
+    meta_client: Option<MetaClientRef>,
 }
 
 impl FrontendBuilder {
@@ -63,6 +65,7 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             heartbeat_task: None,
+            meta_client: None,
         }
     }
 
@@ -83,6 +86,13 @@ impl FrontendBuilder {
     pub fn with_heartbeat_task(self, heartbeat_task: HeartbeatTask) -> Self {
         Self {
             heartbeat_task: Some(heartbeat_task),
+            ..self
+        }
+    }
+
+    pub fn with_meta_client(self, meta_client: MetaClientRef) -> Self {
+        Self {
+            meta_client: Some(meta_client),
             ..self
         }
     }
@@ -137,7 +147,12 @@ impl FrontendBuilder {
         .query_engine();
 
         let script_executor = Arc::new(
-            ScriptExecutor::new(self.catalog_manager.clone(), query_engine.clone()).await?,
+            ScriptExecutor::new(
+                self.catalog_manager.clone(),
+                query_engine.clone(),
+                self.meta_client,
+            )
+            .await?,
         );
 
         let statement_executor = Arc::new(StatementExecutor::new(

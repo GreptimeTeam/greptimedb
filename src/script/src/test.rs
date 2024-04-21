@@ -21,7 +21,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::{StringVector, VectorRef};
+use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
 use query::QueryEngineFactory;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
@@ -36,17 +36,20 @@ pub async fn setup_scripts_manager(
     schema: &str,
     name: &str,
     script: &str,
+    version: u64,
 ) -> ScriptManager<Error> {
     let column_schemas = vec![
         ColumnSchema::new("script", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("schema", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("version", ConcreteDataType::uint64_datatype(), false),
     ];
 
     let columns: Vec<VectorRef> = vec![
         Arc::new(StringVector::from(vec![script])),
         Arc::new(StringVector::from(vec![schema])),
         Arc::new(StringVector::from(vec![name])),
+        Arc::new(UInt64Vector::from_values(vec![version])),
     ];
 
     let schema = Arc::new(Schema::new(column_schemas));
@@ -55,12 +58,17 @@ pub async fn setup_scripts_manager(
     let table = MemTable::table("scripts", recordbatch);
 
     let catalog_manager = MemoryCatalogManager::new_with_table(table.clone());
+    let grpc_query_handler = Arc::new(MockGrpcQueryHandler {});
 
     let factory = QueryEngineFactory::new(catalog_manager.clone(), None, None, None, false);
     let query_engine = factory.query_engine();
-    let mgr = ScriptManager::new(Arc::new(MockGrpcQueryHandler {}) as _, query_engine)
-        .await
-        .unwrap();
+    let mgr = ScriptManager::new(
+        catalog_manager.clone(),
+        grpc_query_handler.clone(),
+        query_engine,
+    )
+    .await
+    .unwrap();
     mgr.insert_scripts_table(catalog, table);
 
     mgr

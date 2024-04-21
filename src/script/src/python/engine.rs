@@ -209,6 +209,10 @@ impl PyScript {
         PyUDF::register_as_udf(udf.clone());
         PyUDF::register_to_query_engine(udf, self.query_engine.clone());
     }
+
+    pub fn udf(&self) -> Arc<PyUDF> {
+        PyUDF::from_copr(self.copr.clone())
+    }
 }
 
 pub struct CoprStream {

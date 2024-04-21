@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
@@ -111,19 +112,28 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        self.engine_state.udf_function(name).map_or_else(
-            || self.session_state.scalar_functions().get(name).cloned(),
-            |func| {
-                Some(Arc::new(
-                    create_udf(
-                        func,
-                        self.query_ctx.clone(),
-                        self.engine_state.function_state(),
-                    )
-                    .into(),
-                ))
-            },
-        )
+        let func_map = |func| {
+            Some(Arc::new(
+                create_udf(
+                    func,
+                    self.query_ctx.clone(),
+                    self.engine_state.function_state(),
+                )
+                .into(),
+            ))
+        };
+
+        self.engine_state
+            .udf_function(name)
+            .map_or_else(
+                || self.session_state.scalar_functions().get(name).cloned(),
+                func_map,
+            )
+            .or_else(|| {
+                FUNCTION_REGISTRY
+                    .get_function_fallback(name, self.query_ctx.clone())
+                    .and_then(func_map)
+            })
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {

@@ -78,7 +78,9 @@ impl MockInstance for MockInstanceImpl {
     fn frontend(&self) -> Arc<Instance> {
         match self {
             MockInstanceImpl::Standalone(instance) => instance.frontend(),
-            MockInstanceImpl::Distributed(instance) => instance.frontend.clone(),
+            MockInstanceImpl::Distributed(instance) => {
+                instance.frontend_instances.first().unwrap().clone()
+            }
         }
     }
 

@@ -30,9 +30,9 @@ use servers::http::test_helpers::TestClient;
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
 use tests_integration::test_util::{
-    setup_test_http_app, setup_test_http_app_with_frontend,
-    setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    StorageType,
+    setup_cluster, setup_test_http_app, setup_test_http_app_cluster,
+    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_user_provider,
+    setup_test_prom_app_with_frontend, StorageType,
 };
 
 #[macro_export]
@@ -70,6 +70,7 @@ macro_rules! http_tests {
                 test_prom_http_api,
                 test_metrics_api,
                 test_scripts_api,
+                test_script_api_with_cluster,
                 test_health_api,
                 test_status_api,
                 test_config_api,
@@ -636,6 +637,114 @@ def test(n) -> vector[f64]:
     );
 
     guard.remove_all().await;
+}
+
+pub async fn test_script_api_with_cluster(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let datanodes = 5u32;
+    let frontends = 5u32;
+    let cluster = setup_cluster("script_api_cluster", store_type, datanodes, frontends).await;
+    let apps = setup_test_http_app_cluster(&cluster).await;
+    let clients = apps
+        .into_iter()
+        .map(TestClient::new)
+        .collect::<Vec<TestClient>>();
+    assert_eq!(clients.len(), 5);
+
+    let res = clients[0]
+        .post("/v1/scripts?name=test&db=public")
+        .body(
+            r#"
+@coprocessor(returns=['msg'])
+def test() -> vector[str]:
+   return "Test"
+"#,
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    assert!(body.output().is_empty());
+
+    // call script
+    let res = clients[1]
+        .post("/v1/run-script?name=test&db=public")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0],
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
+            "records":{"schema":{"column_schemas":[{"name":"msg","data_type":"String"}]},"rows":[["Test"]]}
+        })).unwrap()
+    );
+
+    // call script by SQL UDF
+    let res = clients[2]
+        .get("/v1/sql?db=public&sql=select test();")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0],
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
+            "records":{"schema":{"column_schemas":[{"name":"test()","data_type":"String"}]},"rows":[["Test"]]}
+        })).unwrap()
+    );
+
+    // update script
+    let res = clients[3]
+        .post("/v1/scripts?name=test&db=public")
+        .body(
+            r#"
+@coprocessor(returns=['msg'])
+def test() -> vector[str]:
+   return "Test2"
+"#,
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // call script again
+    let res = clients[4]
+        .post("/v1/run-script?name=test&db=public")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0],
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
+            "records":{"schema":{"column_schemas":[{"name":"msg","data_type":"String"}]},"rows":[["Test2"]]}
+        })).unwrap()
+    );
+
+    // call script by SQL UDF again
+    let res = clients[0]
+        .get("/v1/sql?db=public&sql=select test()")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0],
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
+            "records":{"schema":{"column_schemas":[{"name":"test()","data_type":"String"}]},"rows":[["Test2"]]}
+        })).unwrap()
+    );
 }
 
 pub async fn test_health_api(store_type: StorageType) {

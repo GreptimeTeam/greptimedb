@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_server::HeartbeatServer;
+use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
@@ -84,6 +85,7 @@ pub async fn mock(
             .add_service(HeartbeatServer::new(service.clone()))
             .add_service(StoreServer::new(service.clone()))
             .add_service(ProcedureServiceServer::new(service.clone()))
+            .add_service(LockServer::new(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

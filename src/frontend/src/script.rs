@@ -66,21 +66,20 @@ mod dummy {
 
 #[cfg(feature = "python")]
 mod python {
-    use api::v1::ddl_request::Expr;
+
     use api::v1::greptime_request::Request;
-    use api::v1::DdlRequest;
     use arc_swap::ArcSwap;
-    use catalog::RegisterSystemTableRequest;
+    use async_trait::async_trait;
     use common_error::ext::BoxedError;
-    use common_meta::table_name::TableName;
-    use common_telemetry::{error, info};
+    use common_meta::rpc::lock::{LockRequest, UnlockRequest};
+    use common_telemetry::error;
+    use meta_client::client::MetaClientRef;
     use script::manager::ScriptManager;
+    use servers::error::InternalSnafu;
     use servers::query_handler::grpc::GrpcQueryHandler;
-    use session::context::QueryContext;
-    use snafu::{OptionExt, ResultExt};
+    use snafu::ResultExt;
 
     use super::*;
-    use crate::error::{CatalogSnafu, TableNotFoundSnafu};
     use crate::instance::Instance;
 
     /// A placeholder for the real gRPC handler.
@@ -93,7 +92,7 @@ mod python {
         }
     }
 
-    #[async_trait::async_trait]
+    #[async_trait]
     impl GrpcQueryHandler for DummyHandler {
         type Error = Error;
 
@@ -107,23 +106,26 @@ mod python {
     }
 
     pub struct ScriptExecutor {
-        script_manager: ScriptManager<Error>,
+        script_manager: Arc<ScriptManager<Error>>,
         grpc_handler: ArcSwap<FrontendGrpcQueryHandlerRef>,
-        catalog_manager: CatalogManagerRef,
+        meta_client: Option<MetaClientRef>,
     }
 
     impl ScriptExecutor {
         pub async fn new(
             catalog_manager: CatalogManagerRef,
             query_engine: QueryEngineRef,
+            meta_client: Option<MetaClientRef>,
         ) -> Result<Self> {
             let grpc_handler = DummyHandler::arc();
             Ok(Self {
                 grpc_handler: ArcSwap::new(Arc::new(grpc_handler.clone() as _)),
-                script_manager: ScriptManager::new(grpc_handler as _, query_engine)
-                    .await
-                    .context(crate::error::StartScriptManagerSnafu)?,
-                catalog_manager,
+                script_manager: Arc::new(
+                    ScriptManager::new(catalog_manager.clone(), grpc_handler, query_engine)
+                        .await
+                        .context(crate::error::StartScriptManagerSnafu)?,
+                ),
+                meta_client,
             })
         }
 
@@ -133,87 +135,18 @@ mod python {
             self.script_manager
                 .start(handler)
                 .context(crate::error::StartScriptManagerSnafu)?;
+            ScriptManager::register_as_function_provider(self.script_manager.clone());
 
             Ok(())
         }
-
-        /// Create scripts table for the specific catalog if it's not exists.
-        /// The function is idempotent and safe to be called more than once for the same catalog
-        async fn create_scripts_table_if_need(&self, catalog: &str) -> Result<()> {
-            let scripts_table = self.script_manager.get_scripts_table(catalog);
-
-            if scripts_table.is_some() {
-                return Ok(());
-            }
-
-            let RegisterSystemTableRequest {
-                create_table_expr: expr,
-                open_hook,
-            } = self.script_manager.create_table_request(catalog);
-
-            if let Some(table) = self
-                .catalog_manager
-                .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
-                .await
-                .context(CatalogSnafu)?
-            {
-                if let Some(open_hook) = open_hook {
-                    (open_hook)(table.clone()).await.context(CatalogSnafu)?;
-                }
-
-                self.script_manager.insert_scripts_table(catalog, table);
-
-                return Ok(());
-            }
-
-            let table_name =
-                TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-
-            let _ = self
-                .grpc_handler
-                .load()
-                .do_query(
-                    Request::Ddl(DdlRequest {
-                        expr: Some(Expr::CreateTable(expr)),
-                    }),
-                    QueryContext::arc(),
-                )
-                .await?;
-
-            let table = self
-                .catalog_manager
-                .table(
-                    &table_name.catalog_name,
-                    &table_name.schema_name,
-                    &table_name.table_name,
-                )
-                .await
-                .context(CatalogSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: table_name.to_string(),
-                })?;
-
-            if let Some(open_hook) = open_hook {
-                (open_hook)(table.clone()).await.context(CatalogSnafu)?;
-            }
-
-            info!(
-                "Created scripts table {}.",
-                table.table_info().full_table_name()
-            );
-
-            self.script_manager.insert_scripts_table(catalog, table);
-
-            Ok(())
-        }
-
         pub async fn insert_script(
             &self,
             query_ctx: QueryContextRef,
             name: &str,
             script: &str,
         ) -> servers::error::Result<()> {
-            self.create_scripts_table_if_need(query_ctx.current_catalog())
+            self.script_manager
+                .create_table_if_need(query_ctx.current_catalog())
                 .await
                 .map_err(|e| {
                     if e.status_code().should_log_error() {
@@ -226,6 +159,60 @@ mod python {
                     .build()
                 })?;
 
+            if let Some(meta_client) = &self.meta_client {
+                let lock_req = LockRequest {
+                    name: format!("script-{}", name).as_bytes().to_vec(),
+                    expire_secs: 3,
+                };
+                let lock_resullt = meta_client.lock(lock_req).await.map_err(|e| {
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to lock script");
+                    }
+                    InternalSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
+                let key = lock_resullt.key;
+
+                let result = self.insert_or_update_script(query_ctx, name, script).await;
+
+                if let Err(e) = meta_client.unlock(UnlockRequest { key }).await {
+                    error!(e; "Failed to unlock script");
+                };
+                result?;
+            } else {
+                // TODO: we still need to lock it in standalone mode
+                self.insert_or_update_script(query_ctx, name, script)
+                    .await?;
+            }
+
+            Ok(())
+        }
+
+        async fn insert_or_update_script(
+            &self,
+            query_ctx: QueryContextRef,
+            name: &str,
+            script: &str,
+        ) -> servers::error::Result<()> {
+            let (_, version) = self
+                .script_manager
+                .try_find_script(
+                    query_ctx.current_catalog(),
+                    query_ctx.current_schema(),
+                    name,
+                )
+                .await
+                .map_err(|e| {
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to find script");
+                    }
+                    BoxedError::new(e)
+                })
+                .context(servers::error::InsertScriptSnafu { name })?
+                .unwrap_or((String::default(), 0));
+
             let _s = self
                 .script_manager
                 .insert_and_compile(
@@ -233,17 +220,16 @@ mod python {
                     query_ctx.current_schema(),
                     name,
                     script,
+                    version + 1,
                 )
                 .await
                 .map_err(|e| {
                     if e.status_code().should_log_error() {
                         error!(e; "Failed to insert script");
                     }
-
                     BoxedError::new(e)
                 })
                 .context(servers::error::InsertScriptSnafu { name })?;
-
             Ok(())
         }
 
@@ -253,10 +239,13 @@ mod python {
             name: &str,
             params: HashMap<String, String>,
         ) -> servers::error::Result<Output> {
-            self.create_scripts_table_if_need(query_ctx.current_catalog())
+            self.script_manager
+                .create_table_if_need(query_ctx.current_catalog())
                 .await
                 .map_err(|e| {
-                    error!(e; "Failed to create scripts table");
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to create scripts table");
+                    }
                     servers::error::InternalSnafu {
                         err_msg: e.to_string(),
                     }
@@ -275,7 +264,6 @@ mod python {
                     if e.status_code().should_log_error() {
                         error!(e; "Failed to execute script");
                     }
-
                     BoxedError::new(e)
                 })
                 .context(servers::error::ExecuteScriptSnafu { name })

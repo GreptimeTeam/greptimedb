@@ -47,11 +47,13 @@ where
 /// 2. block on that runtime
 pub fn block_on_async<T, F>(f: F) -> std::thread::Result<T>
 where
-    F: Future<Output = T> + Send + 'static,
-    T: Send + 'static,
+    F: Future<Output = T> + Send,
+    T: Send,
 {
-    let rt = common_runtime::bg_runtime();
     // spawn a thread to block on the runtime, also should prevent `start a runtime inside of runtime` error
     // it's ok to block here, assume calling from async to sync is using a `spawn_blocking_*` call
-    std::thread::spawn(move || rt.block_on(f)).join()
+    std::thread::scope(|s| {
+        let rt = common_runtime::bg_runtime();
+        s.spawn(move || rt.block_on(f)).join()
+    })
 }

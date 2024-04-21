@@ -69,11 +69,18 @@ pub struct GreptimeDbCluster {
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Metasrv,
-    pub frontend: Arc<FeInstance>,
+    pub frontend_instances: Vec<Arc<FeInstance>>,
+}
+
+impl GreptimeDbCluster {
+    pub fn frontend(&self) -> Arc<FeInstance> {
+        self.frontend_instances.first().unwrap().clone()
+    }
 }
 
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
+    frontends: Option<u32>,
     kv_backend: KvBackendRef,
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
@@ -105,6 +112,7 @@ impl GreptimeDbClusterBuilder {
 
         Self {
             cluster_name: cluster_name.to_string(),
+            frontends: None,
             kv_backend,
             store_config: None,
             store_providers: None,
@@ -131,6 +139,11 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
+        self
+    }
+
+    pub fn with_frontends(mut self, frontends: u32) -> Self {
+        self.frontends = Some(frontends);
         self
     }
 
@@ -165,6 +178,7 @@ impl GreptimeDbClusterBuilder {
         dir_guards: Vec<FileDirGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
+        let frontends = self.frontends.unwrap_or(1);
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
         let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
@@ -197,11 +211,15 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
-
-        test_util::prepare_another_catalog_and_schema(frontend.as_ref()).await;
-
-        frontend.start().await.unwrap();
+        let mut frontend_instances = Vec::with_capacity(frontends as usize);
+        for i in 0..frontends {
+            let frontend = self
+                .build_frontend(metasrv.clone(), datanode_clients.clone(), i as u64)
+                .await;
+            test_util::prepare_another_catalog_and_schema(frontend.as_ref()).await;
+            frontend.start().await.unwrap();
+            frontend_instances.push(frontend);
+        }
 
         GreptimeDbCluster {
             datanode_options,
@@ -210,7 +228,7 @@ impl GreptimeDbClusterBuilder {
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
-            frontend,
+            frontend_instances,
         }
     }
 
@@ -339,11 +357,13 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<DatanodeClients>,
+        member_id: u64,
     ) -> Arc<FeInstance> {
-        let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
+        let mut meta_client = MetaClientBuilder::new(1000, member_id, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
+            .enable_lock()
             .channel_manager(metasrv.channel_manager)
             .enable_procedure()
             .enable_access_cluster_info()
@@ -379,10 +399,11 @@ impl GreptimeDbClusterBuilder {
             cached_meta_backend.clone(),
             catalog_manager,
             datanode_clients,
-            meta_client,
+            meta_client.clone(),
         )
         .with_cache_invalidator(multi_cache_invalidator)
         .with_heartbeat_task(heartbeat_task)
+        .with_meta_client(meta_client.clone())
         .try_build()
         .await
         .unwrap();

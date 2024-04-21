@@ -275,11 +275,12 @@ impl StartCommand {
             cached_meta_backend.clone(),
             catalog_manager,
             Arc::new(DatanodeClients::default()),
-            meta_client,
+            meta_client.clone(),
         )
         .with_plugin(plugins.clone())
         .with_cache_invalidator(multi_cache_invalidator)
         .with_heartbeat_task(heartbeat_task)
+        .with_meta_client(meta_client.clone())
         .try_build()
         .await
         .context(StartFrontendSnafu)?;

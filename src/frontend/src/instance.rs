@@ -151,6 +151,7 @@ impl Instance {
             .enable_heartbeat()
             .enable_procedure()
             .enable_access_cluster_info()
+            .enable_lock()
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
             .build();

@@ -22,6 +22,8 @@ mod cluster;
 mod store;
 mod util;
 
+use std::sync::Arc;
+
 use api::v1::meta::Role;
 use cluster::Client as ClusterClient;
 use common_error::ext::BoxedError;
@@ -206,6 +208,8 @@ pub struct MetaClient {
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
 }
+
+pub type MetaClientRef = Arc<MetaClient>;
 
 #[async_trait::async_trait]
 impl ProcedureExecutor for MetaClient {
