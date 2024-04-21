@@ -333,7 +333,9 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+    /// Modify columns form the region, only fields are allowed to modify.
     ModifyColumns {
+        /// Columns to modify.
         columns: Vec<ModifyColumn>,
     },
 }
