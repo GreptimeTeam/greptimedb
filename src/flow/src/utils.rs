@@ -140,7 +140,7 @@ pub struct Arrangement {
     expire_state: Option<KeyExpiryManager>,
     /// the time that the last compaction happened, also know as current time
     last_compaction_time: Option<Timestamp>,
-    name: Option<Vec<String>>,
+    name: Vec<String>,
 }
 
 impl Arrangement {
@@ -152,7 +152,7 @@ impl Arrangement {
             is_written: false,
             expire_state: None,
             last_compaction_time: None,
-            name: None,
+            name: vec![],
         }
     }
 
@@ -163,7 +163,7 @@ impl Arrangement {
             is_written: false,
             expire_state: None,
             last_compaction_time: None,
-            name: Some(name),
+            name,
         }
     }
 
@@ -468,9 +468,9 @@ fn compact_diff_row(old_row: Option<DiffRow>, new_row: &DiffRow) -> Option<DiffR
     }
 }
 
-/// Simply a newtype for ReadGuard of Arrangement
+/// Simply a type alias for ReadGuard of Arrangement
 pub type ArrangeReader<'a> = tokio::sync::RwLockReadGuard<'a, Arrangement>;
-/// Simply a newtype for WriteGuard of Arrangement
+/// Simply a type alias for WriteGuard of Arrangement
 pub type ArrangeWriter<'a> = tokio::sync::RwLockWriteGuard<'a, Arrangement>;
 
 /// A handler to the inner Arrangement, can be cloned and shared, useful for query it's inner state

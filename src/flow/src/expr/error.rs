@@ -52,7 +52,7 @@ pub enum EvalError {
         location: Location,
     },
 
-    #[snafu(display("Data type error with msg: `{msg}`"))]
+    #[snafu(display("{msg}"))]
     DataType {
         msg: String,
         source: datatypes::Error,

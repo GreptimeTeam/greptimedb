@@ -107,7 +107,10 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 input: _,
                 key_val_plan: _,
                 reduce_plan: _,
-            } => todo!(),
+            } => NotImplementedSnafu {
+                reason: "Reduce is still WIP".to_string(),
+            }
+            .fail(),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP".to_string(),
             }
