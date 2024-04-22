@@ -54,6 +54,10 @@ impl fmt::Debug for ColumnSchema {
             if self.is_nullable { "null" } else { "not null" },
         )?;
 
+        if self.is_time_index {
+            write!(f, " time_index")?;
+        }
+
         // Add default constraint if present
         if let Some(default_constraint) = &self.default_constraint {
             write!(f, " default={:?}", default_constraint)?;
@@ -157,6 +161,14 @@ impl ColumnSchema {
     /// [with_nullable_set]: Self::with_nullable_set
     pub fn set_nullable(&mut self) {
         self.is_nullable = true;
+    }
+
+    /// Set the `is_time_index` to `true` of the column.
+    /// Similar to [with_time_index] but don't take the ownership.
+    ///
+    /// [with_time_index]: Self::with_time_index
+    pub fn set_time_index(&mut self) {
+        self.is_time_index = true;
     }
 
     /// Creates a new [`ColumnSchema`] with given metadata.
