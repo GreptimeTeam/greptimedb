@@ -91,7 +91,14 @@ pub async fn create_logical_table(
     assert_matches!(status, Status::Executing { persist: true });
     let status = procedure.on_create_metadata().await.unwrap();
     assert_matches!(status, Status::Done { .. });
-    status.downcast_output_ref::<Vec<u32>>().unwrap()[0]
+
+    let Status::Done {
+        output: Some(output),
+    } = status
+    else {
+        panic!("Unexpected status: {:?}", status);
+    };
+    output.downcast_ref::<Vec<u32>>().unwrap()[0]
 }
 
 pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
