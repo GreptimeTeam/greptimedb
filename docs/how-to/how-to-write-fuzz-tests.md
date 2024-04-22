@@ -61,7 +61,6 @@ path = "targets/<fuzz target name>.rs"
 test = false
 bench = false
 doc = false
-
 ```
 
 3. Define the `FuzzInput` in the `/tests-fuzz/targets/<fuzz target name>.rs`.
