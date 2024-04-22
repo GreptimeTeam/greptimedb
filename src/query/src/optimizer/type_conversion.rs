@@ -121,10 +121,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
         })
         .map(|x| x.data)
     }
-
-    fn name(&self) -> &str {
-        "TypeConversionRule"
-    }
 }
 
 struct TypeConverter {

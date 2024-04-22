@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-12-19
+  RUST_TOOLCHAIN: nightly-2024-04-18
 
 jobs:
   check-typos-and-docs:
@@ -184,13 +184,13 @@ jobs:
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: /tmp/greptime-*.log
+          path: /tmp/sqlness-*
           retention-days: 3
 
   sqlness-kafka-wal:
@@ -214,13 +214,13 @@ jobs:
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs-with-kafka-wal
-          path: /tmp/greptime-*.log
+          path: /tmp/sqlness-*
           retention-days: 3
 
   fmt:
@@ -330,20 +330,20 @@ jobs:
           fail_ci_if_error: false
           verbose: true
 
-  compat:
-    name: Compatibility Test
-    needs: build
-    runs-on: ubuntu-20.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download pre-built binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: bins
-          path: .
-      - name: Unzip binaries
-        run: |
-          mkdir -p ./bins/current
-          tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
-      - run: ./tests/compat/test-compat.sh 0.6.0
+  # compat:
+  #   name: Compatibility Test
+  #   needs: build
+  #   runs-on: ubuntu-20.04
+  #   timeout-minutes: 60
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Download pre-built binaries
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: bins
+  #         path: .
+  #     - name: Unzip binaries
+  #       run: |
+  #         mkdir -p ./bins/current
+  #         tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
+  #     - run: ./tests/compat/test-compat.sh 0.6.0

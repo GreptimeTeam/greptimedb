@@ -17,7 +17,6 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::usize;
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::KvCacheInvalidator;

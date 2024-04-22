@@ -47,7 +47,33 @@ pub struct AccumulablePlan {
     /// Each element represents:
     /// (index of aggr output, index of value among inputs, aggr expr)
     /// These will all be rendered together in one dataflow fragment.
-    pub simple_aggrs: Vec<(usize, usize, AggregateExpr)>,
-    /// Same as above but for all of the `DISTINCT` accumulable aggregations.
-    pub distinct_aggrs: Vec<(usize, usize, AggregateExpr)>,
+    ///
+    /// Invariant: the output index is the index of the aggregation in `full_aggrs`
+    /// which means output index is always smaller than the length of `full_aggrs`
+    pub simple_aggrs: Vec<AggrWithIndex>,
+    /// Same as `simple_aggrs` but for all of the `DISTINCT` accumulable aggregations.
+    pub distinct_aggrs: Vec<AggrWithIndex>,
+}
+
+/// Invariant: the output index is the index of the aggregation in `full_aggrs`
+/// which means output index is always smaller than the length of `full_aggrs`
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct AggrWithIndex {
+    /// aggregation expression
+    pub expr: AggregateExpr,
+    /// index of aggr input among input row
+    pub input_idx: usize,
+    /// index of aggr output among output row
+    pub output_idx: usize,
+}
+
+impl AggrWithIndex {
+    /// Create a new `AggrWithIndex`
+    pub fn new(expr: AggregateExpr, input_idx: usize, output_idx: usize) -> Self {
+        Self {
+            expr,
+            input_idx,
+            output_idx,
+        }
+    }
 }

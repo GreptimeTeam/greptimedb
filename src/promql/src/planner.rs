@@ -57,7 +57,7 @@ use crate::error::{
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
-    RangeManipulate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
@@ -67,6 +67,8 @@ use crate::functions::{
 
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
+/// `scalar()` function in PromQL.
+const SCALAR_FUNCTION: &str = "scalar";
 /// `histogram_quantile` function in PromQL
 const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
 /// `vector` function in PromQL
@@ -337,7 +339,17 @@ impl PromPlanner {
                             // rename table references to avoid ambiguity
                             left_table_ref = TableReference::bare("lhs");
                             right_table_ref = TableReference::bare("rhs");
-                            self.ctx.table_name = Some("lhs".to_string());
+                            // `self.ctx` have ctx in right plan, if right plan have no tag,
+                            // we use left plan ctx as the ctx for subsequent calculations,
+                            // to avoid case like `host + scalar(...)`
+                            // we need preserve tag column on `host` table in subsequent projection,
+                            // which only show in left plan ctx.
+                            if self.ctx.tag_columns.is_empty() {
+                                self.ctx = left_context.clone();
+                                self.ctx.table_name = Some("lhs".to_string());
+                            } else {
+                                self.ctx.table_name = Some("rhs".to_string());
+                            }
                         }
                         let mut field_columns =
                             left_field_columns.iter().zip(right_field_columns.iter());
@@ -346,6 +358,10 @@ impl PromPlanner {
                             right_input,
                             left_table_ref.clone(),
                             right_table_ref.clone(),
+                            // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
+                            // under this case we only join on time index
+                            left_context.tag_columns.is_empty()
+                                || right_context.tag_columns.is_empty(),
                         )?;
                         let join_plan_schema = join_plan.schema().clone();
 
@@ -494,6 +510,7 @@ impl PromPlanner {
                 match func.name {
                     SPECIAL_HISTOGRAM_QUANTILE => return self.create_histogram_plan(args).await,
                     SPECIAL_VECTOR_FUNCTION => return self.create_vector_plan(args).await,
+                    SCALAR_FUNCTION => return self.create_scalar_plan(args).await,
                     _ => {}
                 }
 
@@ -791,7 +808,7 @@ impl PromPlanner {
                 }
 
                 // change the tag columns in context
-                self.ctx.tag_columns = labels.labels.clone();
+                self.ctx.tag_columns.clone_from(&labels.labels);
 
                 // add timestamp column
                 exprs.push(self.create_time_index_column_expr()?);
@@ -1434,6 +1451,44 @@ impl PromPlanner {
         }))
     }
 
+    /// Create a [SCALAR_FUNCTION] plan
+    async fn create_scalar_plan(&mut self, args: &PromFunctionArgs) -> Result<LogicalPlan> {
+        ensure!(
+            args.len() == 1,
+            FunctionInvalidArgumentSnafu {
+                fn_name: SCALAR_FUNCTION
+            }
+        );
+        let input = self
+            .prom_expr_to_plan(args.args[0].as_ref().clone())
+            .await?;
+        ensure!(
+            self.ctx.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: SCALAR_FUNCTION
+            },
+        );
+        let scalar_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(ScalarCalculate::new(
+                self.ctx.start,
+                self.ctx.end,
+                self.ctx.interval,
+                input,
+                self.ctx.time_index_column.as_ref().unwrap(),
+                &self.ctx.tag_columns,
+                &self.ctx.field_columns[0],
+                self.ctx.table_name.as_deref(),
+            )?),
+        });
+        // scalar plan have no tag columns
+        self.ctx.tag_columns.clear();
+        self.ctx.field_columns.clear();
+        self.ctx
+            .field_columns
+            .push(scalar_plan.schema().field(1).name().clone());
+        Ok(scalar_plan)
+    }
+
     /// Try to build a DataFusion Literal Expression from PromQL Expr, return
     /// `None` if the input is not a literal expression.
     fn try_build_literal_expr(expr: &PromExpr) -> Option<DfExpr> {
@@ -1583,19 +1638,24 @@ impl PromPlanner {
     }
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
+    /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
     fn join_on_non_field_columns(
         &self,
         left: LogicalPlan,
         right: LogicalPlan,
         left_table_ref: TableReference,
         right_table_ref: TableReference,
+        only_join_time_index: bool,
     ) -> Result<LogicalPlan> {
-        let mut tag_columns = self
-            .ctx
-            .tag_columns
-            .iter()
-            .map(Column::from_name)
-            .collect::<Vec<_>>();
+        let mut tag_columns = if only_join_time_index {
+            vec![]
+        } else {
+            self.ctx
+                .tag_columns
+                .iter()
+                .map(Column::from_name)
+                .collect::<Vec<_>>()
+        };
 
         // push time index column if it exist
         if let Some(time_index_column) = &self.ctx.time_index_column {
@@ -2543,7 +2603,7 @@ mod test {
             .unwrap();
 
         let  expected = String::from(
-            "Projection: lhs.tag_0, lhs.timestamp, lhs.field_0 + rhs.field_0 AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), lhs.field_0 + rhs.field_0:Float64;N]\
+            "Projection: rhs.tag_0, rhs.timestamp, lhs.field_0 + rhs.field_0 AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), lhs.field_0 + rhs.field_0:Float64;N]\
             \n  Inner Join: lhs.tag_0 = rhs.tag_0, lhs.timestamp = rhs.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\

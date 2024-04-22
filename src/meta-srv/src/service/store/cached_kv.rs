@@ -263,7 +263,7 @@ impl KvBackend for LeaderCachedKvBackend {
             .collect::<HashSet<_>>();
 
         metrics::METRIC_META_KV_CACHE_HIT
-            .with_label_values(&[&"batch_get"])
+            .with_label_values(&["batch_get"])
             .inc_by(hit_keys.len() as u64);
 
         let missed_keys = req
@@ -273,7 +273,7 @@ impl KvBackend for LeaderCachedKvBackend {
             .cloned()
             .collect::<Vec<_>>();
         metrics::METRIC_META_KV_CACHE_MISS
-            .with_label_values(&[&"batch_get"])
+            .with_label_values(&["batch_get"])
             .inc_by(missed_keys.len() as u64);
 
         let remote_req = BatchGetRequest { keys: missed_keys };

@@ -131,6 +131,8 @@ pub struct Arrangement {
     /// TODO: batch size balancing?
     spine: Spine,
     /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
+    ///
+    /// in which `arrange` operator only need future updates, and don't need to keep all updates
     full_arrangement: bool,
     /// flag to mark that this arrangement haven't been written to, so that it can be cloned and shared
     is_written: bool,
@@ -138,6 +140,7 @@ pub struct Arrangement {
     expire_state: Option<KeyExpiryManager>,
     /// the time that the last compaction happened, also know as current time
     last_compaction_time: Option<Timestamp>,
+    name: Vec<String>,
 }
 
 impl Arrangement {
@@ -149,10 +152,22 @@ impl Arrangement {
             is_written: false,
             expire_state: None,
             last_compaction_time: None,
+            name: vec![],
         }
     }
 
-    /// apply updates into spine, all updates should have timestamps that are larger than spine's first key
+    pub fn new_with_name(name: Vec<String>) -> Self {
+        Self {
+            spine: Default::default(),
+            full_arrangement: false,
+            is_written: false,
+            expire_state: None,
+            last_compaction_time: None,
+            name,
+        }
+    }
+
+    /// apply updates into spine, with no respect of whether the updates are in futures, past, or now
     ///
     /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
     pub fn apply_updates(
@@ -453,6 +468,11 @@ fn compact_diff_row(old_row: Option<DiffRow>, new_row: &DiffRow) -> Option<DiffR
     }
 }
 
+/// Simply a type alias for ReadGuard of Arrangement
+pub type ArrangeReader<'a> = tokio::sync::RwLockReadGuard<'a, Arrangement>;
+/// Simply a type alias for WriteGuard of Arrangement
+pub type ArrangeWriter<'a> = tokio::sync::RwLockWriteGuard<'a, Arrangement>;
+
 /// A handler to the inner Arrangement, can be cloned and shared, useful for query it's inner state
 #[derive(Debug)]
 pub struct ArrangeHandler {
@@ -494,15 +514,21 @@ impl ArrangeHandler {
     ///
     /// it's a cheap operation, since it's `Arc-ed` and only clone the `Arc`
     pub fn clone_full_arrange(&self) -> Option<Self> {
-        if self.read().is_written {
-            return None;
+        {
+            let zelf = self.read();
+            if !zelf.full_arrangement && zelf.is_written {
+                return None;
+            }
         }
-        let mut arr = self.write();
-        arr.full_arrangement = true;
-        drop(arr);
+
+        self.write().full_arrangement = true;
         Some(Self {
             inner: self.inner.clone(),
         })
+    }
+
+    pub fn set_full_arrangement(&self, full: bool) {
+        self.write().full_arrangement = full;
     }
 }
 
@@ -566,7 +592,7 @@ mod test {
         }
 
         let arr2 = arr.clone_full_arrange();
-        assert!(arr2.is_none());
+        assert!(arr2.is_some());
         {
             let mut arr = arr.write();
             assert_eq!(arr.spine.len(), 3);
