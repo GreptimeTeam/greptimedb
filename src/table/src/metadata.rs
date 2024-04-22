@@ -23,7 +23,7 @@ pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
@@ -467,82 +467,79 @@ impl TableMeta {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
 
-        let mut modify_columns: HashMap<_, _> = HashMap::with_capacity(requests.len());
+        let mut modify_columns = HashMap::with_capacity(requests.len());
         let timestamp_index = table_schema.timestamp_index();
 
         for col_to_modify in requests {
             let modify_column_name = &col_to_modify.column_name;
 
-            if let Some(index) = table_schema.column_index_by_name(modify_column_name) {
-                let column = &table_schema.column_schemas()[index];
-
-                ensure!(
-                    !self.primary_key_indices.contains(&index),
-                    error::ModifyColumnInIndexSnafu {
-                        column_name: modify_column_name,
-                        table_name,
-                    }
-                );
-
-                if let Some(ts_index) = timestamp_index {
-                    // Not allowed to modify column in timestamp index.
-                    ensure!(
-                        index != ts_index,
-                        error::ModifyColumnInIndexSnafu {
-                            column_name: table_schema.column_name_by_index(ts_index),
-                            table_name,
-                        }
-                    );
-                }
-
-                ensure!(
-                    modify_columns
-                        .insert(&col_to_modify.column_name, col_to_modify)
-                        .is_none(),
-                    error::InvalidAlterRequestSnafu {
-                        table: table_name,
-                        err: format!("modify column {} more than once", col_to_modify.column_name),
-                    }
-                );
-
-                ensure!(
-                    table_schema.contains_column(&col_to_modify.column_name),
-                    error::ColumnExistsSnafu {
-                        table_name,
-                        column_name: col_to_modify.column_name.to_string()
-                    },
-                );
-
-                ensure!(
-                    column
-                        .data_type
-                        .can_arrow_type_cast_to(&col_to_modify.target_type),
-                    error::InvalidAlterRequestSnafu {
-                        table: table_name,
-                        err: format!(
-                            "column '{}' cannot be cast automatically to type '{}'",
-                            col_to_modify.column_name, col_to_modify.target_type,
-                        ),
-                    }
-                );
-
-                ensure!(
-                    column.is_nullable(),
-                    error::InvalidAlterRequestSnafu {
-                        table: table_name,
-                        err: format!(
-                            "column '{}' must be nullable to ensure safe conversion.",
-                            col_to_modify.column_name,
-                        ),
-                    }
-                );
-            } else {
-                return error::ColumnNotExistsSnafu {
+            let index = table_schema
+                .column_index_by_name(modify_column_name)
+                .with_context(|| error::ColumnNotExistsSnafu {
                     column_name: modify_column_name,
                     table_name,
+                })?;
+
+            let column = &table_schema.column_schemas()[index];
+
+            ensure!(
+                !self.primary_key_indices.contains(&index),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "Not allowed to modify primary key index column '{}'",
+                        column.name
+                    )
                 }
-                .fail()?;
+            );
+
+            if let Some(ts_index) = timestamp_index {
+                // Not allowed to modify column in timestamp index.
+                ensure!(
+                    index != ts_index,
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "Not allowed to modify timestamp index column '{}'",
+                            column.name
+                        )
+                    }
+                );
             }
+
+            ensure!(
+                modify_columns
+                    .insert(&col_to_modify.column_name, col_to_modify)
+                    .is_none(),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!("modify column {} more than once", col_to_modify.column_name),
+                }
+            );
+
+            ensure!(
+                column
+                    .data_type
+                    .can_arrow_type_cast_to(&col_to_modify.target_type),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column '{}' cannot be cast automatically to type '{}'",
+                        col_to_modify.column_name, col_to_modify.target_type,
+                    ),
+                }
+            );
+
+            ensure!(
+                column.is_nullable(),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column '{}' must be nullable to ensure safe conversion.",
+                        col_to_modify.column_name,
+                    ),
+                }
+            );
         }
         // Collect columns after modified.
         let columns: Vec<_> = table_schema

@@ -1162,11 +1162,12 @@ mod test {
             .unwrap();
         let metadata = builder.build().unwrap();
         check_columns(&metadata, &["a", "b", "f", "c", "d"]);
-        let b_type = metadata
+        let b_type = &metadata
             .column_by_name("b")
-            .map(|column_meta| column_meta.column_schema.data_type.clone())
-            .unwrap();
-        assert_eq!(ConcreteDataType::string_datatype(), b_type);
+            .unwrap()
+            .column_schema
+            .data_type;
+        assert_eq!(ConcreteDataType::string_datatype(), *b_type);
     }
 
     #[test]

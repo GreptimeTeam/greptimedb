@@ -30,7 +30,7 @@ use strum::IntoStaticStr;
 use crate::logstore::entry;
 use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
-    ModifyColumnNotFoundSnafu, RegionMetadata, Result,
+    RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -530,9 +530,9 @@ impl ModifyColumn {
         let column_meta =
             metadata
                 .column_by_name(&self.column_name)
-                .context(ModifyColumnNotFoundSnafu {
-                    column_name: self.column_name.clone(),
+                .context(InvalidRegionRequestSnafu {
                     region_id: metadata.region_id,
+                    err: format!("column {} not found", self.column_name),
                 })?;
 
         ensure!(

@@ -92,17 +92,6 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Not allowed to modify index column '{}' from table {}",
-        column_name,
-        table_name
-    ))]
-    ModifyColumnInIndex {
-        column_name: String,
-        table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display(
         "Failed to build column descriptor for table: {}, column: {}",
         table_name,
         column_name,
@@ -158,7 +147,6 @@ impl ErrorExt for Error {
             | Error::SchemaConversion { .. }
             | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
             Error::RemoveColumnInIndex { .. }
-            | Error::ModifyColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
             Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
