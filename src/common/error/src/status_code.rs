@@ -59,6 +59,7 @@ pub enum StatusCode {
     RegionNotFound = 4005,
     RegionAlreadyExists = 4006,
     RegionReadonly = 4007,
+    /// Region is not in a proper state to handle specific request.
     RegionNotReady = 4008,
     // If mutually exclusive operations are reached at the same time,
     // only one can be executed, another one will get region busy.
