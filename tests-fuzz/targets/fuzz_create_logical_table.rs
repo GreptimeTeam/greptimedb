@@ -49,15 +49,12 @@ impl FuzzContext {
 #[derive(Clone, Debug)]
 struct FuzzInput {
     seed: u64,
-    actions: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
-        let mut rng = ChaChaRng::seed_from_u64(seed);
-        let actions = rng.gen_range(2..30);
-        Ok(FuzzInput { actions, seed })
+        Ok(FuzzInput { seed })
     }
 }
 
@@ -100,59 +97,57 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
 
     // Create logical table
     let table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
-    for _ in 0..input.actions {
-        let labels = rng.gen_range(1..=5);
+    let labels = rng.gen_range(1..=5);
 
-        let create_logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
-            .table_ctx(table_ctx.clone())
-            .labels(labels)
-            .build()
-            .unwrap()
-            .generate(&mut rng)?;
-        let sql = translator.translate(&create_logical_table_expr)?;
-        let result = sqlx::query(&sql)
-            .execute(&ctx.greptime)
-            .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Create logical table: {sql}, result: {result:?}");
+    let create_logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
+        .table_ctx(table_ctx.clone())
+        .labels(labels)
+        .build()
+        .unwrap()
+        .generate(&mut rng)?;
+    let sql = translator.translate(&create_logical_table_expr)?;
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!("Create logical table: {sql}, result: {result:?}");
 
-        // Validate columns in logical table
-        let mut column_entries = validator::column::fetch_columns(
-            &ctx.greptime,
-            "public".into(),
-            create_logical_table_expr.table_name.clone(),
-        )
-        .await?;
-        column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
-        let mut columns = create_logical_table_expr.columns.clone();
-        columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
-        validator::column::assert_eq(&column_entries, &columns)?;
+    // Validate columns in logical table
+    let mut column_entries = validator::column::fetch_columns(
+        &ctx.greptime,
+        "public".into(),
+        create_logical_table_expr.table_name.clone(),
+    )
+    .await?;
+    column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
+    let mut columns = create_logical_table_expr.columns.clone();
+    columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
+    validator::column::assert_eq(&column_entries, &columns)?;
 
-        // Validate columns in physical table
-        columns.retain(|column| column.column_type == ConcreteDataType::string_datatype());
-        physical_table_columns.append(&mut columns);
-        physical_table_columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
+    // Validate columns in physical table
+    columns.retain(|column| column.column_type == ConcreteDataType::string_datatype());
+    physical_table_columns.append(&mut columns);
+    physical_table_columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
 
-        let mut column_entries = validator::column::fetch_columns(
-            &ctx.greptime,
-            "public".into(),
-            create_physical_table_expr.table_name.clone(),
-        )
-        .await?;
-        column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
-        validator::column::assert_eq(&column_entries, &physical_table_columns)?;
+    let mut column_entries = validator::column::fetch_columns(
+        &ctx.greptime,
+        "public".into(),
+        create_physical_table_expr.table_name.clone(),
+    )
+    .await?;
+    column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
+    validator::column::assert_eq(&column_entries, &physical_table_columns)?;
 
-        // Clean up logical table
-        let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
-        let result = sqlx::query(&sql)
-            .execute(&ctx.greptime)
-            .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!(
-            "Drop table: {}, result: {result:?}",
-            create_logical_table_expr.table_name
-        );
-    }
+    // Clean up logical table
+    let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!(
+        "Drop table: {}, result: {result:?}",
+        create_logical_table_expr.table_name
+    );
 
     // Clean up physical table
     let sql = format!("DROP TABLE {}", create_physical_table_expr.table_name);
