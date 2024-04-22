@@ -514,7 +514,9 @@ impl TableMeta {
                 );
 
                 ensure!(
-                    column.data_type.can_arrow_type_cast_to(&col_to_modify.target_type),
+                    column
+                        .data_type
+                        .can_arrow_type_cast_to(&col_to_modify.target_type),
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
