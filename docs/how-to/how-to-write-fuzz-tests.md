@@ -123,7 +123,6 @@ fuzz_target!(|input: FuzzInput| {
             let translator = CreateTableExprTranslator;
             let sql = translator.translate(&expr).unwrap();
             mysql.execute(&sql).await
-            // other logical
     })
 });
 ```
@@ -131,7 +130,7 @@ fuzz_target!(|input: FuzzInput| {
 5. Run your fuzz test target
 
 ```bash
-    cargo fuzz run <fuzz-test> --fuzz-dir tests-fuzz
+    cargo fuzz run <fuzz-target> --fuzz-dir tests-fuzz
 ```
 
 For more details, please refer to this [document](/tests-fuzz/README.md).
