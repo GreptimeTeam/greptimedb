@@ -58,14 +58,14 @@ For more details about fuzz targets and fundamental components, please refer to 
 
 ```toml
 [[bin]]
-name = "{fuzz target name}"
-path = "targets/<fuzz target name>.rs"
+name = "<fuzz-target>"
+path = "targets/<fuzz-target>.rs"
 test = false
 bench = false
 doc = false
 ```
 
-3. Define the `FuzzInput` in the `/tests-fuzz/targets/<fuzz target name>.rs`.
+3. Define the `FuzzInput` in the `/tests-fuzz/targets/<fuzz-target>.rs`.
 
 ```rust
 #![no_main]
@@ -84,7 +84,7 @@ impl Arbitrary<'_> for FuzzInput {
 }
 ```
 
-4. Write your first fuzz test target in the `/tests-fuzz/targets/<fuzz target name>.rs`.
+4. Write your first fuzz test target in the `/tests-fuzz/targets/<fuzz-target>.rs`.
 
 ```rust
 use libfuzzer_sys::fuzz_target;
@@ -109,7 +109,6 @@ fuzz_target!(|input: FuzzInput| {
         let Connections { mysql } = init_greptime_connections().await;
             let mut rng = ChaChaRng::seed_from_u64(input.seed);
             let columns = rng.gen_range(2..30);
-// ...?
             let create_table_generator = CreateTableExprGeneratorBuilder::default()
                 .name_generator(Box::new(MappedGenerator::new(
                     WordGenerator,
@@ -124,10 +123,15 @@ fuzz_target!(|input: FuzzInput| {
             let translator = CreateTableExprTranslator;
             let sql = translator.translate(&expr).unwrap();
             mysql.execute(&sql).await
+            // other logical
     })
 });
 ```
 
 5. Run your fuzz test target
 
-Please follow the instructions in this [document](/tests-fuzz/README.md).
+```bash
+    cargo fuzz run <fuzz-test> --fuzz-dir tests-fuzz
+```
+
+For more details, please refer to this [document](/tests-fuzz/README.md).
