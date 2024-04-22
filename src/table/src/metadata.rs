@@ -474,7 +474,7 @@ impl TableMeta {
             let modify_column_name = &col_to_modify.column_name;
 
             if let Some(index) = table_schema.column_index_by_name(modify_column_name) {
-                let data_type = &table_schema.column_schemas()[index].data_type;
+                let column = &table_schema.column_schemas()[index];
 
                 ensure!(
                     !self.primary_key_indices.contains(&index),
@@ -514,12 +514,23 @@ impl TableMeta {
                 );
 
                 ensure!(
-                    data_type.can_arrow_type_cast_to(&col_to_modify.target_type),
+                    column.data_type.can_arrow_type_cast_to(&col_to_modify.target_type),
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
                             "column '{}' cannot be cast automatically to type '{}'",
                             col_to_modify.column_name, col_to_modify.target_type,
+                        ),
+                    }
+                );
+
+                ensure!(
+                    column.is_nullable(),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column '{}' must be nullable to ensure safe conversion.",
+                            col_to_modify.column_name,
                         ),
                     }
                 );
