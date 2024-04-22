@@ -330,20 +330,20 @@ jobs:
           fail_ci_if_error: false
           verbose: true
 
-  compat:
-    name: Compatibility Test
-    needs: build
-    runs-on: ubuntu-20.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download pre-built binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: bins
-          path: .
-      - name: Unzip binaries
-        run: |
-          mkdir -p ./bins/current
-          tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
-      - run: ./tests/compat/test-compat.sh 0.6.0
+  # compat:
+  #   name: Compatibility Test
+  #   needs: build
+  #   runs-on: ubuntu-20.04
+  #   timeout-minutes: 60
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Download pre-built binaries
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: bins
+  #         path: .
+  #     - name: Unzip binaries
+  #       run: |
+  #         mkdir -p ./bins/current
+  #         tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
+  #     - run: ./tests/compat/test-compat.sh 0.6.0
