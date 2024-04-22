@@ -206,7 +206,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
     }
 }
 
-/// Generates a physical table.
+/// Generate a physical table with 2 columns: time index and value.
 #[derive(Builder)]
 #[builder(pattern = "owned")]
 pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
@@ -219,7 +219,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
 
     fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
         let if_not_exists = rng.gen_bool(0.5);
-        // Simply generates a physical table with two columns.
+
         let create_physical_table_generator = CreateTableExprGeneratorBuilder::default()
             .name_generator(Box::new(MappedGenerator::new(
                 WordGenerator,
@@ -236,7 +236,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
     }
 }
 
-/// Generates a logical table based on an existing physical table.
+/// Generate a logical table based on an existing physical table.
 #[derive(Builder)]
 #[builder(pattern = "owned")]
 pub struct CreateLogicalTableExprGenerator<R: Rng + 'static> {
@@ -250,7 +250,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprG
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
-        // Currently we mock the usage of GreptimeDB as Prometheu's backend, the physical table must have two columns.
+        // Currently we mock the usage of GreptimeDB as Prometheus' backend, the physical table must have two columns.
         ensure!(
             self.table_ctx.columns.len() == 2,
             error::UnexpectedSnafu {
