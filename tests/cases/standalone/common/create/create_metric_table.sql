@@ -4,6 +4,9 @@ SHOW TABLES;
 
 DESC TABLE phy;
 
+-- create table with duplicate column def
+CREATE TABLE t1(ts timestamp time index, val double, host text, host string) engine=metric with ("on_physical_table" = "phy");
+
 CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
