@@ -9539,6 +9539,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlness",
+ "tempfile",
  "tinytemplate",
  "tokio",
 ]
