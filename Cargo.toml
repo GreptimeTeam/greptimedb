@@ -70,7 +70,10 @@ license = "Apache-2.0"
 clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
 clippy.implicit_clone = "warn"
+clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
+# Remove this after https://github.com/PyO3/pyo3/issues/4094
+rust.non_local_definitions = "allow"
 
 [workspace.dependencies]
 # We turn off default-features for some dependencies here so the workspaces which inherit them can
@@ -111,7 +114,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/MichaelScofield/greptime-proto.git", rev = "bdbd4cfa871ec8d192d3dbabf11debcb2cb67748" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "73ac0207ab71dfea48f30259ffdb611501b5ecb8" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"

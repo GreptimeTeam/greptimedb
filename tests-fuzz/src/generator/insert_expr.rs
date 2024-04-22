@@ -50,7 +50,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
         let mut values_columns = vec![];
         if omit_column_list {
             // If omit column list, then all columns are required in the values list
-            values_columns = self.table_ctx.columns.clone();
+            values_columns.clone_from(&self.table_ctx.columns);
         } else {
             for column in &self.table_ctx.columns {
                 let can_omit = column.is_nullable() || column.has_default_value();

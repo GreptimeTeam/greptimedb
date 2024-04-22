@@ -120,7 +120,7 @@ where
 
             // update min/max, assume values are appended in lexicographic order
             if stats.distinct_count == 1 {
-                stats.min_value = value.clone();
+                stats.min_value.clone_from(&value);
             }
             stats.max_value = value;
         }

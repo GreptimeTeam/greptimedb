@@ -58,7 +58,7 @@ struct DataSourceWrapper {
 
 impl DataSource for DataSourceWrapper {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
-        *self.filter.write().unwrap() = request.filters.clone();
+        self.filter.write().unwrap().clone_from(&request.filters);
         self.inner.get_stream(request)
     }
 }

@@ -21,12 +21,12 @@ mod reduce;
 use datatypes::arrow::ipc::Map;
 use serde::{Deserialize, Serialize};
 
-pub(crate) use self::reduce::{AccumulablePlan, KeyValPlan, ReducePlan};
 use crate::adapter::error::Error;
 use crate::expr::{
     AggregateExpr, EvalError, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr,
 };
 use crate::plan::join::JoinPlan;
+pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
 use crate::repr::{ColumnType, DiffRow, RelationType};
 
 /// A plan for a dataflow component. But with type to indicate the output type of the relation.

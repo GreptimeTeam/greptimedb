@@ -21,7 +21,7 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 
-use super::{HistogramFold, UnionDistinctOn};
+use super::{HistogramFold, ScalarCalculate, UnionDistinctOn};
 use crate::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
@@ -48,6 +48,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<EmptyMetric>() {
             Ok(Some(node.to_execution_plan(session_state, planner)?))
+        } else if let Some(node) = node.as_any().downcast_ref::<ScalarCalculate>() {
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else if let Some(node) = node.as_any().downcast_ref::<HistogramFold>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<UnionDistinctOn>() {

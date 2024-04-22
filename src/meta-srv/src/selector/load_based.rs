@@ -205,11 +205,9 @@ mod tests {
         let alive_stat_kvs = filter_out_expired_datanode(stat_kvs, &lease_kvs);
 
         assert_eq!(1, alive_stat_kvs.len());
-        assert!(alive_stat_kvs
-            .get(&StatKey {
-                cluster_id: 1,
-                node_id: 1
-            })
-            .is_some());
+        assert!(alive_stat_kvs.contains_key(&StatKey {
+            cluster_id: 1,
+            node_id: 1
+        }));
     }
 }

@@ -52,6 +52,13 @@ pub enum EvalError {
         location: Location,
     },
 
+    #[snafu(display("{msg}"))]
+    DataType {
+        msg: String,
+        source: datatypes::Error,
+        location: Location,
+    },
+
     #[snafu(display("Invalid argument: {reason}"))]
     InvalidArgument { reason: String, location: Location },
 

@@ -573,6 +573,7 @@ mod tests {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(path.clone())
             .unwrap();
 

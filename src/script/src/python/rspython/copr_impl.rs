@@ -38,7 +38,7 @@ use crate::python::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
 use crate::python::rspython::dataframe_impl::init_data_frame;
 use crate::python::rspython::utils::{format_py_error, is_instance, py_obj_to_vec};
 
-thread_local!(static INTERPRETER: RefCell<Option<Rc<Interpreter>>> = RefCell::new(None));
+thread_local!(static INTERPRETER: RefCell<Option<Rc<Interpreter>>> = const { RefCell::new(None) });
 
 /// Using `RustPython` to run a parsed `Coprocessor` struct as input to execute python code
 pub(crate) fn rspy_exec_parsed(

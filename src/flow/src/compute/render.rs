@@ -18,25 +18,32 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Range;
 use std::rc::Rc;
 
+use datatypes::data_type::ConcreteDataType;
+use datatypes::value::{ListValue, Value};
+use hydroflow::futures::SinkExt;
 use hydroflow::lattices::cc_traits::Get;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::graph_ext::GraphExt;
 use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use super::state::Scheduler;
-use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu};
+use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu};
 use crate::compute::state::DataflowState;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
+use crate::expr::error::{DataTypeSnafu, InternalSnafu};
 use crate::expr::{
     self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
 };
-use crate::plan::Plan;
+use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
-use crate::utils::{ArrangeHandler, Arrangement};
+use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, Arrangement};
+
+mod map;
 
 /// The Context for build a Operator with id of `GlobalId`
 pub struct Context<'referred, 'df> {
@@ -86,8 +93,6 @@ impl<'referred, 'df> Context<'referred, 'df> {
     }
 }
 
-// There is a false positive in using `Vec<ScalarExpr>` as key
-#[allow(clippy::mutable_key_type)]
 impl<'referred, 'df> Context<'referred, 'df> {
     /// Interpret and execute plan
     ///
@@ -97,26 +102,62 @@ impl<'referred, 'df> Context<'referred, 'df> {
             Plan::Constant { rows } => Ok(self.render_constant(rows)),
             Plan::Get { id } => self.get_by_id(id),
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
-            Plan::Mfp { input, mfp } => {
-                self.render_map_filter_project_into_executable_dataflow(input, mfp)
+            Plan::Mfp { input, mfp } => self.render_mfp(input, mfp),
+            Plan::Reduce {
+                input: _,
+                key_val_plan: _,
+                reduce_plan: _,
+            } => NotImplementedSnafu {
+                reason: "Reduce is still WIP".to_string(),
             }
-            Plan::Reduce { .. } => todo!(),
-            Plan::Join { .. } => todo!(),
-            Plan::Union { .. } => todo!(),
+            .fail(),
+            Plan::Join { .. } => NotImplementedSnafu {
+                reason: "Join is still WIP".to_string(),
+            }
+            .fail(),
+            Plan::Union { .. } => NotImplementedSnafu {
+                reason: "Union is still WIP".to_string(),
+            }
+            .fail(),
         }
     }
 
-    /// render Constant, will only emit the `rows` once.
-    pub fn render_constant(&mut self, mut rows: Vec<DiffRow>) -> CollectionBundle {
+    /// render Constant, take all rows that have a timestamp not greater than the current time
+    ///
+    /// Always assume input is sorted by timestamp
+    pub fn render_constant(&mut self, rows: Vec<DiffRow>) -> CollectionBundle {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff>("constant");
+        let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = rows
+            .into_iter()
+            .group_by(|(_row, ts, _diff)| *ts)
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect_vec()))
+            .collect();
+        let now = self.compute_state.current_time_ref();
+        // TODO(discord9): better way to schedule future run
+        let scheduler = self.compute_state.get_scheduler();
+        let scheduler_inner = scheduler.clone();
 
-        self.df
-            .add_subgraph_source("Constant", send_port, move |_ctx, send_port| {
-                if rows.is_empty() {
-                    return;
-                }
-                send_port.give(std::mem::take(&mut rows));
-            });
+        let subgraph_id =
+            self.df
+                .add_subgraph_source("Constant", send_port, move |_ctx, send_port| {
+                    // find the first timestamp that is greater than now
+                    // use filter_map
+
+                    let mut after = per_time.split_off(&(*now.borrow() + 1));
+                    // swap
+                    std::mem::swap(&mut per_time, &mut after);
+                    let not_great_than_now = after;
+
+                    not_great_than_now.into_iter().for_each(|(_ts, rows)| {
+                        send_port.give(rows);
+                    });
+                    // schedule the next run
+                    if let Some(next_run_time) = per_time.keys().next().copied() {
+                        scheduler_inner.schedule_at(next_run_time);
+                    }
+                });
+        scheduler.set_cur_subgraph(subgraph_id);
 
         CollectionBundle::from_collection(Collection::from_port(recv_port))
     }
@@ -161,144 +202,14 @@ impl<'referred, 'df> Context<'referred, 'df> {
         let ret = self.render_plan(*body)?;
         Ok(ret)
     }
-
-    /// render MapFilterProject, will only emit the `rows` once. Assume all incoming row's sys time being `now`` and ignore the row's stated sys time
-    /// TODO(discord9): schedule mfp operator to run when temporal filter need
-    ///
-    /// `MapFilterProject`(`mfp` for short) is scheduled to run when there is enough amount of input updates
-    /// ***or*** when a future update in it's output buffer(a `Arrangement`) is supposed to emit now.
-    pub fn render_map_filter_project_into_executable_dataflow(
-        &mut self,
-        input: Box<Plan>,
-        mfp: MapFilterProject,
-    ) -> Result<CollectionBundle, Error> {
-        let input = self.render_plan(*input)?;
-        // TODO(discord9): consider if check if contain temporal to determine if
-        // need arrange or not, or does this added complexity worth it
-        let (out_send_port, out_recv_port) = self.df.make_edge::<_, Toff>("mfp");
-        let input_arity = mfp.input_arity;
-
-        // default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
-        // as stream only sends current updates and etc.
-        let arrange = Arrangement::new();
-        let arrange_handler = ArrangeHandler::from(arrange.clone());
-        let arrange_handler_inner = ArrangeHandler::from(arrange);
-
-        // This closure capture following variables:
-        let mfp_plan = MfpPlan::create_from(mfp)?;
-        let now = self.compute_state.current_time_ref();
-
-        let err_collector = self.err_collector.clone();
-
-        // TODO(discord9): better way to schedule future run
-        let scheduler = self.compute_state.get_scheduler();
-        let scheduler_inner = scheduler.clone();
-
-        let subgraph = self.df.add_subgraph_in_out(
-            "mfp",
-            input.collection.into_inner(),
-            out_send_port,
-            move |_ctx, recv, send| {
-                // mfp only need to passively receive updates from recvs
-                let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
-
-                mfp_subgraph(
-                    &arrange_handler_inner,
-                    data,
-                    &mfp_plan,
-                    *now.borrow(),
-                    &err_collector,
-                    &scheduler_inner,
-                    send,
-                );
-            },
-        );
-
-        // register current subgraph in scheduler for future scheduling
-        scheduler.set_cur_subgraph(subgraph);
-
-        let arranged = BTreeMap::from([(
-            (0..input_arity).map(ScalarExpr::Column).collect_vec(),
-            Arranged::new(arrange_handler),
-        )]);
-
-        let bundle = CollectionBundle {
-            collection: Collection::from_port(out_recv_port),
-            arranged,
-        };
-        Ok(bundle)
-    }
 }
 
-fn mfp_subgraph(
-    arrange: &ArrangeHandler,
-    input: impl IntoIterator<Item = DiffRow>,
-    mfp_plan: &MfpPlan,
+/// The Common argument for all `Subgraph` in the render process
+struct SubgraphArg<'a> {
     now: repr::Timestamp,
-    err_collector: &ErrCollector,
-    scheduler: &Scheduler,
-    send: &PortCtx<SEND, Toff>,
-) {
-    let run_mfp = || {
-        let all_updates = eval_mfp_core(input, mfp_plan, now, err_collector);
-        arrange.write().apply_updates(now, all_updates)?;
-        Ok(())
-    };
-    err_collector.run(run_mfp);
-
-    // Deal with output:
-    // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
-    // 2. Output the updates.
-    // 3. Truncate all updates within that range.
-
-    let from = arrange.read().last_compaction_time().map(|n| n + 1);
-    let from = from.unwrap_or(repr::Timestamp::MIN);
-    let output_kv = arrange.read().get_updates_in_range(from..=now);
-    // the output is expected to be key -> empty val
-    let output = output_kv
-        .into_iter()
-        .map(|((key, _v), ts, diff)| (key, ts, diff))
-        .collect_vec();
-    send.give(output);
-    let run_compaction = || {
-        arrange.write().compaction_to(now)?;
-        Ok(())
-    };
-    err_collector.run(run_compaction);
-
-    // schedule the next time this operator should run
-    if let Some(i) = arrange.read().get_next_update_time(&now) {
-        scheduler.schedule_at(i)
-    }
-}
-
-/// The core of evaluating MFP operator, given a MFP and a input, evaluate the MFP operator,
-/// return the output updates **And** possibly any number of errors that occurred during the evaluation
-fn eval_mfp_core(
-    input: impl IntoIterator<Item = DiffRow>,
-    mfp_plan: &MfpPlan,
-    now: repr::Timestamp,
-    err_collector: &ErrCollector,
-) -> Vec<KeyValDiffRow> {
-    let mut all_updates = Vec::new();
-    for (mut row, _sys_time, diff) in input.into_iter() {
-        // this updates is expected to be only zero to two rows
-        let updates = mfp_plan.evaluate::<EvalError>(&mut row.inner, now, diff);
-        // TODO(discord9): refactor error handling
-        // Expect error in a single row to not interrupt the whole evaluation
-        let updates = updates
-            .filter_map(|r| match r {
-                Ok((key, ts, diff)) => Some(((key, Row::empty()), ts, diff)),
-                Err((err, _ts, _diff)) => {
-                    err_collector.push_err(err);
-                    None
-                }
-            })
-            .collect_vec();
-
-        all_updates.extend(updates);
-    }
-    all_updates
+    err_collector: &'a ErrCollector,
+    scheduler: &'a Scheduler,
+    send: &'a PortCtx<SEND, Toff>,
 }
 
 #[cfg(test)]
@@ -316,64 +227,30 @@ mod test {
     use crate::expr::BinaryFunc;
     use crate::repr::Row;
 
-    fn harness_test_ctx<'r, 'h>(
-        df: &'r mut Hydroflow<'h>,
-        state: &'r mut DataflowState,
-    ) -> Context<'r, 'h> {
-        let err_collector = state.get_err_collector();
-        Context {
-            id: GlobalId::User(0),
-            df,
-            compute_state: state,
-            input_collection: BTreeMap::new(),
-            local_scope: Default::default(),
-            err_collector,
+    pub fn run_and_check(
+        state: &mut DataflowState,
+        df: &mut Hydroflow,
+        time_range: Range<i64>,
+        expected: BTreeMap<i64, Vec<DiffRow>>,
+        output: Rc<RefCell<Vec<DiffRow>>>,
+    ) {
+        for now in time_range {
+            state.set_current_ts(now);
+            state.run_available_with_schedule(df);
+            assert!(state.get_err_collector().inner.borrow().is_empty());
+            if let Some(expected) = expected.get(&now) {
+                assert_eq!(*output.borrow(), *expected, "at ts={}", now);
+            } else {
+                assert_eq!(*output.borrow(), vec![], "at ts={}", now);
+            };
+            output.borrow_mut().clear();
         }
     }
 
-    /// test if temporal filter works properly
-    /// namely: if mfp operator can schedule a delete at the correct time
-    #[test]
-    fn test_render_mfp_with_temporal() {
-        let mut df = Hydroflow::new();
-        let mut state = DataflowState::default();
-        let mut ctx = harness_test_ctx(&mut df, &mut state);
-
-        let rows = vec![
-            (Row::new(vec![1i64.into()]), 1, 1),
-            (Row::new(vec![2i64.into()]), 2, 1),
-            (Row::new(vec![3i64.into()]), 3, 1),
-        ];
-        let collection = ctx.render_constant(rows);
-        ctx.insert_global(GlobalId::User(1), collection);
-        let input_plan = Plan::Get {
-            id: expr::Id::Global(GlobalId::User(1)),
-        };
-        // temporal filter: now <= col(0) < now + 4
-        let mfp = MapFilterProject::new(1)
-            .filter(vec![
-                ScalarExpr::Column(0)
-                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
-                    .call_binary(
-                        ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
-                        BinaryFunc::Gte,
-                    ),
-                ScalarExpr::Column(0)
-                    .call_binary(
-                        ScalarExpr::literal(4i64.into(), ConcreteDataType::int64_datatype()),
-                        BinaryFunc::SubInt64,
-                    )
-                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
-                    .call_binary(
-                        ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
-                        BinaryFunc::Lt,
-                    ),
-            ])
-            .unwrap();
-
-        let mut bundle = ctx
-            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
-            .unwrap();
+    pub fn get_output_handle(
+        ctx: &mut Context,
+        mut bundle: CollectionBundle,
+    ) -> Rc<RefCell<Vec<DiffRow>>> {
         let collection = bundle.collection;
         let _arranged = bundle.arranged.pop_first().unwrap().1;
         let output = Rc::new(RefCell::new(vec![]));
@@ -388,93 +265,22 @@ mod test {
                 output_inner.borrow_mut().extend(res);
             },
         );
-        // drop ctx here to simulate actual process of compile first, run later scenario
-        drop(ctx);
-        // expected output at given time
-        let expected_output = BTreeMap::from([
-            (
-                0, // time
-                vec![
-                    (Row::new(vec![1i64.into()]), 0, 1),
-                    (Row::new(vec![2i64.into()]), 0, 1),
-                    (Row::new(vec![3i64.into()]), 0, 1),
-                ],
-            ),
-            (
-                2, // time
-                vec![(Row::new(vec![1i64.into()]), 2, -1)],
-            ),
-            (
-                3, // time
-                vec![(Row::new(vec![2i64.into()]), 3, -1)],
-            ),
-            (
-                4, // time
-                vec![(Row::new(vec![3i64.into()]), 4, -1)],
-            ),
-        ]);
-
-        for now in 0i64..5 {
-            state.set_current_ts(now);
-            state.run_available_with_schedule(&mut df);
-            assert!(state.get_err_collector().inner.borrow().is_empty());
-            if let Some(expected) = expected_output.get(&now) {
-                assert_eq!(*output.borrow(), *expected);
-            } else {
-                assert_eq!(*output.borrow(), vec![]);
-            };
-            output.borrow_mut().clear();
-        }
+        output
     }
 
-    /// test if mfp operator without temporal filter works properly
-    /// that is it filter the rows correctly
-    #[test]
-    fn test_render_mfp() {
-        let mut df = Hydroflow::new();
-        let mut state = DataflowState::default();
-        let mut ctx = harness_test_ctx(&mut df, &mut state);
-
-        let rows = vec![
-            (Row::new(vec![1.into()]), 1, 1),
-            (Row::new(vec![2.into()]), 2, 1),
-            (Row::new(vec![3.into()]), 3, 1),
-        ];
-        let collection = ctx.render_constant(rows);
-        ctx.insert_global(GlobalId::User(1), collection);
-        let input_plan = Plan::Get {
-            id: expr::Id::Global(GlobalId::User(1)),
-        };
-        // filter: col(0)>1
-        let mfp = MapFilterProject::new(1)
-            .filter(vec![ScalarExpr::Column(0).call_binary(
-                ScalarExpr::literal(1.into(), ConcreteDataType::int32_datatype()),
-                BinaryFunc::Gt,
-            )])
-            .unwrap();
-        let bundle = ctx
-            .render_map_filter_project_into_executable_dataflow(Box::new(input_plan), mfp)
-            .unwrap();
-        let collection = bundle.collection.clone(ctx.df);
-
-        ctx.df.add_subgraph_sink(
-            "test_render_constant",
-            collection.into_inner(),
-            move |_ctx, recv| {
-                let data = recv.take_inner();
-                let res = data.into_iter().flat_map(|v| v.into_iter()).collect_vec();
-                assert_eq!(
-                    res,
-                    vec![
-                        (Row::new(vec![2.into()]), 0, 1),
-                        (Row::new(vec![3.into()]), 0, 1),
-                    ]
-                )
-            },
-        );
-        drop(ctx);
-
-        df.run_available();
+    pub fn harness_test_ctx<'r, 'h>(
+        df: &'r mut Hydroflow<'h>,
+        state: &'r mut DataflowState,
+    ) -> Context<'r, 'h> {
+        let err_collector = state.get_err_collector();
+        Context {
+            id: GlobalId::User(0),
+            df,
+            compute_state: state,
+            input_collection: BTreeMap::new(),
+            local_scope: Default::default(),
+            err_collector,
+        }
     }
 
     /// test if constant operator works properly
@@ -494,7 +300,7 @@ mod test {
         let collection = collection.collection.clone(ctx.df);
         let cnt = Rc::new(RefCell::new(0));
         let cnt_inner = cnt.clone();
-        ctx.df.add_subgraph_sink(
+        let res_subgraph_id = ctx.df.add_subgraph_sink(
             "test_render_constant",
             collection.into_inner(),
             move |_ctx, recv| {
@@ -502,9 +308,16 @@ mod test {
                 *cnt_inner.borrow_mut() += data.iter().map(|v| v.len()).sum::<usize>();
             },
         );
+        ctx.compute_state.set_current_ts(2);
+        ctx.compute_state.run_available_with_schedule(ctx.df);
+        assert_eq!(*cnt.borrow(), 2);
+
+        ctx.compute_state.set_current_ts(3);
+        ctx.compute_state.run_available_with_schedule(ctx.df);
+        // to get output
+        ctx.df.schedule_subgraph(res_subgraph_id);
         ctx.df.run_available();
-        assert_eq!(*cnt.borrow(), 3);
-        ctx.df.run_available();
+
         assert_eq!(*cnt.borrow(), 3);
     }
 
@@ -532,5 +345,34 @@ mod test {
         df.run_available();
 
         assert_eq!(sum.borrow().to_owned(), 45);
+    }
+
+    #[test]
+    fn test_tee_auto_schedule() {
+        use hydroflow::scheduled::handoff::TeeingHandoff as Toff;
+        let mut df = Hydroflow::new();
+        let (send_port, recv_port) = df.make_edge::<_, Toff<i32>>("test_handoff");
+        let source = df.add_subgraph_source("test_handoff_source", send_port, move |_ctx, send| {
+            for i in 0..10 {
+                send.give(vec![i]);
+            }
+        });
+        let teed_recv_port = recv_port.tee(&mut df);
+
+        let sum = Rc::new(RefCell::new(0));
+        let sum_move = sum.clone();
+        let _sink = df.add_subgraph_sink("test_handoff_sink", teed_recv_port, move |_ctx, recv| {
+            let data = recv.take_inner();
+            *sum_move.borrow_mut() += data.iter().flat_map(|i| i.iter()).sum::<i32>();
+        });
+        drop(recv_port);
+
+        df.run_available();
+        assert_eq!(sum.borrow().to_owned(), 45);
+
+        df.schedule_subgraph(source);
+        df.run_available();
+
+        assert_eq!(sum.borrow().to_owned(), 90);
     }
 }
