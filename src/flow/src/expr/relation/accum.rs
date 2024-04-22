@@ -300,7 +300,6 @@ pub struct Float {
 
 impl Float {
     /// Expect first value to be `OrderedF64` and the rest four values to be `Diff` type values.
-    ///
     pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
     where
         I: Iterator<Item = Value>,
