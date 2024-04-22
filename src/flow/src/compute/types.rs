@@ -28,7 +28,7 @@ use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::DiffRow;
 use crate::utils::{ArrangeHandler, Arrangement};
 
-pub type Toff = TeeingHandoff<DiffRow>;
+pub type Toff<T = DiffRow> = TeeingHandoff<T>;
 
 /// A collection, represent a collections of data that is received from a handoff.
 pub struct Collection<T: 'static> {
@@ -107,12 +107,17 @@ impl Arranged {
 /// of reading the data from the collection.
 pub struct CollectionBundle {
     /// This is useful for passively reading the new updates from the collection
+    ///
+    /// Invariant: the timestamp of the updates should always not greater than now, since future updates should be stored in the arrangement
     pub collection: Collection<DiffRow>,
     /// the key [`ScalarExpr`] indicate how the keys(also a [`Row`]) used in Arranged is extract from collection's [`Row`]
     /// So it is the "index" of the arrangement
     ///
     /// The `Arranged` is the actual data source, it can be used to read the data from the collection by
     /// using the key indicated by the `Vec<ScalarExpr>`
+    /// There is a false positive in using `Vec<ScalarExpr>` as key due to `ScalarExpr::Literal`
+    /// contain a `Value` which have `bytes` variant
+    #[allow(clippy::mutable_key_type)]
     pub arranged: BTreeMap<Vec<ScalarExpr>, Arranged>,
 }
 
@@ -151,12 +156,16 @@ impl ErrCollector {
         self.inner.borrow_mut().push_back(err)
     }
 
-    pub fn run<F>(&self, f: F)
+    pub fn run<F, R>(&self, f: F) -> Option<R>
     where
-        F: FnOnce() -> Result<(), EvalError>,
+        F: FnOnce() -> Result<R, EvalError>,
     {
-        if let Err(e) = f() {
-            self.push_err(e)
+        match f() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                self.push_err(e);
+                None
+            }
         }
     }
 }

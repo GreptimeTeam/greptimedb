@@ -4150,8 +4150,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow"
-version = "0.6.0"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+version = "0.6.2"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "bincode",
  "byteorder",
@@ -4183,7 +4183,7 @@ dependencies = [
 [[package]]
 name = "hydroflow_datalog"
 version = "0.6.0"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "hydroflow_datalog_core",
  "proc-macro-crate 1.3.1",
@@ -4194,8 +4194,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow_datalog_core"
-version = "0.6.0"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+version = "0.6.1"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "hydroflow_lang",
  "proc-macro-crate 1.3.1",
@@ -4209,8 +4209,8 @@ dependencies = [
 
 [[package]]
 name = "hydroflow_lang"
-version = "0.6.0"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+version = "0.6.2"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "auto_impl",
  "clap 4.5.4",
@@ -4230,7 +4230,7 @@ dependencies = [
 [[package]]
 name = "hydroflow_macro"
 version = "0.6.0"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "hydroflow_lang",
  "itertools 0.10.5",
@@ -4723,8 +4723,8 @@ dependencies = [
 
 [[package]]
 name = "lattices"
-version = "0.5.3"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+version = "0.5.4"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "cc-traits",
  "sealed",
@@ -7376,7 +7376,7 @@ checksum = "3b7e158a385023d209d6d5f2585c4b468f6dcb3dd5aca9b75c4f1678c05bb375"
 [[package]]
 name = "pusherator"
 version = "0.0.5"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "either",
  "variadics",
@@ -11148,7 +11148,7 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if 0.1.10",
  "rand",
  "static_assertions",
 ]
@@ -11562,7 +11562,7 @@ checksum = "830b7e5d4d90034032940e4ace0d9a9a057e7a45cd94e6c007832e39edb82f6d"
 [[package]]
 name = "variadics"
 version = "0.0.4"
-source = "git+https://github.com/GreptimeTeam/hydroflow.git?rev=ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94#ba2df44efd42b7c4d37ebefbf82e77c6f1d4cb94"
+source = "git+https://github.com/GreptimeTeam/hydroflow.git?branch=main#b072ee026f97f8537165e1fb247101e0ab2fb320"
 dependencies = [
  "sealed",
 ]

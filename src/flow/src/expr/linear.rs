@@ -89,6 +89,11 @@ impl MapFilterProject {
         }
     }
 
+    /// The number of columns expected in the output row.
+    pub fn output_arity(&self) -> usize {
+        self.projection.len()
+    }
+
     /// Given two mfps, return an mfp that applies one
     /// followed by the other.
     /// Note that the arguments are in the opposite order
