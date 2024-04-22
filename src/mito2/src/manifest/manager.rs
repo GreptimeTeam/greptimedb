@@ -257,9 +257,8 @@ impl RegionManifestManager {
     }
 
     /// Stops the manager.
-    pub async fn stop(&mut self) -> Result<()> {
+    pub async fn stop(&mut self) {
         self.stopped = true;
-        Ok(())
     }
 
     /// Updates the manifest. Returns the current manifest version number.
@@ -524,7 +523,7 @@ mod test {
             .unwrap()
             .unwrap();
         // Stops it.
-        manager.stop().await.unwrap();
+        manager.stop().await;
 
         // Open it.
         let manager = env
@@ -564,7 +563,7 @@ mod test {
         manager.validate_manifest(&new_metadata, 1);
 
         // Reopen the manager.
-        manager.stop().await.unwrap();
+        manager.stop().await;
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, None)
             .await
@@ -651,7 +650,7 @@ mod test {
 
         // Reopen the manager,
         // we just calculate the size from the latest checkpoint file
-        manager.stop().await.unwrap();
+        manager.stop().await;
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, None)
             .await

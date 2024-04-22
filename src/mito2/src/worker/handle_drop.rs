@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
@@ -27,7 +27,7 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::REGION_COUNT;
-use crate::region::{MitoRegionRef, RegionMapRef, RegionState};
+use crate::region::{RegionMapRef, RegionState};
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
@@ -44,24 +44,6 @@ impl<S> RegionWorkerLoop<S> {
 
         // Marks the region as dropping.
         region.set_dropping()?;
-
-        struct ResetState<'a> {
-            region: &'a MitoRegionRef,
-            discard: bool,
-        }
-
-        impl<'a> Drop for ResetState<'a> {
-            fn drop(&mut self) {
-                if !self.discard {
-                    self.region.switch_state_to_writable(RegionState::Dropping);
-                }
-            }
-        }
-
-        let mut reset = ResetState {
-            region: &region,
-            discard: false,
-        };
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
@@ -70,9 +52,16 @@ impl<S> RegionWorkerLoop<S> {
             .object_store()
             .write(&marker_path, vec![])
             .await
-            .context(OpenDalSnafu)?;
+            .context(OpenDalSnafu)
+            .inspect_err(|e| {
+                error!(e; "Failed to write the drop marker file for region {}", region_id);
 
-        region.stop().await?;
+                // Sets the state back to writable. It's possible that the marker file has been written.
+                // We sets the state back to writable so we can retry the drop operation.
+                region.switch_state_to_writable(RegionState::Dropping);
+            })?;
+
+        region.stop().await;
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
@@ -111,9 +100,6 @@ impl<S> RegionWorkerLoop<S> {
             .await;
             listener.on_later_drop_end(region_id, removed);
         });
-
-        // Discards the reset state guard.
-        reset.discard = true;
 
         Ok(0)
     }

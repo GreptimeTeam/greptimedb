@@ -396,10 +396,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} is in {:?} state", region_id, state))]
+    #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
     RegionState {
         region_id: RegionId,
         state: RegionState,
+        expect: RegionState,
         location: Location,
     },
 
@@ -671,7 +672,7 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionState { .. } => StatusCode::RegionReadonly,
+            RegionState { .. } => StatusCode::RegionBusy,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

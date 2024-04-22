@@ -111,20 +111,18 @@ pub(crate) type MitoRegionRef = Arc<MitoRegion>;
 
 impl MitoRegion {
     /// Stop background managers for this region.
-    pub(crate) async fn stop(&self) -> Result<()> {
+    pub(crate) async fn stop(&self) {
         self.manifest_ctx
             .manifest_manager
             .write()
             .await
             .stop()
-            .await?;
+            .await;
 
         info!(
             "Stopped region manifest manager, region_id: {}",
             self.region_id
         );
-
-        Ok(())
     }
 
     /// Returns current metadata of the region.
@@ -262,6 +260,7 @@ impl MitoRegion {
                 RegionStateSnafu {
                     region_id: self.region_id,
                     state: actual,
+                    expect,
                 }
                 .build()
             })?;
@@ -311,6 +310,7 @@ impl ManifestContext {
             RegionStateSnafu {
                 region_id: manifest.metadata.region_id,
                 state: current_state,
+                expect: expect_state,
             }
         );
 
@@ -413,7 +413,8 @@ impl RegionMap {
             region.is_writable(),
             RegionStateSnafu {
                 region_id,
-                state: region.state()
+                state: region.state(),
+                expect: RegionState::Writable,
             }
         );
         Ok(region)

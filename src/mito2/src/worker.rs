@@ -739,9 +739,7 @@ impl<S> RegionWorkerLoop<S> {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {
-            if let Err(e) = region.stop().await {
-                error!(e; "Failed to stop region {}", region.region_id);
-            }
+            region.stop().await;
         }
 
         self.regions.clear();

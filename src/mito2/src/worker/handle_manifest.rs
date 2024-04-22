@@ -56,7 +56,12 @@ impl<S> RegionWorkerLoop<S> {
         common_runtime::spawn_bg(async move {
             let result = edit_region(&region, edit).await;
 
-            let _ = sender.send(result);
+            if let Err(res) = sender.send(result) {
+                warn!(
+                    "Failed to send result back to the worker, region_id: {}, res: {:?}",
+                    region_id, res
+                );
+            }
 
             // Sets the region as writable. For simplicity, we don't send the result
             // back to the worker.
