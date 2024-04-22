@@ -131,6 +131,8 @@ pub struct Arrangement {
     /// TODO: batch size balancing?
     spine: Spine,
     /// if set to false, will not update current value of the arrangement, useful for case like `map -> arrange -> reduce`
+    ///
+    /// in which `arrange` operator only need future updates, and don't need to keep all updates
     full_arrangement: bool,
     /// flag to mark that this arrangement haven't been written to, so that it can be cloned and shared
     is_written: bool,
@@ -165,7 +167,7 @@ impl Arrangement {
         }
     }
 
-    /// apply updates into spine, all updates should have timestamps that are larger than spine's first key
+    /// apply updates into spine, with no respect of whether the updates are in futures, past, or now
     ///
     /// return the maximum expire time(already expire by how much time) of all updates if any keys is already expired
     pub fn apply_updates(
