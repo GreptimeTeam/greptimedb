@@ -118,6 +118,10 @@ impl StatementExecutor {
 
             Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
+            Statement::ShowCollation(kind) => self.show_collation(kind, query_ctx).await,
+
+            Statement::ShowCharset(kind) => self.show_charset(kind, query_ctx).await,
+
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
                 match req.direction {

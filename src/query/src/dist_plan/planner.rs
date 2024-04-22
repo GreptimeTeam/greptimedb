@@ -25,10 +25,11 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeVisitor, VisitRecursion};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::TableReference;
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_optimizer::analyzer::Analyzer;
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -103,12 +104,18 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .encode(&amended_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?
             .into();
+
+        let query_ctx = session_state
+            .config()
+            .get_extension()
+            .unwrap_or_else(QueryContext::arc);
         let merge_scan_plan = MergeScanExec::new(
             table_name,
             regions,
             substrait_plan,
             &schema,
             self.region_query_handler.clone(),
+            query_ctx,
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
@@ -125,6 +132,7 @@ impl DistExtensionPlanner {
     /// Apply the fully resolved table name to the TableScan plan
     fn plan_with_full_table_name(plan: LogicalPlan, name: &TableName) -> Result<LogicalPlan> {
         plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, name))
+            .map(|x| x.data)
     }
 
     async fn get_regions(&self, table_name: &TableName) -> Result<Vec<RegionId>> {
@@ -163,9 +171,9 @@ struct TableNameExtractor {
 }
 
 impl TreeNodeVisitor for TableNameExtractor {
-    type N = LogicalPlan;
+    type Node = LogicalPlan;
 
-    fn pre_visit(&mut self, node: &Self::N) -> Result<VisitRecursion> {
+    fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
                 if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
@@ -182,7 +190,7 @@ impl TreeNodeVisitor for TableNameExtractor {
                                 info.name.clone(),
                             ));
                         }
-                        return Ok(VisitRecursion::Stop);
+                        return Ok(TreeNodeRecursion::Stop);
                     }
                 }
                 match &scan.table_name {
@@ -192,32 +200,32 @@ impl TreeNodeVisitor for TableNameExtractor {
                         table,
                     } => {
                         self.table_name = Some(TableName::new(
-                            catalog.clone(),
-                            schema.clone(),
-                            table.clone(),
+                            catalog.to_string(),
+                            schema.to_string(),
+                            table.to_string(),
                         ));
-                        Ok(VisitRecursion::Stop)
+                        Ok(TreeNodeRecursion::Stop)
                     }
                     // TODO(ruihang): Maybe the following two cases should not be valid
                     TableReference::Partial { schema, table } => {
                         self.table_name = Some(TableName::new(
                             DEFAULT_CATALOG_NAME.to_string(),
-                            schema.clone(),
-                            table.clone(),
+                            schema.to_string(),
+                            table.to_string(),
                         ));
-                        Ok(VisitRecursion::Stop)
+                        Ok(TreeNodeRecursion::Stop)
                     }
                     TableReference::Bare { table } => {
                         self.table_name = Some(TableName::new(
                             DEFAULT_CATALOG_NAME.to_string(),
                             DEFAULT_SCHEMA_NAME.to_string(),
-                            table.clone(),
+                            table.to_string(),
                         ));
-                        Ok(VisitRecursion::Stop)
+                        Ok(TreeNodeRecursion::Stop)
                     }
                 }
             }
-            _ => Ok(VisitRecursion::Continue),
+            _ => Ok(TreeNodeRecursion::Continue),
         }
     }
 }
@@ -236,9 +244,9 @@ impl TableNameRewriter {
                     name.schema_name.clone(),
                     name.table_name.clone(),
                 );
-                Transformed::Yes(LogicalPlan::TableScan(table_scan))
+                Transformed::yes(LogicalPlan::TableScan(table_scan))
             }
-            _ => Transformed::No(plan),
+            _ => Transformed::no(plan),
         })
     }
 }

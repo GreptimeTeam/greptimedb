@@ -157,11 +157,11 @@ impl StartCommand {
         )?;
 
         if let Some(dir) = &cli_options.log_dir {
-            opts.logging.dir = dir.clone();
+            opts.logging.dir.clone_from(dir);
         }
 
         if cli_options.log_level.is_some() {
-            opts.logging.level = cli_options.log_level.clone();
+            opts.logging.level.clone_from(&cli_options.log_level);
         }
 
         let tls_opts = TlsOption::new(
@@ -171,7 +171,7 @@ impl StartCommand {
         );
 
         if let Some(addr) = &self.http_addr {
-            opts.http.addr = addr.clone()
+            opts.http.addr.clone_from(addr);
         }
 
         if let Some(http_timeout) = self.http_timeout {
@@ -183,24 +183,24 @@ impl StartCommand {
         }
 
         if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr = addr.clone()
+            opts.grpc.addr.clone_from(addr);
         }
 
         if let Some(addr) = &self.mysql_addr {
             opts.mysql.enable = true;
-            opts.mysql.addr = addr.clone();
+            opts.mysql.addr.clone_from(addr);
             opts.mysql.tls = tls_opts.clone();
         }
 
         if let Some(addr) = &self.postgres_addr {
             opts.postgres.enable = true;
-            opts.postgres.addr = addr.clone();
+            opts.postgres.addr.clone_from(addr);
             opts.postgres.tls = tls_opts;
         }
 
         if let Some(addr) = &self.opentsdb_addr {
             opts.opentsdb.enable = true;
-            opts.opentsdb.addr = addr.clone();
+            opts.opentsdb.addr.clone_from(addr);
         }
 
         if let Some(enable) = self.influxdb_enable {
@@ -210,11 +210,12 @@ impl StartCommand {
         if let Some(metasrv_addrs) = &self.metasrv_addr {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
-                .metasrv_addrs = metasrv_addrs.clone();
+                .metasrv_addrs
+                .clone_from(metasrv_addrs);
             opts.mode = Mode::Distributed;
         }
 
-        opts.user_provider = self.user_provider.clone();
+        opts.user_provider.clone_from(&self.user_provider);
 
         Ok(Options::Frontend(Box::new(opts)))
     }

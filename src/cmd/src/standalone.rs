@@ -293,11 +293,11 @@ impl StartCommand {
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &cli_options.log_dir {
-            opts.logging.dir = dir.clone();
+            opts.logging.dir.clone_from(dir);
         }
 
         if cli_options.log_level.is_some() {
-            opts.logging.level = cli_options.log_level.clone();
+            opts.logging.level.clone_from(&cli_options.log_level);
         }
 
         let tls_opts = TlsOption::new(
@@ -307,11 +307,11 @@ impl StartCommand {
         );
 
         if let Some(addr) = &self.http_addr {
-            opts.http.addr = addr.clone()
+            opts.http.addr.clone_from(addr);
         }
 
         if let Some(data_home) = &self.data_home {
-            opts.storage.data_home = data_home.clone();
+            opts.storage.data_home.clone_from(data_home);
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -325,31 +325,31 @@ impl StartCommand {
                 }
                 .fail();
             }
-            opts.grpc.addr = addr.clone()
+            opts.grpc.addr.clone_from(addr)
         }
 
         if let Some(addr) = &self.mysql_addr {
             opts.mysql.enable = true;
-            opts.mysql.addr = addr.clone();
+            opts.mysql.addr.clone_from(addr);
             opts.mysql.tls = tls_opts.clone();
         }
 
         if let Some(addr) = &self.postgres_addr {
             opts.postgres.enable = true;
-            opts.postgres.addr = addr.clone();
+            opts.postgres.addr.clone_from(addr);
             opts.postgres.tls = tls_opts;
         }
 
         if let Some(addr) = &self.opentsdb_addr {
             opts.opentsdb.enable = true;
-            opts.opentsdb.addr = addr.clone();
+            opts.opentsdb.addr.clone_from(addr);
         }
 
         if self.influxdb_enable {
             opts.influxdb.enable = self.influxdb_enable;
         }
 
-        opts.user_provider = self.user_provider.clone();
+        opts.user_provider.clone_from(&self.user_provider);
 
         let metadata_store = opts.metadata_store.clone();
         let procedure = opts.procedure.clone();

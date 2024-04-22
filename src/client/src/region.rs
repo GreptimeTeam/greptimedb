@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::region::RegionResponse;
 use api::v1::region::{QueryRequest, RegionRequest};
 use api::v1::ResponseHeader;
 use arc_swap::ArcSwapOption;
@@ -23,7 +24,7 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use common_meta::datanode_manager::{Datanode, HandleResponse};
+use common_meta::datanode_manager::Datanode;
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
@@ -46,7 +47,7 @@ pub struct RegionRequester {
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<HandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
         self.handle_inner(request).await.map_err(|err| {
             if err.should_retry() {
                 meta_error::Error::RetryLater {
@@ -165,7 +166,7 @@ impl RegionRequester {
         Ok(Box::pin(record_batch_stream))
     }
 
-    async fn handle_inner(&self, request: RegionRequest) -> Result<HandleResponse> {
+    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
         let request_type = request
             .body
             .as_ref()
@@ -194,10 +195,10 @@ impl RegionRequester {
 
         check_response_header(&response.header)?;
 
-        Ok(HandleResponse::from_region_response(response))
+        Ok(RegionResponse::from_region_response(response))
     }
 
-    pub async fn handle(&self, request: RegionRequest) -> Result<HandleResponse> {
+    pub async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         self.handle_inner(request).await
     }
 }

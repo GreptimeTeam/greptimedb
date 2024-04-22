@@ -126,7 +126,7 @@ impl DfAccumulatorAdaptor {
 }
 
 impl DfAccumulator for DfAccumulatorAdaptor {
-    fn state(&self) -> DfResult<Vec<ScalarValue>> {
+    fn state(&mut self) -> DfResult<Vec<ScalarValue>> {
         let state_values = self.accumulator.state()?;
         let state_types = self.creator.state_types()?;
         if state_values.len() != state_types.len() {
@@ -161,7 +161,7 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         Ok(())
     }
 
-    fn evaluate(&self) -> DfResult<ScalarValue> {
+    fn evaluate(&mut self) -> DfResult<ScalarValue> {
         let value = self.accumulator.evaluate()?;
         let output_type = self.creator.output_type()?;
         let scalar_value = value

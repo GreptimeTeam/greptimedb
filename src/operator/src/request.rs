@@ -162,6 +162,7 @@ impl Requester {
         let request_factory = RegionRequestFactory::new(RegionRequestHeader {
             tracing_context: TracingContext::from_current_span().to_w3c(),
             dbname: db_string.unwrap_or_else(|| ctx.get_db_string()),
+            ..Default::default()
         });
 
         let tasks = requests.into_iter().map(|req_body| {

@@ -14,11 +14,12 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
+use api::region::RegionResponse;
+use api::v1::region::{QueryRequest, RegionRequest, RegionResponse as RegionResponseV1};
 use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::{Datanode, DatanodeManager, DatanodeRef, HandleResponse};
+use common_meta::datanode_manager::{Datanode, DatanodeManager, DatanodeRef};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::peer::Peer;
 use common_recordbatch::SendableRecordBatchStream;
@@ -49,7 +50,7 @@ impl RegionInvoker {
         Arc::new(Self { region_server })
     }
 
-    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
+    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponseV1> {
         let body = request.body.with_context(|| InvalidRegionRequestSnafu {
             reason: "body not found",
         })?;
@@ -63,7 +64,7 @@ impl RegionInvoker {
 
 #[async_trait]
 impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<HandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
         let span = request
             .header
             .as_ref()
@@ -79,7 +80,7 @@ impl Datanode for RegionInvoker {
         check_response_header(&response.header)
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        Ok(HandleResponse::from_region_response(response))
+        Ok(RegionResponse::from_region_response(response))
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {

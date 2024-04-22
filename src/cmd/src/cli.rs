@@ -84,10 +84,10 @@ impl Command {
         let mut logging_opts = LoggingOptions::default();
 
         if let Some(dir) = &cli_options.log_dir {
-            logging_opts.dir = dir.clone();
+            logging_opts.dir.clone_from(dir);
         }
 
-        logging_opts.level = cli_options.log_level.clone();
+        logging_opts.level.clone_from(&cli_options.log_level);
 
         Ok(Options::Cli(Box::new(logging_opts)))
     }

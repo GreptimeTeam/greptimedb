@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
+use sqlparser::ast::DescribeAlias;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
@@ -22,14 +23,14 @@ use crate::statements::statement::Statement;
 /// EXPLAIN statement parser implementation
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_explain(&mut self) -> Result<Statement> {
-        let explain_statement =
-            self.parser
-                .parse_explain(false)
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a query statement",
-                    actual: self.peek_token_as_string(),
-                })?;
+        let explain_statement = self
+            .parser
+            .parse_explain(DescribeAlias::Explain)
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a query statement",
+                actual: self.peek_token_as_string(),
+            })?;
 
         Ok(Statement::Explain(Explain::try_from(explain_statement)?))
     }
@@ -80,6 +81,7 @@ mod tests {
             having: None,
             qualify: None,
             named_window: vec![],
+            value_table_mode: None,
         };
 
         let sp_statement = SpStatement::Query(Box::new(SpQuery {
@@ -87,13 +89,15 @@ mod tests {
             body: Box::new(sqlparser::ast::SetExpr::Select(Box::new(select))),
             order_by: vec![],
             limit: None,
+            limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
+            for_clause: None,
         }));
 
         let explain = Explain::try_from(SpStatement::Explain {
-            describe_alias: false,
+            describe_alias: DescribeAlias::Explain,
             analyze: false,
             verbose: false,
             statement: Box::new(sp_statement),

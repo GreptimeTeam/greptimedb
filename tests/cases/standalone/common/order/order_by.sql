@@ -50,15 +50,9 @@ SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY l;
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;
 
 -- Not compatible with duckdb, give an error in greptimedb
--- TODO(LFC): Failed to meet the expected error:
--- expected:
---   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY a-10;
 
 -- Not compatible with duckdb, give an error in greptimedb
--- TODO(LFC): Failed to meet the expected error:
--- expected:
---   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 SELECT a-10 AS k FROM test UNION SELECT a-11 AS l FROM test ORDER BY a-11;
 
 DROP TABLE test;

@@ -180,11 +180,12 @@ impl ParquetReaderBuilder {
 
         metrics.build_cost = start.elapsed();
 
-        let predicate = if let Some(p) = &self.predicate {
-            p.exprs()
+        let predicate = if let Some(predicate) = &self.predicate {
+            predicate
+                .exprs()
                 .iter()
                 .filter_map(|expr| SimpleFilterEvaluator::try_new(expr.df_expr()))
-                .collect()
+                .collect::<Vec<_>>()
         } else {
             vec![]
         };

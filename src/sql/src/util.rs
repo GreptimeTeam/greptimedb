@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use sqlparser::ast::{ObjectName, SqlOption, Value};
+use sqlparser::ast::{Expr, ObjectName, SqlOption, Value};
 
 static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -47,9 +47,11 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
     format!("{}", Inner { name })
 }
 
-pub fn parse_option_string(value: Value) -> Option<String> {
+pub fn parse_option_string(value: Expr) -> Option<String> {
     match value {
-        Value::SingleQuotedString(v) | Value::DoubleQuotedString(v) => Some(v),
+        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => {
+            Some(v)
+        }
         _ => None,
     }
 }
@@ -60,7 +62,9 @@ pub fn to_lowercase_options_map(opts: &[SqlOption]) -> HashMap<String, String> {
     let mut map = HashMap::with_capacity(opts.len());
     for SqlOption { name, value } in opts {
         let value_str = match value {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
+            Expr::Value(Value::SingleQuotedString(s))
+            | Expr::Value(Value::DoubleQuotedString(s)) => s.clone(),
+            Expr::Identifier(i) => i.value.clone(),
             _ => value.to_string(),
         };
         let _ = map.insert(name.value.to_lowercase().clone(), value_str);

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use arrow::pyarrow::PyArrowException;
 use common_telemetry::info;
@@ -27,7 +27,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
 
-use crate::python::ffi_types::utils::{collect_diff_types_string, new_item_field};
+use crate::python::ffi_types::utils::collect_diff_types_string;
 use crate::python::ffi_types::PyVector;
 use crate::python::metric;
 use crate::python::pyo3::builtins::greptime_builtins;
@@ -75,9 +75,10 @@ pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {
         Value::DateTime(val) => val.val().to_object(py),
         Value::Timestamp(val) => val.value().to_object(py),
         Value::List(val) => {
-            let list = val.items().clone().unwrap_or(Default::default());
-            let list = list
-                .into_iter()
+            let list = val
+                .items()
+                .iter()
+                .cloned()
                 .map(|v| val_to_py_any(py, v))
                 .collect::<PyResult<Vec<_>>>()?;
             list.to_object(py)
@@ -211,9 +212,13 @@ pub fn scalar_value_to_py_any(py: Python<'_>, val: ScalarValue) -> PyResult<PyOb
             match val{
             ScalarValue::Null => Ok(py.None()),
             $(ScalarValue::$scalar_ty(Some(v)) => Ok(v.to_object(py)),)*
-            ScalarValue::List(Some(col), _) => {
+            ScalarValue::List(array) => {
+                let col = ScalarValue::convert_array_to_scalar_vec(array.as_ref()).map_err(|e|
+                    PyValueError::new_err(format!("{e}"))
+                )?;
                 let list:Vec<PyObject> = col
                     .into_iter()
+                    .flatten()
                     .map(|v| scalar_value_to_py_any(py, v))
                     .collect::<PyResult<_>>()?;
                 let list = PyList::new(py, list);
@@ -281,8 +286,7 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
 
         if ret.is_empty() {
             return Ok(ColumnarValue::Scalar(ScalarValue::List(
-                None,
-                Arc::new(new_item_field(ArrowDataType::Null)),
+                ScalarValue::new_list(&[], &ArrowDataType::Null),
             )));
         }
         let ty = ret[0].data_type();
@@ -294,8 +298,7 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
             )));
         }
         Ok(ColumnarValue::Scalar(ScalarValue::List(
-            Some(ret),
-            Arc::new(new_item_field(ty)),
+            ScalarValue::new_list(ret.as_slice(), &ty),
         )))
     } else {
         to_rust_types!(obj,

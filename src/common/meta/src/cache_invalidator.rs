@@ -18,6 +18,7 @@ use tokio::sync::RwLock;
 
 use crate::error::Result;
 use crate::instruction::CacheIdent;
+use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
@@ -106,6 +107,10 @@ where
                 CacheIdent::TableName(table_name) => {
                     let key: TableNameKey = (&table_name).into();
                     self.invalidate_key(&key.as_raw_key()).await
+                }
+                CacheIdent::SchemaName(schema_name) => {
+                    let key: SchemaNameKey = (&schema_name).into();
+                    self.invalidate_key(&key.as_raw_key()).await;
                 }
             }
         }

@@ -209,6 +209,7 @@ fn eval_pyo3(case: CodeBlockTestCase) {
         let res_vec = locals
             .get_item("ret")
             .unwrap()
+            .unwrap()
             .extract::<PyVector>()
             .map_err(|e| {
                 dbg!(&case.script);

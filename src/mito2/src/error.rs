@@ -685,7 +685,9 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
+
             FilterRecordBatch { source, .. } => source.status_code(),
+
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,

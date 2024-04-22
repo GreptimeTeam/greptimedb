@@ -117,7 +117,7 @@ impl CsvConfig {
         let mut builder = csv::ReaderBuilder::new(self.file_schema.clone())
             .with_delimiter(self.delimiter)
             .with_batch_size(self.batch_size)
-            .has_header(self.has_header);
+            .with_header(self.has_header);
 
         if let Some(proj) = &self.file_projection {
             builder = builder.with_projection(proj.clone());

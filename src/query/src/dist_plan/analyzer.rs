@@ -17,7 +17,7 @@ use std::sync::Arc;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{RewriteRecursion, Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
 use datafusion_optimizer::analyzer::AnalyzerRule;
@@ -47,12 +47,12 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // preprocess the input plan
         let optimizer_context = OptimizerContext::new();
         let plan = SimplifyExpressions::new()
-            .try_optimize(&plan, &optimizer_context)?
-            .unwrap_or(plan);
+            .rewrite(plan, &optimizer_context)?
+            .data;
 
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
-        let result = plan.rewrite(&mut rewriter)?;
+        let result = plan.data.rewrite(&mut rewriter)?.data;
 
         Ok(result)
     }
@@ -63,35 +63,40 @@ impl DistPlannerAnalyzer {
         let exprs = plan
             .expressions()
             .into_iter()
-            .map(|e| e.transform(&Self::transform_subquery))
+            .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
 
         let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-        Ok(Transformed::Yes(plan.with_new_exprs(exprs, &inputs)?))
+        Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
     }
 
     fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
         match expr {
-            Expr::Exists(exists) => Ok(Transformed::Yes(Expr::Exists(Exists {
+            Expr::Exists(exists) => Ok(Transformed::yes(Expr::Exists(Exists {
                 subquery: Self::handle_subquery(exists.subquery)?,
                 negated: exists.negated,
             }))),
-            Expr::InSubquery(in_subquery) => Ok(Transformed::Yes(Expr::InSubquery(InSubquery {
+            Expr::InSubquery(in_subquery) => Ok(Transformed::yes(Expr::InSubquery(InSubquery {
                 expr: in_subquery.expr,
                 subquery: Self::handle_subquery(in_subquery.subquery)?,
                 negated: in_subquery.negated,
             }))),
-            Expr::ScalarSubquery(scalar_subquery) => Ok(Transformed::Yes(Expr::ScalarSubquery(
+            Expr::ScalarSubquery(scalar_subquery) => Ok(Transformed::yes(Expr::ScalarSubquery(
                 Self::handle_subquery(scalar_subquery)?,
             ))),
 
-            _ => Ok(Transformed::No(expr)),
+            _ => Ok(Transformed::no(expr)),
         }
     }
 
     fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
         let mut rewriter = PlanRewriter::default();
-        let mut rewrote_subquery = subquery.subquery.as_ref().clone().rewrite(&mut rewriter)?;
+        let mut rewrote_subquery = subquery
+            .subquery
+            .as_ref()
+            .clone()
+            .rewrite(&mut rewriter)?
+            .data;
         // Workaround. DF doesn't support the first plan in subquery to be an Extension
         if matches!(rewrote_subquery, LogicalPlan::Extension(_)) {
             let output_schema = rewrote_subquery.schema().clone();
@@ -232,35 +237,34 @@ impl PlanRewriter {
 }
 
 impl TreeNodeRewriter for PlanRewriter {
-    type N = LogicalPlan;
+    type Node = LogicalPlan;
 
     /// descend
-    fn pre_visit<'a>(&'a mut self, node: &'a Self::N) -> DfResult<RewriteRecursion> {
+    fn f_down<'a>(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         self.level += 1;
         self.stack.push((node.clone(), self.level));
         // decendening will clear the stage
         self.stage.clear();
         self.set_unexpanded();
         self.partition_cols = None;
-
-        Ok(RewriteRecursion::Continue)
+        Ok(Transformed::no(node))
     }
 
     /// ascend
     ///
     /// Besure to call `pop_stack` before returning
-    fn mutate(&mut self, node: Self::N) -> DfResult<Self::N> {
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         // only expand once on each ascending
         if self.is_expanded() {
             self.pop_stack();
-            return Ok(node);
+            return Ok(Transformed::no(node));
         }
 
         // only expand when the leaf is table scan
         if node.inputs().is_empty() && !matches!(node, LogicalPlan::TableScan(_)) {
             self.set_expanded();
             self.pop_stack();
-            return Ok(node);
+            return Ok(Transformed::no(node));
         }
 
         self.maybe_set_partitions(&node);
@@ -270,12 +274,12 @@ impl TreeNodeRewriter for PlanRewriter {
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
             // expand stages
             for new_stage in self.stage.drain(..) {
-                node = new_stage.with_new_inputs(&[node])?
+                node = new_stage.with_new_exprs(node.expressions(), vec![node.clone()])?
             }
             self.set_expanded();
 
             self.pop_stack();
-            return Ok(node);
+            return Ok(Transformed::yes(node));
         };
 
         // TODO(ruihang): avoid this clone
@@ -285,16 +289,16 @@ impl TreeNodeRewriter for PlanRewriter {
             let mut node = MergeScanLogicalPlan::new(node, false).into_logical_plan();
             // expand stages
             for new_stage in self.stage.drain(..) {
-                node = new_stage.with_new_inputs(&[node])?
+                node = new_stage.with_new_exprs(node.expressions(), vec![node.clone()])?
             }
             self.set_expanded();
 
             self.pop_stack();
-            return Ok(node);
+            return Ok(Transformed::yes(node));
         }
 
         self.pop_stack();
-        Ok(node)
+        Ok(Transformed::no(node))
     }
 }
 

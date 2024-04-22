@@ -12,7 +12,7 @@ test = ["common-test-util"]
 workspace = true
 
 [dependencies]
-api = { workspace = true, optional = true }
+api.workspace = true
 async-trait = "0.1"
 common-catalog.workspace = true
 common-datasource.workspace = true
@@ -25,6 +25,7 @@ common-telemetry.workspace = true
 common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
 datafusion.workspace = true
+datafusion-expr.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 object-store.workspace = true

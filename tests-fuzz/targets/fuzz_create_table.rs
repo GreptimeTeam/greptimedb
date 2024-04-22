@@ -62,6 +62,7 @@ impl Arbitrary<'_> for FuzzInput {
 fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let metric_engine = rng.gen_bool(0.5);
+    let if_not_exists = rng.gen_bool(0.5);
     if metric_engine {
         let create_table_generator = CreateTableExprGeneratorBuilder::default()
             .name_generator(Box::new(MappedGenerator::new(
@@ -70,6 +71,7 @@ fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
             )))
             .columns(input.columns)
             .engine("metric")
+            .if_not_exists(if_not_exists)
             .with_clause([("physical_metric_table".to_string(), "".to_string())])
             .build()
             .unwrap();
@@ -82,6 +84,7 @@ fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
             )))
             .columns(input.columns)
             .engine("mito")
+            .if_not_exists(if_not_exists)
             .build()
             .unwrap();
         create_table_generator.generate(&mut rng)

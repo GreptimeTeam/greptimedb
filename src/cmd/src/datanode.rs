@@ -139,19 +139,19 @@ impl StartCommand {
         )?;
 
         if let Some(dir) = &cli_options.log_dir {
-            opts.logging.dir = dir.clone();
+            opts.logging.dir.clone_from(dir);
         }
 
         if cli_options.log_level.is_some() {
-            opts.logging.level = cli_options.log_level.clone();
+            opts.logging.level.clone_from(&cli_options.log_level);
         }
 
         if let Some(addr) = &self.rpc_addr {
-            opts.rpc_addr = addr.clone();
+            opts.rpc_addr.clone_from(addr);
         }
 
         if self.rpc_hostname.is_some() {
-            opts.rpc_hostname = self.rpc_hostname.clone();
+            opts.rpc_hostname.clone_from(&self.rpc_hostname);
         }
 
         if let Some(node_id) = self.node_id {
@@ -161,7 +161,8 @@ impl StartCommand {
         if let Some(metasrv_addrs) = &self.metasrv_addr {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
-                .metasrv_addrs = metasrv_addrs.clone();
+                .metasrv_addrs
+                .clone_from(metasrv_addrs);
             opts.mode = Mode::Distributed;
         }
 
@@ -173,7 +174,7 @@ impl StartCommand {
         }
 
         if let Some(data_home) = &self.data_home {
-            opts.storage.data_home = data_home.clone();
+            opts.storage.data_home.clone_from(data_home);
         }
 
         // `wal_dir` only affects raft-engine config.
@@ -191,7 +192,7 @@ impl StartCommand {
         }
 
         if let Some(http_addr) = &self.http_addr {
-            opts.http.addr = http_addr.clone();
+            opts.http.addr.clone_from(http_addr);
         }
 
         if let Some(http_timeout) = self.http_timeout {

@@ -35,8 +35,6 @@ static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-j(.*))").unwrap());
 static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
-static SHOW_COLLATION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(show collation where(.*))").unwrap());
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
 
@@ -70,9 +68,6 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SET @@(.*))",
         "(?i)^(SET PROFILING(.*))",
 
-        "(?i)^(SHOW COLLATION)",
-        "(?i)^(SHOW CHARSET)",
-
         // mysqlclient.
         "(?i)^(SELECT \\$\\$)",
 
@@ -96,8 +91,6 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SHOW WARNINGS)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW WARNINGS)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW PLUGINS)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW COLLATION)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW CHARSET)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW ENGINES)",
         "(?i)^(/\\* ApplicationName=(.*)SELECT @@(.*))",
         "(?i)^(/\\* ApplicationName=(.*)SHOW @@(.*))",
@@ -248,8 +241,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
         Some(show_variables("sql_mode", "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION"))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_COLLATION_PATTERN.is_match(query) || SHOW_VARIABLES_LIKE_PATTERN.is_match(query)
-    {
+    } else if SHOW_VARIABLES_LIKE_PATTERN.is_match(query) {
         Some(show_variables("", ""))
     } else {
         None
@@ -377,12 +369,6 @@ mod test {
 +------------------------+-------+
 | lower_case_table_names | 0     |
 +------------------------+-------+";
-        test(query, expected);
-
-        let query = "show collation";
-        let expected = "\
-++
-++"; // empty
         test(query, expected);
 
         let query = "SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP())";

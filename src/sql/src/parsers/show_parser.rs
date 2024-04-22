@@ -31,11 +31,26 @@ impl<'a> ParserContext<'a> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases()
         } else if self.matches_keyword(Keyword::TABLES) {
-            let _ = self.parser.next_token();
+            self.parser.next_token();
             self.parse_show_tables(false)
+        } else if self.matches_keyword(Keyword::CHARSET) {
+            self.parser.next_token();
+            Ok(Statement::ShowCharset(self.parse_show_kind()?))
+        } else if self.matches_keyword(Keyword::CHARACTER) {
+            self.parser.next_token();
+
+            if self.matches_keyword(Keyword::SET) {
+                self.parser.next_token();
+                Ok(Statement::ShowCharset(self.parse_show_kind()?))
+            } else {
+                self.unsupported(self.peek_token_as_string())
+            }
+        } else if self.matches_keyword(Keyword::COLLATION) {
+            self.parser.next_token();
+            Ok(Statement::ShowCollation(self.parse_show_kind()?))
         } else if self.matches_keyword(Keyword::COLUMNS) || self.matches_keyword(Keyword::FIELDS) {
             // SHOW {COLUMNS | FIELDS}
-            let _ = self.parser.next_token();
+            self.parser.next_token();
             self.parse_show_columns(false)
         } else if self.consume_token("INDEX")
             || self.consume_token("INDEXES")
@@ -59,14 +74,13 @@ impl<'a> ParserContext<'a> {
                 self.unsupported(self.peek_token_as_string())
             }
         } else if self.consume_token("VARIABLES") {
-            let variable =
-                self.parser
-                    .parse_object_name()
-                    .with_context(|_| error::UnexpectedSnafu {
-                        sql: self.sql,
-                        expected: "a variable name",
-                        actual: self.peek_token_as_string(),
-                    })?;
+            let variable = self
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a variable name",
+                    actual: self.peek_token_as_string(),
+                })?;
             Ok(Statement::ShowVariables(ShowVariables { variable }))
         } else {
             self.unsupported(self.peek_token_as_string())
@@ -75,14 +89,13 @@ impl<'a> ParserContext<'a> {
 
     /// Parse SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
-        let raw_table_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
+        let raw_table_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
         let table_name = Self::canonicalize_object_name(raw_table_name);
         ensure!(
             !table_name.0.is_empty(),
@@ -94,15 +107,14 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_show_table_name(&mut self) -> Result<String> {
-        let _ = self.parser.next_token();
-        let table_name =
-            self.parser
-                .parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
+        self.parser.next_token();
+        let table_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
 
         ensure!(
             table_name.0.len() == 1,
@@ -118,9 +130,8 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_db_name(&mut self) -> Result<Option<String>> {
-        let _ = self.parser.next_token();
+        self.parser.next_token();
         let db_name = self
-            .parser
             .parse_object_name()
             .with_context(|_| error::UnexpectedSnafu {
                 sql: self.sql,
@@ -176,34 +187,7 @@ impl<'a> ParserContext<'a> {
             _ => None,
         };
 
-        let kind = match self.parser.peek_token().token {
-            Token::EOF | Token::SemiColon => ShowKind::All,
-            // SHOW COLUMNS [WHERE | LIKE] [EXPR]
-            Token::Word(w) => match w.keyword {
-                Keyword::LIKE => {
-                    let _ = self.parser.next_token();
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "LIKE",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?)
-                }
-                Keyword::WHERE => {
-                    let _ = self.parser.next_token();
-                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "some valid expression",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?)
-                }
-                _ => return self.unsupported(self.peek_token_as_string()),
-            },
-            _ => return self.unsupported(self.peek_token_as_string()),
-        };
+        let kind = self.parse_show_kind()?;
 
         Ok(Statement::ShowColumns(ShowColumns {
             kind,
@@ -211,6 +195,36 @@ impl<'a> ParserContext<'a> {
             table,
             full,
         }))
+    }
+
+    fn parse_show_kind(&mut self) -> Result<ShowKind> {
+        match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => Ok(ShowKind::All),
+            Token::Word(w) => match w.keyword {
+                Keyword::LIKE => {
+                    self.parser.next_token();
+                    Ok(ShowKind::Like(self.parse_identifier().with_context(
+                        |_| error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "LIKE",
+                            actual: self.peek_token_as_string(),
+                        },
+                    )?))
+                }
+                Keyword::WHERE => {
+                    self.parser.next_token();
+                    Ok(ShowKind::Where(self.parser.parse_expr().with_context(
+                        |_| error::UnexpectedSnafu {
+                            sql: self.sql,
+                            expected: "some valid expression",
+                            actual: self.peek_token_as_string(),
+                        },
+                    )?))
+                }
+                _ => self.unsupported(self.peek_token_as_string()),
+            },
+            _ => self.unsupported(self.peek_token_as_string()),
+        }
     }
 
     fn parse_show_index(&mut self) -> Result<Statement> {
@@ -252,7 +266,7 @@ impl<'a> ParserContext<'a> {
             // SHOW INDEX [WHERE] [EXPR]
             Token::Word(w) => match w.keyword {
                 Keyword::WHERE => {
-                    let _ = self.parser.next_token();
+                    self.parser.next_token();
                     ShowKind::Where(self.parser.parse_expr().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
@@ -292,34 +306,7 @@ impl<'a> ParserContext<'a> {
             _ => None,
         };
 
-        let kind = match self.parser.peek_token().token {
-            Token::EOF | Token::SemiColon => ShowKind::All,
-            // SHOW TABLES [WHERE | LIKE] [EXPR]
-            Token::Word(w) => match w.keyword {
-                Keyword::LIKE => {
-                    let _ = self.parser.next_token();
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "LIKE",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?)
-                }
-                Keyword::WHERE => {
-                    let _ = self.parser.next_token();
-                    ShowKind::Where(self.parser.parse_expr().with_context(|_| {
-                        error::UnexpectedSnafu {
-                            sql: self.sql,
-                            expected: "some valid expression",
-                            actual: self.peek_token_as_string(),
-                        }
-                    })?)
-                }
-                _ => return self.unsupported(self.peek_token_as_string()),
-            },
-            _ => return self.unsupported(self.peek_token_as_string()),
-        };
+        let kind = self.parse_show_kind()?;
 
         Ok(Statement::ShowTables(ShowTables {
             kind,
@@ -337,7 +324,7 @@ impl<'a> ParserContext<'a> {
             }
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
-                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                    ShowKind::Like(self.parse_identifier().with_context(|_| {
                         error::UnexpectedSnafu {
                             sql: self.sql,
                             expected: "LIKE",
@@ -721,5 +708,67 @@ mod tests {
                              kind: ShowKind::Where(expr),
                              ..
                          }) if table == "test" && expr.to_string() == "Field = 'disk'"));
+    }
+
+    #[test]
+    fn parse_show_collation() {
+        let sql = "SHOW COLLATION";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCollation(ShowKind::All)
+        ));
+
+        let sql = "SHOW COLLATION WHERE Charset = 'latin1'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCollation(ShowKind::Where(_))
+        ));
+
+        let sql = "SHOW COLLATION LIKE 'latin1'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCollation(ShowKind::Like(_))
+        ));
+    }
+
+    #[test]
+    fn parse_show_charset() {
+        let sql = "SHOW CHARSET";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCharset(ShowKind::All)
+        ));
+
+        let sql = "SHOW CHARACTER SET";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCharset(ShowKind::All)
+        ));
+
+        let sql = "SHOW CHARSET WHERE Charset = 'latin1'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCharset(ShowKind::Where(_))
+        ));
+
+        let sql = "SHOW CHARACTER SET LIKE 'latin1'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(matches!(
+            result.unwrap()[0],
+            Statement::ShowCharset(ShowKind::Like(_))
+        ));
     }
 }

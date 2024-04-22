@@ -33,15 +33,18 @@ use common_telemetry::tracing_context::TracingContext;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning};
-use datafusion_common::{Result, Statistics};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
+};
+use datafusion_common::Result;
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::time::Instant;
@@ -123,6 +126,8 @@ pub struct MergeScanExec {
     arrow_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
+    query_ctx: QueryContextRef,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -142,8 +147,14 @@ impl MergeScanExec {
         substrait_plan: Bytes,
         arrow_schema: &ArrowSchema,
         region_query_handler: RegionQueryHandlerRef,
+        query_ctx: QueryContextRef,
     ) -> Result<Self> {
         let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(arrow_schema_without_metadata.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         let schema_without_metadata =
             Self::arrow_schema_to_schema(arrow_schema_without_metadata.clone())?;
         Ok(Self {
@@ -154,6 +165,8 @@ impl MergeScanExec {
             arrow_schema: arrow_schema_without_metadata,
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
+            query_ctx,
         })
     }
 
@@ -166,6 +179,7 @@ impl MergeScanExec {
 
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let tz = self.query_ctx.timezone().to_string();
 
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -178,6 +192,7 @@ impl MergeScanExec {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
+                        timezone: tz.clone(),
                     }),
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),
@@ -266,12 +281,8 @@ impl ExecutionPlan for MergeScanExec {
         self.arrow_schema.clone()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -295,10 +306,6 @@ impl ExecutionPlan for MergeScanExec {
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(
             self.to_stream(context)?,
         )))
-    }
-
-    fn statistics(&self) -> Statistics {
-        Statistics::default()
     }
 
     fn metrics(&self) -> Option<MetricsSet> {

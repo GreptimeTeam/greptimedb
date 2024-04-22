@@ -37,6 +37,10 @@ pub use recordbatch::RecordBatch;
 use snafu::{ensure, ResultExt};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
+    fn name(&self) -> &str {
+        "RecordBatchStream"
+    }
+
     fn schema(&self) -> SchemaRef;
 
     fn output_ordering(&self) -> Option<&[OrderOption]>;
@@ -243,6 +247,10 @@ impl<S> RecordBatchStreamWrapper<S> {
 impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
     for RecordBatchStreamWrapper<S>
 {
+    fn name(&self) -> &str {
+        "RecordBatchStreamWrapper"
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

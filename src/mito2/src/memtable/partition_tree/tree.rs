@@ -211,8 +211,9 @@ impl PartitionTree {
         };
 
         let filters = predicate
-            .map(|p| {
-                p.exprs()
+            .map(|predicate| {
+                predicate
+                    .exprs()
                     .iter()
                     .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
                     .collect::<Vec<_>>()

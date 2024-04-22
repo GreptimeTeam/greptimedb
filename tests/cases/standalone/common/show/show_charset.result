@@ -1,0 +1,58 @@
+SHOW CHARACTER SET;
+
++---------+---------------+-------------------+--------+
+| Charset | Description   | Default collation | Maxlen |
++---------+---------------+-------------------+--------+
+| utf8    | UTF-8 Unicode | utf8_bin          | 4      |
++---------+---------------+-------------------+--------+
+
+SHOW CHARSET;
+
++---------+---------------+-------------------+--------+
+| Charset | Description   | Default collation | Maxlen |
++---------+---------------+-------------------+--------+
+| utf8    | UTF-8 Unicode | utf8_bin          | 4      |
++---------+---------------+-------------------+--------+
+
+SHOW CHARACTER SET LIKE 'utf8';
+
++---------+---------------+-------------------+--------+
+| Charset | Description   | Default collation | Maxlen |
++---------+---------------+-------------------+--------+
+| utf8    | UTF-8 Unicode | utf8_bin          | 4      |
++---------+---------------+-------------------+--------+
+
+SHOW CHARACTER SET LIKE 'latin1';
+
+++
+++
+
+SHOW CHARSET LIKE 'utf8';
+
++---------+---------------+-------------------+--------+
+| Charset | Description   | Default collation | Maxlen |
++---------+---------------+-------------------+--------+
+| utf8    | UTF-8 Unicode | utf8_bin          | 4      |
++---------+---------------+-------------------+--------+
+
+SHOW CHARACTER SET WHERE Charset = 'utf8';
+
++---------+---------------+-------------------+--------+
+| Charset | Description   | Default collation | Maxlen |
++---------+---------------+-------------------+--------+
+| utf8    | UTF-8 Unicode | utf8_bin          | 4      |
++---------+---------------+-------------------+--------+
+
+SHOW CHARSET WHERE Charset = 'utf8';
+
++---------+---------------+-------------------+--------+
+| Charset | Description   | Default collation | Maxlen |
++---------+---------------+-------------------+--------+
+| utf8    | UTF-8 Unicode | utf8_bin          | 4      |
++---------+---------------+-------------------+--------+
+
+SHOW CHARSET WHERE Charset = 'latin1';
+
+++
+++
+

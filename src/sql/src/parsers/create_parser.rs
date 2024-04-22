@@ -111,14 +111,11 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
-        let database_name = self
-            .parser
-            .parse_object_name()
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a database name",
-                actual: self.peek_token_as_string(),
-            })?;
+        let database_name = self.parse_object_name().context(error::UnexpectedSnafu {
+            sql: self.sql,
+            expected: "a database name",
+            actual: self.peek_token_as_string(),
+        })?;
         let database_name = Self::canonicalize_object_name(database_name);
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,
@@ -319,6 +316,7 @@ impl<'a> ParserContext<'a> {
                             quote_style: None,
                         }],
                         is_primary: false,
+                        characteristics: None,
                     };
                     constraints.push(constraint);
                 }
@@ -367,7 +365,7 @@ impl<'a> ParserContext<'a> {
     pub fn parse_column_def(&mut self) -> std::result::Result<ColumnDef, ParserError> {
         let parser = &mut self.parser;
 
-        let name = parser.parse_identifier()?;
+        let name = parser.parse_identifier(false)?;
         if name.quote_style.is_none() &&
         // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
@@ -380,14 +378,14 @@ impl<'a> ParserContext<'a> {
 
         let data_type = parser.parse_data_type()?;
         let collation = if parser.parse_keyword(Keyword::COLLATE) {
-            Some(parser.parse_object_name()?)
+            Some(parser.parse_object_name(false)?)
         } else {
             None
         };
         let mut options = vec![];
         loop {
             if parser.parse_keyword(Keyword::CONSTRAINT) {
-                let name = Some(parser.parse_identifier()?);
+                let name = Some(parser.parse_identifier(false)?);
                 if let Some(option) = Self::parse_optional_column_option(parser)? {
                     options.push(ColumnOptionDef { name, option });
                 } else {
@@ -415,7 +413,7 @@ impl<'a> ParserContext<'a> {
     ) -> std::result::Result<Option<ColumnOption>, ParserError> {
         if parser.parse_keywords(&[Keyword::CHARACTER, Keyword::SET]) {
             Ok(Some(ColumnOption::CharacterSet(
-                parser.parse_object_name()?,
+                parser.parse_object_name(false)?,
             )))
         } else if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL]) {
             Ok(Some(ColumnOption::NotNull))
@@ -432,9 +430,15 @@ impl<'a> ParserContext<'a> {
         } else if parser.parse_keyword(Keyword::DEFAULT) {
             Ok(Some(ColumnOption::Default(parser.parse_expr()?)))
         } else if parser.parse_keywords(&[Keyword::PRIMARY, Keyword::KEY]) {
-            Ok(Some(ColumnOption::Unique { is_primary: true }))
+            Ok(Some(ColumnOption::Unique {
+                is_primary: true,
+                characteristics: None,
+            }))
         } else if parser.parse_keyword(Keyword::UNIQUE) {
-            Ok(Some(ColumnOption::Unique { is_primary: false }))
+            Ok(Some(ColumnOption::Unique {
+                is_primary: false,
+                characteristics: None,
+            }))
         } else if parser.parse_keywords(&[Keyword::TIME, Keyword::INDEX]) {
             // Use a DialectSpecific option for time index
             Ok(Some(ColumnOption::DialectSpecific(vec![
@@ -456,7 +460,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
         let name = if self.parser.parse_keyword(Keyword::CONSTRAINT) {
-            let raw_name = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
+            let raw_name = self.parse_identifier().context(SyntaxSnafu)?;
             Some(Self::canonicalize_identifier(raw_name))
         } else {
             None
@@ -485,6 +489,7 @@ impl<'a> ParserContext<'a> {
                     name,
                     columns,
                     is_primary: true,
+                    characteristics: None,
                 }))
             }
             TokenWithLocation {
@@ -524,6 +529,7 @@ impl<'a> ParserContext<'a> {
                     }),
                     columns,
                     is_primary: false,
+                    characteristics: None,
                 }))
             }
             unexpected => {
@@ -568,6 +574,7 @@ fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -
                 name: Some(ident),
                 columns,
                 is_primary: false,
+                ..
             } = c
             {
                 if ident.value == TIME_INDEX {
@@ -857,7 +864,7 @@ mod tests {
                 assert_column_def(&columns[0], "host", "STRING");
                 assert_column_def(&columns[1], "ts", "TIMESTAMP");
                 assert_column_def(&columns[2], "cpu", "FLOAT");
-                assert_column_def(&columns[3], "memory", "DOUBLE");
+                assert_column_def(&columns[3], "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
                 assert_matches!(
@@ -1108,6 +1115,7 @@ ENGINE=mito";
                     name,
                     columns,
                     is_primary,
+                    ..
                 } => {
                     assert_eq!(name.unwrap().to_string(), "__time_index");
                     assert_eq!(columns.len(), 1);
@@ -1314,6 +1322,7 @@ ENGINE=mito";
                     name,
                     columns,
                     is_primary,
+                    ..
                 } => {
                     assert_eq!(name.unwrap().to_string(), "__time_index");
                     assert_eq!(columns.len(), 1);
@@ -1422,7 +1431,7 @@ ENGINE=mito";
                 assert_column_def(&columns[0], "host", "STRING");
                 assert_column_def(&columns[1], "ts", "TIMESTAMP");
                 assert_column_def(&columns[2], "cpu", "FLOAT");
-                assert_column_def(&columns[3], "memory", "DOUBLE");
+                assert_column_def(&columns[3], "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
                 assert_matches!(

@@ -14,14 +14,13 @@
 
 use std::sync::Arc;
 
+use api::region::RegionResponse;
 use api::v1::region::{QueryRequest, RegionRequest};
 pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
-use crate::datanode_manager::{
-    Datanode, DatanodeManager, DatanodeManagerRef, DatanodeRef, HandleResponse,
-};
+use crate::datanode_manager::{Datanode, DatanodeManager, DatanodeManagerRef, DatanodeRef};
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
@@ -35,7 +34,7 @@ use crate::wal_options_allocator::WalOptionsAllocator;
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse>;
+    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse>;
 
     async fn handle_query(
         &self,
@@ -65,7 +64,7 @@ struct MockDatanode<T> {
 
 #[async_trait::async_trait]
 impl<T: MockDatanodeHandler> Datanode for MockDatanode<T> {
-    async fn handle(&self, request: RegionRequest) -> Result<HandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         self.handler.handle(&self.peer, request).await
     }
 
