@@ -114,3 +114,10 @@ pub async fn execute_until_suspended_or_done(
 
     None
 }
+
+pub fn new_test_procedure_context() -> Context {
+    Context {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+    }
+}

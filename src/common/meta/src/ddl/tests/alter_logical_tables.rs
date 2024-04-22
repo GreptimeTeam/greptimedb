@@ -128,9 +128,9 @@ async fn test_on_prepare_different_physical_table() {
     let datanode_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(datanode_manager);
 
-    let phy1_id = create_physical_table(ddl_context.clone(), cluster_id, "phy1").await;
+    let phy1_id = create_physical_table(&ddl_context, cluster_id, "phy1").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy1_id, "table1").await;
-    let phy2_id = create_physical_table(ddl_context.clone(), cluster_id, "phy2").await;
+    let phy2_id = create_physical_table(&ddl_context, cluster_id, "phy2").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy2_id, "table2").await;
 
     let tasks = vec![
@@ -150,7 +150,7 @@ async fn test_on_prepare_logical_table_not_exists() {
     let ddl_context = new_ddl_context(datanode_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(ddl_context.clone(), cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
     // Creates 3 logical tables
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
 
@@ -172,7 +172,7 @@ async fn test_on_prepare() {
     let ddl_context = new_ddl_context(datanode_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(ddl_context.clone(), cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
     // Creates 3 logical tables
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
@@ -196,7 +196,7 @@ async fn test_on_update_metadata() {
     let ddl_context = new_ddl_context(datanode_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(ddl_context.clone(), cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
     // Creates 3 logical tables
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
@@ -233,7 +233,7 @@ async fn test_on_part_duplicate_alter_request() {
     let ddl_context = new_ddl_context(datanode_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(ddl_context.clone(), cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
     // Creates 3 logical tables
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;

@@ -46,7 +46,7 @@ pub struct DropTableProcedure {
     /// The serializable data.
     pub data: DropTableData,
     /// The guards of opening regions.
-    pub dropping_regions: Vec<OperatingRegionGuard>,
+    pub(crate) dropping_regions: Vec<OperatingRegionGuard>,
     /// The drop table executor.
     executor: DropTableExecutor,
 }
@@ -153,7 +153,7 @@ impl DropTableProcedure {
     }
 
     /// Deletes metadata tombstone.
-    async fn on_delete_metadata_tombstone(&self) -> Result<Status> {
+    async fn on_delete_metadata_tombstone(&mut self) -> Result<Status> {
         let table_route_value = &TableRouteValue::new(
             self.data.task.table_id,
             // Safety: checked
@@ -163,6 +163,8 @@ impl DropTableProcedure {
         self.executor
             .on_delete_metadata_tombstone(&self.context, table_route_value)
             .await?;
+
+        self.dropping_regions.clear();
         Ok(Status::done())
     }
 }
@@ -266,7 +268,7 @@ impl DropTableData {
 }
 
 /// The state of drop table.
-#[derive(Debug, Serialize, Deserialize, AsRefStr)]
+#[derive(Debug, Serialize, Deserialize, AsRefStr, PartialEq)]
 pub enum DropTableState {
     /// Prepares to drop the table
     Prepare,

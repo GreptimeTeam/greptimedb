@@ -47,7 +47,7 @@ pub async fn create_physical_table_metadata(
 }
 
 pub async fn create_physical_table(
-    ddl_context: DdlContext,
+    ddl_context: &DdlContext,
     cluster_id: ClusterId,
     name: &str,
 ) -> TableId {
@@ -67,7 +67,7 @@ pub async fn create_physical_table(
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
     create_physical_table_metadata(
-        &ddl_context,
+        ddl_context,
         create_physical_table_task.table_info.clone(),
         TableRouteValue::Physical(table_route),
     )
@@ -81,7 +81,7 @@ pub async fn create_logical_table(
     cluster_id: ClusterId,
     physical_table_id: TableId,
     table_name: &str,
-) {
+) -> TableId {
     use std::assert_matches::assert_matches;
 
     let tasks = vec![test_create_logical_table_task(table_name)];
@@ -91,6 +91,7 @@ pub async fn create_logical_table(
     assert_matches!(status, Status::Executing { persist: true });
     let status = procedure.on_create_metadata().await.unwrap();
     assert_matches!(status, Status::Done { .. });
+    status.downcast_output_ref::<Vec<u32>>().unwrap()[0]
 }
 
 pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
