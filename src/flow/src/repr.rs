@@ -160,7 +160,7 @@ impl Row {
         self.inner.iter()
     }
 
-    /// eturns the number of elements in the row, also known as its 'length'.
+    /// Returns the number of elements in the row, also known as its 'length'.
     pub fn len(&self) -> usize {
         self.inner.len()
     }

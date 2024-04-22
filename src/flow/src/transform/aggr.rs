@@ -52,7 +52,7 @@ use crate::expr::{
     AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
     TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
-use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
+use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, ColumnType, RelationType};
 use crate::transform::{DataflowContext, FunctionExtensions};
 
@@ -265,9 +265,17 @@ impl TypedPlan {
                 reason: "Expect aggregate argument to be transformed into a column at this point",
             })?;
             if aggr_expr.distinct {
-                distinct_aggrs.push((output_column, input_column, aggr_expr.clone()));
+                distinct_aggrs.push(AggrWithIndex::new(
+                    aggr_expr.clone(),
+                    input_column,
+                    output_column,
+                ));
             } else {
-                simple_aggrs.push((output_column, input_column, aggr_expr.clone()));
+                simple_aggrs.push(AggrWithIndex::new(
+                    aggr_expr.clone(),
+                    input_column,
+                    output_column,
+                ));
             }
         }
         let accum_plan = AccumulablePlan {
@@ -327,7 +335,7 @@ mod test {
                     },
                     reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
                         full_aggrs: vec![aggr_expr.clone()],
-                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
                         distinct_aggrs: vec![],
                     }),
                 }),
@@ -379,7 +387,7 @@ mod test {
                     },
                     reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
                         full_aggrs: vec![aggr_expr.clone()],
-                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
                         distinct_aggrs: vec![],
                     }),
                 }),
@@ -430,7 +438,7 @@ mod test {
                     },
                     reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
                         full_aggrs: vec![aggr_expr.clone()],
-                        simple_aggrs: vec![(0, 0, aggr_expr.clone())],
+                        simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
                         distinct_aggrs: vec![],
                     }),
                 }),
