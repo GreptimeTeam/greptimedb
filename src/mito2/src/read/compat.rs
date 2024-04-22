@@ -135,8 +135,8 @@ impl CompatPrimaryKey {
 /// Helper to make fields compatible.
 #[derive(Debug)]
 struct CompatFields {
-    /// Column Ids the reader actually returns.
-    actual_fields: Vec<ColumnId>,
+    /// Column Ids and DataTypes the reader actually returns.
+    actual_fields: Vec<(ColumnId, ConcreteDataType)>,
     /// Indices to convert actual fields to expect fields.
     index_or_defaults: Vec<IndexOrDefault>,
 }
@@ -150,7 +150,7 @@ impl CompatFields {
             .actual_fields
             .iter()
             .zip(batch.fields())
-            .all(|(id, batch_column)| *id == batch_column.column_id));
+            .all(|((id, _), batch_column)| *id == batch_column.column_id));
 
         let len = batch.num_rows();
         let fields = self
@@ -254,32 +254,26 @@ fn may_compat_fields(
     mapper: &ProjectionMapper,
     actual: &RegionMetadata,
 ) -> Result<Option<CompatFields>> {
-    let expect = mapper.metadata();
     let expect_fields = mapper.batch_fields();
     let actual_fields = Batch::projected_fields(actual, mapper.column_ids());
-    if expect.schema == actual.schema {
+    if expect_fields == actual_fields {
         return Ok(None);
     }
 
     let source_field_index: HashMap<_, _> = actual_fields
         .iter()
         .enumerate()
-        .map(|(idx, column_id)| (*column_id, idx))
+        .map(|(idx, (column_id, data_type))| (*column_id, (idx, data_type)))
         .collect();
 
     let index_or_defaults = expect_fields
         .iter()
-        .map(|column_id| {
-            if let Some(index) = source_field_index.get(column_id) {
-                // TODO(kould): more Modify case, e.g. column name
+        .map(|(column_id, expect_data_type)| {
+            if let Some((index, actual_data_type)) = source_field_index.get(column_id) {
                 let mut modify_type = None;
 
-                // Safety: check on [`TableMeta::modify_columns`].
-                let expect_column = expect.column_by_id(*column_id).unwrap();
-                let actual_column = actual.column_by_id(*column_id).unwrap();
-
-                if expect_column != actual_column {
-                    modify_type = Some(expect_column.column_schema.data_type.clone())
+                if expect_data_type != *actual_data_type {
+                    modify_type = Some(expect_data_type.clone())
                 }
                 // Source has this field.
                 Ok(IndexOrDefault::Index {
