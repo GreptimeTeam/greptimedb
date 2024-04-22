@@ -44,8 +44,9 @@ use crate::engine::options::{
 use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
-    InternalColumnOccupiedSnafu, MissingRegionOptionSnafu, MitoReadOperationSnafu,
-    ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+    InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
+    MitoReadOperationSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu,
 };
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{to_data_region_id, to_metadata_region_id};
@@ -290,6 +291,8 @@ impl MetricEngineInner {
     /// - required table option is present ([PHYSICAL_TABLE_METADATA_KEY] or
     ///   [LOGICAL_TABLE_METADATA_KEY])
     fn verify_region_create_request(request: &RegionCreateRequest) -> Result<()> {
+        request.validate().context(InvalidMetadataSnafu)?;
+
         let name_to_index = request
             .column_metadatas
             .iter()
