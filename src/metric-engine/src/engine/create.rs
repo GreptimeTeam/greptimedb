@@ -549,7 +549,15 @@ mod test {
     #[test]
     fn test_verify_region_create_request_options() {
         let mut request = RegionCreateRequest {
-            column_metadatas: vec![],
+            column_metadatas: vec![ColumnMetadata {
+                column_id: 0,
+                semantic_type: SemanticType::Timestamp,
+                column_schema: ColumnSchema::new(
+                    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            }],
             region_dir: "test_dir".to_string(),
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
