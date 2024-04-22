@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
@@ -31,7 +31,7 @@ use query::sql::{
 };
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
@@ -214,7 +214,70 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
         table_id: None,
         engine: create.engine.to_string(),
     };
+
+    validate_create_expr(&expr)?;
     Ok(expr)
+}
+
+/// Validate the [`CreateTableExpr`] request.
+pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
+    // construct column list
+    let mut column_to_indices = HashMap::new();
+    for (idx, column) in create.column_defs.iter().enumerate() {
+        if let Some(indices) = column_to_indices.get(&column.name) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is duplicated at index {} and {}",
+                    column.name, indices, idx
+                ),
+            }
+            .fail();
+        }
+        column_to_indices.insert(&column.name, idx);
+    }
+
+    // verify time_index exists
+    let _ = column_to_indices
+        .get(&create.time_index)
+        .with_context(|| InvalidSqlSnafu {
+            err_msg: format!(
+                "column name `{}` is not found in column list",
+                create.time_index
+            ),
+        })?;
+
+    // verify primary_key exists
+    for pk in &create.primary_keys {
+        let _ = column_to_indices
+            .get(&pk)
+            .with_context(|| InvalidSqlSnafu {
+                err_msg: format!("column name `{}` is not found in column list", pk),
+            })?;
+    }
+
+    // construct primary_key set
+    let mut pk_set = HashSet::new();
+    for pk in &create.primary_keys {
+        if !pk_set.insert(pk) {
+            return InvalidSqlSnafu {
+                err_msg: format!("column name `{}` is duplicated in primary keys", pk),
+            }
+            .fail();
+        }
+    }
+
+    // verify time index is not primary key
+    if pk_set.contains(&create.time_index) {
+        return InvalidSqlSnafu {
+            err_msg: format!(
+                "column name `{}` is both primary key and time index",
+                create.time_index
+            ),
+        }
+        .fail();
+    }
+
+    Ok(())
 }
 
 fn find_primary_keys(
@@ -455,6 +518,33 @@ mod tests {
             "1.0MiB",
             expr.table_options.get("write_buffer_size").unwrap()
         );
+    }
+
+    #[test]
+    fn test_invalid_create_to_expr() {
+        let cases = [
+            // duplicate column declaration
+            "CREATE TABLE monitor (host STRING primary key, ts TIMESTAMP TIME INDEX, some_column text, some_column string);",
+        // duplicate primary key
+            "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, some_column STRING, PRIMARY KEY (some_column, host, some_column));",
+            // time index is primary key
+            "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (host, ts));"
+        ];
+
+        for sql in cases {
+            let stmt = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+            let Statement::CreateTable(create_table) = stmt else {
+                unreachable!()
+            };
+            create_to_expr(&create_table, QueryContext::arc()).unwrap_err();
+        }
     }
 
     #[test]
