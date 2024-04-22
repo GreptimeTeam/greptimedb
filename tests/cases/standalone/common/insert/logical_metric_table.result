@@ -54,7 +54,7 @@ DESC TABLE phy;
 +------------+----------------------+-----+------+---------+---------------+
 | Column     | Type                 | Key | Null | Default | Semantic Type |
 +------------+----------------------+-----+------+---------+---------------+
-| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val        | Float64              |     | YES  |         | FIELD         |
 | __table_id | UInt32               | PRI | NO   |         | TAG           |
 | __tsid     | UInt64               | PRI | NO   |         | TAG           |
