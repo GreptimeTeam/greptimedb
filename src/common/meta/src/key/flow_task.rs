@@ -135,6 +135,4 @@ mod tests {
         let flow_task = FlowTaskKey::new(2);
         assert_eq!(b"__flow_task/2".to_vec(), flow_task.as_raw_key());
     }
-
-    
 }

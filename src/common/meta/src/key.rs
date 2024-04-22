@@ -69,8 +69,6 @@ pub mod table_region;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
-// TODO(weny): remove it.
-#[allow(dead_code)]
 mod tombstone;
 pub(crate) mod txn_helper;
 
