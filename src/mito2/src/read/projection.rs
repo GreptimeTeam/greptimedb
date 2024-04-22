@@ -344,7 +344,13 @@ mod tests {
         );
         let mapper = ProjectionMapper::all(&metadata).unwrap();
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
-        assert_eq!([(3, ConcreteDataType::int64_datatype()), (4, ConcreteDataType::int64_datatype())], mapper.batch_fields());
+        assert_eq!(
+            [
+                (3, ConcreteDataType::int64_datatype()),
+                (4, ConcreteDataType::int64_datatype())
+            ],
+            mapper.batch_fields()
+        );
 
         // With vector cache.
         let cache = CacheManager::builder().vector_cache_size(1024).build();
@@ -378,7 +384,10 @@ mod tests {
         // Columns v1, k0
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
         assert_eq!([4, 1], mapper.column_ids());
-        assert_eq!([(4, ConcreteDataType::int64_datatype())], mapper.batch_fields());
+        assert_eq!(
+            [(4, ConcreteDataType::int64_datatype())],
+            mapper.batch_fields()
+        );
 
         let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
         let record_batch = mapper.convert(&batch, None).unwrap();
