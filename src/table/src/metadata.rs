@@ -27,7 +27,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
-use crate::requests::{AddColumnRequest, AlterKind, ModifyColumnRequest, TableOptions};
+use crate::requests::{AddColumnRequest, AlterKind, ChangeColumnTypeRequest, TableOptions};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -195,7 +195,9 @@ impl TableMeta {
                 self.add_columns(table_name, columns, add_if_not_exists)
             }
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
-            AlterKind::ModifyColumns { columns } => self.modify_columns(table_name, columns),
+            AlterKind::ChangeColumnTypes { columns } => {
+                self.change_column_types(table_name, columns)
+            }
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => {
                 let mut meta_builder = TableMetaBuilder::default();
@@ -459,24 +461,24 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
-    fn modify_columns(
+    fn change_column_types(
         &self,
         table_name: &str,
-        requests: &[ModifyColumnRequest],
+        requests: &[ChangeColumnTypeRequest],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
 
-        let mut modify_columns = HashMap::with_capacity(requests.len());
+        let mut change_column_types = HashMap::with_capacity(requests.len());
         let timestamp_index = table_schema.timestamp_index();
 
-        for col_to_modify in requests {
-            let modify_column_name = &col_to_modify.column_name;
+        for col_to_change in requests {
+            let change_column_name = &col_to_change.column_name;
 
             let index = table_schema
-                .column_index_by_name(modify_column_name)
+                .column_index_by_name(change_column_name)
                 .with_context(|| error::ColumnNotExistsSnafu {
-                    column_name: modify_column_name,
+                    column_name: change_column_name,
                     table_name,
                 })?;
 
@@ -487,20 +489,20 @@ impl TableMeta {
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
                     err: format!(
-                        "Not allowed to modify primary key index column '{}'",
+                        "Not allowed to change primary key index column '{}'",
                         column.name
                     )
                 }
             );
 
             if let Some(ts_index) = timestamp_index {
-                // Not allowed to modify column in timestamp index.
+                // Not allowed to change column datatype in timestamp index.
                 ensure!(
                     index != ts_index,
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
-                            "Not allowed to modify timestamp index column '{}'",
+                            "Not allowed to change timestamp index column '{}' datatype",
                             column.name
                         )
                     }
@@ -508,24 +510,24 @@ impl TableMeta {
             }
 
             ensure!(
-                modify_columns
-                    .insert(&col_to_modify.column_name, col_to_modify)
+                change_column_types
+                    .insert(&col_to_change.column_name, col_to_change)
                     .is_none(),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
-                    err: format!("modify column {} more than once", col_to_modify.column_name),
+                    err: format!("change column datatype {} more than once", col_to_change.column_name),
                 }
             );
 
             ensure!(
                 column
                     .data_type
-                    .can_arrow_type_cast_to(&col_to_modify.target_type),
+                    .can_arrow_type_cast_to(&col_to_change.target_type),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
                     err: format!(
                         "column '{}' cannot be cast automatically to type '{}'",
-                        col_to_modify.column_name, col_to_modify.target_type,
+                        col_to_change.column_name, col_to_change.target_type,
                     ),
                 }
             );
@@ -536,19 +538,19 @@ impl TableMeta {
                     table: table_name,
                     err: format!(
                         "column '{}' must be nullable to ensure safe conversion.",
-                        col_to_modify.column_name,
+                        col_to_change.column_name,
                     ),
                 }
             );
         }
-        // Collect columns after modified.
+        // Collect columns after changed.
         let columns: Vec<_> = table_schema
             .column_schemas()
             .iter()
             .cloned()
             .map(|mut column| {
-                if let Some(modify_column) = modify_columns.get(&column.name) {
-                    column.data_type = modify_column.target_type.clone();
+                if let Some(change_column) = change_column_types.get(&column.name) {
+                    column.data_type = change_column.target_type.clone();
                 }
                 column
             })
@@ -570,7 +572,7 @@ impl TableMeta {
                 .collect();
 
             error::SchemaBuildSnafu {
-                msg: format!("Table {table_name} cannot modify columns {column_names:?}"),
+                msg: format!("Table {table_name} cannot change datatype with columns {column_names:?}"),
             }
         })?;
 
@@ -1151,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_modify_unknown_column() {
+    fn test_change_unknown_column_data_type() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
             .schema(schema)
@@ -1161,8 +1163,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::ModifyColumns {
-            columns: vec![ModifyColumnRequest {
+        let alter_kind = AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnTypeRequest {
                 column_name: "unknown".to_string(),
                 target_type: ConcreteDataType::string_datatype(),
             }],
@@ -1210,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_modify_key_column() {
+    fn test_change_key_column_data_type() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
             .schema(schema)
@@ -1221,8 +1223,8 @@ mod tests {
             .unwrap();
 
         // Remove column in primary key.
-        let alter_kind = AlterKind::ModifyColumns {
-            columns: vec![ModifyColumnRequest {
+        let alter_kind = AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnTypeRequest {
                 column_name: "col1".to_string(),
                 target_type: ConcreteDataType::string_datatype(),
             }],
@@ -1235,8 +1237,8 @@ mod tests {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
 
         // Remove timestamp column.
-        let alter_kind = AlterKind::ModifyColumns {
-            columns: vec![ModifyColumnRequest {
+        let alter_kind = AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnTypeRequest {
                 column_name: "ts".to_string(),
                 target_type: ConcreteDataType::string_datatype(),
             }],

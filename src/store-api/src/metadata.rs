@@ -33,7 +33,7 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
-use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumn};
+use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ChangeColumnType};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
@@ -537,7 +537,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ModifyColumns { columns } => self.modify_columns(columns),
+            AlterKind::ChangeColumnTypes { columns } => self.change_columns_type(columns),
         }
         Ok(self)
     }
@@ -619,12 +619,12 @@ impl RegionMetadataBuilder {
             .retain(|col| !name_set.contains(&col.column_schema.name));
     }
 
-    /// Modifies columns to the metadata if exist.
-    fn modify_columns(&mut self, columns: Vec<ModifyColumn>) {
-        let mut modify_map: HashMap<_, _> = columns
+    /// Changes columns type to the metadata if exist.
+    fn change_columns_type(&mut self, columns: Vec<ChangeColumnType>) {
+        let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
-                |ModifyColumn {
+                |ChangeColumnType {
                      column_name,
                      target_type,
                  }| (column_name, target_type),
@@ -632,7 +632,7 @@ impl RegionMetadataBuilder {
             .collect();
 
         for column_meta in self.column_metadatas.iter_mut() {
-            if let Some(target_type) = modify_map.remove(&column_meta.column_schema.name) {
+            if let Some(target_type) = change_type_map.remove(&column_meta.column_schema.name) {
                 column_meta.column_schema.data_type = target_type;
             }
         }
@@ -730,8 +730,8 @@ pub enum MetadataError {
     #[snafu(display("Time index column not found"))]
     TimeIndexNotFound { location: Location },
 
-    #[snafu(display("Modify column {} not exists in region: {}", column_name, region_id))]
-    ModifyColumnNotFound {
+    #[snafu(display("Change column {} not exists in region: {}", column_name, region_id))]
+    ChangeColumnNotFound {
         column_name: String,
         region_id: RegionId,
         location: Location,
@@ -1153,8 +1153,8 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::ModifyColumns {
-                columns: vec![ModifyColumn {
+            .alter(AlterKind::ChangeColumnTypes {
+                columns: vec![ChangeColumnType {
                     column_name: "b".to_string(),
                     target_type: ConcreteDataType::string_datatype(),
                 }],

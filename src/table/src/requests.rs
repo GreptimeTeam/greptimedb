@@ -165,19 +165,27 @@ pub struct AddColumnRequest {
     pub location: Option<AddColumnLocation>,
 }
 
-/// Modify column request
+/// Change column datatype request
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModifyColumnRequest {
+pub struct ChangeColumnTypeRequest {
     pub column_name: String,
     pub target_type: ConcreteDataType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlterKind {
-    AddColumns { columns: Vec<AddColumnRequest> },
-    DropColumns { names: Vec<String> },
-    ModifyColumns { columns: Vec<ModifyColumnRequest> },
-    RenameTable { new_table_name: String },
+    AddColumns {
+        columns: Vec<AddColumnRequest>,
+    },
+    DropColumns {
+        names: Vec<String>,
+    },
+    ChangeColumnTypes {
+        columns: Vec<ChangeColumnTypeRequest>,
+    },
+    RenameTable {
+        new_table_name: String,
+    },
 }
 
 #[derive(Debug)]

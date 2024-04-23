@@ -333,10 +333,10 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
-    /// Modify columns form the region, only fields are allowed to modify.
-    ModifyColumns {
-        /// Columns to modify.
-        columns: Vec<ModifyColumn>,
+    /// Change columns datatype form the region, only fields are allowed to change.
+    ChangeColumnTypes {
+        /// Columns to change.
+        columns: Vec<ChangeColumnType>,
     },
 }
 
@@ -356,9 +356,9 @@ impl AlterKind {
                     Self::validate_column_to_drop(name, metadata)?;
                 }
             }
-            AlterKind::ModifyColumns { columns } => {
-                for col_to_modify in columns {
-                    col_to_modify.validate(metadata)?;
+            AlterKind::ChangeColumnTypes { columns } => {
+                for col_to_change in columns {
+                    col_to_change.validate(metadata)?;
                 }
             }
         }
@@ -375,9 +375,9 @@ impl AlterKind {
             AlterKind::DropColumns { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
-            AlterKind::ModifyColumns { columns } => columns
+            AlterKind::ChangeColumnTypes { columns } => columns
                 .iter()
-                .any(|col_to_modify| col_to_modify.need_alter(metadata)),
+                .any(|col_to_change| col_to_change.need_alter(metadata)),
         }
     }
 
@@ -515,17 +515,17 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
     }
 }
 
-/// Modify a column.
+/// Change a column's datatype.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct ModifyColumn {
+pub struct ChangeColumnType {
     /// Schema of the column to modify.
     pub column_name: String,
-    /// Column will be modified to this type.
+    /// Column will be changed to this type.
     pub target_type: ConcreteDataType,
 }
 
-impl ModifyColumn {
-    /// Returns an error if the column to modify is invalid.
+impl ChangeColumnType {
+    /// Returns an error if the column's datatype to change is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         let column_meta = metadata
             .column_by_name(&self.column_name)
@@ -558,7 +558,7 @@ impl ModifyColumn {
         Ok(())
     }
 
-    /// Returns true if no column to modify to the region.
+    /// Returns true if no column's datatype to change to the region.
     pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
         debug_assert!(self.validate(metadata).is_ok());
         metadata.column_by_name(&self.column_name).is_some()
@@ -864,10 +864,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_modify_column() {
+    fn test_validate_change_column_type() {
         let metadata = new_metadata();
-        AlterKind::ModifyColumns {
-            columns: vec![ModifyColumn {
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
                 column_name: "xxxx".to_string(),
                 target_type: ConcreteDataType::string_datatype(),
             }],
@@ -875,8 +875,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AlterKind::ModifyColumns {
-            columns: vec![ModifyColumn {
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
                 column_name: "field_1".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
             }],
@@ -884,8 +884,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AlterKind::ModifyColumns {
-            columns: vec![ModifyColumn {
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
                 column_name: "ts".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
             }],
@@ -893,8 +893,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AlterKind::ModifyColumns {
-            columns: vec![ModifyColumn {
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
                 column_name: "tag_0".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
             }],
@@ -902,8 +902,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        let kind = AlterKind::ModifyColumns {
-            columns: vec![ModifyColumn {
+        let kind = AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
                 column_name: "field_0".to_string(),
                 target_type: ConcreteDataType::int32_datatype(),
             }],
