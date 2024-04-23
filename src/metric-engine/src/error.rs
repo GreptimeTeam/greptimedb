@@ -171,7 +171,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Mutiple field column found: {} and {}", previous, current))]
+    #[snafu(display("Multiple field column found: {} and {}", previous, current))]
     MultipleFieldColumn {
         previous: String,
         current: String,
