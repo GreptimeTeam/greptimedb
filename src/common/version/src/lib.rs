@@ -103,3 +103,28 @@ pub fn setup_build_info() {
     println!("cargo:rustc-env=RUSTC_VERSION={}", build_info.rustc);
     println!("cargo:rustc-env=SOURCE_TIMESTAMP={}", build_info.timestamp);
 }
+
+/// Get the string for the output of cli "--version".
+#[macro_export]
+macro_rules! version {
+    () => {
+        concat!(
+            "\nbranch: ",
+            env!("GIT_BRANCH"),
+            "\ncommit: ",
+            env!("GIT_COMMIT"),
+            "\ndirty: ",
+            env!("GIT_DIRTY"),
+            "\nversion: ",
+            env!("CARGO_PKG_VERSION")
+        )
+    };
+}
+
+/// Short version for reporting metrics.
+#[macro_export]
+macro_rules! short_version {
+    () => {
+        concat!(env!("GIT_BRANCH"), "-", env!("GIT_COMMIT_SHORT"))
+    };
+}
