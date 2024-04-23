@@ -46,9 +46,7 @@ pub struct DataflowState {
 
 impl DataflowState {
     pub fn new_arrange(&mut self, name: Option<Vec<String>>) -> ArrangeHandler {
-        let arrange = name
-            .map(Arrangement::new_with_name)
-            .unwrap_or_else(Arrangement::new);
+        let arrange = name.map(Arrangement::new_with_name).unwrap_or_default();
 
         let arr = ArrangeHandler::from(arrange);
         // mark this arrange as used in this dataflow
