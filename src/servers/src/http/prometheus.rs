@@ -620,7 +620,6 @@ pub async fn label_values_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Query(params): Query<LabelValueQuery>,
 ) -> PrometheusJsonResponse {
-    common_telemetry::info!("[DEBUG] query params: {:?}", params);
     let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
     let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
 
