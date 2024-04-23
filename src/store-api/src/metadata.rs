@@ -537,7 +537,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ChangeColumnTypes { columns } => self.change_columns_type(columns),
+            AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
         }
         Ok(self)
     }
@@ -620,7 +620,7 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes columns type to the metadata if exist.
-    fn change_columns_type(&mut self, columns: Vec<ChangeColumnType>) {
+    fn change_column_types(&mut self, columns: Vec<ChangeColumnType>) {
         let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
