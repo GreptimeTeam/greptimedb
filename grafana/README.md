@@ -17,9 +17,16 @@ This cluster dashboard provides a comprehensive view of incoming requests, respo
 
 ### Configuration
 
+Please check the following configuration before importing the dashboard into Grafana.
+
 __Prometheus scrape config__
 
+Assign `greptime_pod` to each target. We use this label to identify each node instance.
+
 ```yml
+# example config
+# only to indicate how to assign labels to each target
+# modify yours accordingly
 scrape_configs:
   - job_name: metasrv
     static_configs:
@@ -45,3 +52,8 @@ scrape_configs:
       labels:
         greptime_pod: frontend
 ```
+
+__Grafana config__
+
+Create a Prometheus datasource in Grafana before using this dashboard. We use datasource as a variable in Grafana dashboard so multiple environments are supported.
+
