@@ -26,7 +26,7 @@ pub enum ShowKind {
     Where(Expr),
 }
 
-impl fmt::Display for ShowKind {
+impl Display for ShowKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ShowKind::All => write!(f, "ALL"),
@@ -53,19 +53,15 @@ pub struct ShowColumns {
 
 impl Display for ShowColumns {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SHOW")?;
+        write!(f, "SHOW ")?;
         if self.full {
-            f.write_str(" FULL")?;
+            write!(f, "FULL ")?;
         }
-
-        let table = format!("IN {}", &self.table);
-        let database = match &self.database {
-            Some(database) => format!("IN {}", database),
-            None => String::default(),
-        };
-
-        let kind = &self.kind;
-        write!(f, r#" COLUMNS {table} {database} {kind}"#)
+        write!(f, "COLUMNS IN {} ", &self.table)?;
+        if let Some(database) = &self.database {
+            write!(f, "IN {database} ")?;
+        }
+        write!(f, "{}", &self.kind)
     }
 }
 
@@ -79,13 +75,11 @@ pub struct ShowIndex {
 
 impl Display for ShowIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = &self.kind;
-        let table = format!("IN {}", &self.table);
-        let database = match &self.database {
-            Some(database) => format!("IN {}", database),
-            None => String::default(),
-        };
-        write!(f, r#"SHOW INDEX {table} {database} {kind}"#)
+        write!(f, "SHOW INDEX IN {} ", &self.table)?;
+        if let Some(database) = &self.database {
+            write!(f, "IN {database} ")?;
+        }
+        write!(f, "{}", &self.kind)
     }
 }
 
@@ -113,18 +107,15 @@ pub struct ShowTables {
 
 impl Display for ShowTables {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SHOW")?;
+        write!(f, "SHOW ")?;
         if self.full {
-            f.write_str(" FULL")?;
+            write!(f, "FULL ")?;
         }
-        f.write_str(" TABLES")?;
-        let database = match &self.database {
-            Some(d) => format!("IN {} ", d),
-            None => String::default(),
-        };
-
-        let kind = &self.kind;
-        write!(f, r#" {database}{kind}"#)
+        write!(f, "TABLES ")?;
+        if let Some(database) = &self.database {
+            write!(f, "IN {database} ")?;
+        }
+        write!(f, "{}", &self.kind)
     }
 }
 
