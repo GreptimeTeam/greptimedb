@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -201,28 +202,37 @@ impl Picker for TwcsPicker {
     }
 }
 
-#[derive(Default)]
 struct Window {
-    start: Option<Timestamp>,
-    end: Option<Timestamp>,
+    start: Timestamp,
+    end: Timestamp,
     files: Vec<FileHandle>,
     time_window: i64,
     overlapping: bool,
 }
 
 impl Window {
-    /// # Panics
-    /// If `files` is empty.
+    /// Creates a new [Window] with given file.
+    fn new_with_file(file: FileHandle) -> Self {
+        let (start, end) = file.time_range();
+        Self {
+            start,
+            end,
+            files: vec![file],
+            time_window: 0,
+            overlapping: false,
+        }
+    }
+
+    /// Returns the time range of all files in current window (inclusive).
     fn range(&self) -> (Timestamp, Timestamp) {
-        assert!(!self.files.is_empty());
-        (self.start.unwrap(), self.end.unwrap())
+        (self.start, self.end)
     }
 
     /// Adds a new file to window and updates time range.
     fn add_file(&mut self, file: FileHandle) {
         let (start, end) = file.time_range();
-        self.start = Some(self.start.map_or(start, |e| e.min(start)));
-        self.end = Some(self.end.map_or(end, |e| e.max(end)));
+        self.start = self.start.min(start);
+        self.end = self.end.max(end);
         self.files.push(file);
     }
 }
@@ -242,9 +252,17 @@ fn assign_to_windows<'a>(
             .value()
             .align_to_ceil_by_bucket(time_window_size)
             .unwrap_or(i64::MIN);
-        let window = windows.entry(time_window).or_default();
-        window.time_window = time_window;
-        window.add_file(f.clone());
+
+        match windows.entry(time_window) {
+            Entry::Occupied(mut e) => {
+                e.get_mut().add_file(f.clone());
+            }
+            Entry::Vacant(e) => {
+                let mut window = Window::new_with_file(f.clone());
+                window.time_window = time_window;
+                e.insert(window);
+            }
+        }
     }
     if windows.is_empty() {
         return BTreeMap::new();
@@ -253,8 +271,7 @@ fn assign_to_windows<'a>(
     let mut windows = windows.into_values().collect::<Vec<_>>();
     windows.sort_unstable_by(|l, r| l.start.cmp(&r.start).then(l.end.cmp(&r.end).reverse()));
 
-    let mut current_range: (Timestamp, Timestamp) =
-        (windows[0].start.unwrap(), windows[0].end.unwrap());
+    let mut current_range: (Timestamp, Timestamp) = windows[0].range(); // windows cannot be empty.
 
     for idx in 1..windows.len() {
         let next_range = windows[idx].range();
