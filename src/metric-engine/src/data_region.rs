@@ -25,7 +25,7 @@ use store_api::region_request::{
     AddColumn, AffectedRows, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::RegionId;
+use store_api::storage::{ConcreteDataType, RegionId};
 
 use crate::error::{
     ColumnTypeMismatchSnafu, MitoReadOperationSnafu, MitoWriteOperationSnafu, Result,
@@ -128,7 +128,8 @@ impl DataRegion {
                 if c.semantic_type == SemanticType::Tag {
                     if !c.column_schema.data_type.is_string() {
                         return ColumnTypeMismatchSnafu {
-                            column_type: c.column_schema.data_type.clone(),
+                            expect: ConcreteDataType::string_datatype(),
+                            actual: c.column_schema.data_type.clone(),
                         }
                         .fail();
                     }

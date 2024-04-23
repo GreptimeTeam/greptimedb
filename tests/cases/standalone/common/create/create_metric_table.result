@@ -33,6 +33,21 @@ CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) en
 
 Affected Rows: 0
 
+-- create logical table with different data type on field column
+CREATE TABLE t3 (ts timestamp time index, val string, host string, primary key (host)) engine=metric with ("on_physical_table" = "phy");
+
+Error: 1004(InvalidArguments), Column type mismatch. Expect Float64(Float64Type), got String(StringType)
+
+-- create logical table with different data type on tag column
+CREATE TABLE t4 (ts timestamp time index, val double, host double, primary key (host)) engine=metric with ("on_physical_table" = "phy");
+
+Error: 1004(InvalidArguments), Column type mismatch. Expect String(StringType), got Float64(Float64Type)
+
+-- create logical table with different column name on field column
+CREATE TABLE t5 (ts timestamp time index, valval double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Error: 1004(InvalidArguments), Adding field column valval to physical table
+
 SELECT table_catalog, table_schema, table_name, table_type, engine FROM information_schema.tables WHERE engine = 'metric' order by table_name;
 
 +---------------+--------------+------------+------------+--------+
@@ -131,18 +146,10 @@ Affected Rows: 0
 -- fuzz test case https://github.com/GreptimeTeam/greptimedb/issues/3612
 CREATE TABLE `auT`(
   incidunt TIMESTAMP(3) TIME INDEX,
-  `QuaErAT` BOOLEAN,
-  `REPREHenDERIt` BOOLEAN DEFAULT true,
-  `Et` INT NULL,
-  `AutEM` INT,
-  esse DOUBLE,
-  `Tempore` BOOLEAN,
-  `reruM` BOOLEAN,
-  `eRrOR` BOOLEAN NULL,
-  `cOMmodi` BOOLEAN,
-  `PERfERENdIS` DOUBLE,
-  `eSt` FLOAT DEFAULT 0.70978713,
-  PRIMARY KEY(`cOMmodi`, `PERfERENdIS`, esse)
+  `REPREHenDERIt` double DEFAULT 0.70978713,
+  `cOMmodi` STRING,
+  `PERfERENdIS` STRING,
+  PRIMARY KEY(`cOMmodi`, `PERfERENdIS`)
 ) ENGINE = metric with ("physical_metric_table" = "");
 
 Affected Rows: 0
@@ -153,17 +160,9 @@ DESC TABLE `auT`;
 | Column        | Type                 | Key | Null | Default    | Semantic Type |
 +---------------+----------------------+-----+------+------------+---------------+
 | incidunt      | TimestampMillisecond | PRI | NO   |            | TIMESTAMP     |
-| QuaErAT       | Boolean              |     | YES  |            | FIELD         |
-| REPREHenDERIt | Boolean              |     | YES  | true       | FIELD         |
-| Et            | Int32                |     | YES  |            | FIELD         |
-| AutEM         | Int32                |     | YES  |            | FIELD         |
-| esse          | Float64              | PRI | YES  |            | TAG           |
-| Tempore       | Boolean              |     | YES  |            | FIELD         |
-| reruM         | Boolean              |     | YES  |            | FIELD         |
-| eRrOR         | Boolean              |     | YES  |            | FIELD         |
-| cOMmodi       | Boolean              | PRI | YES  |            | TAG           |
-| PERfERENdIS   | Float64              | PRI | YES  |            | TAG           |
-| eSt           | Float32              |     | YES  | 0.70978713 | FIELD         |
+| REPREHenDERIt | Float64              |     | YES  | 0.70978713 | FIELD         |
+| cOMmodi       | String               | PRI | YES  |            | TAG           |
+| PERfERENdIS   | String               | PRI | YES  |            | TAG           |
 +---------------+----------------------+-----+------+------------+---------------+
 
 DROP TABLE `auT`;

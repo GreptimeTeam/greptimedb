@@ -133,9 +133,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Column type mismatch. Expect string, got {:?}", column_type))]
+    #[snafu(display("Column type mismatch. Expect {:?}, got {:?}", expect, actual))]
     ColumnTypeMismatch {
-        column_type: ConcreteDataType,
+        expect: ConcreteDataType,
+        actual: ConcreteDataType,
         location: Location,
     },
 
@@ -169,6 +170,19 @@ pub enum Error {
         request: RegionRequest,
         location: Location,
     },
+
+    #[snafu(display("Mutiple field column found: {} and {}", previous, current))]
+    MultipleFieldColumn {
+        previous: String,
+        current: String,
+        location: Location,
+    },
+
+    #[snafu(display("Adding field column {} to physical table", name))]
+    AddingFieldColumn { name: String, location: Location },
+
+    #[snafu(display("No field column found"))]
+    NoFieldColumn { location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -182,7 +196,10 @@ impl ErrorExt for Error {
             | MissingRegionOption { .. }
             | ConflictRegionOption { .. }
             | ColumnTypeMismatch { .. }
-            | PhysicalRegionBusy { .. } => StatusCode::InvalidArguments,
+            | PhysicalRegionBusy { .. }
+            | MultipleFieldColumn { .. }
+            | NoFieldColumn { .. }
+            | AddingFieldColumn { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported

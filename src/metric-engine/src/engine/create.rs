@@ -43,10 +43,11 @@ use crate::engine::options::{
 };
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
-    InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
-    MitoReadOperationSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
-    SerializeColumnMetadataSnafu,
+    AddingFieldColumnSnafu, ColumnNotFoundSnafu, ColumnTypeMismatchSnafu,
+    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
+    InvalidMetadataSnafu, MissingRegionOptionSnafu, MitoReadOperationSnafu,
+    MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu,
+    Result, SerializeColumnMetadataSnafu,
 };
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{to_data_region_id, to_metadata_region_id};
@@ -192,6 +193,14 @@ impl MetricEngineInner {
                     })?;
             for col in &request.column_metadatas {
                 if !physical_columns.contains(&col.column_schema.name) {
+                    // Multi-field on physical table is explicit forbidden at present
+                    // TODO(ruihang): support multi-field on both logical and physical column
+                    ensure!(
+                        col.semantic_type != SemanticType::Field,
+                        AddingFieldColumnSnafu {
+                            name: col.column_schema.name.clone()
+                        }
+                    );
                     new_columns.push(col.clone());
                 } else {
                     existing_columns.push(col.column_schema.name.clone());
@@ -324,6 +333,39 @@ impl MetricEngineInner {
             !(request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
                 && request.options.contains_key(LOGICAL_TABLE_METADATA_KEY)),
             ConflictRegionOptionSnafu {}
+        );
+
+        // check if only one field column is declared, and all tag columns are string
+        let mut field_col: Option<&ColumnMetadata> = None;
+        for col in &request.column_metadatas {
+            if col.semantic_type == SemanticType::Field {
+                if field_col.is_some() {
+                    MultipleFieldColumnSnafu {
+                        previous: field_col.unwrap().column_schema.name.clone(),
+                        current: col.column_schema.name.clone(),
+                    }
+                    .fail()?;
+                }
+                field_col = Some(col);
+            } else if col.semantic_type == SemanticType::Tag {
+                ensure!(
+                    col.column_schema.data_type == ConcreteDataType::string_datatype(),
+                    ColumnTypeMismatchSnafu {
+                        expect: ConcreteDataType::string_datatype(),
+                        actual: col.column_schema.data_type.clone(),
+                    }
+                );
+            }
+        }
+        let field_col = field_col.context(NoFieldColumnSnafu)?;
+
+        // make sure the field column is float64 type
+        ensure!(
+            field_col.column_schema.data_type == ConcreteDataType::float64_datatype(),
+            ColumnTypeMismatchSnafu {
+                expect: ConcreteDataType::float64_datatype(),
+                actual: field_col.column_schema.data_type.clone(),
+            }
         );
 
         Ok(())
@@ -534,6 +576,15 @@ mod test {
                         false,
                     ),
                 },
+                ColumnMetadata {
+                    column_id: 2,
+                    semantic_type: SemanticType::Field,
+                    column_schema: ColumnSchema::new(
+                        "column2".to_string(),
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                },
             ],
             region_dir: "test_dir".to_string(),
             engine: METRIC_ENGINE_NAME.to_string(),
@@ -542,45 +593,51 @@ mod test {
                 .into_iter()
                 .collect(),
         };
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_ok());
+        let _ = MetricEngineInner::verify_region_create_request(&request).unwrap();
     }
 
     #[test]
     fn test_verify_region_create_request_options() {
         let mut request = RegionCreateRequest {
-            column_metadatas: vec![ColumnMetadata {
-                column_id: 0,
-                semantic_type: SemanticType::Timestamp,
-                column_schema: ColumnSchema::new(
-                    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-            }],
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Field,
+                    column_schema: ColumnSchema::new(
+                        "val".to_string(),
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                },
+            ],
             region_dir: "test_dir".to_string(),
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
         };
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_err());
+        MetricEngineInner::verify_region_create_request(&request).unwrap_err();
 
         let mut options = HashMap::new();
         options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "value".to_string());
         request.options.clone_from(&options);
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_ok());
+        MetricEngineInner::verify_region_create_request(&request).unwrap();
 
         options.insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "value".to_string());
         request.options.clone_from(&options);
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_err());
+        MetricEngineInner::verify_region_create_request(&request).unwrap_err();
 
         options.remove(PHYSICAL_TABLE_METADATA_KEY).unwrap();
         request.options = options;
-        let result = MetricEngineInner::verify_region_create_request(&request);
-        assert!(result.is_ok());
+        MetricEngineInner::verify_region_create_request(&request).unwrap();
     }
 
     #[tokio::test]
