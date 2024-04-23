@@ -593,7 +593,7 @@ mod test {
                 .into_iter()
                 .collect(),
         };
-        let _ = MetricEngineInner::verify_region_create_request(&request).unwrap();
+        MetricEngineInner::verify_region_create_request(&request).unwrap();
     }
 
     #[test]
