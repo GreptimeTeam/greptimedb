@@ -270,15 +270,15 @@ fn may_compat_fields(
         .iter()
         .map(|(column_id, expect_data_type)| {
             if let Some((index, actual_data_type)) = source_field_index.get(column_id) {
-                let mut modify_type = None;
+                let mut cast_type = None;
 
                 if expect_data_type != *actual_data_type {
-                    modify_type = Some(expect_data_type.clone())
+                    cast_type = Some(expect_data_type.clone())
                 }
                 // Source has this field.
                 Ok(IndexOrDefault::Index {
                     pos: *index,
-                    cast_type: modify_type,
+                    cast_type,
                 })
             } else {
                 // Safety: mapper must have this column.
