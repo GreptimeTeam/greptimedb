@@ -15,12 +15,14 @@
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use snafu::OptionExt;
 use table::metadata::TableId;
 
-use super::TABLE_TASK_KEY_PATTERN;
 use crate::error::{self, Result};
-use crate::key::{TableMetaKey, TaskId, TABLE_TASK_KEY_PREFIX};
+use crate::key::{
+    PartitionId, TableMetaKey, TaskId, TABLE_TASK_KEY_PATTERN, TABLE_TASK_KEY_PREFIX,
+};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -29,19 +31,27 @@ use crate::rpc::KeyValue;
 use crate::FlownodeId;
 
 /// The key of mapping [TableId] to [FlownodeId] and [TaskId].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableTaskKey {
     table_id: TableId,
     flownode_id: FlownodeId,
     task_id: TaskId,
+    partition_id: PartitionId,
 }
 
 impl TableTaskKey {
     /// Returns a new [TableTaskKey].
-    pub fn new(table_id: TableId, flownode_id: FlownodeId, task_id: TaskId) -> TableTaskKey {
+    pub fn new(
+        table_id: TableId,
+        flownode_id: FlownodeId,
+        task_id: TaskId,
+        partition_id: PartitionId,
+    ) -> TableTaskKey {
         Self {
             table_id,
             flownode_id,
             task_id,
+            partition_id,
         }
     }
 
@@ -55,7 +65,7 @@ impl TableTaskKey {
     }
 
     /// Strips the [TaskId] from bytes.
-    pub fn strip_flownode_id_and_task_id(raw_key: &[u8]) -> Result<(FlownodeId, TaskId)> {
+    pub fn strip_key(raw_key: &[u8]) -> Result<TableTaskKey> {
         let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
@@ -72,25 +82,34 @@ impl TableTaskKey {
                     err_msg: format!("Invalid FlownodeTaskKey '{key}'"),
                 })?;
         // Safety: pass the regex check above
+        let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
         let task_id = captures[3].parse::<TaskId>().unwrap();
-        Ok((flownode_id, task_id))
+        let partition_id = captures[4].parse::<PartitionId>().unwrap();
+        Ok(TableTaskKey::new(
+            table_id,
+            flownode_id,
+            task_id,
+            partition_id,
+        ))
     }
 }
 
 impl TableMetaKey for TableTaskKey {
     fn as_raw_key(&self) -> Vec<u8> {
         format!(
-            "{}/{}/{}/{}",
-            TABLE_TASK_KEY_PREFIX, self.table_id, self.flownode_id, self.task_id
+            "{TABLE_TASK_KEY_PREFIX}/{}/{}/{}/{}",
+            self.table_id, self.flownode_id, self.task_id, self.partition_id
         )
         .into_bytes()
     }
 }
 
-/// Decodes `KeyValue` to ((),[TaskId])
-pub fn table_task_decoder(kv: KeyValue) -> Result<(FlownodeId, TaskId)> {
-    TableTaskKey::strip_flownode_id_and_task_id(&kv.key)
+/// Decodes `KeyValue` to ((),[TableTaskKey])
+pub fn table_task_decoder(kv: KeyValue) -> Result<((), TableTaskKey)> {
+    let key = TableTaskKey::strip_key(&kv.key)?;
+
+    Ok(((), key))
 }
 
 /// The manager of [TableTaskKey].
@@ -105,7 +124,7 @@ impl TableTaskManager {
     }
 
     /// Retrieves all ([FlownodeId], [TaskId])s of the specified `table_id`.
-    pub fn nodes(&self, table_id: TableId) -> BoxStream<'static, Result<(FlownodeId, TaskId)>> {
+    pub fn nodes(&self, table_id: TableId) -> BoxStream<'static, Result<TableTaskKey>> {
         let start_key = TableTaskKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 
@@ -116,24 +135,28 @@ impl TableTaskManager {
             Arc::new(table_task_decoder),
         );
 
-        Box::pin(stream)
+        Box::pin(stream.map(|kv| kv.map(|kv| kv.1)))
     }
 
     /// Builds a create table task transaction.
-    pub fn build_create_txn(
+    pub fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
         task_id: TaskId,
-        flownode_id: FlownodeId,
+        flownode_ids: I,
         source_table_ids: &[TableId],
     ) -> Txn {
-        let txns = source_table_ids
-            .iter()
-            .map(|table_id| {
-                TxnOp::Put(
-                    TableTaskKey::new(*table_id, flownode_id, task_id).as_raw_key(),
-                    vec![],
-                )
+        let txns = flownode_ids
+            .into_iter()
+            .map(|(partition_id, flownode_id)| {
+                source_table_ids.iter().map(move |table_id| {
+                    TxnOp::Put(
+                        TableTaskKey::new(*table_id, flownode_id, task_id, partition_id)
+                            .as_raw_key(),
+                        vec![],
+                    )
+                })
             })
+            .flatten()
             .collect::<Vec<_>>();
 
         Txn::new().and_then(txns)
@@ -146,9 +169,9 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let table_task_key = TableTaskKey::new(1024, 1, 2);
+        let table_task_key = TableTaskKey::new(1024, 1, 2, 0);
         assert_eq!(
-            b"__table_task/1024/1/2".to_vec(),
+            b"__table_task/1024/1/2/0".to_vec(),
             table_task_key.as_raw_key()
         );
         let prefix = TableTaskKey::range_start_key(1024);
@@ -157,10 +180,10 @@ mod tests {
 
     #[test]
     fn test_strip_task_id() {
-        let key = b"__table_task/1/10/100".to_vec();
+        let key = b"__table_task/1/10/100/0".to_vec();
         assert_eq!(
-            (10, 100),
-            TableTaskKey::strip_flownode_id_and_task_id(&key).unwrap()
+            TableTaskKey::new(1, 10, 100, 0),
+            TableTaskKey::strip_key(&key).unwrap()
         );
     }
 }

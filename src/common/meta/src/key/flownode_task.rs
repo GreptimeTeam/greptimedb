@@ -19,7 +19,9 @@ use futures::StreamExt;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::{TableMetaKey, TaskId, FLOWNODE_TASK_KEY_PATTERN, FLOWNODE_TASK_KEY_PREFIX};
+use crate::key::{
+    PartitionId, TableMetaKey, TaskId, FLOWNODE_TASK_KEY_PATTERN, FLOWNODE_TASK_KEY_PREFIX,
+};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -31,14 +33,16 @@ use crate::FlownodeId;
 pub struct FlownodeTaskKey {
     flownode_id: FlownodeId,
     task_id: TaskId,
+    partition_id: PartitionId,
 }
 
 impl FlownodeTaskKey {
     /// Returns a [FlownodeTaskKey] with the specified `flow_node` and `task_id`.
-    pub fn new(flownode_id: FlownodeId, task_id: TaskId) -> Self {
+    pub fn new(flownode_id: FlownodeId, task_id: TaskId, partition_id: PartitionId) -> Self {
         Self {
             flownode_id,
             task_id,
+            partition_id,
         }
     }
 
@@ -77,8 +81,8 @@ impl FlownodeTaskKey {
 impl TableMetaKey for FlownodeTaskKey {
     fn as_raw_key(&self) -> Vec<u8> {
         format!(
-            "{}/{}/{}",
-            FLOWNODE_TASK_KEY_PREFIX, self.flownode_id, self.task_id
+            "{FLOWNODE_TASK_KEY_PREFIX}/{}/{}/{}",
+            self.flownode_id, self.task_id, self.partition_id,
         )
         .into_bytes()
     }
@@ -118,11 +122,21 @@ impl FlownodeTaskManager {
     }
 
     /// Builds a create flownode task transaction.
-    pub(crate) fn build_create_txn(&self, task_id: TaskId, flownode_id: FlownodeId) -> Txn {
-        let key = FlownodeTaskKey::new(flownode_id, task_id);
-        let raw_key = key.as_raw_key();
+    pub(crate) fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
+        &self,
+        task_id: TaskId,
+        flownode_ids: I,
+    ) -> Txn {
+        let txns = flownode_ids
+            .into_iter()
+            .map(|(partition_id, flownode_id)| {
+                let key = FlownodeTaskKey::new(flownode_id, task_id, partition_id);
+                let raw_key = key.as_raw_key();
+                TxnOp::Put(raw_key.clone(), vec![])
+            })
+            .collect::<Vec<_>>();
 
-        Txn::new().and_then(vec![TxnOp::Put(raw_key.clone(), vec![])])
+        Txn::new().and_then(txns)
     }
 }
 
@@ -133,15 +147,18 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let flownode_task = FlownodeTaskKey::new(1, 2);
-        assert_eq!(b"__flownode_task/1/2".to_vec(), flownode_task.as_raw_key());
+        let flownode_task = FlownodeTaskKey::new(1, 2, 0);
+        assert_eq!(
+            b"__flownode_task/1/2/0".to_vec(),
+            flownode_task.as_raw_key()
+        );
         let prefix = FlownodeTaskKey::range_start_key(1);
         assert_eq!("__flownode_task/1/", &prefix);
     }
 
     #[test]
     fn test_strip_task_id() {
-        let key = b"__flownode_task/1/10".to_vec();
+        let key = b"__flownode_task/1/10/0".to_vec();
         assert_eq!(10, FlownodeTaskKey::strip_task_id(&key).unwrap());
     }
 }

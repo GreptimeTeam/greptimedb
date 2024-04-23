@@ -133,17 +133,21 @@ pub const CACHE_KEY_PREFIXES: [&str; 4] = [
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
-/// The id of task.
+/// The id of flow task.
 pub type TaskId = u32;
+/// The partition of flow task.
+pub type PartitionId = u32;
 
 lazy_static! {
-    static ref FLOWNODE_TASK_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{FLOWNODE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)$")).unwrap();
+    static ref FLOWNODE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{FLOWNODE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)$"
+    ))
+    .unwrap();
 }
 
 lazy_static! {
     static ref TABLE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{TABLE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)$"
+        "^{TABLE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)/([0-9]*)$"
     ))
     .unwrap();
 }

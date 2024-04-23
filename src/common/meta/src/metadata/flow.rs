@@ -73,11 +73,11 @@ impl FlowMetadataManager {
 
         let create_flownode_task_txn = self
             .flownode_task_manager
-            .build_create_txn(task_id, flow_task_value.flownode_id());
+            .build_create_txn(task_id, flow_task_value.flownode_ids().clone());
 
         let create_table_task_txn = self.table_task_manager.build_create_txn(
             task_id,
-            flow_task_value.flownode_id(),
+            flow_task_value.flownode_ids().clone(),
             flow_task_value.source_table_ids(),
         );
 
@@ -111,6 +111,7 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::*;
+    use crate::key::table_task::TableTaskKey;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
@@ -118,7 +119,15 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], 2048, 1);
+        let flow_task_value = FlowTaskValue::new(
+            vec![1024, 1025, 1026],
+            2048,
+            [(0, 1u64)].into(),
+            "raw".to_string(),
+            "expr".to_string(),
+            "hi".to_string(),
+            Default::default(),
+        );
         flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value.clone())
             .await
@@ -149,7 +158,7 @@ mod tests {
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
-            assert_eq!(nodes, vec![(1, task_id)])
+            assert_eq!(nodes, vec![TableTaskKey::new(table_id, 1, task_id, 0)]);
         }
     }
 
@@ -158,13 +167,29 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], 2048, 1);
+        let flow_task_value = FlowTaskValue::new(
+            vec![1024, 1025, 1026],
+            2048,
+            [(0, 1u64)].into(),
+            "raw".to_string(),
+            "expr".to_string(),
+            "hi".to_string(),
+            Default::default(),
+        );
         flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         // Creates again.
-        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], 2049, 1);
+        let flow_task_value = FlowTaskValue::new(
+            vec![1024, 1025, 1026],
+            2049,
+            [(0, 1u64)].into(),
+            "raw".to_string(),
+            "expr".to_string(),
+            "hi".to_string(),
+            Default::default(),
+        );
         let err = flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value)
             .await

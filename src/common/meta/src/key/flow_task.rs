@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeMap, HashMap};
+
 use serde::{Deserialize, Serialize};
 use table::metadata::TableId;
 
 use super::txn_helper::TxnOpGetResponseSet;
-use super::DeserializedValueWithBytes;
+use super::{DeserializedValueWithBytes, PartitionId};
 use crate::error::Result;
 use crate::key::{txn_helper, TableMetaKey, TableMetaValue, TaskId, FLOW_TASK_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
@@ -38,7 +40,7 @@ impl FlowTaskKey {
 
 impl TableMetaKey for FlowTaskKey {
     fn as_raw_key(&self) -> Vec<u8> {
-        format!("{}/{}", FLOW_TASK_KEY_PREFIX, self.task_id).into_bytes()
+        format!("{FLOW_TASK_KEY_PREFIX}/{}", self.task_id).into_bytes()
     }
 }
 
@@ -49,23 +51,39 @@ pub struct FlowTaskValue {
     source_tables: Vec<TableId>,
     /// The sink table used by the task.
     sink_table: TableId,
-    /// Which flow node this task is running on.
-    flownode_id: FlownodeId,
+    /// Which flow nodes this task is running on.
+    flownode_ids: BTreeMap<PartitionId, FlownodeId>,
+    raw_sql: String,
+    expire_when: String,
+    comment: String,
+    options: HashMap<String, String>,
 }
 
 impl FlowTaskValue {
     /// Returns a new [FlowTaskValue]
-    pub fn new(source_tables: Vec<TableId>, sink_table: TableId, flownode_id: FlownodeId) -> Self {
+    pub fn new(
+        source_tables: Vec<TableId>,
+        sink_table: TableId,
+        flownode_ids: BTreeMap<PartitionId, FlownodeId>,
+        raw_sql: String,
+        expire_when: String,
+        comment: String,
+        options: HashMap<String, String>,
+    ) -> Self {
         Self {
             source_tables,
             sink_table,
-            flownode_id,
+            flownode_ids,
+            raw_sql,
+            expire_when,
+            comment,
+            options,
         }
     }
 
     /// Returns the `flownode_id`.
-    pub fn flownode_id(&self) -> FlownodeId {
-        self.flownode_id
+    pub fn flownode_ids(&self) -> &BTreeMap<PartitionId, FlownodeId> {
+        &self.flownode_ids
     }
 
     /// Returns the `source_table`.
