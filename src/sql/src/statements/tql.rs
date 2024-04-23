@@ -43,23 +43,16 @@ pub struct TqlEval {
     pub query: String,
 }
 
-impl TqlEval {
-    #[inline]
-    fn format_lookback(&self) -> String {
-        if let Some(lookback) = &self.lookback {
-            format!(", {}\n", lookback)
-        } else {
-            String::default()
-        }
-    }
-}
-
 impl Display for TqlEval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let lookback = match &self.lookback {
+            Some(lookback) => format!(", {}", lookback),
+            None => String::default(),
+        };
+
         let start = &self.start;
         let end = &self;
         let step = &self;
-        let lookback = self.format_lookback();
         let query = &self.query;
         write!(f, "TQL EVAL ({start}, {end}, {step}{lookback}) {query}")
     }
@@ -77,38 +70,24 @@ pub struct TqlExplain {
     pub is_verbose: bool,
 }
 
-impl TqlExplain {
-    #[inline]
-    fn format_lookback(&self) -> String {
-        if let Some(lookback) = &self.lookback {
-            format!(", {}\n", lookback)
-        } else {
-            String::default()
-        }
-    }
-
-    #[inline]
-    fn format_is_verbose(&self) -> &str {
-        if self.is_verbose {
-            "VERBOSE"
-        } else {
-            ""
-        }
-    }
-}
-
 impl Display for TqlExplain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TQL EXPLAIN")?;
+        if self.is_verbose {
+            f.write_str(" VERBOSE")?;
+        }
+
+        let lookback = match &self.lookback {
+            Some(lookback) => format!(", {}", lookback),
+            None => String::default(),
+        };
+
         let start = &self.start;
         let end = &self.end;
         let step = &self.step;
-        let lookback = self.format_lookback();
         let query = &self.query;
-        let is_verbose = self.format_is_verbose();
-        write!(
-            f,
-            "TQL EXPLAIN {is_verbose} ({start}, {end}, {step}{lookback}) {query}"
-        )
+
+        write!(f, " ({start}, {end}, {step}{lookback}) {query}")
     }
 }
 
@@ -124,38 +103,24 @@ pub struct TqlAnalyze {
     pub is_verbose: bool,
 }
 
-impl TqlAnalyze {
-    #[inline]
-    fn format_lookback(&self) -> String {
-        if let Some(lookback) = &self.lookback {
-            format!(", {}\n", lookback)
-        } else {
-            String::default()
-        }
-    }
-
-    #[inline]
-    fn format_is_verbose(&self) -> &str {
-        if self.is_verbose {
-            "VERBOSE"
-        } else {
-            ""
-        }
-    }
-}
-
 impl Display for TqlAnalyze {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TQL ANALYZE")?;
+        if self.is_verbose {
+            f.write_str(" VERBOSE")?;
+        }
+
+        let lookback = match &self.lookback {
+            Some(lookback) => format!(", {}", lookback),
+            None => String::default(),
+        };
+
         let start = &self.start;
         let end = &self.end;
         let step = &self.step;
-        let lookback = self.format_lookback();
         let query = &self.query;
-        let is_verbose = self.format_is_verbose();
-        write!(
-            f,
-            "TQL ANALYZE {is_verbose} ({start}, {end}, {step}{lookback}) {query}"
-        )
+
+        write!(f, " ({start}, {end}, {step}{lookback}) {query}")
     }
 }
 

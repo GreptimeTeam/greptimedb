@@ -128,15 +128,11 @@ impl ShowDatabases {
     pub fn new(kind: ShowKind) -> Self {
         ShowDatabases { kind }
     }
-
-    pub fn kind(&self) -> &ShowKind {
-        &self.kind
-    }
 }
 
 impl Display for ShowDatabases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = self.kind();
+        let kind = &self.kind;
         write!(f, r#"SHOW DATABASES {kind}"#)
     }
 }
@@ -149,31 +145,20 @@ pub struct ShowTables {
     pub full: bool,
 }
 
-impl ShowTables {
-    pub fn kind(&self) -> &ShowKind {
-        &self.kind
-    }
-
-    #[inline]
-    fn format_database(&self) -> String {
-        match &self.database {
-            None => String::default(),
-            Some(database) => {
-                format!("IN {}", database)
-            }
-        }
-    }
-}
-
 impl Display for ShowTables {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SHOW")?;
         if self.full {
             f.write_str(" FULL")?;
         }
-        let database = self.format_database();
-        let kind = self.kind();
-        write!(f, r#" TABLES {database} {kind}"#)
+        f.write_str(" TABLES")?;
+        let database = match &self.database {
+            Some(d) => format!("IN {} ", d),
+            None => String::default(),
+        };
+
+        let kind = &self.kind;
+        write!(f, r#" {database}{kind}"#)
     }
 }
 
@@ -183,15 +168,9 @@ pub struct ShowCreateTable {
     pub table_name: ObjectName,
 }
 
-impl ShowCreateTable {
-    fn table_name(&self) -> &ObjectName {
-        &self.table_name
-    }
-}
-
 impl Display for ShowCreateTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let table_name = self.table_name();
+        let table_name = &self.table_name;
         write!(f, r#"SHOW CREATE TABLE {table_name}"#)
     }
 }
@@ -202,15 +181,9 @@ pub struct ShowVariables {
     pub variable: ObjectName,
 }
 
-impl ShowVariables {
-    fn variable(&self) -> &ObjectName {
-        &self.variable
-    }
-}
-
 impl Display for ShowVariables {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let variable = self.variable();
+        let variable = &self.variable;
         write!(f, r#"SHOW VARIABLES {variable}"#)
     }
 }
@@ -407,6 +380,26 @@ SHOW FULL COLUMNS IN t1 IN d1 ALL"#,
                 assert_eq!(
                     r#"
 SHOW FULL TABLES IN d1 ALL"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"show full tables;";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowTables { .. });
+        match &stmts[0] {
+            Statement::ShowTables(show) => {
+                let new_sql = format!("\n{}", show);
+                assert_eq!(
+                    r#"
+SHOW FULL TABLES ALL"#,
                     &new_sql
                 );
             }
