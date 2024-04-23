@@ -396,6 +396,7 @@ pub struct CreateRequestBuilder {
     primary_key: Option<Vec<ColumnId>>,
     all_not_null: bool,
     engine: String,
+    ts_type: ConcreteDataType,
 }
 
 impl Default for CreateRequestBuilder {
@@ -408,6 +409,7 @@ impl Default for CreateRequestBuilder {
             primary_key: None,
             all_not_null: false,
             engine: MITO_ENGINE_NAME.to_string(),
+            ts_type: ConcreteDataType::timestamp_millisecond_datatype(),
         }
     }
 }
@@ -454,6 +456,12 @@ impl CreateRequestBuilder {
         self
     }
 
+    #[must_use]
+    pub fn with_ts_type(mut self, ty: ConcreteDataType) -> Self {
+        self.ts_type = ty;
+        self
+    }
+
     pub fn build(&self) -> RegionCreateRequest {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
@@ -487,7 +495,7 @@ impl CreateRequestBuilder {
         column_metadatas.push(ColumnMetadata {
             column_schema: ColumnSchema::new(
                 "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
+                self.ts_type.clone(),
                 // Time index is always not null.
                 false,
             ),
