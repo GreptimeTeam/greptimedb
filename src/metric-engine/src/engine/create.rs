@@ -338,23 +338,25 @@ impl MetricEngineInner {
         // check if only one field column is declared, and all tag columns are string
         let mut field_col: Option<&ColumnMetadata> = None;
         for col in &request.column_metadatas {
-            if col.semantic_type == SemanticType::Field {
-                if field_col.is_some() {
-                    MultipleFieldColumnSnafu {
-                        previous: field_col.unwrap().column_schema.name.clone(),
-                        current: col.column_schema.name.clone(),
-                    }
-                    .fail()?;
-                }
-                field_col = Some(col);
-            } else if col.semantic_type == SemanticType::Tag {
-                ensure!(
+            match col.semantic_type {
+                SemanticType::Tag => ensure!(
                     col.column_schema.data_type == ConcreteDataType::string_datatype(),
                     ColumnTypeMismatchSnafu {
                         expect: ConcreteDataType::string_datatype(),
                         actual: col.column_schema.data_type.clone(),
                     }
-                );
+                ),
+                SemanticType::Field => {
+                    if field_col.is_some() {
+                        MultipleFieldColumnSnafu {
+                            previous: field_col.unwrap().column_schema.name.clone(),
+                            current: col.column_schema.name.clone(),
+                        }
+                        .fail()?;
+                    }
+                    field_col = Some(col)
+                }
+                SemanticType::Timestamp => {}
             }
         }
         let field_col = field_col.context(NoFieldColumnSnafu)?;

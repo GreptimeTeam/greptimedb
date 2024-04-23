@@ -222,7 +222,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
 /// Validate the [`CreateTableExpr`] request.
 pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
     // construct column list
-    let mut column_to_indices = HashMap::new();
+    let mut column_to_indices = HashMap::with_capacity(create.column_defs.len());
     for (idx, column) in create.column_defs.iter().enumerate() {
         if let Some(indices) = column_to_indices.get(&column.name) {
             return InvalidSqlSnafu {
@@ -525,7 +525,7 @@ mod tests {
         let cases = [
             // duplicate column declaration
             "CREATE TABLE monitor (host STRING primary key, ts TIMESTAMP TIME INDEX, some_column text, some_column string);",
-        // duplicate primary key
+            // duplicate primary key
             "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, some_column STRING, PRIMARY KEY (some_column, host, some_column));",
             // time index is primary key
             "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (host, ts));"

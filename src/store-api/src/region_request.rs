@@ -261,7 +261,7 @@ impl RegionCreateRequest {
         );
 
         // build column id to indices
-        let mut column_id_to_indices = HashMap::new();
+        let mut column_id_to_indices = HashMap::with_capacity(self.column_metadatas.len());
         for (i, c) in self.column_metadatas.iter().enumerate() {
             if let Some(previous) = column_id_to_indices.insert(c.column_id, i) {
                 return InvalidRegionRequestSnafu {
