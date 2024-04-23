@@ -51,38 +51,20 @@ pub struct ShowColumns {
     pub full: bool,
 }
 
-impl ShowColumns {
-    pub fn kind(&self) -> &ShowKind {
-        &self.kind
-    }
-
-    pub fn table(&self) -> &String {
-        &self.table
-    }
-
-    #[inline]
-    fn format_table(&self) -> String {
-        format!("IN {}", self.table)
-    }
-
-    #[inline]
-    fn format_database(&self) -> String {
-        match &self.database {
-            Some(database) => format!("IN {}", database),
-            None => String::default(),
-        }
-    }
-}
-
 impl Display for ShowColumns {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SHOW")?;
         if self.full {
             f.write_str(" FULL")?;
         }
-        let kind = self.kind();
-        let table = self.format_table();
-        let database = self.format_database();
+
+        let table = format!("IN {}", &self.table);
+        let database = match &self.database {
+            Some(database) => format!("IN {}", database),
+            None => String::default(),
+        };
+
+        let kind = &self.kind;
         write!(f, r#" COLUMNS {table} {database} {kind}"#)
     }
 }
@@ -95,30 +77,14 @@ pub struct ShowIndex {
     pub database: Option<String>,
 }
 
-impl ShowIndex {
-    pub fn kind(&self) -> &ShowKind {
-        &self.kind
-    }
-
-    #[inline]
-    fn format_table(&self) -> String {
-        format!("IN {}", self.table)
-    }
-
-    #[inline]
-    fn format_database(&self) -> String {
-        match &self.database {
-            Some(database) => format!("IN {}", database),
-            None => String::default(),
-        }
-    }
-}
-
 impl Display for ShowIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = self.kind();
-        let table = self.format_table();
-        let database = self.format_database();
+        let kind = &self.kind;
+        let table = format!("IN {}", &self.table);
+        let database = match &self.database {
+            Some(database) => format!("IN {}", database),
+            None => String::default(),
+        };
         write!(f, r#"SHOW INDEX {table} {database} {kind}"#)
     }
 }

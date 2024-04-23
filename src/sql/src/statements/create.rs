@@ -230,10 +230,6 @@ impl CreateDatabase {
             if_not_exists,
         }
     }
-
-    pub fn name(&self) -> &ObjectName {
-        &self.name
-    }
 }
 
 impl Display for CreateDatabase {
@@ -242,7 +238,7 @@ impl Display for CreateDatabase {
         if self.if_not_exists {
             f.write_str(" IF NOT EXISTS")?;
         }
-        let name = self.name();
+        let name = &self.name;
         write!(f, r#" {name}"#)
     }
 }
@@ -277,19 +273,16 @@ impl CreateExternalTable {
             })
             .join(LINE_SEP)
     }
+}
 
-    #[inline]
-    fn format_if_not_exists(&self) -> &str {
-        if self.if_not_exists {
-            "IF NOT EXISTS"
-        } else {
-            ""
-        }
-    }
+impl Display for CreateExternalTable {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let if_not_exists = match self.if_not_exists {
+            true => "IF NOT EXISTS",
+            false => "",
+        };
 
-    #[inline]
-    fn format_options(&self) -> String {
-        if self.options.map.is_empty() {
+        let options = if self.options.map.is_empty() {
             String::default()
         } else {
             let options = format_sorted_hashmap!(&self.options.map);
@@ -298,17 +291,11 @@ impl CreateExternalTable {
 {options}
 )"#
             )
-        }
-    }
-}
+        };
 
-impl Display for CreateExternalTable {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let name = &self.name;
         let columns = format_list_indent!(self.columns);
         let constraints = self.format_constraints();
-        let options = self.format_options();
-        let if_not_exists = self.format_if_not_exists();
         let engine = &self.engine;
         write!(
             f,

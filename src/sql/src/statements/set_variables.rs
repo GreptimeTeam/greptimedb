@@ -24,25 +24,15 @@ pub struct SetVariables {
     pub value: Vec<Expr>,
 }
 
-impl SetVariables {
-    pub fn variable(&self) -> &ObjectName {
-        &self.variable
-    }
-
-    pub fn format_value(&self) -> String {
-        // The number of value is always one.
-        self.value
+impl Display for SetVariables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variable = &self.variable;
+        let value = &self.value
             .iter()
             .map(|expr| format!("{}", expr))
             .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
+            .join(", ");
 
-impl Display for SetVariables {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let variable = self.variable();
-        let value = self.format_value();
         write!(f, r#"SET {variable} = {value}"#)
     }
 }
