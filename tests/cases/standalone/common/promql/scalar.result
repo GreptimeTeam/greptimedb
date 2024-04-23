@@ -301,6 +301,35 @@ TQL EVAL (0, 15, '5s') scalar(host{host="host1"} + scalar(host));
 | 1970-01-01T00:00:15 | NaN                               |
 +---------------------+-----------------------------------+
 
+-- No data input in scalar
+TQL EVAL (350, 360, '5s') scalar(host{host="host1"});
+
++---------------------+-------------+
+| ts                  | scalar(val) |
++---------------------+-------------+
+| 1970-01-01T00:05:50 | NaN         |
+| 1970-01-01T00:05:55 | NaN         |
+| 1970-01-01T00:06:00 | NaN         |
++---------------------+-------------+
+
+DELETE from host where ts = 0;
+
+Affected Rows: 2
+
+-- Under this case, InstantManipulate will input a valid record batch but output a empty record batch (because no data will be selected in this batch)
+-- Test input a empty record batch to ScalarCalculate plan
+TQL EVAL (0, 1600, '6m40s') scalar(host{host="host1"});
+
++---------------------+-------------+
+| ts                  | scalar(val) |
++---------------------+-------------+
+| 1970-01-01T00:00:00 | NaN         |
+| 1970-01-01T00:06:40 | NaN         |
+| 1970-01-01T00:13:20 | NaN         |
+| 1970-01-01T00:20:00 | NaN         |
+| 1970-01-01T00:26:40 | NaN         |
++---------------------+-------------+
+
 -- error case
 TQL EVAL (0, 15, '5s') scalar(1 + scalar(host{host="host2"}));
 

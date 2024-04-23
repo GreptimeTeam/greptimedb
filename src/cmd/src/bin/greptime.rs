@@ -22,6 +22,7 @@ use cmd::options::{CliOptions, Options};
 use cmd::{
     cli, datanode, frontend, greptimedb_cli, log_versions, metasrv, standalone, start_app, App,
 };
+use common_version::{short_version, version};
 
 #[derive(Parser)]
 enum SubCommand {
@@ -105,7 +106,8 @@ async fn main() -> Result<()> {
 
     common_telemetry::set_panic_hook();
 
-    let cli = greptimedb_cli();
+    let version = version!();
+    let cli = greptimedb_cli().version(version);
 
     let cli = SubCommand::augment_subcommands(cli);
 
@@ -129,7 +131,7 @@ async fn main() -> Result<()> {
         opts.node_id(),
     );
 
-    log_versions();
+    log_versions(version, short_version!());
 
     let app = subcmd.build(opts).await?;
 

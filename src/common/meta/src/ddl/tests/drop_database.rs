@@ -42,7 +42,7 @@ async fn test_drop_database_with_logical_tables() {
         .await
         .unwrap();
     // Creates physical table
-    let phy_id = create_physical_table(ddl_context.clone(), cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
     // Creates 3 logical tables
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
@@ -91,7 +91,7 @@ async fn test_drop_database_retryable_error() {
         .await
         .unwrap();
     // Creates physical table
-    let phy_id = create_physical_table(ddl_context.clone(), cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
     // Creates 3 logical tables
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
     create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;

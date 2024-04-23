@@ -64,60 +64,28 @@ pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
     Ok(())
 }
 
-pub fn log_versions() {
+/// Log the versions of the application, and the arguments passed to the cli.
+/// `version_string` should be the same as the output of cli "--version";
+/// and the `app_version` is the short version of the codes, often consist of git branch and commit.
+pub fn log_versions(version_string: &str, app_version: &str) {
     // Report app version as gauge.
     APP_VERSION
-        .with_label_values(&[short_version(), full_version()])
+        .with_label_values(&[env!("CARGO_PKG_VERSION"), app_version])
         .inc();
 
     // Log version and argument flags.
-    info!(
-        "short_version: {}, full_version: {}",
-        short_version(),
-        full_version()
-    );
+    info!("GreptimeDB version: {}", version_string);
 
     log_env_flags();
 }
 
 pub fn greptimedb_cli() -> clap::Command {
-    let cmd = clap::Command::new("greptimedb")
-        .version(print_version())
-        .subcommand_required(true);
+    let cmd = clap::Command::new("greptimedb").subcommand_required(true);
 
     #[cfg(feature = "tokio-console")]
     let cmd = cmd.arg(arg!(--"tokio-console-addr"[TOKIO_CONSOLE_ADDR]));
 
     cmd.args([arg!(--"log-dir"[LOG_DIR]), arg!(--"log-level"[LOG_LEVEL])])
-}
-
-fn print_version() -> &'static str {
-    concat!(
-        "\nbranch: ",
-        env!("GIT_BRANCH"),
-        "\ncommit: ",
-        env!("GIT_COMMIT"),
-        "\ndirty: ",
-        env!("GIT_DIRTY"),
-        "\nversion: ",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-fn short_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-// {app_name}-{branch_name}-{commit_short}
-// The branch name (tag) of a release build should already contain the short
-// version so the full version doesn't concat the short version explicitly.
-fn full_version() -> &'static str {
-    concat!(
-        "greptimedb-",
-        env!("GIT_BRANCH"),
-        "-",
-        env!("GIT_COMMIT_SHORT")
-    )
 }
 
 fn log_env_flags() {

@@ -258,7 +258,7 @@ pub enum Error {
         error: Utf8Error,
     },
 
-    #[snafu(display("Table nod found, table: {}", table_name))]
+    #[snafu(display("Table not found: '{}'", table_name))]
     TableNotFound {
         table_name: String,
         location: Location,
