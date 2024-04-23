@@ -27,7 +27,8 @@ pub struct SetVariables {
 impl Display for SetVariables {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let variable = &self.variable;
-        let value = &self.value
+        let value = &self
+            .value
             .iter()
             .map(|expr| format!("{}", expr))
             .collect::<Vec<_>>()
