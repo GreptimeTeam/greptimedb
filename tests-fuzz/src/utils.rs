@@ -12,21 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod config;
+pub mod health;
+pub mod process;
+
 use std::env;
 
 use common_telemetry::info;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
 
+/// Database connections
 pub struct Connections {
     pub mysql: Option<Pool<MySql>>,
 }
 
 const GT_MYSQL_ADDR: &str = "GT_MYSQL_ADDR";
 
-pub async fn init_greptime_connections() -> Connections {
+/// Connects to GreptimeDB via env variables.
+pub async fn init_greptime_connections_via_env() -> Connections {
     let _ = dotenv::dotenv();
     let mysql = if let Ok(addr) = env::var(GT_MYSQL_ADDR) {
+        Some(addr)
+    } else {
+        info!("GT_MYSQL_ADDR is empty, ignores test");
+        None
+    };
+
+    init_greptime_connections(mysql).await
+}
+
+/// Connects to GreptimeDB via env variables.
+pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
+    let mysql = if let Some(addr) = mysql {
         Some(
             MySqlPoolOptions::new()
                 .connect(&format!("mysql://{addr}/public"))
@@ -34,9 +52,33 @@ pub async fn init_greptime_connections() -> Connections {
                 .unwrap(),
         )
     } else {
-        info!("GT_MYSQL_ADDR is empty, ignores test");
         None
     };
 
     Connections { mysql }
+}
+
+const GT_FUZZ_BINARY_PATH: &str = "GT_FUZZ_BINARY_PATH";
+const GT_FUZZ_INSTANCE_ROOT_DIR: &str = "GT_FUZZ_INSTANCE_ROOT_DIR";
+
+/// The variables for unstable test
+pub struct UnstableTestVariables {
+    pub binary_path: String,
+    pub root_dir: Option<String>,
+}
+
+/// Loads env variables for unstable test
+pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
+    let _ = dotenv::dotenv();
+    let binary_path = env::var(GT_FUZZ_BINARY_PATH).expect("GT_FUZZ_BINARY_PATH not found");
+    let root_dir = if let Ok(root) = env::var(GT_FUZZ_INSTANCE_ROOT_DIR) {
+        Some(root)
+    } else {
+        None
+    };
+
+    UnstableTestVariables {
+        binary_path,
+        root_dir,
+    }
 }

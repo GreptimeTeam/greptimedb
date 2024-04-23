@@ -10225,15 +10225,18 @@ dependencies = [
  "dotenv",
  "lazy_static",
  "libfuzzer-sys",
+ "nix 0.28.0",
  "partition",
  "rand",
  "rand_chacha",
+ "reqwest",
  "serde",
  "serde_json",
  "snafu",
  "sql",
  "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
  "sqlx",
+ "tinytemplate",
  "tokio",
 ]
 
