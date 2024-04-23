@@ -527,19 +527,15 @@ pub struct ModifyColumn {
 impl ModifyColumn {
     /// Returns an error if the column to modify is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
-        let column_meta =
-            metadata
-                .column_by_name(&self.column_name)
-                .context(InvalidRegionRequestSnafu {
-                    region_id: metadata.region_id,
-                    err: format!("column {} not found", self.column_name),
-                })?;
+        let column_meta = metadata
+            .column_by_name(&self.column_name)
+            .with_context(|| InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", self.column_name),
+            })?;
 
         ensure!(
-            !matches!(
-                column_meta.semantic_type,
-                SemanticType::Timestamp | SemanticType::Tag
-            ),
+            matches!(column_meta.semantic_type, SemanticType::Field),
             InvalidRegionRequestSnafu {
                 region_id: metadata.region_id,
                 err: "'timestamp' or 'tag' column cannot change type".to_string()
