@@ -97,7 +97,8 @@ impl KeyExpiryManager {
         Ok(None)
     }
 
-    /// Remove expired keys from the state, and return an iterator of removed keys.
+    /// Remove expired keys from the state, and return an iterator of removed keys with
+    /// event_ts less than expire time (i.e. now - key_expiration_duration).
     pub fn remove_expired_keys(&mut self, now: Timestamp) -> Option<impl Iterator<Item = Row>> {
         let expire_time = self.compute_expiration_timestamp(now)?;
 
