@@ -11,6 +11,15 @@ SHOW TABLES;
 | phy     |
 +---------+
 
+DESC TABLE phy;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val    | Float64              |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
 CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
 Affected Rows: 0
@@ -44,7 +53,7 @@ DESC TABLE phy;
 +------------+----------------------+-----+------+---------+---------------+
 | Column     | Type                 | Key | Null | Default | Semantic Type |
 +------------+----------------------+-----+------+---------+---------------+
-| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val        | Float64              |     | YES  |         | FIELD         |
 | __table_id | UInt32               | PRI | NO   |         | TAG           |
 | __tsid     | UInt64               | PRI | NO   |         | TAG           |
@@ -87,7 +96,7 @@ DESC TABLE phy;
 +------------+----------------------+-----+------+---------+---------------+
 | Column     | Type                 | Key | Null | Default | Semantic Type |
 +------------+----------------------+-----+------+---------+---------------+
-| ts         | TimestampMillisecond |     | NO   |         | FIELD         |
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val        | Float64              |     | YES  |         | FIELD         |
 | __table_id | UInt32               | PRI | NO   |         | TAG           |
 | __tsid     | UInt64               | PRI | NO   |         | TAG           |

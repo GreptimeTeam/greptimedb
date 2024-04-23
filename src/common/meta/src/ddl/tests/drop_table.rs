@@ -19,17 +19,21 @@ use api::v1::region::{region_request, RegionRequest};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId};
-use common_procedure_test::MockContextProvider;
+use common_procedure::Procedure;
+use common_procedure_test::{
+    execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
+};
 use store_api::storage::RegionId;
+use table::metadata::TableId;
 use tokio::sync::mpsc;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::drop_table::DropTableProcedure;
+use crate::ddl::drop_table::{DropTableProcedure, DropTableState};
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
 use crate::ddl::test_util::{
-    create_physical_table_metadata, test_create_logical_table_task, test_create_physical_table_task,
+    create_logical_table, create_physical_table, create_physical_table_metadata,
+    test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
 use crate::key::table_route::TableRouteValue;
@@ -58,14 +62,7 @@ async fn test_on_prepare_table_not_exists_err() {
         .await
         .unwrap();
 
-    let task = DropTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: "bar".to_string(),
-        table_id,
-        drop_if_exists: false,
-    };
-
+    let task = new_drop_table_task("bar", table_id, false);
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
@@ -90,26 +87,12 @@ async fn test_on_prepare_table() {
         .await
         .unwrap();
 
-    let task = DropTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: "bar".to_string(),
-        table_id,
-        drop_if_exists: true,
-    };
-
+    let task = new_drop_table_task("bar", table_id, true);
     // Drop if exists
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
 
-    let task = DropTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: table_name.to_string(),
-        table_id,
-        drop_if_exists: false,
-    };
-
+    let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
     procedure.on_prepare().await.unwrap();
@@ -158,13 +141,7 @@ async fn test_on_datanode_drop_regions() {
         .await
         .unwrap();
 
-    let task = DropTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: table_name.to_string(),
-        table_id,
-        drop_if_exists: false,
-    };
+    let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
     procedure.on_prepare().await.unwrap();
@@ -234,10 +211,7 @@ async fn test_on_rollback() {
         ddl_context.clone(),
     );
     procedure.on_prepare().await.unwrap();
-    let ctx = ProcedureContext {
-        procedure_id: ProcedureId::random(),
-        provider: Arc::new(MockContextProvider::default()),
-    };
+    let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to create table metadata
     let status = procedure.execute(&ctx).await.unwrap();
@@ -247,20 +221,10 @@ async fn test_on_rollback() {
     let expected_kvs = kv_backend.dump();
     // Drops the physical table
     {
-        let task = DropTableTask {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table: "phy_table".to_string(),
-            table_id: physical_table_id,
-            drop_if_exists: false,
-        };
+        let task = new_drop_table_task("phy_table", physical_table_id, false);
         let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
         procedure.on_prepare().await.unwrap();
         procedure.on_delete_metadata().await.unwrap();
-        let ctx = ProcedureContext {
-            procedure_id: ProcedureId::random(),
-            provider: Arc::new(MockContextProvider::default()),
-        };
         procedure.rollback(&ctx).await.unwrap();
         // Rollback again
         procedure.rollback(&ctx).await.unwrap();
@@ -269,23 +233,66 @@ async fn test_on_rollback() {
     }
 
     // Drops the logical table
-    let task = DropTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: "foo".to_string(),
-        table_id: table_ids[0],
-        drop_if_exists: false,
-    };
+    let task = new_drop_table_task("foo", table_ids[0], false);
     let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     procedure.on_delete_metadata().await.unwrap();
-    let ctx = ProcedureContext {
-        procedure_id: ProcedureId::random(),
-        provider: Arc::new(MockContextProvider::default()),
-    };
     procedure.rollback(&ctx).await.unwrap();
     // Rollback again
     procedure.rollback(&ctx).await.unwrap();
     let kvs = kv_backend.dump();
     assert_eq!(kvs, expected_kvs);
+}
+
+fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool) -> DropTableTask {
+    DropTableTask {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table: table_name.to_string(),
+        table_id,
+        drop_if_exists,
+    }
+}
+
+#[tokio::test]
+async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
+    let cluster_id = 1;
+
+    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(datanode_manager, kv_backend);
+
+    let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
+    let logical_table_id =
+        create_logical_table(ddl_context.clone(), cluster_id, physical_table_id, "s").await;
+
+    let inner_test = |task: DropTableTask| async {
+        let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+        execute_procedure_until(&mut procedure, |p| {
+            p.data.state == DropTableState::InvalidateTableCache
+        })
+        .await;
+
+        // Ensure that after running to the state `InvalidateTableCache`(just past `DeleteMetadata`),
+        // the dropping regions should be recorded:
+        let guards = &procedure.dropping_regions;
+        assert_eq!(guards.len(), 1);
+        let (datanode_id, region_id) = (0, RegionId::new(physical_table_id, 0));
+        assert_eq!(guards[0].info(), (datanode_id, region_id));
+        assert!(ddl_context
+            .memory_region_keeper
+            .contains(datanode_id, region_id));
+
+        execute_procedure_until_done(&mut procedure).await;
+
+        // Ensure that when run to the end, the dropping regions should be cleared:
+        let guards = &procedure.dropping_regions;
+        assert!(guards.is_empty());
+        assert!(!ddl_context
+            .memory_region_keeper
+            .contains(datanode_id, region_id));
+    };
+
+    inner_test(new_drop_table_task("s", logical_table_id, false)).await;
+    inner_test(new_drop_table_task("t", physical_table_id, false)).await;
 }

@@ -21,9 +21,12 @@ use api::v1::{ColumnDataType, SemanticType};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
-use common_procedure_test::MockContextProvider;
+use common_procedure_test::{
+    execute_procedure_until, execute_procedure_until_done, MockContextProvider,
+};
+use store_api::storage::RegionId;
 
-use crate::ddl::create_table::CreateTableProcedure;
+use crate::ddl::create_table::{CreateTableProcedure, CreateTableState};
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
     build_raw_table_info_from_expr, TestCreateTableExprBuilder,
@@ -33,8 +36,9 @@ use crate::ddl::test_util::datanode_handler::{
 };
 use crate::error::Error;
 use crate::key::table_route::TableRouteValue;
+use crate::kv_backend::memory::MemoryKvBackend;
 use crate::rpc::ddl::CreateTableTask;
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDatanodeManager};
 
 fn test_create_table_task(name: &str) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
@@ -243,4 +247,40 @@ async fn test_on_create_metadata() {
     let status = procedure.execute(&ctx).await.unwrap();
     let table_id = status.downcast_output_ref::<u32>().unwrap();
     assert_eq!(*table_id, 1024);
+}
+
+#[tokio::test]
+async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
+    let cluster_id = 1;
+
+    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(datanode_manager, kv_backend);
+
+    let task = test_create_table_task("foo");
+    let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context.clone());
+
+    execute_procedure_until(&mut procedure, |p| {
+        p.creator.data.state == CreateTableState::CreateMetadata
+    })
+    .await;
+
+    // Ensure that after running to the state `CreateMetadata`(just past `DatanodeCreateRegions`),
+    // the opening regions should be recorded:
+    let guards = &procedure.creator.opening_regions;
+    assert_eq!(guards.len(), 1);
+    let (datanode_id, region_id) = (0, RegionId::new(procedure.table_id(), 0));
+    assert_eq!(guards[0].info(), (datanode_id, region_id));
+    assert!(ddl_context
+        .memory_region_keeper
+        .contains(datanode_id, region_id));
+
+    execute_procedure_until_done(&mut procedure).await;
+
+    // Ensure that when run to the end, the opening regions should be cleared:
+    let guards = &procedure.creator.opening_regions;
+    assert!(guards.is_empty());
+    assert!(!ddl_context
+        .memory_region_keeper
+        .contains(datanode_id, region_id));
 }

@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
 use catalog::CatalogManagerRef;
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -41,7 +40,7 @@ use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{Location, ResultExt};
 
 pub use super::prometheus_resp::PrometheusJsonResponse;
@@ -166,7 +165,7 @@ pub struct InstantQuery {
 pub async fn instant_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<InstantQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<InstantQuery>,
 ) -> PrometheusJsonResponse {
     // Extract time from query string, or use current server time if not specified.
@@ -184,6 +183,12 @@ pub async fn instant_query(
             .or(form_params.lookback)
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
+
+    // update catalog and schema in query context if necessary
+    if let Some(db) = &params.db {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    }
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -214,7 +219,7 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<RangeQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<RangeQuery>,
 ) -> PrometheusJsonResponse {
     let prom_query = PromQuery {
@@ -227,6 +232,12 @@ pub async fn range_query(
             .or(form_params.lookback)
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
+
+    // update catalog and schema in query context if necessary
+    if let Some(db) = &params.db {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    }
 
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
@@ -294,8 +305,8 @@ pub async fn labels_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<LabelsQuery>,
 ) -> PrometheusJsonResponse {
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+    let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
+    let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
 
     let mut queries = params.matches.0;
     if queries.is_empty() {
@@ -534,6 +545,35 @@ pub(crate) fn retrieve_metric_name_and_result_type(
     Ok((metric_name, result_type))
 }
 
+/// Tries to get catalog and schema from an optional db param. And retrieves
+/// them from [QueryContext] if they don't present.
+pub(crate) fn get_catalog_schema(db: &Option<String>, ctx: &QueryContext) -> (String, String) {
+    if let Some(db) = db {
+        parse_catalog_and_schema_from_db_string(db)
+    } else {
+        (
+            ctx.current_catalog().to_string(),
+            ctx.current_schema().to_string(),
+        )
+    }
+}
+
+/// Update catalog and schema in [QueryContext] if necessary.
+pub(crate) fn try_update_catalog_schema(
+    ctx: QueryContextRef,
+    catalog: &str,
+    schema: &str,
+) -> QueryContextRef {
+    if ctx.current_catalog() != catalog || ctx.current_schema() != schema {
+        QueryContextBuilder::from_existing(&ctx)
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .build()
+    } else {
+        ctx
+    }
+}
+
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
     match expr {
         PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => promql_expr_to_metric_name(expr),
@@ -580,8 +620,8 @@ pub async fn label_values_query(
     Extension(query_ctx): Extension<QueryContextRef>,
     Query(params): Query<LabelValueQuery>,
 ) -> PrometheusJsonResponse {
-    let db = &params.db.unwrap_or(DEFAULT_SCHEMA_NAME.to_string());
-    let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+    let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
+    let query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
 
     if label_name == METRIC_NAME_LABEL {
         let mut table_names = match handler
@@ -731,7 +771,7 @@ pub struct SeriesQuery {
 pub async fn series_query(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<SeriesQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
+    Extension(mut query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SeriesQuery>,
 ) -> PrometheusJsonResponse {
     let mut queries: Vec<String> = params.matches.0;
@@ -753,6 +793,12 @@ pub async fn series_query(
         .lookback
         .or(form_params.lookback)
         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
+
+    // update catalog and schema in query context if necessary
+    if let Some(db) = &params.db {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+        query_ctx = try_update_catalog_schema(query_ctx, &catalog, &schema);
+    }
 
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();

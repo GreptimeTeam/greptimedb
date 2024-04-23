@@ -114,3 +114,29 @@ pub async fn execute_until_suspended_or_done(
 
     None
 }
+
+pub fn new_test_procedure_context() -> Context {
+    Context {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
+    }
+}
+
+pub async fn execute_procedure_until<P: Procedure>(procedure: &mut P, until: impl Fn(&P) -> bool) {
+    let mut reached = false;
+    let context = new_test_procedure_context();
+    while !matches!(
+        procedure.execute(&context).await.unwrap(),
+        Status::Done { .. }
+    ) {
+        if until(procedure) {
+            reached = true;
+            break;
+        }
+    }
+    assert!(
+        reached,
+        "procedure '{}' did not reach the expected state",
+        procedure.type_name()
+    );
+}

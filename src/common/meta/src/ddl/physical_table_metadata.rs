@@ -52,5 +52,9 @@ pub(crate) fn build_new_physical_table_info(
         columns.push(col.column_schema.clone());
     }
 
+    if let Some(time_index) = *time_index {
+        raw_table_info.meta.schema.column_schemas[time_index].set_time_index();
+    }
+
     raw_table_info
 }
