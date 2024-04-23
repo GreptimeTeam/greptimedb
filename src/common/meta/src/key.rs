@@ -39,10 +39,13 @@
 //! 6. Flow task key: `__flow_task/{task_id}`
 //!     - Stores metadata of the task.
 //!
-//! 7. Flownode task key: `__flownode_task/{flownode_id}/{task_id}`
+//! 7. Flow task key: `__flow_task_name/{catalog}/{task}`
+//!     - Mapping {catalog}/{task} to {task_id}
+//!
+//! 8. Flownode task key: `__flownode_task/{flownode_id}/{task_id}`
 //!     - Mapping {flownode_id} to {task_id}
 //!
-//! 8. Table task key: `__table_task/{table_id}/{node_id}`
+//! 9. Table task key: `__table_task/{table_id}/{node_id}`
 //!     - Mapping {table_id} to {node_id}
 //!     - Used in `Flownode` booting.
 //!
@@ -56,6 +59,7 @@
 pub mod catalog_name;
 pub mod datanode_table;
 pub mod flow_task;
+pub mod flow_task_name;
 pub mod flownode_task;
 pub mod schema_name;
 pub mod table_info;
@@ -96,6 +100,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
 use self::flow_task::FlowTaskValue;
+use self::flow_task_name::FlowTaskNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
@@ -118,6 +123,7 @@ const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
 pub const TABLE_TASK_KEY_PREFIX: &str = "__table_task";
 pub const FLOWNODE_TASK_KEY_PREFIX: &str = "__flownode_task";
 pub const FLOW_TASK_KEY_PREFIX: &str = "__flow_task";
+pub const FLOW_TASK_NAME_KEY_PREFIX: &str = "__flow_task_name";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
@@ -1042,7 +1048,8 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     DatanodeTableValue,
-    FlowTaskValue
+    FlowTaskValue,
+    FlowTaskNameValue
 }
 
 impl_optional_meta_value! {

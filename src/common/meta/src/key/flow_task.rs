@@ -48,39 +48,21 @@ impl TableMetaKey for FlowTaskKey {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowTaskValue {
     /// The source tables used by the task.
-    source_tables: Vec<TableId>,
+    pub(crate) source_tables: Vec<TableId>,
     /// The sink table used by the task.
-    sink_table: TableId,
+    pub(crate) sink_table: TableId,
     /// Which flow nodes this task is running on.
-    flownode_ids: BTreeMap<PartitionId, FlownodeId>,
-    raw_sql: String,
-    expire_when: String,
-    comment: String,
-    options: HashMap<String, String>,
+    pub(crate) flownode_ids: BTreeMap<PartitionId, FlownodeId>,
+    /// The metadata
+    pub(crate) catalog_name: String,
+    pub(crate) task_name: String,
+    pub(crate) raw_sql: String,
+    pub(crate) expire_when: String,
+    pub(crate) comment: String,
+    pub(crate) options: HashMap<String, String>,
 }
 
 impl FlowTaskValue {
-    /// Returns a new [FlowTaskValue]
-    pub fn new(
-        source_tables: Vec<TableId>,
-        sink_table: TableId,
-        flownode_ids: BTreeMap<PartitionId, FlownodeId>,
-        raw_sql: String,
-        expire_when: String,
-        comment: String,
-        options: HashMap<String, String>,
-    ) -> Self {
-        Self {
-            source_tables,
-            sink_table,
-            flownode_ids,
-            raw_sql,
-            expire_when,
-            comment,
-            options,
-        }
-    }
-
     /// Returns the `flownode_id`.
     pub fn flownode_ids(&self) -> &BTreeMap<PartitionId, FlownodeId> {
         &self.flownode_ids

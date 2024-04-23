@@ -241,6 +241,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Task already exists, table: {}", task_name))]
+    TaskAlreadyExists {
+        task_name: String,
+        location: Location,
+    },
+
     #[snafu(display("Catalog already exists, catalog: {}", catalog))]
     CatalogAlreadyExists { catalog: String, location: Location },
 
@@ -494,7 +500,8 @@ impl ErrorExt for Error {
             | EmptyKey { .. }
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
-            | CreateLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
+            | CreateLogicalTablesInvalidArguments { .. }
+            | TaskAlreadyExists { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

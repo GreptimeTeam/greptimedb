@@ -17,6 +17,7 @@ use snafu::{ensure, OptionExt};
 use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow_task::{FlowTaskManager, FlowTaskValue};
+use crate::key::flow_task_name::FlowTaskNameManager;
 use crate::key::flownode_task::FlownodeTaskManager;
 use crate::key::table_task::TableTaskManager;
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -32,6 +33,7 @@ pub struct FlowMetadataManager {
     flow_task_manager: FlowTaskManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
+    flow_task_name_manager: FlowTaskNameManager,
     kv_backend: KvBackendRef,
 }
 
@@ -40,6 +42,7 @@ impl FlowMetadataManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             flow_task_manager: FlowTaskManager::new(kv_backend.clone()),
+            flow_task_name_manager: FlowTaskNameManager::new(kv_backend.clone()),
             flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
             table_task_manager: TableTaskManager::new(kv_backend.clone()),
             kv_backend,
@@ -67,6 +70,13 @@ impl FlowMetadataManager {
         task_id: TaskId,
         flow_task_value: FlowTaskValue,
     ) -> Result<()> {
+        let (create_flow_task_name_txn, on_create_flow_task_name_failure) =
+            self.flow_task_name_manager.build_create_txn(
+                &flow_task_value.catalog_name,
+                &flow_task_value.task_name,
+                task_id,
+            )?;
+
         let (create_flow_task_txn, on_create_flow_task_failure) = self
             .flow_task_manager
             .build_create_txn(task_id, &flow_task_value)?;
@@ -82,6 +92,7 @@ impl FlowMetadataManager {
         );
 
         let txn = Txn::merge_all(vec![
+            create_flow_task_name_txn,
             create_flow_task_txn,
             create_flownode_task_txn,
             create_table_task_txn,
@@ -90,6 +101,23 @@ impl FlowMetadataManager {
         let mut resp = self.kv_backend.txn(txn).await?;
         if !resp.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let remote_flow_task_name = on_create_flow_task_name_failure(&mut set)?
+                .context(error::UnexpectedSnafu {
+                    err_msg: format!(
+                    "Reads the empty flow task name during the creating flow task, task_id: {task_id}"
+                ),
+                })?
+                .into_inner();
+            ensure!(
+                remote_flow_task_name.task_id() == task_id,
+                error::TaskAlreadyExistsSnafu {
+                    task_name: format!(
+                        "{}.{}",
+                        flow_task_value.catalog_name, flow_task_value.task_name
+                    ),
+                }
+            );
+
             let remote_flow_task = on_create_flow_task_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: format!(
@@ -106,11 +134,13 @@ impl FlowMetadataManager {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use futures::TryStreamExt;
 
     use super::*;
+    use crate::error::Error;
     use crate::key::table_task::TableTaskKey;
     use crate::kv_backend::memory::MemoryKvBackend;
 
@@ -119,15 +149,17 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue::new(
-            vec![1024, 1025, 1026],
-            2048,
-            [(0, 1u64)].into(),
-            "raw".to_string(),
-            "expr".to_string(),
-            "hi".to_string(),
-            Default::default(),
-        );
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
         flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value.clone())
             .await
@@ -163,33 +195,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_metadata_err() {
+    async fn test_create_table_metadata_task_exists_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue::new(
-            vec![1024, 1025, 1026],
-            2048,
-            [(0, 1u64)].into(),
-            "raw".to_string(),
-            "expr".to_string(),
-            "hi".to_string(),
-            Default::default(),
-        );
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
         flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         // Creates again.
-        let flow_task_value = FlowTaskValue::new(
-            vec![1024, 1025, 1026],
-            2049,
-            [(0, 1u64)].into(),
-            "raw".to_string(),
-            "expr".to_string(),
-            "hi".to_string(),
-            Default::default(),
-        );
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        let err = flow_metadata_manager
+            .create_flow_metadata(task_id + 1, flow_task_value)
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::TaskAlreadyExists { .. });
+    }
+
+    #[tokio::test]
+    async fn test_create_table_metadata_unexpected_err() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let task_id = 10;
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        flow_metadata_manager
+            .create_flow_metadata(task_id, flow_task_value.clone())
+            .await
+            .unwrap();
+        // Creates again.
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2048,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
         let err = flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value)
             .await

@@ -147,7 +147,7 @@ impl TableTaskManager {
     ) -> Txn {
         let txns = flownode_ids
             .into_iter()
-            .map(|(partition_id, flownode_id)| {
+            .flat_map(|(partition_id, flownode_id)| {
                 source_table_ids.iter().map(move |table_id| {
                     TxnOp::Put(
                         TableTaskKey::new(*table_id, flownode_id, task_id, partition_id)
@@ -156,7 +156,6 @@ impl TableTaskManager {
                     )
                 })
             })
-            .flatten()
             .collect::<Vec<_>>();
 
         Txn::new().and_then(txns)
