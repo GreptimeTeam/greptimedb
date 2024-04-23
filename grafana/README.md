@@ -15,13 +15,17 @@ Open Grafana Dashboard page, choose `New` -> `Import`. And upload `greptimedb.js
 
 This cluster dashboard provides a comprehensive view of incoming requests, response statuses, and internal activities such as flush and compaction, with a layered structure from frontend to datanode. Designed with a focus on alert functionality, its primary aim is to highlight any anomalies in metrics, allowing users to quickly pinpoint the cause of errors.
 
+We use Prometheus to scrape off metrics from nodes in GreptimeDB cluster, Grafana to visualize the diagram. Any compatible stack should work too.
+
+__Note__: This dashboard is still in an early stage of development. Any issue or advice on improvement is welcomed.
+
 ### Configuration
 
-Please check the following configuration before importing the dashboard into Grafana.
+Please ensure the following configuration before importing the dashboard into Grafana.
 
-__Prometheus scrape config__
+__1. Prometheus scrape config__
 
-Assign `greptime_pod` to each target. We use this label to identify each node instance.
+Assign `greptime_pod` label to each host target. We use this label to identify each node instance.
 
 ```yml
 # example config
@@ -53,7 +57,10 @@ scrape_configs:
         greptime_pod: frontend
 ```
 
-__Grafana config__
+__2. Grafana config__
 
-Create a Prometheus datasource in Grafana before using this dashboard. We use datasource as a variable in Grafana dashboard so multiple environments are supported.
+Create a Prometheus data source in Grafana before using this dashboard. We use `datasource` as a variable in Grafana dashboard so that multiple environments are supported.
 
+### Usage
+
+Use `datasource` or `greptime_pod` on the upper-left corner to filter data from certain node.
