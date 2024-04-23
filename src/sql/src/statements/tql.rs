@@ -45,16 +45,14 @@ pub struct TqlEval {
 
 impl Display for TqlEval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let lookback = match &self.lookback {
-            Some(lookback) => format!(", {}", lookback),
-            None => String::default(),
-        };
-
-        let start = &self.start;
-        let end = &self;
-        let step = &self;
-        let query = &self.query;
-        write!(f, "TQL EVAL ({start}, {end}, {step}{lookback}) {query}")
+        write!(f, "TQL EVAL(")?;
+        write!(f, "{}, ", &self.start)?;
+        write!(f, "{}, ", &self.end)?;
+        write!(f, "{}", &self.step)?;
+        if let Some(lookback) = &self.lookback {
+            write!(f, ", {}", lookback)?;
+        }
+        write!(f, ") {}", &self.query)
     }
 }
 
@@ -72,22 +70,18 @@ pub struct TqlExplain {
 
 impl Display for TqlExplain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TQL EXPLAIN")?;
+        write!(f, "TQL EXPLAIN ")?;
         if self.is_verbose {
-            f.write_str(" VERBOSE")?;
+            write!(f, "VERBOSE ")?;
         }
-
-        let lookback = match &self.lookback {
-            Some(lookback) => format!(", {}", lookback),
-            None => String::default(),
-        };
-
-        let start = &self.start;
-        let end = &self.end;
-        let step = &self.step;
-        let query = &self.query;
-
-        write!(f, " ({start}, {end}, {step}{lookback}) {query}")
+        write!(f, "(")?;
+        write!(f, "{}, ", &self.start)?;
+        write!(f, "{}, ", &self.end)?;
+        write!(f, "{}", &self.step)?;
+        if let Some(lookback) = &self.lookback {
+            write!(f, ", {}", lookback)?;
+        }
+        write!(f, ") {}", &self.query)
     }
 }
 
@@ -105,22 +99,18 @@ pub struct TqlAnalyze {
 
 impl Display for TqlAnalyze {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TQL ANALYZE")?;
+        write!(f, "TQL ANALYZE ")?;
         if self.is_verbose {
-            f.write_str(" VERBOSE")?;
+            write!(f, "VERBOSE ")?;
         }
-
-        let lookback = match &self.lookback {
-            Some(lookback) => format!(", {}", lookback),
-            None => String::default(),
-        };
-
-        let start = &self.start;
-        let end = &self.end;
-        let step = &self.step;
-        let query = &self.query;
-
-        write!(f, " ({start}, {end}, {step}{lookback}) {query}")
+        write!(f, "(")?;
+        write!(f, "{}, ", &self.start)?;
+        write!(f, "{}, ", &self.end)?;
+        write!(f, "{}", &self.step)?;
+        if let Some(lookback) = &self.lookback {
+            write!(f, ", {}", lookback)?;
+        }
+        write!(f, ") {}", &self.query)
     }
 }
 

@@ -110,14 +110,18 @@ impl Display for Statement {
             Statement::ShowIndex(s) => s.fmt(f),
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::DescribeTable(s) => s.fmt(f),
-            Statement::Explain(s) => s.inner.fmt(f),
+            Statement::Explain(s) => s.fmt(f),
             Statement::Copy(s) => s.fmt(f),
             Statement::Tql(s) => s.fmt(f),
             Statement::TruncateTable(s) => s.fmt(f),
             Statement::SetVariables(s) => s.fmt(f),
             Statement::ShowVariables(s) => s.fmt(f),
-            Statement::ShowCharset(s) => s.fmt(f),
-            Statement::ShowCollation(s) => s.fmt(f),
+            Statement::ShowCharset(kind) => {
+                write!(f, "SHOW CHARSET {kind}")
+            }
+            Statement::ShowCollation(kind) => {
+                write!(f, "SHOW COLLATION {kind}")
+            }
         }
     }
 }
