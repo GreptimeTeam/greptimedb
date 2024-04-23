@@ -354,8 +354,7 @@ impl ManifestContext {
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
-        // Executes the applier. We MUST holds the write lock.
-        applier();
+        // Executes the applier. We MUST hold the write lock.
 
         if self.state.load() == RegionState::ReadOnly {
             warn!(
