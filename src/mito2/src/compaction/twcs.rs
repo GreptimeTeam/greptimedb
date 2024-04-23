@@ -253,24 +253,19 @@ fn assign_to_windows<'a>(
     let mut windows = windows.into_values().collect::<Vec<_>>();
     windows.sort_unstable_by(|l, r| l.start.cmp(&r.start).then(l.end.cmp(&r.end).reverse()));
 
-    let mut current_range: Option<(Timestamp, Timestamp)> =
-        Some((windows[0].start.unwrap(), windows[0].end.unwrap()));
+    let mut current_range: (Timestamp, Timestamp) =
+        (windows[0].start.unwrap(), windows[0].end.unwrap());
 
     for idx in 1..windows.len() {
-        match current_range {
-            None => {
-                current_range = Some(windows[idx - 1].range());
-                continue;
-            }
-            Some(current) => {
-                let next_range = windows[idx].range();
-                if overlaps(&current, &next_range) {
-                    windows[idx - 1].overlapping = true;
-                    windows[idx].overlapping = true;
-                }
-                current_range = Some((current.0.min(next_range.0), current.1.max(next_range.1)));
-            }
+        let next_range = windows[idx].range();
+        if overlaps(&current_range, &next_range) {
+            windows[idx - 1].overlapping = true;
+            windows[idx].overlapping = true;
         }
+        current_range = (
+            current_range.0.min(next_range.0),
+            current_range.1.max(next_range.1),
+        );
     }
 
     windows.into_iter().map(|w| (w.time_window, w)).collect()
@@ -843,17 +838,35 @@ mod tests {
 
         check_assign_to_windows_with_overlapping(
             &[
-                (0, 999),
-                (1000, 1999),
-                (2000, 2999),
-                (3000, 3999),
-                (2999, 3999),
+                (0, 999),     // window 0
+                (1000, 1999), // window 2
+                (2000, 2999), // window 2
+                (3000, 3999), // window 4
+                (2999, 3999), // window 4
             ],
             2,
             &[
+                // window 2 overlaps with window 4
                 (0, false, vec![(0, 999)]),
                 (2, true, vec![(1000, 1999), (2000, 2999)]),
                 (4, true, vec![(2999, 3999), (3000, 3999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[
+                (0, 999),     // window 0
+                (1000, 1999), // window 2
+                (2000, 2999), // window 2
+                (3000, 3999), // window 4
+                (0, 1000),    // // window 2
+            ],
+            2,
+            &[
+                // only window 0 overlaps with window 2.
+                (0, true, vec![(0, 999)]),
+                (2, true, vec![(0, 1000), (1000, 1999), (2000, 2999)]),
+                (4, false, vec![(3000, 3999)]),
             ],
         );
     }

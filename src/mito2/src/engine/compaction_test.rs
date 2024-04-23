@@ -149,6 +149,54 @@ async fn test_compaction_region() {
     assert_eq!((0..25).map(|v| v * 1000).collect::<Vec<_>>(), vec);
 }
 
+#[tokio::test]
+async fn test_compaction_region_with_overlapping() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_active_window_files", "2")
+        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Flush 4 SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 0..2400).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 3600..10800).await; // window 10800
+    delete_and_flush(&engine, region_id, &column_schemas, 0..3600).await; // window 3600
+
+    let result = engine
+        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 0);
+
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(
+        2,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+    let stream = scanner.scan().await.unwrap();
+
+    let vec = collect_stream_ts(stream).await;
+    assert_eq!((3600..10800).map(|i| { i * 1000 }).collect::<Vec<_>>(), vec);
+}
+
 // For issue https://github.com/GreptimeTeam/greptimedb/issues/3633
 #[tokio::test]
 async fn test_readonly_during_compaction() {
