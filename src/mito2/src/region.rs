@@ -355,6 +355,7 @@ impl ManifestContext {
         )?;
 
         // Executes the applier. We MUST hold the write lock.
+        applier();
 
         if self.state.load() == RegionState::ReadOnly {
             warn!(
