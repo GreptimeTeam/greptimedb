@@ -54,8 +54,10 @@ ifneq ($(strip $(RELEASE)),)
 	CARGO_BUILD_OPTS += --release
 endif
 
-ifeq ($(BUILDX_MULTI_PLATFORM_BUILD), true)
+ifeq ($(BUILDX_MULTI_PLATFORM_BUILD), all)
 	BUILDX_MULTI_PLATFORM_BUILD_OPTS := --platform linux/amd64,linux/arm64 --push
+else ifeq ($(BUILDX_MULTI_PLATFORM_BUILD), amd64)
+	BUILDX_MULTI_PLATFORM_BUILD_OPTS := --platform linux/amd64 --push
 else
 	BUILDX_MULTI_PLATFORM_BUILD_OPTS := -o type=docker
 endif
