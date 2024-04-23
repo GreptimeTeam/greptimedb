@@ -223,6 +223,18 @@ impl QueryContextBuilder {
             .insert(key, value);
         self
     }
+
+    pub fn from_existing(context: &QueryContext) -> QueryContextBuilder {
+        QueryContextBuilder {
+            current_catalog: Some(context.current_catalog.clone()),
+            current_schema: Some(context.current_schema.clone()),
+            current_user: Some(context.current_user.load().clone().into()),
+            timezone: Some(context.timezone.load().clone().into()),
+            sql_dialect: Some(context.sql_dialect.clone()),
+            extension: Some(context.extension.clone()),
+            configuration_parameter: Some(context.configuration_parameter.clone()),
+        }
+    }
 }
 
 #[derive(Debug)]

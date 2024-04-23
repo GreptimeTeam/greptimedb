@@ -23,7 +23,7 @@ use serde_json::json;
 use servers::http::error_result::ErrorResponse;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
-use servers::http::header::GREPTIME_TIMEZONE_HEADER_NAME;
+use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::test_helpers::TestClient;
@@ -533,6 +533,34 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     // single match[]
     let res = client
         .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
+    );
+
+    // query an empty database should return nothing
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=600")
+        .header(GREPTIME_DB_HEADER_NAME.clone(), "nonexistent")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!([])).unwrap()
+    );
+
+    // db header will be overrode by `db` in param
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=600&db=public")
+        .header(GREPTIME_DB_HEADER_NAME.clone(), "nonexistent")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
