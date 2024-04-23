@@ -515,7 +515,10 @@ impl TableMeta {
                     .is_none(),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
-                    err: format!("change column datatype {} more than once", col_to_change.column_name),
+                    err: format!(
+                        "change column datatype {} more than once",
+                        col_to_change.column_name
+                    ),
                 }
             );
 
@@ -572,7 +575,9 @@ impl TableMeta {
                 .collect();
 
             error::SchemaBuildSnafu {
-                msg: format!("Table {table_name} cannot change datatype with columns {column_names:?}"),
+                msg: format!(
+                    "Table {table_name} cannot change datatype with columns {column_names:?}"
+                ),
             }
         })?;
 
