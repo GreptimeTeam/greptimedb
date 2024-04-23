@@ -84,6 +84,15 @@ TQL EVAL (0, 15, '5s') scalar(host) + host{host="host2"};
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') scalar(host{host="host1"} + scalar(host));
 
+-- No data input in scalar
+TQL EVAL (350, 360, '5s') scalar(host{host="host1"});
+
+DELETE from host where ts = 0;
+
+-- Under this case, InstantManipulate will input a valid record batch but output a empty record batch (because no data will be selected in this batch)
+-- Test input a empty record batch to ScalarCalculate plan
+TQL EVAL (0, 1600, '6m40s') scalar(host{host="host1"});
+
 -- error case
 
 TQL EVAL (0, 15, '5s') scalar(1 + scalar(host{host="host2"}));
