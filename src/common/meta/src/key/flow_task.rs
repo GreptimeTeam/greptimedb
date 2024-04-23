@@ -47,22 +47,18 @@ impl TableMetaKey for FlowTaskKey {
 pub struct FlowTaskValue {
     /// The source tables used by the task.
     source_tables: Vec<TableId>,
-    /// The sink tables used by the task.
-    sink_tables: Vec<TableId>,
+    /// The sink table used by the task.
+    sink_table: TableId,
     /// Which flow node this task is running on.
     flownode_id: FlownodeId,
 }
 
 impl FlowTaskValue {
     /// Returns a new [FlowTaskValue]
-    pub fn new(
-        source_tables: Vec<TableId>,
-        sink_tables: Vec<TableId>,
-        flownode_id: FlownodeId,
-    ) -> Self {
+    pub fn new(source_tables: Vec<TableId>, sink_table: TableId, flownode_id: FlownodeId) -> Self {
         Self {
             source_tables,
-            sink_tables,
+            sink_table,
             flownode_id,
         }
     }

@@ -118,7 +118,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], vec![2048], 1);
+        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], 2048, 1);
         flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value.clone())
             .await
@@ -158,13 +158,13 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], vec![2048], 1);
+        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], 2048, 1);
         flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         // Creates again.
-        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], vec![2049], 1);
+        let flow_task_value = FlowTaskValue::new(vec![1024, 1025, 1026], 2049, 1);
         let err = flow_metadata_manager
             .create_flow_metadata(task_id, flow_task_value)
             .await
