@@ -271,7 +271,7 @@ impl CreateTableProcedure {
     ///
     /// Abort(not-retry):
     /// - Failed to create table metadata.
-    async fn on_create_metadata(&self) -> Result<Status> {
+    async fn on_create_metadata(&mut self) -> Result<Status> {
         let table_id = self.table_id();
         let manager = &self.context.table_metadata_manager;
 
@@ -285,6 +285,7 @@ impl CreateTableProcedure {
             .await?;
         info!("Created table metadata for table {table_id}");
 
+        self.creator.opening_regions.clear();
         Ok(Status::done_with_output(table_id))
     }
 }
@@ -385,7 +386,7 @@ impl TableCreator {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, AsRefStr)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsRefStr, PartialEq)]
 pub enum CreateTableState {
     /// Prepares to create the table
     Prepare,

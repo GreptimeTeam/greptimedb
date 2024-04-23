@@ -19,8 +19,10 @@ use api::v1::region::{region_request, RegionRequest};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::{Procedure, Status};
-use common_procedure_test::{execute_procedure_until_done, new_test_procedure_context};
+use common_procedure::Procedure;
+use common_procedure_test::{
+    execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
+};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc;
@@ -265,16 +267,11 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
         create_logical_table(ddl_context.clone(), cluster_id, physical_table_id, "s").await;
 
     let inner_test = |task: DropTableTask| async {
-        let context = new_test_procedure_context();
         let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
-        while !matches!(
-            procedure.execute(&context).await.unwrap(),
-            Status::Done { .. }
-        ) {
-            if procedure.data.state == DropTableState::InvalidateTableCache {
-                break;
-            }
-        }
+        execute_procedure_until(&mut procedure, |p| {
+            p.data.state == DropTableState::InvalidateTableCache
+        })
+        .await;
 
         // Ensure that after running to the state `InvalidateTableCache`(just past `DeleteMetadata`),
         // the dropping regions should be recorded:
