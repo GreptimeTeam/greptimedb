@@ -277,6 +277,9 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprG
             .unwrap();
 
         let mut table = table_generator.generate(rng)?;
+        while table.table_name.value == physical_table_name {
+            table.table_name = table_generator.name_generator.gen(rng);
+        }
         let logical_ts = table.columns.iter().position(|column| {
             column
                 .options
@@ -290,8 +293,8 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprG
                 .options
                 .retain(|option| option == &ColumnOption::PrimaryKey);
             // Ensures the column name is unique.
-            while column.name == self.table_ctx.columns[0].name
-                || column.name == self.table_ctx.columns[1].name
+            while column.name.value == self.table_ctx.columns[0].name.value
+                || column.name.value == self.table_ctx.columns[1].name.value
             {
                 column.name = table_generator.name_generator.gen(rng);
             }
