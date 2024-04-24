@@ -14,7 +14,7 @@
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
-use common_grpc::writer::Precision;
+use common_grpc::precision::Precision;
 use hyper::Request;
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -88,7 +88,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
             // timestamp
             let precision = unwrap_or_default_precision(value.precision);
-            row_writer::write_ts_precision(
+            row_writer::write_ts_to_nanos(
                 table_data,
                 INFLUXDB_TIMESTAMP_COLUMN_NAME,
                 ts,
@@ -195,7 +195,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                 }
                 "ts" => {
                     assert_eq!(
-                        ColumnDataType::TimestampMillisecond as i32,
+                        ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
                     );
                     assert_eq!(SemanticType::Timestamp as i32, column_schema.semantic_type);
@@ -204,12 +204,12 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         let v = row.values[i].value_data.as_ref();
                         match j {
                             0 => assert_eq!(
-                                1663840496100023100 / 1_000_000,
-                                extract_ts_millis_value(v.as_ref().unwrap())
+                                1663840496100023100,
+                                extract_ts_nanos_value(v.as_ref().unwrap())
                             ),
                             1 => assert_eq!(
-                                1663840496400340001 / 1_000_000,
-                                extract_ts_millis_value(v.as_ref().unwrap())
+                                1663840496400340001,
+                                extract_ts_nanos_value(v.as_ref().unwrap())
                             ),
                             _ => panic!(),
                         }
@@ -270,7 +270,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                 }
                 "ts" => {
                     assert_eq!(
-                        ColumnDataType::TimestampMillisecond as i32,
+                        ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
                     );
                     assert_eq!(SemanticType::Timestamp as i32, column_schema.semantic_type);
@@ -279,12 +279,12 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         let v = row.values[i].value_data.as_ref();
                         match j {
                             0 => assert_eq!(
-                                1663840496100023102 / 1_000_000,
-                                extract_ts_millis_value(v.as_ref().unwrap())
+                                1663840496100023102,
+                                extract_ts_nanos_value(v.as_ref().unwrap())
                             ),
                             1 => assert_eq!(
-                                1663840496400340003 / 1_000_000,
-                                extract_ts_millis_value(v.as_ref().unwrap())
+                                1663840496400340003,
+                                extract_ts_nanos_value(v.as_ref().unwrap())
                             ),
                             _ => panic!(),
                         }
@@ -309,9 +309,9 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         }
     }
 
-    fn extract_ts_millis_value(value: &ValueData) -> i64 {
+    fn extract_ts_nanos_value(value: &ValueData) -> i64 {
         match value {
-            ValueData::TimestampMillisecondValue(v) => *v,
+            ValueData::TimestampNanosecondValue(v) => *v,
             _ => panic!(),
         }
     }

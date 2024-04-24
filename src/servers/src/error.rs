@@ -462,6 +462,9 @@ pub enum Error {
         #[snafu(source)]
         error: notify::Error,
     },
+
+    #[snafu(display("Timestamp overflow: {}", error))]
+    TimestampOverflow { error: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -524,7 +527,8 @@ impl ErrorExt for Error {
             | IncompatibleSchema { .. }
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
-            | UnexpectedPhysicalTable { .. } => StatusCode::InvalidArguments,
+            | UnexpectedPhysicalTable { .. }
+            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
