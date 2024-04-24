@@ -157,7 +157,7 @@ async fn execute_unstable_create_table(
 
     loop {
         let sql = "DROP DATABASE IF EXISTS public";
-        match sqlx::query(&sql).execute(&ctx.greptime).await {
+        match sqlx::query(sql).execute(&ctx.greptime).await {
             Ok(result) => {
                 info!("Drop table: {}, result: {result:?}", sql);
                 break;

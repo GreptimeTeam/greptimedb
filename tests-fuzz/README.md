@@ -9,6 +9,25 @@ cargo install cargo-fuzz
 2. Start GreptimeDB
 3. Copy the `.env.example`, which is at project root, to `.env` and change the values on need.
 
+### For stable fuzz tests
+Set the GreptimeDB MySQL address.
+```
+GT_MYSQL_ADDR = localhost:4002
+```
+
+### For unstable fuzz tests
+Set the binary path of the GreptimeDB:
+```
+GT_FUZZ_BINARY_PATH = /path/to/
+```
+
+Change the instance root directory(the default value: `/tmp/unstable_greptime/`)
+```
+GT_FUZZ_INSTANCE_ROOT_DIR = /path/to/
+```
+
+
+
 ## Run
 1. List all fuzz targets
 ```bash
