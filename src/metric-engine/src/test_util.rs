@@ -210,9 +210,9 @@ pub fn create_logical_region_request(
             ),
         },
     ];
-    for tag in tags {
+    for (bias, tag) in tags.iter().enumerate() {
         column_metadatas.push(ColumnMetadata {
-            column_id: 2,
+            column_id: 2 + bias as ColumnId,
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new(
                 tag.to_string(),

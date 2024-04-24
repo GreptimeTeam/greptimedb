@@ -151,11 +151,7 @@ impl<'a> ParserContext<'a> {
             .context(SyntaxSnafu)?
             .into_iter()
             .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_lowercase(), v))
-                } else {
-                    None
-                }
+                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
             })
             .collect::<HashMap<String, String>>();
         for key in options.keys() {

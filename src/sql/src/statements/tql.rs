@@ -60,7 +60,7 @@ pub struct TqlEval {
 
 impl Display for TqlEval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TQL EVAL")?;
+        write!(f, "TQL EVAL ")?;
         format_tql(
             f,
             &self.start,

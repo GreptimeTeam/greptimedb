@@ -247,6 +247,53 @@ pub struct RegionCreateRequest {
     pub region_dir: String,
 }
 
+impl RegionCreateRequest {
+    /// Checks whether the request is valid, returns an error if it is invalid.
+    pub fn validate(&self) -> Result<()> {
+        // time index must exist
+        ensure!(
+            self.column_metadatas
+                .iter()
+                .any(|x| x.semantic_type == SemanticType::Timestamp),
+            InvalidRegionRequestSnafu {
+                region_id: RegionId::new(0, 0),
+                err: "missing timestamp column in create region request".to_string(),
+            }
+        );
+
+        // build column id to indices
+        let mut column_id_to_indices = HashMap::with_capacity(self.column_metadatas.len());
+        for (i, c) in self.column_metadatas.iter().enumerate() {
+            if let Some(previous) = column_id_to_indices.insert(c.column_id, i) {
+                return InvalidRegionRequestSnafu {
+                    region_id: RegionId::new(0, 0),
+                    err: format!(
+                        "duplicate column id {} (at position {} and {}) in create region request",
+                        c.column_id, previous, i
+                    ),
+                }
+                .fail();
+            }
+        }
+
+        // primary key must exist
+        for column_id in &self.primary_key {
+            ensure!(
+                column_id_to_indices.contains_key(column_id),
+                InvalidRegionRequestSnafu {
+                    region_id: RegionId::new(0, 0),
+                    err: format!(
+                        "missing primary key column {} in create region request",
+                        column_id
+                    ),
+                }
+            );
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RegionDropRequest {}
 
@@ -964,5 +1011,47 @@ mod tests {
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
+    }
+
+    #[test]
+    fn test_validate_create_region() {
+        let column_metadatas = vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            },
+        ];
+        let create = RegionCreateRequest {
+            engine: "mito".to_string(),
+            column_metadatas,
+            primary_key: vec![3, 4],
+            options: HashMap::new(),
+            region_dir: "path".to_string(),
+        };
+
+        assert!(create.validate().is_err());
     }
 }

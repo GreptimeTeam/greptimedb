@@ -27,7 +27,7 @@ use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self, OptionMap};
 use table::metadata::{TableInfoRef, TableMeta};
-use table::requests::FILE_TABLE_META_KEY;
+use table::requests::{FILE_TABLE_META_KEY, REGIONS_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
@@ -37,19 +37,19 @@ fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
 
     if !table_meta.region_numbers.is_empty() {
         options.insert(
-            "regions".to_string(),
+            REGIONS_KEY.to_string(),
             table_meta.region_numbers.len().to_string(),
         );
     }
 
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
         options.insert(
-            "write_buffer_size".to_string(),
+            WRITE_BUFFER_SIZE_KEY.to_string(),
             write_buffer_size.to_string(),
         );
     }
     if let Some(ttl) = table_opts.ttl {
-        options.insert("ttl".to_string(), format_duration(ttl).to_string());
+        options.insert(TTL_KEY.to_string(), format_duration(ttl).to_string());
     }
 
     for (k, v) in table_opts

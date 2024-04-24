@@ -152,7 +152,7 @@ PARTITION ON COLUMNS (n) (
 |       |                                     |
 |       | ENGINE=mito                         |
 |       | WITH(                               |
-|       |   regions = '1'                       |
+|       |   regions = '1'                     |
 |       | )                                   |
 +-------+-------------------------------------+"#
     };
