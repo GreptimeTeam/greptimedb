@@ -4,9 +4,21 @@ SHOW TABLES;
 
 DESC TABLE phy;
 
+-- create table with duplicate column def
+CREATE TABLE t1(ts timestamp time index, val double, host text, host string) engine=metric with ("on_physical_table" = "phy");
+
 CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
+
+-- create logical table with different data type on field column
+CREATE TABLE t3 (ts timestamp time index, val string, host string, primary key (host)) engine=metric with ("on_physical_table" = "phy");
+
+-- create logical table with different data type on tag column
+CREATE TABLE t4 (ts timestamp time index, val double, host double, primary key (host)) engine=metric with ("on_physical_table" = "phy");
+
+-- create logical table with different column name on field column
+CREATE TABLE t5 (ts timestamp time index, valval double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
 SELECT table_catalog, table_schema, table_name, table_type, engine FROM information_schema.tables WHERE engine = 'metric' order by table_name;
 
@@ -38,18 +50,10 @@ DROP TABLE phy2;
 -- fuzz test case https://github.com/GreptimeTeam/greptimedb/issues/3612
 CREATE TABLE `auT`(
   incidunt TIMESTAMP(3) TIME INDEX,
-  `QuaErAT` BOOLEAN,
-  `REPREHenDERIt` BOOLEAN DEFAULT true,
-  `Et` INT NULL,
-  `AutEM` INT,
-  esse DOUBLE,
-  `Tempore` BOOLEAN,
-  `reruM` BOOLEAN,
-  `eRrOR` BOOLEAN NULL,
-  `cOMmodi` BOOLEAN,
-  `PERfERENdIS` DOUBLE,
-  `eSt` FLOAT DEFAULT 0.70978713,
-  PRIMARY KEY(`cOMmodi`, `PERfERENdIS`, esse)
+  `REPREHenDERIt` double DEFAULT 0.70978713,
+  `cOMmodi` STRING,
+  `PERfERENdIS` STRING,
+  PRIMARY KEY(`cOMmodi`, `PERfERENdIS`)
 ) ENGINE = metric with ("physical_metric_table" = "");
 
 DESC TABLE `auT`;
