@@ -22,6 +22,7 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};
@@ -164,11 +165,27 @@ pub struct AddColumnRequest {
     pub location: Option<AddColumnLocation>,
 }
 
+/// Change column datatype request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeColumnTypeRequest {
+    pub column_name: String,
+    pub target_type: ConcreteDataType,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlterKind {
-    AddColumns { columns: Vec<AddColumnRequest> },
-    DropColumns { names: Vec<String> },
-    RenameTable { new_table_name: String },
+    AddColumns {
+        columns: Vec<AddColumnRequest>,
+    },
+    DropColumns {
+        names: Vec<String>,
+    },
+    ChangeColumnTypes {
+        columns: Vec<ChangeColumnTypeRequest>,
+    },
+    RenameTable {
+        new_table_name: String,
+    },
 }
 
 #[derive(Debug)]
