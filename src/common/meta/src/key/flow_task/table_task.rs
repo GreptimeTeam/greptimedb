@@ -20,8 +20,9 @@ use regex::Regex;
 use snafu::OptionExt;
 use table::metadata::TableId;
 
-use super::scope::{BytesAdapter, CatalogScoped, FlowTaskScoped, MetaKey};
 use crate::error::{self, Result};
+use crate::key::flow_task::FlowTaskScoped;
+use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
 use crate::key::{FlowTaskId, PartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;

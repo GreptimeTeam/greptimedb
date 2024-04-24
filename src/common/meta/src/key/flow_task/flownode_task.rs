@@ -20,8 +20,9 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::OptionExt;
 
-use super::scope::{BytesAdapter, CatalogScoped, FlowTaskScoped, MetaKey};
 use crate::error::{self, Result};
+use crate::key::flow_task::FlowTaskScoped;
+use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
 use crate::key::{FlowTaskId, PartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -232,7 +233,7 @@ impl FlownodeTaskManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::key::flownode_task::FlownodeTaskKey;
+    use crate::key::flow_task::flownode_task::FlownodeTaskKey;
     use crate::key::scope::MetaKey;
 
     #[test]

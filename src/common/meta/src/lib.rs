@@ -30,7 +30,6 @@ pub mod instruction;
 pub mod key;
 pub mod kv_backend;
 pub mod lock_key;
-pub mod metadata;
 pub mod metrics;
 pub mod peer;
 pub mod range_stream;

@@ -12,207 +12,376 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+pub(crate) mod flow_task;
+pub(crate) mod flow_task_name;
+pub(crate) mod flownode_task;
+pub(crate) mod table_task;
 
-use lazy_static::lazy_static;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
-use table::metadata::TableId;
+use std::ops::Deref;
 
+use snafu::{ensure, OptionExt};
+
+use self::flow_task::FlowTaskValue;
+use crate::ensure_values;
 use crate::error::{self, Result};
-use crate::key::scope::{CatalogScoped, FlowTaskScoped, MetaKey};
+use crate::key::flow_task::flow_task::FlowTaskManager;
+use crate::key::flow_task::flow_task_name::FlowTaskNameManager;
+use crate::key::flow_task::flownode_task::FlownodeTaskManager;
+use crate::key::flow_task::table_task::TableTaskManager;
+use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{txn_helper, DeserializedValueWithBytes, FlowTaskId, PartitionId, TableMetaValue};
+use crate::key::FlowTaskId;
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::FlownodeId;
 
-const FLOW_TASK_KEY_PREFIX: &str = "id";
-
-lazy_static! {
-    static ref FLOW_TASK_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{FLOW_TASK_KEY_PREFIX}/([0-9]*)$")).unwrap();
+#[derive(Debug, PartialEq)]
+pub struct FlowTaskScoped<T> {
+    inner: T,
 }
 
-/// The key stores the metadata of the task.
-///
-/// The layout: `__flow_task/{catalog}/id/{flow_task_id}`.
-pub struct FlowTaskKey(FlowTaskScoped<CatalogScoped<FlowTaskKeyInner>>);
+impl<T> Deref for FlowTaskScoped<T> {
+    type Target = T;
 
-impl MetaKey<FlowTaskKey> for FlowTaskKey {
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> FlowTaskScoped<T> {
+    const PREFIX: &'static str = "__flow_task/";
+
+    /// Returns a new [FlowTaskScoped] key.
+    pub fn new(inner: T) -> FlowTaskScoped<T> {
+        Self { inner }
+    }
+}
+
+impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
     fn to_bytes(&self) -> Vec<u8> {
-        self.0.to_bytes()
+        let prefix = FlowTaskScoped::<T>::PREFIX.as_bytes();
+        let inner = self.inner.to_bytes();
+        let mut bytes = Vec::with_capacity(prefix.len() + inner.len());
+        bytes.extend(prefix);
+        bytes.extend(inner);
+        bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKey> {
-        Ok(FlowTaskKey(FlowTaskScoped::<
-            CatalogScoped<FlowTaskKeyInner>,
-        >::from_bytes(bytes)?))
-    }
-}
-
-impl FlowTaskKey {
-    /// Returns the [FlowTaskKey].
-    pub fn new(catalog: String, flow_task_id: FlowTaskId) -> FlowTaskKey {
-        let inner = FlowTaskKeyInner::new(flow_task_id);
-        FlowTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
-    }
-
-    /// Returns the catalog.
-    pub fn catalog(&self) -> &str {
-        self.0.catalog()
-    }
-
-    /// Returns the [FlowTaskId].
-    pub fn flow_task_id(&self) -> FlowTaskId {
-        self.0.flow_task_id
-    }
-}
-
-/// The key of flow task metadata.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct FlowTaskKeyInner {
-    flow_task_id: FlowTaskId,
-}
-
-impl FlowTaskKeyInner {
-    /// Returns a [FlowTaskKey] with the specified `flow_task_id`.
-    pub fn new(flow_task_id: FlowTaskId) -> FlowTaskKeyInner {
-        FlowTaskKeyInner { flow_task_id }
-    }
-}
-
-impl MetaKey<FlowTaskKeyInner> for FlowTaskKeyInner {
-    fn to_bytes(&self) -> Vec<u8> {
-        format!("{FLOW_TASK_KEY_PREFIX}/{}", self.flow_task_id).into_bytes()
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKeyInner> {
-        let key = std::str::from_utf8(bytes).map_err(|e| {
-            error::InvalidTableMetadataSnafu {
-                err_msg: format!(
-                    "FlowTaskKeyInner '{}' is not a valid UTF8 string: {e}",
-                    String::from_utf8_lossy(bytes)
-                ),
+    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskScoped<T>> {
+        let prefix = FlowTaskScoped::<T>::PREFIX.as_bytes();
+        ensure!(
+            bytes.starts_with(prefix),
+            error::MismatchPrefixSnafu {
+                prefix: String::from_utf8_lossy(prefix),
+                key: String::from_utf8_lossy(bytes),
             }
-            .build()
-        })?;
-        let captures =
-            FLOW_TASK_KEY_PATTERN
-                .captures(key)
-                .context(error::InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid FlowTaskKeyInner '{key}'"),
-                })?;
-        // Safety: pass the regex check above
-        let flow_task_id = captures[1].parse::<FlowTaskId>().unwrap();
-        Ok(FlowTaskKeyInner { flow_task_id })
+        );
+        let inner = T::from_bytes(&bytes[prefix.len()..])?;
+        Ok(FlowTaskScoped { inner })
     }
 }
 
-// The metadata of the flow task.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FlowTaskValue {
-    /// The source tables used by the task.
-    pub(crate) source_tables: Vec<TableId>,
-    /// The sink table used by the task.
-    pub(crate) sink_table: TableId,
-    /// Which flow nodes this task is running on.
-    pub(crate) flownode_ids: BTreeMap<PartitionId, FlownodeId>,
-    /// The catalog name.
-    pub(crate) catalog_name: String,
-    /// The task name.
-    pub(crate) task_name: String,
-    /// The raw sql.
-    pub(crate) raw_sql: String,
-    /// The expr of expire.
-    pub(crate) expire_when: String,
-    /// The comment.
-    pub(crate) comment: String,
-    /// The options.
-    pub(crate) options: HashMap<String, String>,
-}
-
-impl FlowTaskValue {
-    /// Returns the `flownode_id`.
-    pub fn flownode_ids(&self) -> &BTreeMap<PartitionId, FlownodeId> {
-        &self.flownode_ids
-    }
-
-    /// Returns the `source_table`.
-    pub fn source_table_ids(&self) -> &[TableId] {
-        &self.source_tables
-    }
-}
-
-/// The manager of [FlowTaskKey].
-pub struct FlowTaskManager {
+/// The manager of metadata, provides ability to:
+/// - Create metadata of the task.
+/// - Retrieve metadata of the task.
+/// - Delete metadata of the task.
+pub struct FlowMetadataManager {
+    flow_task_manager: FlowTaskManager,
+    flownode_task_manager: FlownodeTaskManager,
+    table_task_manager: TableTaskManager,
+    flow_task_name_manager: FlowTaskNameManager,
     kv_backend: KvBackendRef,
 }
 
-impl FlowTaskManager {
-    /// Returns a new [FlowTaskManager].
+impl FlowMetadataManager {
+    /// Returns a new [FlowMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
-        Self { kv_backend }
+        Self {
+            flow_task_manager: FlowTaskManager::new(kv_backend.clone()),
+            flow_task_name_manager: FlowTaskNameManager::new(kv_backend.clone()),
+            flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
+            table_task_manager: TableTaskManager::new(kv_backend.clone()),
+            kv_backend,
+        }
     }
 
-    /// Returns the [FlowTaskValue] of specified `flow_task_id`.
-    pub async fn get(
-        &self,
-        catalog: &str,
-        flow_task_id: FlowTaskId,
-    ) -> Result<Option<FlowTaskValue>> {
-        let key = FlowTaskKey::new(catalog.to_string(), flow_task_id).to_bytes();
-        self.kv_backend
-            .get(&key)
-            .await?
-            .map(|x| FlowTaskValue::try_from_raw_value(&x.value))
-            .transpose()
+    /// Returns the [FlowTaskManager].
+    pub fn flow_task_manager(&self) -> &FlowTaskManager {
+        &self.flow_task_manager
     }
 
-    /// Builds a create flow task transaction.
-    /// It is expected that the `__flow_task/{flow_task_id}` wasn't occupied.
-    /// Otherwise, the transaction will retrieve existing value.
-    pub(crate) fn build_create_txn(
-        &self,
-        catalog: &str,
-        flow_task_id: FlowTaskId,
-        flow_task_value: &FlowTaskValue,
-    ) -> Result<(
-        Txn,
-        impl FnOnce(
-            &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<FlowTaskValue>>>,
-    )> {
-        let key = FlowTaskKey::new(catalog.to_string(), flow_task_id).to_bytes();
-        let txn =
-            txn_helper::build_put_if_absent_txn(key.clone(), flow_task_value.try_as_raw_value()?);
+    /// Returns the [FlownodeTaskManager].
+    pub fn flownode_task_manager(&self) -> &FlownodeTaskManager {
+        &self.flownode_task_manager
+    }
 
-        Ok((
-            txn,
-            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
-        ))
+    /// Returns the [TableTaskManager].
+    pub fn table_task_manager(&self) -> &TableTaskManager {
+        &self.table_task_manager
+    }
+
+    /// Creates metadata for task and returns an error if different metadata exists.
+    pub async fn create_flow_metadata(
+        &self,
+        flow_task_id: FlowTaskId,
+        flow_task_value: FlowTaskValue,
+    ) -> Result<()> {
+        let (create_flow_task_name_txn, on_create_flow_task_name_failure) =
+            self.flow_task_name_manager.build_create_txn(
+                &flow_task_value.catalog_name,
+                &flow_task_value.task_name,
+                flow_task_id,
+            )?;
+
+        let (create_flow_task_txn, on_create_flow_task_failure) =
+            self.flow_task_manager.build_create_txn(
+                &flow_task_value.catalog_name,
+                flow_task_id,
+                &flow_task_value,
+            )?;
+
+        let create_flownode_task_txn = self.flownode_task_manager.build_create_txn(
+            &flow_task_value.catalog_name,
+            flow_task_id,
+            flow_task_value.flownode_ids().clone(),
+        );
+
+        let create_table_task_txn = self.table_task_manager.build_create_txn(
+            &flow_task_value.catalog_name,
+            flow_task_id,
+            flow_task_value.flownode_ids().clone(),
+            flow_task_value.source_table_ids(),
+        );
+
+        let txn = Txn::merge_all(vec![
+            create_flow_task_name_txn,
+            create_flow_task_txn,
+            create_flownode_task_txn,
+            create_table_task_txn,
+        ]);
+
+        let mut resp = self.kv_backend.txn(txn).await?;
+        if !resp.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let remote_flow_task_name = on_create_flow_task_name_failure(&mut set)?
+                .context(error::UnexpectedSnafu {
+                    err_msg: format!(
+                    "Reads the empty flow task name during the creating flow task, flow_task_id: {flow_task_id}"
+                ),
+                })?;
+            ensure!(
+                remote_flow_task_name.flow_task_id() == flow_task_id,
+                error::TaskAlreadyExistsSnafu {
+                    task_name: format!(
+                        "{}.{}",
+                        flow_task_value.catalog_name, flow_task_value.task_name
+                    ),
+                    flow_task_id,
+                }
+            );
+
+            let remote_flow_task = on_create_flow_task_failure(&mut set)?
+                .context(error::UnexpectedSnafu {
+                    err_msg: format!(
+                    "Reads the empty flow task during the creating flow task, flow_task_id: {flow_task_id}"
+                ),
+                })?;
+            let op_name = "creating flow task";
+            ensure_values!(*remote_flow_task, flow_task_value, op_name);
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::assert_matches::assert_matches;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_key_serialization() {
-        let flow_task = FlowTaskKey::new("my_catalog".to_string(), 2);
-        assert_eq!(
-            b"__flow_task/my_catalog/id/2".to_vec(),
-            flow_task.to_bytes()
-        );
+    use futures::TryStreamExt;
+
+    use super::*;
+    use crate::key::flow_task::table_task::TableTaskKey;
+    use crate::key::scope::CatalogScoped;
+    use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[derive(Debug)]
+    struct MockKey {
+        inner: Vec<u8>,
+    }
+
+    impl MetaKey<MockKey> for MockKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            self.inner.clone()
+        }
+
+        fn from_bytes(bytes: &[u8]) -> Result<MockKey> {
+            Ok(MockKey {
+                inner: bytes.to_vec(),
+            })
+        }
     }
 
     #[test]
-    fn test_key_deserialization() {
-        let bytes = b"__flow_task/my_catalog/id/2".to_vec();
-        let key = FlowTaskKey::from_bytes(&bytes).unwrap();
+    fn test_flow_scoped_to_bytes() {
+        let key = FlowTaskScoped::new(CatalogScoped::new(
+            "my_catalog".to_string(),
+            MockKey {
+                inner: b"hi".to_vec(),
+            },
+        ));
+        assert_eq!(b"__flow_task/my_catalog/hi".to_vec(), key.to_bytes());
+    }
+
+    #[test]
+    fn test_flow_scoped_from_bytes() {
+        let bytes = b"__flow_task/my_catalog/hi";
+        let key = FlowTaskScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
-        assert_eq!(key.flow_task_id(), 2);
+        assert_eq!(key.inner.inner, b"hi".to_vec());
+    }
+
+    #[test]
+    fn test_flow_scoped_from_bytes_mismatch() {
+        let bytes = b"__table/my_catalog/hi";
+        let err = FlowTaskScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap_err();
+        assert_matches!(err, error::Error::MismatchPrefix { .. });
+    }
+
+    #[tokio::test]
+    async fn test_create_flow_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let task_id = 10;
+        let catalog_name = "greptime";
+        let flow_task_value = FlowTaskValue {
+            catalog_name: catalog_name.to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        flow_metadata_manager
+            .create_flow_metadata(task_id, flow_task_value.clone())
+            .await
+            .unwrap();
+        // Creates again.
+        flow_metadata_manager
+            .create_flow_metadata(task_id, flow_task_value.clone())
+            .await
+            .unwrap();
+        let got = flow_metadata_manager
+            .flow_task_manager()
+            .get(catalog_name, task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, flow_task_value);
+        let tasks = flow_metadata_manager
+            .flownode_task_manager()
+            .tasks(catalog_name, 1)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(tasks, vec![(task_id, 0)]);
+        for table_id in [1024, 1025, 1026] {
+            let nodes = flow_metadata_manager
+                .table_task_manager()
+                .nodes(catalog_name, table_id)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(
+                nodes,
+                vec![TableTaskKey::new(
+                    catalog_name.to_string(),
+                    table_id,
+                    1,
+                    task_id,
+                    0
+                )]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_table_metadata_task_exists_err() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let task_id = 10;
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        flow_metadata_manager
+            .create_flow_metadata(task_id, flow_task_value.clone())
+            .await
+            .unwrap();
+        // Creates again.
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        let err = flow_metadata_manager
+            .create_flow_metadata(task_id + 1, flow_task_value)
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::TaskAlreadyExists { .. });
+    }
+
+    #[tokio::test]
+    async fn test_create_table_metadata_unexpected_err() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let task_id = 10;
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2049,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        flow_metadata_manager
+            .create_flow_metadata(task_id, flow_task_value.clone())
+            .await
+            .unwrap();
+        // Creates again.
+        let flow_task_value = FlowTaskValue {
+            catalog_name: "greptime".to_string(),
+            task_name: "task".to_string(),
+            source_tables: vec![1024, 1025, 1026],
+            sink_table: 2048,
+            flownode_ids: [(0, 1u64)].into(),
+            raw_sql: "raw".to_string(),
+            expire_when: "expr".to_string(),
+            comment: "hi".to_string(),
+            options: Default::default(),
+        };
+        let err = flow_metadata_manager
+            .create_flow_metadata(task_id, flow_task_value)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Reads the different value"));
     }
 }

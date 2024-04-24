@@ -58,14 +58,13 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
+/// TODO(weny):removes id.
+#[allow(unused)]
 pub mod flow_task;
-pub mod flow_task_name;
-pub mod flownode_task;
 pub mod schema_name;
 pub mod scope;
 pub mod table_info;
 pub mod table_name;
-pub mod table_task;
 // TODO(weny): removes it.
 #[allow(deprecated)]
 pub mod table_region;
@@ -100,8 +99,8 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
-use self::flow_task::FlowTaskValue;
-use self::flow_task_name::FlowTaskNameValue;
+use self::flow_task::flow_task::FlowTaskValue;
+use self::flow_task::flow_task_name::FlowTaskNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
