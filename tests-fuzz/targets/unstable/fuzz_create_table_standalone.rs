@@ -67,7 +67,7 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let num = rng.gen_range(1..100);
+        let num = rng.gen_range(1..500);
         Ok(FuzzInput { seed, num })
     }
 }
