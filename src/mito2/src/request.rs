@@ -16,18 +16,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::helper::{
     is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_proto_value,
     ColumnDataTypeWrapper,
 };
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
-use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_engine::SetReadonlyResponse;
@@ -44,10 +43,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
 use crate::manifest::action::RegionEdit;
-use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
-use crate::sst::file::FileMeta;
-use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
 use crate::wal::EntryId;
 
 /// Request to write a region.
@@ -620,6 +616,8 @@ pub(crate) enum BackgroundNotify {
     CompactionFinished(CompactionFinished),
     /// Compaction has failed.
     CompactionFailed(CompactionFailed),
+    /// Truncate result.
+    Truncate(TruncateResult),
 }
 
 /// Notifies a flush job is finished.
@@ -627,18 +625,10 @@ pub(crate) enum BackgroundNotify {
 pub(crate) struct FlushFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// Meta of the flushed SSTs.
-    pub(crate) file_metas: Vec<FileMeta>,
     /// Entry id of flushed data.
     pub(crate) flushed_entry_id: EntryId,
-    /// Sequence of flushed data.
-    pub(crate) flushed_sequence: SequenceNumber,
-    /// Id of memtables to remove.
-    pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result senders.
     pub(crate) senders: Vec<OutputTx>,
-    /// File purger for cleaning files on failure.
-    pub(crate) file_purger: FilePurgerRef,
     /// Flush timer.
     pub(crate) _timer: HistogramTimer,
 }
@@ -660,12 +650,6 @@ impl OnFailure for FlushFinished {
                 region_id: self.region_id,
             }));
         }
-        // Clean flushed files.
-        for file in &self.file_metas {
-            self.file_purger.send_request(PurgeRequest {
-                file_meta: file.clone(),
-            });
-        }
     }
 }
 
@@ -681,16 +665,8 @@ pub(crate) struct FlushFailed {
 pub(crate) struct CompactionFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// Compaction output files that are to be added to region version.
-    pub(crate) compaction_outputs: Vec<FileMeta>,
-    /// Compacted files that are to be removed from region version.
-    pub(crate) compacted_files: Vec<FileMeta>,
     /// Compaction result senders.
     pub(crate) senders: Vec<OutputTx>,
-    /// File purger for cleaning files on failure.
-    pub(crate) file_purger: FilePurgerRef,
-    /// Inferred Compaction time window.
-    pub(crate) compaction_time_window: Option<Duration>,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
 }
@@ -708,23 +684,13 @@ impl CompactionFinished {
 }
 
 impl OnFailure for CompactionFinished {
-    /// Compaction succeeded but failed to update manifest or region's already been dropped,
-    /// clean compaction output files.
+    /// Compaction succeeded but failed to update manifest or region's already been dropped.
     fn on_failure(&mut self, err: Error) {
         let err = Arc::new(err);
         for sender in self.senders.drain(..) {
             sender.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
-        }
-        for file in &self.compaction_outputs {
-            warn!(
-                "Cleaning region {} compaction output file: {}",
-                self.region_id, file.file_id
-            );
-            self.file_purger.send_request(PurgeRequest {
-                file_meta: file.clone(),
-            });
         }
     }
 }
@@ -735,6 +701,21 @@ pub(crate) struct CompactionFailed {
     pub(crate) region_id: RegionId,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
+}
+
+/// Notifies the truncate result of a region.
+#[derive(Debug)]
+pub(crate) struct TruncateResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Truncate result.
+    pub(crate) result: Result<()>,
+    /// Truncated entry id.
+    pub(crate) truncated_entry_id: EntryId,
+    /// Truncated sequence.
+    pub(crate) truncated_sequence: SequenceNumber,
 }
 
 #[cfg(test)]

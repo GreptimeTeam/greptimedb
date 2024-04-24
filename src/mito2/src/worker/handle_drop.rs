@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
@@ -27,7 +27,7 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::REGION_COUNT;
-use crate::region::RegionMapRef;
+use crate::region::{RegionMapRef, RegionState};
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
@@ -42,17 +42,27 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Try to drop region: {}", region_id);
 
-        // write dropping marker
+        // Marks the region as dropping.
+        region.set_dropping()?;
+        // Writes dropping marker
+        // We rarely drop a region so we still operate in the worker loop.
         let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
         region
             .access_layer
             .object_store()
             .write(&marker_path, vec![])
             .await
-            .context(OpenDalSnafu)?;
+            .context(OpenDalSnafu)
+            .inspect_err(|e| {
+                error!(e; "Failed to write the drop marker file for region {}", region_id);
 
-        region.stop().await?;
-        // remove this region from region map to prevent other requests from accessing this region
+                // Sets the state back to writable. It's possible that the marker file has been written.
+                // We sets the state back to writable so we can retry the drop operation.
+                region.switch_state_to_writable(RegionState::Dropping);
+            })?;
+
+        region.stop().await;
+        // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
         // Notifies flush scheduler.
@@ -60,7 +70,7 @@ impl<S> RegionWorkerLoop<S> {
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_dropped(region_id);
 
-        // mark region version as dropped
+        // Marks region version as dropped
         region
             .version_control
             .mark_dropped(&region.memtable_builder);
@@ -71,7 +81,7 @@ impl<S> RegionWorkerLoop<S> {
 
         REGION_COUNT.dec();
 
-        // detach a background task to delete the region dir
+        // Detaches a background task to delete the region dir
         let region_dir = region.access_layer.region_dir().to_owned();
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();

@@ -21,6 +21,7 @@ mod handle_compaction;
 mod handle_create;
 mod handle_drop;
 mod handle_flush;
+mod handle_manifest;
 mod handle_open;
 mod handle_truncate;
 mod handle_write;
@@ -45,9 +46,8 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{InvalidRequestSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
-use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
@@ -367,7 +367,7 @@ impl<S: LogStore> WorkerStarter<S> {
             running: running.clone(),
             memtable_builder_provider: MemtableBuilderProvider::new(
                 Some(self.write_buffer_manager.clone()),
-                self.config,
+                self.config.clone(),
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
@@ -376,6 +376,8 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.scheduler,
                 sender.clone(),
                 self.cache_manager.clone(),
+                self.config,
+                self.listener.clone(),
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
@@ -622,10 +624,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     edit,
                     tx,
                 } => {
-                    let result = self.edit_region(region_id, edit).await;
-                    if let Err(Err(e)) = tx.send(result) {
-                        warn!("Failed to send edit region error to caller, error: {e:?}");
-                    }
+                    self.handle_region_edit(region_id, edit, tx).await;
                 }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
@@ -669,7 +668,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     self.handle_compaction_request(ddl.region_id, ddl.sender);
                     continue;
                 }
-                DdlRequest::Truncate(_) => self.handle_truncate_request(ddl.region_id).await,
+                DdlRequest::Truncate(_) => {
+                    self.handle_truncate_request(ddl.region_id, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
             };
 
@@ -706,6 +709,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_compaction_finished(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
+            BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
         }
     }
 
@@ -716,34 +720,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: oneshot::Sender<SetReadonlyResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
-            region.set_writable(false);
+            // We need to do this in background as we need the manifest lock.
+            common_runtime::spawn_bg(async move {
+                region.set_readonly_gracefully().await;
 
-            let last_entry_id = region.version_control.current().last_entry_id;
-            let _ = sender.send(SetReadonlyResponse::success(Some(last_entry_id)));
+                let last_entry_id = region.version_control.current().last_entry_id;
+                let _ = sender.send(SetReadonlyResponse::success(Some(last_entry_id)));
+            });
         } else {
             let _ = sender.send(SetReadonlyResponse::NotFound);
         }
-    }
-
-    async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
-        let region = self.regions.writable_region(region_id)?;
-
-        for file_meta in &edit.files_to_add {
-            let is_exist = region.access_layer.is_exist(file_meta).await?;
-            ensure!(
-                is_exist,
-                InvalidRequestSnafu {
-                    region_id,
-                    reason: format!(
-                        "trying to add a not exist file '{}' when editing region",
-                        file_meta.file_id
-                    )
-                }
-            );
-        }
-
-        // Applying region edit directly has nothing to do with memtables (at least for now).
-        region.apply_edit(edit, &[]).await
     }
 }
 
@@ -753,9 +739,7 @@ impl<S> RegionWorkerLoop<S> {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {
-            if let Err(e) = region.stop().await {
-                error!(e; "Failed to stop region {}", region.region_id);
-            }
+            region.stop().await;
         }
 
         self.regions.clear();
@@ -825,10 +809,10 @@ impl WorkerListener {
         let _ = removed;
     }
 
-    pub(crate) async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+    pub(crate) async fn on_merge_ssts_finished(&self, region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
-            listener.on_handle_compaction_finished(region_id).await;
+            listener.on_merge_ssts_finished(region_id).await;
         }
         // Avoid compiler warning.
         let _ = region_id;

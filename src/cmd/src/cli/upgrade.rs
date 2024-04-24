@@ -192,10 +192,10 @@ impl MigrateTableMetadata {
                 let key = v1SchemaKey::parse(key_str)
                     .unwrap_or_else(|e| panic!("schema key is corrupted: {e}, key: {key_str}"));
 
-                Ok((key, ()))
+                Ok(key)
             }),
         );
-        while let Some((key, _)) = stream.try_next().await.context(error::IterStreamSnafu)? {
+        while let Some(key) = stream.try_next().await.context(error::IterStreamSnafu)? {
             let _ = self.migrate_schema_key(&key).await;
             keys.push(key.to_string().as_bytes().to_vec());
         }
@@ -244,10 +244,10 @@ impl MigrateTableMetadata {
                 let key = v1CatalogKey::parse(key_str)
                     .unwrap_or_else(|e| panic!("catalog key is corrupted: {e}, key: {key_str}"));
 
-                Ok((key, ()))
+                Ok(key)
             }),
         );
-        while let Some((key, _)) = stream.try_next().await.context(error::IterStreamSnafu)? {
+        while let Some(key) = stream.try_next().await.context(error::IterStreamSnafu)? {
             let _ = self.migrate_catalog_key(&key).await;
             keys.push(key.to_string().as_bytes().to_vec());
         }
