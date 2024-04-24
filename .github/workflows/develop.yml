@@ -210,6 +210,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           max-total-time: 120
+          unstable: 'true'
       - name: Upload unstable fuzz test logs
         if: always()
         uses: actions/upload-artifact@v4
