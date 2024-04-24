@@ -15,8 +15,8 @@
 use api::v1::alter_expr::Kind;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
-    alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
-    RegionRequest, RegionRequestHeader,
+    alter_request, AddColumn, AddColumns, AlterRequest, ChangeColumnType, ChangeColumnTypes,
+    DropColumn, DropColumns, RegionColumnDef, RegionRequest, RegionRequestHeader,
 };
 use common_telemetry::tracing_context::TracingContext;
 use snafu::OptionExt;
@@ -91,6 +91,23 @@ fn create_proto_alter_kind(
                 add_columns,
             })))
         }
+        Kind::ChangeColumnTypes(x) => {
+            let change_column_types = x
+                .change_column_types
+                .iter()
+                .map(|change_column_type| ChangeColumnType {
+                    column_name: change_column_type.column_name.clone(),
+                    target_type: change_column_type.target_type,
+                    target_type_extension: change_column_type.target_type_extension.clone(),
+                })
+                .collect();
+
+            Ok(Some(alter_request::Kind::ChangeColumnTypes(
+                ChangeColumnTypes {
+                    change_column_types,
+                },
+            )))
+        }
         Kind::DropColumns(x) => {
             let drop_columns = x
                 .drop_columns
@@ -119,8 +136,8 @@ mod tests {
     use api::v1::region::region_request::Body;
     use api::v1::region::RegionColumnDef;
     use api::v1::{
-        region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
-        ColumnDef as PbColumnDef, SemanticType,
+        region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ChangeColumnType,
+        ChangeColumnTypes, ColumnDataType, ColumnDef as PbColumnDef, SemanticType,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use store_api::storage::RegionId;
@@ -194,48 +211,14 @@ mod tests {
             )
             .await
             .unwrap();
-
-        let task = AlterTableTask {
-            alter_table: AlterExpr {
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: table_name.to_string(),
-                kind: Some(Kind::AddColumns(AddColumns {
-                    add_columns: vec![AddColumn {
-                        column_def: Some(PbColumnDef {
-                            name: "my_tag3".to_string(),
-                            data_type: ColumnDataType::String as i32,
-                            is_nullable: true,
-                            default_constraint: b"hello".to_vec(),
-                            semantic_type: SemanticType::Tag as i32,
-                            comment: String::new(),
-                            ..Default::default()
-                        }),
-                        location: Some(AddColumnLocation {
-                            location_type: LocationType::After as i32,
-                            after_column_name: "my_tag2".to_string(),
-                        }),
-                    }],
-                })),
-            },
-        };
-
-        let mut procedure =
-            AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
-        procedure.on_prepare().await.unwrap();
-        let Some(Body::Alter(alter_region_request)) =
-            procedure.make_alter_region_request(region_id).unwrap().body
-        else {
-            unreachable!()
-        };
-        assert_eq!(alter_region_request.region_id, region_id.as_u64());
-        assert_eq!(alter_region_request.schema_version, 1);
-        assert_eq!(
-            alter_region_request.kind,
-            Some(region::alter_request::Kind::AddColumns(
-                region::AddColumns {
-                    add_columns: vec![region::AddColumn {
-                        column_def: Some(RegionColumnDef {
+        {
+            let add_column_task = AlterTableTask {
+                alter_table: AlterExpr {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    kind: Some(Kind::AddColumns(AddColumns {
+                        add_columns: vec![AddColumn {
                             column_def: Some(PbColumnDef {
                                 name: "my_tag3".to_string(),
                                 data_type: ColumnDataType::String as i32,
@@ -245,15 +228,99 @@ mod tests {
                                 comment: String::new(),
                                 ..Default::default()
                             }),
-                            column_id: 3,
-                        }),
-                        location: Some(AddColumnLocation {
-                            location_type: LocationType::After as i32,
-                            after_column_name: "my_tag2".to_string(),
-                        }),
-                    }]
-                }
-            ))
-        );
+                            location: Some(AddColumnLocation {
+                                location_type: LocationType::After as i32,
+                                after_column_name: "my_tag2".to_string(),
+                            }),
+                        }],
+                    })),
+                },
+            };
+
+            let mut procedure = AlterTableProcedure::new(
+                cluster_id,
+                table_id,
+                add_column_task,
+                ddl_context.clone(),
+            )
+            .unwrap();
+            procedure.on_prepare().await.unwrap();
+            let Some(Body::Alter(alter_region_request)) =
+                procedure.make_alter_region_request(region_id).unwrap().body
+            else {
+                unreachable!()
+            };
+            assert_eq!(alter_region_request.region_id, region_id.as_u64());
+            assert_eq!(alter_region_request.schema_version, 1);
+            assert_eq!(
+                alter_region_request.kind,
+                Some(region::alter_request::Kind::AddColumns(
+                    region::AddColumns {
+                        add_columns: vec![region::AddColumn {
+                            column_def: Some(RegionColumnDef {
+                                column_def: Some(PbColumnDef {
+                                    name: "my_tag3".to_string(),
+                                    data_type: ColumnDataType::String as i32,
+                                    is_nullable: true,
+                                    default_constraint: b"hello".to_vec(),
+                                    semantic_type: SemanticType::Tag as i32,
+                                    comment: String::new(),
+                                    ..Default::default()
+                                }),
+                                column_id: 3,
+                            }),
+                            location: Some(AddColumnLocation {
+                                location_type: LocationType::After as i32,
+                                after_column_name: "my_tag2".to_string(),
+                            }),
+                        }]
+                    }
+                ))
+            );
+        }
+        {
+            let change_column_type_task = AlterTableTask {
+                alter_table: AlterExpr {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
+                        change_column_types: vec![ChangeColumnType {
+                            column_name: "cpu".to_string(),
+                            target_type: ColumnDataType::String as i32,
+                            target_type_extension: None,
+                        }],
+                    })),
+                },
+            };
+
+            let mut procedure = AlterTableProcedure::new(
+                cluster_id,
+                table_id,
+                change_column_type_task,
+                ddl_context,
+            )
+            .unwrap();
+            procedure.on_prepare().await.unwrap();
+            let Some(Body::Alter(alter_region_request)) =
+                procedure.make_alter_region_request(region_id).unwrap().body
+            else {
+                unreachable!()
+            };
+            assert_eq!(alter_region_request.region_id, region_id.as_u64());
+            assert_eq!(alter_region_request.schema_version, 1);
+            assert_eq!(
+                alter_region_request.kind,
+                Some(region::alter_request::Kind::ChangeColumnTypes(
+                    region::ChangeColumnTypes {
+                        change_column_types: vec![region::ChangeColumnType {
+                            column_name: "cpu".to_string(),
+                            target_type: ColumnDataType::String as i32,
+                            target_type_extension: None,
+                        }]
+                    }
+                ))
+            );
+        }
     }
 }

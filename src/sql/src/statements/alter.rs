@@ -15,7 +15,7 @@
 use std::fmt::{Debug, Display};
 
 use common_query::AddColumnLocation;
-use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
@@ -58,6 +58,11 @@ pub enum AlterTableOperation {
         column_def: ColumnDef,
         location: Option<AddColumnLocation>,
     },
+    /// `ALTER COLUMN <column_name> TYPE [target_type]`
+    ChangeColumnType {
+        column_name: Ident,
+        target_type: DataType,
+    },
     /// `DROP COLUMN <name>`
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
@@ -81,6 +86,12 @@ impl Display for AlterTableOperation {
             AlterTableOperation::DropColumn { name } => write!(f, r#"DROP COLUMN {name}"#),
             AlterTableOperation::RenameTable { new_table_name } => {
                 write!(f, r#"RENAME {new_table_name}"#)
+            }
+            AlterTableOperation::ChangeColumnType {
+                column_name,
+                target_type,
+            } => {
+                write!(f, r#"ALTER COLUMN {column_name} TYPE {target_type}"#)
             }
         }
     }
@@ -109,6 +120,27 @@ mod tests {
                 assert_eq!(
                     r#"
 ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"alter table monitor alter column load_15 type string;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Alter { .. });
+
+        match &stmts[0] {
+            Statement::Alter(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor ALTER COLUMN load_15 TYPE STRING"#,
                     &new_sql
                 );
             }
