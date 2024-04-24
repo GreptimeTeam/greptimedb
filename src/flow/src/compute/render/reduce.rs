@@ -260,7 +260,7 @@ fn eval_distinct_core(
             };
 
             if let Some(((k, v), t, d)) = new_key_val.clone() {
-                // update the inner_map, so later upadtes can be checked against it
+                // update the inner_map, so later updates can be checked against it
                 inner_map.insert(k.clone(), (v.clone(), t, d));
             }
             new_key_val
@@ -363,22 +363,22 @@ fn reduce_accum_subgraph(
         simple_aggrs,
         distinct_aggrs,
     } = accum_plan;
-    let mut key2vals = BTreeMap::<Row, Vec<(Row, repr::Diff)>>::new();
+    let mut key_to_vals = BTreeMap::<Row, Vec<(Row, repr::Diff)>>::new();
 
     for ((key, val), _tick, diff) in kv {
         // it is assumed that value is in order of insertion
-        let vals = key2vals.entry(key).or_default();
+        let vals = key_to_vals.entry(key).or_default();
         vals.push((val, diff));
     }
 
-    let mut all_updates = Vec::with_capacity(key2vals.len());
-    let mut all_outputs = Vec::with_capacity(key2vals.len());
+    let mut all_updates = Vec::with_capacity(key_to_vals.len());
+    let mut all_outputs = Vec::with_capacity(key_to_vals.len());
 
     // lock the arrange for write for the rest of function body
     // so to prevent wide race condition since we are going to update the arrangement by write after read
     // TODO(discord9): consider key-based lock
     let mut arrange = arrange.write();
-    for (key, value_diffs) in key2vals {
+    for (key, value_diffs) in key_to_vals {
         let col_diffs = {
             let row_len = value_diffs[0].0.len();
             // split value_diffs into columns
