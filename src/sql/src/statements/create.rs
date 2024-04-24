@@ -261,7 +261,7 @@ mod tests {
                             host > 'a',
                        )
                        engine=mito
-                       with(regions=1, ttl='7d', storage='File');
+                       with(ttl='7d', storage='File');
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -287,7 +287,6 @@ PARTITION ON COLUMNS (host) (
 )
 ENGINE=mito
 WITH(
-  regions = '1',
   storage = 'File',
   ttl = '7d'
 )"#,
@@ -364,14 +363,14 @@ ENGINE=mito
       )
       PARTITION ON COLUMNS (host) ()
       engine=mito
-      with(regions=1, ttl='7d', 'compaction.type'='world');
+      with(ttl='7d', 'compaction.type'='world');
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         match &result[0] {
             Statement::CreateTable(c) => {
-                assert_eq!(3, c.options.map.len());
+                assert_eq!(2, c.options.map.len());
             }
             _ => unreachable!(),
         }

@@ -1401,7 +1401,7 @@ ENGINE=mito";
                              memory float64,
                              TIME INDEX (ts),
                              PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             with(ttl='10s');
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -1437,7 +1437,7 @@ ENGINE=mito";
                 let options = &c.options;
                 assert_eq!(1, options.map.len());
                 let (k, v) = options.map.iter().next().unwrap();
-                assert_eq!(("regions", "1"), (k.as_str(), v.as_str()));
+                assert_eq!(("ttl", "10s"), (k.as_str(), v.as_str()));
             }
             _ => unreachable!(),
         }
@@ -1451,8 +1451,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -1469,8 +1468,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -1484,8 +1482,7 @@ ENGINE=mito";
                              t timestamp,
                              memory float64,
                              TIME INDEX (t),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());

@@ -6,7 +6,7 @@ create table foo (
      cpu double default 0,
      TIME INDEX (ts),
      PRIMARY KEY(host)
-) engine=mito with(regions=1);
+) engine=mito;
 
 DROP TABLE IF EXISTS foo;
 

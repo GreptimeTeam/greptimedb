@@ -27,20 +27,13 @@ use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self, OptionMap};
 use table::metadata::{TableInfoRef, TableMeta};
-use table::requests::{FILE_TABLE_META_KEY, REGIONS_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
+use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
 fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
     let table_opts = &table_meta.options;
     let mut options = HashMap::with_capacity(4 + table_opts.extra_options.len());
-
-    if !table_meta.region_numbers.is_empty() {
-        options.insert(
-            REGIONS_KEY.to_string(),
-            table_meta.region_numbers.len().to_string(),
-        );
-    }
 
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
         options.insert(
@@ -243,9 +236,7 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   PRIMARY KEY ("id", "host")
 )
 ENGINE=mito
-WITH(
-  regions = '3'
-)"#,
+"#,
             sql
         );
     }

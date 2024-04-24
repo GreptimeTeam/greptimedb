@@ -41,7 +41,6 @@ SHOW CREATE TABLE system_metrics;
 |                | )                                                         |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
-|                |   regions = '3',                                          |
 |                |   ttl = '7days',                                          |
 |                |   write_buffer_size = '1.0KiB'                            |
 |                | )                                                         |
@@ -68,9 +67,7 @@ show create table table_without_partition;
 |                         | )                                                         |
 |                         |                                                           |
 |                         | ENGINE=mito                                               |
-|                         | WITH(                                                     |
-|                         |   regions = '1'                                           |
-|                         | )                                                         |
+|                         |                                                           |
 +-------------------------+-----------------------------------------------------------+
 
 drop table table_without_partition;
