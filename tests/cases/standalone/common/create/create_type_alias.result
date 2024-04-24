@@ -47,7 +47,7 @@ SHOW CREATE TABLE data_types;
 |            |                                                            |
 |            | ENGINE=mito                                                |
 |            | WITH(                                                      |
-|            |   regions = 1                                              |
+|            |   regions = '1'                                            |
 |            | )                                                          |
 +------------+------------------------------------------------------------+
 

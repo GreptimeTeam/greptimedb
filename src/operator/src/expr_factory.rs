@@ -36,7 +36,6 @@ use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
-use sql::util::to_lowercase_options_map;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
 
@@ -190,8 +189,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
 
     let time_index = find_time_index(&create.constraints)?;
     let table_options = HashMap::from(
-        &TableOptions::try_from(&to_lowercase_options_map(&create.options))
-            .context(UnrecognizedTableOptionSnafu)?,
+        &TableOptions::try_from(create.options.as_ref()).context(UnrecognizedTableOptionSnafu)?,
     );
 
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;

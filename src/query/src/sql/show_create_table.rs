@@ -14,64 +14,42 @@
 
 //! Implementation of `SHOW CREATE TABLE` statement.
 
-use std::fmt::Display;
+use std::collections::HashMap;
 
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
 use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName, SqlOption, TableConstraint,
-    Value as SqlValue,
+    ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName, TableConstraint,
 };
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
-use sql::statements::{self};
+use sql::statements::{self, OptionMap};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::FILE_TABLE_META_KEY;
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
-#[inline]
-fn number_value<T: Display>(n: T) -> SqlValue {
-    SqlValue::Number(format!("{}", n), false)
-}
-
-#[inline]
-fn string_value(s: impl Into<String>) -> SqlValue {
-    SqlValue::SingleQuotedString(s.into())
-}
-
-#[inline]
-fn sql_option(name: &str, value: SqlValue) -> SqlOption {
-    SqlOption {
-        name: name.into(),
-        value: Expr::Value(value),
-    }
-}
-
-fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
+fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
     let table_opts = &table_meta.options;
-    let mut options = Vec::with_capacity(4 + table_opts.extra_options.len());
+    let mut options = HashMap::with_capacity(4 + table_opts.extra_options.len());
 
     if !table_meta.region_numbers.is_empty() {
-        options.push(sql_option(
-            "regions",
-            number_value(table_meta.region_numbers.len()),
-        ));
+        options.insert(
+            "regions".to_string(),
+            table_meta.region_numbers.len().to_string(),
+        );
     }
 
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
-        options.push(sql_option(
-            "write_buffer_size",
-            string_value(write_buffer_size.to_string()),
-        ));
+        options.insert(
+            "write_buffer_size".to_string(),
+            write_buffer_size.to_string(),
+        );
     }
     if let Some(ttl) = table_opts.ttl {
-        options.push(sql_option(
-            "ttl",
-            string_value(format_duration(ttl).to_string()),
-        ));
+        options.insert("ttl".to_string(), format_duration(ttl).to_string());
     }
 
     for (k, v) in table_opts
@@ -79,10 +57,10 @@ fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
         .iter()
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
-        options.push(sql_option(k, string_value(v)));
+        options.insert(k.to_string(), v.to_string());
     }
 
-    options
+    OptionMap { map: options }
 }
 
 #[inline]
@@ -266,7 +244,7 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
 )
 ENGINE=mito
 WITH(
-  regions = 3
+  regions = '3'
 )"#,
             sql
         );

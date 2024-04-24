@@ -135,7 +135,7 @@ PARTITION ON COLUMNS (n) (
 |       | )                                   |
 |       | ENGINE=mito                         |
 |       | WITH(                               |
-|       |   regions = 4                       |
+|       |   regions = '4'                     |
 |       | )                                   |
 +-------+-------------------------------------+"#
     } else {
@@ -152,7 +152,7 @@ PARTITION ON COLUMNS (n) (
 |       |                                     |
 |       | ENGINE=mito                         |
 |       | WITH(                               |
-|       |   regions = 1                       |
+|       |   regions = '1'                       |
 |       | )                                   |
 +-------+-------------------------------------+"#
     };
@@ -229,7 +229,7 @@ ENGINE=file
 WITH(
   format = 'csv',
   location = '{location}',
-  regions = 1
+  regions = '1'
 )"#
     );
     assert_eq!(actual.to_string(), expect);
@@ -2085,7 +2085,7 @@ PARTITION ON COLUMNS ("a") (
 )
 ENGINE=mito
 WITH(
-  regions = 1,
+  regions = '1',
   storage = '{storage_name}'
 )"#
                 )
@@ -2100,7 +2100,7 @@ WITH(
 
 ENGINE=mito
 WITH(
-  regions = 1,
+  regions = '1',
   storage = '{storage_name}'
 )"#
                 )

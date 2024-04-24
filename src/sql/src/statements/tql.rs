@@ -33,7 +33,6 @@ impl Display for Tql {
     }
 }
 
-// TODO: encapsulate shard TQL args into a struct and implement Display for it.
 fn format_tql(
     f: &mut std::fmt::Formatter<'_>,
     start: &str,
