@@ -436,8 +436,7 @@ dir = "/tmp/greptimedb/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## +toml2docs:none-default
-level = "debug"
-# level = "info"
+level = "info"
 
 ## Enable OTLP tracing.
 enable_otlp_tracing = false
