@@ -21,7 +21,7 @@ use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::key::{
-    PartitionId, TableMetaKey, TaskId, TABLE_TASK_KEY_PATTERN, TABLE_TASK_KEY_PREFIX,
+    FlowTaskId, PartitionId, TableMetaKey, TABLE_TASK_KEY_PATTERN, TABLE_TASK_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -35,7 +35,7 @@ use crate::FlownodeId;
 pub struct TableTaskKey {
     table_id: TableId,
     flownode_id: FlownodeId,
-    task_id: TaskId,
+    task_id: FlowTaskId,
     partition_id: PartitionId,
 }
 
@@ -44,7 +44,7 @@ impl TableTaskKey {
     pub fn new(
         table_id: TableId,
         flownode_id: FlownodeId,
-        task_id: TaskId,
+        task_id: FlowTaskId,
         partition_id: PartitionId,
     ) -> TableTaskKey {
         Self {
@@ -84,7 +84,7 @@ impl TableTaskKey {
         // Safety: pass the regex check above
         let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
-        let task_id = captures[3].parse::<TaskId>().unwrap();
+        let task_id = captures[3].parse::<FlowTaskId>().unwrap();
         let partition_id = captures[4].parse::<PartitionId>().unwrap();
         Ok(TableTaskKey::new(
             table_id,
@@ -141,7 +141,7 @@ impl TableTaskManager {
     /// Builds a create table task transaction.
     pub fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
-        task_id: TaskId,
+        task_id: FlowTaskId,
         flownode_ids: I,
         source_table_ids: &[TableId],
     ) -> Txn {

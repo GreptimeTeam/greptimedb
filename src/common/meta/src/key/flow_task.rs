@@ -20,7 +20,7 @@ use table::metadata::TableId;
 use super::txn_helper::TxnOpGetResponseSet;
 use super::{DeserializedValueWithBytes, PartitionId};
 use crate::error::Result;
-use crate::key::{txn_helper, TableMetaKey, TableMetaValue, TaskId, FLOW_TASK_KEY_PREFIX};
+use crate::key::{txn_helper, FlowTaskId, TableMetaKey, TableMetaValue, FLOW_TASK_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
@@ -28,12 +28,12 @@ use crate::FlownodeId;
 /// The key of flow task metadata.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlowTaskKey {
-    task_id: TaskId,
+    task_id: FlowTaskId,
 }
 
 impl FlowTaskKey {
     /// Returns a [FlowTaskKey] with the specified `task_id`.
-    pub fn new(task_id: TaskId) -> FlowTaskKey {
+    pub fn new(task_id: FlowTaskId) -> FlowTaskKey {
         FlowTaskKey { task_id }
     }
 }
@@ -86,7 +86,7 @@ impl FlowTaskManager {
     }
 
     /// Returns the [FlowTaskValue] of specified `task_id`.
-    pub async fn get(&self, task_id: TaskId) -> Result<Option<FlowTaskValue>> {
+    pub async fn get(&self, task_id: FlowTaskId) -> Result<Option<FlowTaskValue>> {
         let key = FlowTaskKey::new(task_id);
         let raw_key = key.as_raw_key();
         self.kv_backend
@@ -100,7 +100,7 @@ impl FlowTaskManager {
     /// Otherwise, the transaction will retrieve existing value.
     pub(crate) fn build_create_txn(
         &self,
-        task_id: TaskId,
+        task_id: FlowTaskId,
         flow_task_value: &FlowTaskValue,
     ) -> Result<(
         Txn,

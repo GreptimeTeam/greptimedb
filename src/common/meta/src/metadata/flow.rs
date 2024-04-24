@@ -21,7 +21,7 @@ use crate::key::flow_task_name::FlowTaskNameManager;
 use crate::key::flownode_task::FlownodeTaskManager;
 use crate::key::table_task::TableTaskManager;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::TaskId;
+use crate::key::FlowTaskId;
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
@@ -67,7 +67,7 @@ impl FlowMetadataManager {
     /// Creates metadata for task and returns an error if different metadata exists.
     pub async fn create_flow_metadata(
         &self,
-        task_id: TaskId,
+        task_id: FlowTaskId,
         flow_task_value: FlowTaskValue,
     ) -> Result<()> {
         let (create_flow_task_name_txn, on_create_flow_task_name_failure) =

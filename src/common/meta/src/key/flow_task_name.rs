@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    txn_helper, DeserializedValueWithBytes, TableMetaKey, TableMetaValue, TaskId,
+    txn_helper, DeserializedValueWithBytes, FlowTaskId, TableMetaKey, TableMetaValue,
     FLOW_TASK_NAME_KEY_PREFIX,
 };
 use crate::kv_backend::txn::Txn;
@@ -46,17 +46,17 @@ impl<'a> FlowTaskNameKey<'a> {
 /// The value of [FlowTaskNameKey].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlowTaskNameValue {
-    task_id: TaskId,
+    task_id: FlowTaskId,
 }
 
 impl FlowTaskNameValue {
     /// Returns a [FlowTaskNameValue] with specified [TaskId].
-    pub fn new(task_id: TaskId) -> Self {
+    pub fn new(task_id: FlowTaskId) -> Self {
         Self { task_id }
     }
 
     /// Returns the [TaskId]
-    pub fn task_id(&self) -> TaskId {
+    pub fn task_id(&self) -> FlowTaskId {
         self.task_id
     }
 }
@@ -89,7 +89,7 @@ impl FlowTaskNameManager {
         &self,
         catalog: &str,
         name: &str,
-        task_id: TaskId,
+        task_id: FlowTaskId,
     ) -> Result<(
         Txn,
         impl FnOnce(

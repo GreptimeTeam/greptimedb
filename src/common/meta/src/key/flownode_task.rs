@@ -19,7 +19,7 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::{
-    PartitionId, TableMetaKey, TaskId, FLOWNODE_TASK_KEY_PATTERN, FLOWNODE_TASK_KEY_PREFIX,
+    FlowTaskId, PartitionId, TableMetaKey, FLOWNODE_TASK_KEY_PATTERN, FLOWNODE_TASK_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -31,13 +31,13 @@ use crate::FlownodeId;
 /// The key of mapping [FlownodeId] to [TaskId].
 pub struct FlownodeTaskKey {
     flownode_id: FlownodeId,
-    task_id: TaskId,
+    task_id: FlowTaskId,
     partition_id: PartitionId,
 }
 
 impl FlownodeTaskKey {
     /// Returns a [FlownodeTaskKey] with the specified `flow_node` and `task_id`.
-    pub fn new(flownode_id: FlownodeId, task_id: TaskId, partition_id: PartitionId) -> Self {
+    pub fn new(flownode_id: FlownodeId, task_id: FlowTaskId, partition_id: PartitionId) -> Self {
         Self {
             flownode_id,
             task_id,
@@ -55,7 +55,7 @@ impl FlownodeTaskKey {
     }
 
     /// Strips the [TaskId] from bytes.
-    pub fn strip_task_id_and_partition_id(raw_key: &[u8]) -> Result<(TaskId, PartitionId)> {
+    pub fn strip_task_id_and_partition_id(raw_key: &[u8]) -> Result<(FlowTaskId, PartitionId)> {
         let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
@@ -72,7 +72,7 @@ impl FlownodeTaskKey {
                     err_msg: format!("Invalid FlownodeTaskKey '{key}'"),
                 })?;
         // Safety: pass the regex check above
-        let task_id = captures[2].parse::<TaskId>().unwrap();
+        let task_id = captures[2].parse::<FlowTaskId>().unwrap();
         let partition_id = captures[3].parse::<PartitionId>().unwrap();
         Ok((task_id, partition_id))
     }
@@ -94,7 +94,7 @@ pub struct FlownodeTaskManager {
 }
 
 /// Decodes `KeyValue` to ((),[TaskId])
-pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<(TaskId, PartitionId)> {
+pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<(FlowTaskId, PartitionId)> {
     FlownodeTaskKey::strip_task_id_and_partition_id(&kv.key)
 }
 
@@ -108,7 +108,7 @@ impl FlownodeTaskManager {
     pub fn tasks(
         &self,
         flownode_id: FlownodeId,
-    ) -> BoxStream<'static, Result<(TaskId, PartitionId)>> {
+    ) -> BoxStream<'static, Result<(FlowTaskId, PartitionId)>> {
         let start_key = FlownodeTaskKey::range_start_key(flownode_id);
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 
@@ -125,7 +125,7 @@ impl FlownodeTaskManager {
     /// Builds a create flownode task transaction.
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
-        task_id: TaskId,
+        task_id: FlowTaskId,
         flownode_ids: I,
     ) -> Txn {
         let txns = flownode_ids
