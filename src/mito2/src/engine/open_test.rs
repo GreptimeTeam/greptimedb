@@ -127,7 +127,7 @@ async fn test_engine_open_readonly() {
         )
         .await
         .unwrap_err();
-    assert_eq!(StatusCode::RegionReadonly, err.status_code());
+    assert_eq!(StatusCode::RegionNotReady, err.status_code());
 
     assert_eq!(Some(RegionRole::Follower), engine.role(region_id));
     // Set writable and write.

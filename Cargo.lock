@@ -5416,6 +5416,7 @@ dependencies = [
  "common-wal",
  "crc32fast",
  "criterion",
+ "crossbeam-utils",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
