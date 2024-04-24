@@ -176,7 +176,7 @@ impl TableNameManager {
     }
 
     /// Builds a update table name transaction. It only executes while the primary keys comparing successes.
-    /// 
+    ///
     /// Puts ``__flow_task_name/{catalog}/{task_name}` key.
     pub(crate) fn build_update_txn(
         &self,

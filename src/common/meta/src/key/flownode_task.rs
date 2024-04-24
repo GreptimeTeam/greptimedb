@@ -123,7 +123,7 @@ impl FlownodeTaskManager {
     }
 
     /// Builds a create flownode task transaction.
-    /// 
+    ///
     /// Puts `__flownode_task/{flownode_id}/{task_id}/{partition_id}` keys.
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
