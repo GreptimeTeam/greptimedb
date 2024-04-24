@@ -16,6 +16,7 @@ use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
 use crate::ir::create_expr::{CreateDatabaseExprBuilderError, CreateTableExprBuilderError};
+#[cfg(feature = "unstable")]
 use crate::utils::process::Pid;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -84,6 +85,7 @@ pub enum Error {
         error: std::io::Error,
     },
 
+    #[cfg(feature = "unstable")]
     #[snafu(display("Failed to kill a process, pid: {}", pid))]
     KillProcess {
         location: Location,
