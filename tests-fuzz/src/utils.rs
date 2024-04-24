@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod health;
+#[cfg(feature = "unstable")]
 pub mod process;
 
 use std::env;

@@ -27,6 +27,7 @@ use tokio::fs::OpenOptions;
 use tokio::process::Child;
 
 use crate::error::{self, Result};
+use crate::utils::health::HealthChecker;
 
 pub type Pid = u32;
 
@@ -140,14 +141,6 @@ impl ProcessManager {
 
         Ok(())
     }
-}
-
-/// Check health of the processing.
-#[async_trait::async_trait]
-pub trait HealthChecker: Send + Sync {
-    async fn check(&self);
-
-    fn wait_timeout(&self) -> Duration;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

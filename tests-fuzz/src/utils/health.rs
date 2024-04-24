@@ -15,7 +15,14 @@
 use std::time::Duration;
 
 use crate::utils::info;
-use crate::utils::process::HealthChecker;
+
+/// Check health of the processing.
+#[async_trait::async_trait]
+pub trait HealthChecker: Send + Sync {
+    async fn check(&self);
+
+    fn wait_timeout(&self) -> Duration;
+}
 
 /// Http health checker.
 pub struct HttpHealthChecker {
