@@ -233,7 +233,7 @@ fn reduce_subgraph(
 
 /// return distinct rows(distinct by row's key) from the input, but do not update the arrangement
 ///
-/// if the same key already exist, we only perserve the oldest value(It make sense for distinct input over key)
+/// if the same key already exist, we only preserve the oldest value(It make sense for distinct input over key)
 fn eval_distinct_core(
     arrange: ArrangeReader,
     kv: impl IntoIterator<Item = KeyValDiffRow>,
@@ -243,7 +243,7 @@ fn eval_distinct_core(
     let _ = err_collector;
 
     // note that we also need to keep track of the distinct rows inside the current input
-    // hence the `inner_map` to kepping track of the distinct rows
+    // hence the `inner_map` to keeping track of the distinct rows
     let mut inner_map = BTreeMap::new();
     kv.into_iter()
         .filter_map(|((key, val), ts, diff)| {
