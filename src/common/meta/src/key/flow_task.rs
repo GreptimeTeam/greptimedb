@@ -85,7 +85,7 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
 /// - Create metadata of the task.
 /// - Retrieve metadata of the task.
 /// - Delete metadata of the task.
-pub struct FlowMetadataManager {
+pub struct FlowTaskMetadataManager {
     flow_task_manager: FlowTaskInfoManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
@@ -93,8 +93,8 @@ pub struct FlowMetadataManager {
     kv_backend: KvBackendRef,
 }
 
-impl FlowMetadataManager {
-    /// Returns a new [FlowMetadataManager].
+impl FlowTaskMetadataManager {
+    /// Returns a new [FlowTaskMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             flow_task_manager: FlowTaskInfoManager::new(kv_backend.clone()),
@@ -121,7 +121,7 @@ impl FlowMetadataManager {
     }
 
     /// Creates metadata for task and returns an error if different metadata exists.
-    pub async fn create_flow_metadata(
+    pub async fn create_flow_task_metadata(
         &self,
         flow_task_id: FlowTaskId,
         flow_task_value: FlowTaskInfoValue,
@@ -251,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_flow_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv.clone());
         let task_id = 10;
         let catalog_name = "greptime";
         let flow_task_value = FlowTaskInfoValue {
@@ -266,12 +266,12 @@ mod tests {
             options: Default::default(),
         };
         flow_metadata_manager
-            .create_flow_metadata(task_id, flow_task_value.clone())
+            .create_flow_task_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         // Creates again.
         flow_metadata_manager
-            .create_flow_metadata(task_id, flow_task_value.clone())
+            .create_flow_task_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         let got = flow_metadata_manager
@@ -311,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_metadata_task_exists_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv);
         let task_id = 10;
         let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
@@ -325,7 +325,7 @@ mod tests {
             options: Default::default(),
         };
         flow_metadata_manager
-            .create_flow_metadata(task_id, flow_task_value.clone())
+            .create_flow_task_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         // Creates again.
@@ -341,7 +341,7 @@ mod tests {
             options: Default::default(),
         };
         let err = flow_metadata_manager
-            .create_flow_metadata(task_id + 1, flow_task_value)
+            .create_flow_task_metadata(task_id + 1, flow_task_value)
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::TaskAlreadyExists { .. });
@@ -350,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_metadata_unexpected_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv);
         let task_id = 10;
         let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
@@ -364,7 +364,7 @@ mod tests {
             options: Default::default(),
         };
         flow_metadata_manager
-            .create_flow_metadata(task_id, flow_task_value.clone())
+            .create_flow_task_metadata(task_id, flow_task_value.clone())
             .await
             .unwrap();
         // Creates again.
@@ -380,7 +380,7 @@ mod tests {
             options: Default::default(),
         };
         let err = flow_metadata_manager
-            .create_flow_metadata(task_id, flow_task_value)
+            .create_flow_task_metadata(task_id, flow_task_value)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Reads the different value"));
