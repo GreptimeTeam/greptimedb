@@ -134,6 +134,7 @@ PARTITION ON COLUMNS (n) (
 |       |   n >= 10 AND n < 100               |
 |       | )                                   |
 |       | ENGINE=mito                         |
+|       |                                     |
 +-------+-------------------------------------+"#
     } else {
         r#"+-------+-------------------------------------+
@@ -148,6 +149,7 @@ PARTITION ON COLUMNS (n) (
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
+|       |                                     |
 +-------+-------------------------------------+"#
     };
 
@@ -222,7 +224,7 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
 ENGINE=file
 WITH(
   format = 'csv',
-  location = '{location}',
+  location = '{location}'
 )"#
     );
     assert_eq!(actual.to_string(), expect);
