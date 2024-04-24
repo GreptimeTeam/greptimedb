@@ -212,7 +212,7 @@ jobs:
           max-total-time: 120
           unstable: 'true'
       - name: Upload unstable fuzz test logs
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: unstable-fuzz-logs
