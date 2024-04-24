@@ -9,7 +9,7 @@ inputs:
     required: true
   unstable:
     default: 'false'
-    description: "enable unstable feature"
+    description: "Enable unstable feature"
 runs:
   using: composite
   steps:

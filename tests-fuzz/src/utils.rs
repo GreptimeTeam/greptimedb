@@ -43,7 +43,7 @@ pub async fn init_greptime_connections_via_env() -> Connections {
     init_greptime_connections(mysql).await
 }
 
-/// Connects to GreptimeDB via env variables.
+/// Connects to GreptimeDB.
 pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
     let mysql = if let Some(addr) = mysql {
         Some(
