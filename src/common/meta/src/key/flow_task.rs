@@ -53,12 +53,17 @@ pub struct FlowTaskValue {
     pub(crate) sink_table: TableId,
     /// Which flow nodes this task is running on.
     pub(crate) flownode_ids: BTreeMap<PartitionId, FlownodeId>,
-    /// The metadata
+    /// The catalog name.
     pub(crate) catalog_name: String,
+    /// The task name.
     pub(crate) task_name: String,
+    /// The raw sql.
     pub(crate) raw_sql: String,
+    /// The expr of expire.
     pub(crate) expire_when: String,
+    /// The comment.
     pub(crate) comment: String,
+    /// The options.
     pub(crate) options: HashMap<String, String>,
 }
 
