@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, SchemaRef};
 use snafu::ResultExt;
 use store_api::data_source::DataSourceRef;
 use store_api::storage::ScanRequest;
@@ -80,5 +80,14 @@ impl Table {
     /// to optimise data retrieval.
     pub fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
         Ok(vec![self.filter_pushdown; filters.len()])
+    }
+
+    /// Get primary key columns in the definition order.
+    pub fn primary_key_columns(&self) -> impl Iterator<Item = ColumnSchema> + '_ {
+        self.table_info
+            .meta
+            .primary_key_indices
+            .iter()
+            .map(|i| self.table_info.meta.schema.column_schemas()[*i].clone())
     }
 }
