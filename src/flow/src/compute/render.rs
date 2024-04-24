@@ -105,13 +105,10 @@ impl<'referred, 'df> Context<'referred, 'df> {
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
             Plan::Mfp { input, mfp } => self.render_mfp(input, mfp),
             Plan::Reduce {
-                input: _,
-                key_val_plan: _,
-                reduce_plan: _,
-            } => NotImplementedSnafu {
-                reason: "Reduce is still WIP".to_string(),
-            }
-            .fail(),
+                input,
+                key_val_plan,
+                reduce_plan,
+            } => self.render_reduce(input, key_val_plan, reduce_plan),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP".to_string(),
             }
