@@ -28,13 +28,13 @@ use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::rpc::KeyValue;
 use crate::util::get_next_prefix_key;
 
-pub type KeyValueDecoderFn<K, V> = dyn Fn(KeyValue) -> Result<(K, V)> + Send + Sync;
+pub type KeyValueDecoderFn<T> = dyn Fn(KeyValue) -> Result<T> + Send + Sync;
 
-enum PaginationStreamState<K, V> {
+enum PaginationStreamState<T> {
     /// At the start of reading.
     Init,
     /// Decoding key value pairs.
-    Decoding(SimpleKeyValueDecoder<K, V>),
+    Decoding(SimpleKeyValueDecoder<T>),
     /// Retrieving data from backend.
     Reading(BoxFuture<'static, Result<(PaginationStreamFactory, Option<RangeResponse>)>>),
     /// Error
@@ -77,7 +77,7 @@ struct PaginationStreamFactory {
 }
 
 impl PaginationStreamFactory {
-    pub fn new(
+    fn new(
         kv: &KvBackendRef,
         key: Vec<u8>,
         range_end: Vec<u8>,
@@ -137,7 +137,7 @@ impl PaginationStreamFactory {
         }
     }
 
-    pub async fn read_next(mut self) -> Result<(Self, Option<RangeResponse>)> {
+    async fn read_next(mut self) -> Result<(Self, Option<RangeResponse>)> {
         if self.more {
             let resp = self
                 .adaptive_range(RangeRequest {
@@ -174,18 +174,19 @@ impl PaginationStreamFactory {
     }
 }
 
-pub struct PaginationStream<K, V> {
-    state: PaginationStreamState<K, V>,
-    decoder_fn: Arc<KeyValueDecoderFn<K, V>>,
+pub struct PaginationStream<T> {
+    state: PaginationStreamState<T>,
+    decoder_fn: Arc<KeyValueDecoderFn<T>>,
     factory: Option<PaginationStreamFactory>,
 }
 
-impl<K, V> PaginationStream<K, V> {
+impl<T> PaginationStream<T> {
+    /// Returns a new [PaginationStream].
     pub fn new(
         kv: KvBackendRef,
         req: RangeRequest,
         page_size: usize,
-        decoder_fn: Arc<KeyValueDecoderFn<K, V>>,
+        decoder_fn: Arc<KeyValueDecoderFn<T>>,
     ) -> Self {
         Self {
             state: PaginationStreamState::Init,
@@ -202,13 +203,13 @@ impl<K, V> PaginationStream<K, V> {
     }
 }
 
-struct SimpleKeyValueDecoder<K, V> {
+struct SimpleKeyValueDecoder<T> {
     kv: VecDeque<KeyValue>,
-    decoder: Arc<KeyValueDecoderFn<K, V>>,
+    decoder: Arc<KeyValueDecoderFn<T>>,
 }
 
-impl<K, V> Iterator for SimpleKeyValueDecoder<K, V> {
-    type Item = Result<(K, V)>;
+impl<T> Iterator for SimpleKeyValueDecoder<T> {
+    type Item = Result<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(kv) = self.kv.pop_front() {
@@ -219,8 +220,8 @@ impl<K, V> Iterator for SimpleKeyValueDecoder<K, V> {
     }
 }
 
-impl<K, V> Stream for PaginationStream<K, V> {
-    type Item = Result<(K, V)>;
+impl<T> Stream for PaginationStream<T> {
+    type Item = Result<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
