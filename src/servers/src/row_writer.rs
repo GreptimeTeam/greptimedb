@@ -29,6 +29,9 @@ use crate::error::{
     IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
 };
 
+/// The intermediate data structure for building the write request.
+/// It constructs the `schema` and `rows` as all input data row
+/// parsing is completed.
 pub struct TableData {
     schema: Vec<ColumnSchema>,
     rows: Vec<Row>,
@@ -140,15 +143,17 @@ impl MultiTableData {
     }
 }
 
+/// Write data as tags into the table data.
 pub fn write_tags(
     table_data: &mut TableData,
-    kvs: impl Iterator<Item = (String, String)>,
+    tags: impl Iterator<Item = (String, String)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
-    let ktv_iter = kvs.map(|(k, v)| (k, ColumnDataType::String, ValueData::StringValue(v)));
+    let ktv_iter = tags.map(|(k, v)| (k, ColumnDataType::String, ValueData::StringValue(v)));
     write_by_semantic_type(table_data, SemanticType::Tag, ktv_iter, one_row)
 }
 
+/// Write data as fields into the table data.
 pub fn write_fields(
     table_data: &mut TableData,
     fields: impl Iterator<Item = (String, ColumnDataType, ValueData)>,
@@ -157,6 +162,7 @@ pub fn write_fields(
     write_by_semantic_type(table_data, SemanticType::Field, fields, one_row)
 }
 
+/// Write data as a tag into the table data.
 pub fn write_tag(
     table_data: &mut TableData,
     name: impl ToString,
@@ -175,6 +181,7 @@ pub fn write_tag(
     )
 }
 
+/// Write i64 data as a field into the table data.
 pub fn write_f64(
     table_data: &mut TableData,
     name: impl ToString,
@@ -227,6 +234,7 @@ fn write_by_semantic_type(
     Ok(())
 }
 
+/// Write timestamp data as milliseconds into the table data.
 pub fn write_ts_to_millis(
     table_data: &mut TableData,
     name: impl ToString,
@@ -244,6 +252,7 @@ pub fn write_ts_to_millis(
     )
 }
 
+/// Write timestamp data as nanoseconds into the table data.
 pub fn write_ts_to_nanos(
     table_data: &mut TableData,
     name: impl ToString,
