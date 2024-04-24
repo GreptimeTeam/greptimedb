@@ -155,19 +155,16 @@ async fn execute_unstable_create_table(
         }
     }
 
-    for table in table_states.keys() {
-        loop {
-            let sql = format!("DROP TABLE IF EXISTS {}", table);
-            match sqlx::query(&sql).execute(&ctx.greptime).await {
-                Ok(result) => {
-                    info!("Drop table: {}, result: {result:?}", table);
-                    break;
-                }
-                Err(err) => warn!("Failed to drop table: {}, error: {err}", sql),
+    loop {
+        let sql = "DROP DATABASE IF EXISTS public";
+        match sqlx::query(&sql).execute(&ctx.greptime).await {
+            Ok(result) => {
+                info!("Drop table: {}, result: {result:?}", sql);
+                break;
             }
+            Err(err) => warn!("Failed to drop table: {}, error: {err}", sql),
         }
     }
-
     // Cleans up
     ctx.close().await;
     unstable_process_controller.stop();
