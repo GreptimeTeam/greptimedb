@@ -139,6 +139,8 @@ impl TableTaskManager {
     }
 
     /// Builds a create table task transaction.
+    /// 
+    /// Puts `__table_task/{table_id}/{node_id}/{partition_id}` keys.
     pub fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
         task_id: FlowTaskId,
