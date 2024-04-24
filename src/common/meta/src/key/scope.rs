@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Deref;
+
 use snafu::{ensure, OptionExt};
 
 use crate::error::{self, Result};
 
-const DELIMITER: u8 = b'/';
+/// The delimiter of key.
+pub const DELIMITER: u8 = b'/';
 
 /// The key of metadata.
 pub trait MetaKey<T> {
@@ -25,9 +28,17 @@ pub trait MetaKey<T> {
     fn from_bytes(bytes: &[u8]) -> Result<T>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FlowTaskScoped<T> {
     inner: T,
+}
+
+impl<T> Deref for FlowTaskScoped<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl<T> FlowTaskScoped<T> {
@@ -63,17 +74,29 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct CatalogScoped<T> {
     inner: T,
     catalog: String,
 }
 
+impl<T> Deref for CatalogScoped<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 impl<T> CatalogScoped<T> {
     /// Returns a new [CatalogScoped] key.
-    pub fn new(catalog: String, inner: T) -> Result<CatalogScoped<T>> {
-        // TODO(weny): Validates the catalog.
-        Ok(CatalogScoped { inner, catalog })
+    pub fn new(catalog: String, inner: T) -> CatalogScoped<T> {
+        CatalogScoped { inner, catalog }
+    }
+
+    /// Returns the `catalog`.
+    pub fn catalog(&self) -> &str {
+        &self.catalog
     }
 }
 
@@ -99,6 +122,25 @@ impl<T: MetaKey<T>> MetaKey<CatalogScoped<T>> for CatalogScoped<T> {
         // Safety: We don't need the `DELIMITER` char.
         let inner = T::from_bytes(&bytes[pos + 1..])?;
         Ok(CatalogScoped { inner, catalog })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BytesAdapter(Vec<u8>);
+
+impl From<Vec<u8>> for BytesAdapter {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl MetaKey<BytesAdapter> for BytesAdapter {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<BytesAdapter> {
+        Ok(BytesAdapter(bytes.to_vec()))
     }
 }
 
@@ -155,15 +197,12 @@ mod tests {
 
     #[test]
     fn test_flow_scoped_to_bytes() {
-        let key = FlowTaskScoped::new(
-            CatalogScoped::new(
-                "my_catalog".to_string(),
-                MockKey {
-                    inner: b"hi".to_vec(),
-                },
-            )
-            .unwrap(),
-        );
+        let key = FlowTaskScoped::new(CatalogScoped::new(
+            "my_catalog".to_string(),
+            MockKey {
+                inner: b"hi".to_vec(),
+            },
+        ));
         assert_eq!(b"__flow_task/my_catalog/hi".to_vec(), key.to_bytes());
     }
 

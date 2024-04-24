@@ -15,12 +15,14 @@
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
+use futures::TryStreamExt;
+use lazy_static::lazy_static;
+use regex::Regex;
 use snafu::OptionExt;
 
+use super::scope::{BytesAdapter, CatalogScoped, FlowTaskScoped, MetaKey};
 use crate::error::{self, Result};
-use crate::key::{
-    FlowTaskId, PartitionId, TableMetaKey, FLOWNODE_TASK_KEY_PATTERN, FLOWNODE_TASK_KEY_PREFIX,
-};
+use crate::key::{FlowTaskId, PartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -28,19 +30,92 @@ use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::FlownodeId;
 
-/// The key of mapping [FlownodeId] to [TaskId].
-pub struct FlownodeTaskKey {
-    flownode_id: FlownodeId,
-    task_id: FlowTaskId,
-    partition_id: PartitionId,
+lazy_static! {
+    static ref FLOWNODE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{FLOWNODE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)$"
+    ))
+    .unwrap();
+}
+
+const FLOWNODE_TASK_KEY_PREFIX: &str = "flownode";
+
+/// The key of mapping [FlownodeId] to [FlowTaskId].
+///
+/// The layout `__flow_task/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
+pub struct FlownodeTaskKey(FlowTaskScoped<CatalogScoped<FlownodeTaskKeyInner>>);
+
+impl MetaKey<FlownodeTaskKey> for FlownodeTaskKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<FlownodeTaskKey> {
+        Ok(FlownodeTaskKey(FlowTaskScoped::<
+            CatalogScoped<FlownodeTaskKeyInner>,
+        >::from_bytes(bytes)?))
+    }
 }
 
 impl FlownodeTaskKey {
-    /// Returns a [FlownodeTaskKey] with the specified `flow_node` and `task_id`.
-    pub fn new(flownode_id: FlownodeId, task_id: FlowTaskId, partition_id: PartitionId) -> Self {
+    /// Returns a new [FlownodeTaskKey].
+    pub fn new(
+        catalog: String,
+        flownode_id: FlownodeId,
+        flow_task_id: FlowTaskId,
+        partition_id: PartitionId,
+    ) -> FlownodeTaskKey {
+        let inner = FlownodeTaskKeyInner::new(flownode_id, flow_task_id, partition_id);
+        FlownodeTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+    }
+
+    /// The prefix used to retrieve all [FlownodeTaskKey]s with the specified `flownode_id`.
+    pub fn range_start_key(catalog: String, flownode_id: FlownodeId) -> Vec<u8> {
+        let catalog_scoped_key = CatalogScoped::new(
+            catalog,
+            BytesAdapter::from(FlownodeTaskKeyInner::range_start_key(flownode_id).into_bytes()),
+        );
+
+        FlowTaskScoped::new(catalog_scoped_key).to_bytes()
+    }
+
+    /// Returns the catalog.
+    pub fn catalog(&self) -> &str {
+        self.0.catalog()
+    }
+
+    /// Returns the [FlowTaskId].
+    pub fn flow_task_id(&self) -> FlowTaskId {
+        self.0.flow_task_id
+    }
+
+    /// Returns the [FlownodeId].
+    pub fn flownode_id(&self) -> FlownodeId {
+        self.0.flownode_id
+    }
+
+    /// Returns the [PartitionId].
+    pub fn partition_id(&self) -> PartitionId {
+        self.0.partition_id
+    }
+}
+
+/// The key of mapping [FlownodeId] to [TaskId].
+pub struct FlownodeTaskKeyInner {
+    flownode_id: FlownodeId,
+    flow_task_id: FlowTaskId,
+    partition_id: PartitionId,
+}
+
+impl FlownodeTaskKeyInner {
+    /// Returns a [FlownodeTaskKey] with the specified `flow_node` and `flow_task_id`.
+    pub fn new(
+        flownode_id: FlownodeId,
+        flow_task_id: FlowTaskId,
+        partition_id: PartitionId,
+    ) -> Self {
         Self {
             flownode_id,
-            task_id,
+            flow_task_id,
             partition_id,
         }
     }
@@ -50,41 +125,46 @@ impl FlownodeTaskKey {
     }
 
     /// The prefix used to retrieve all [FlownodeTaskKey]s with the specified `flownode_id`.
-    pub fn range_start_key(flownode_id: FlownodeId) -> String {
+    fn range_start_key(flownode_id: FlownodeId) -> String {
         format!("{}/", Self::prefix(flownode_id))
     }
+}
 
-    /// Strips the [TaskId] from bytes.
-    pub fn strip_task_id_and_partition_id(raw_key: &[u8]) -> Result<(FlowTaskId, PartitionId)> {
-        let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
+impl MetaKey<FlownodeTaskKeyInner> for FlownodeTaskKeyInner {
+    fn to_bytes(&self) -> Vec<u8> {
+        format!(
+            "{FLOWNODE_TASK_KEY_PREFIX}/{}/{}/{}",
+            self.flownode_id, self.flow_task_id, self.partition_id,
+        )
+        .into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<FlownodeTaskKeyInner> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
-                    "FlownodeTaskKey '{}' is not a valid UTF8 string: {e}",
-                    String::from_utf8_lossy(raw_key)
+                    "FlownodeTaskKeyInner '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
                 ),
             }
             .build()
         })?;
         let captures =
             FLOWNODE_TASK_KEY_PATTERN
-                .captures(&key)
+                .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid FlownodeTaskKey '{key}'"),
+                    err_msg: format!("Invalid FlownodeTaskKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
-        let task_id = captures[2].parse::<FlowTaskId>().unwrap();
+        let flownode_id = captures[1].parse::<FlownodeId>().unwrap();
+        let flow_task_id = captures[2].parse::<FlowTaskId>().unwrap();
         let partition_id = captures[3].parse::<PartitionId>().unwrap();
-        Ok((task_id, partition_id))
-    }
-}
 
-impl TableMetaKey for FlownodeTaskKey {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!(
-            "{FLOWNODE_TASK_KEY_PREFIX}/{}/{}/{}",
-            self.flownode_id, self.task_id, self.partition_id,
-        )
-        .into_bytes()
+        Ok(FlownodeTaskKeyInner {
+            flownode_id,
+            flow_task_id,
+            partition_id,
+        })
     }
 }
 
@@ -93,9 +173,9 @@ pub struct FlownodeTaskManager {
     kv_backend: KvBackendRef,
 }
 
-/// Decodes `KeyValue` to ((),[TaskId])
-pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<(FlowTaskId, PartitionId)> {
-    FlownodeTaskKey::strip_task_id_and_partition_id(&kv.key)
+/// Decodes `KeyValue` to [FlownodeTaskKey].
+pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<FlownodeTaskKey> {
+    FlownodeTaskKey::from_bytes(&kv.key)
 }
 
 impl FlownodeTaskManager {
@@ -107,10 +187,11 @@ impl FlownodeTaskManager {
     /// Retrieves all [TaskId]s of the specified `flownode_id`.
     pub fn tasks(
         &self,
+        catalog: &str,
         flownode_id: FlownodeId,
     ) -> BoxStream<'static, Result<(FlowTaskId, PartitionId)>> {
-        let start_key = FlownodeTaskKey::range_start_key(flownode_id);
-        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
+        let start_key = FlownodeTaskKey::range_start_key(catalog.to_string(), flownode_id);
+        let req = RangeRequest::new().with_prefix(start_key);
 
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
@@ -119,23 +200,29 @@ impl FlownodeTaskManager {
             Arc::new(flownode_task_key_decoder),
         );
 
-        Box::pin(stream)
+        Box::pin(stream.map_ok(|key| (key.flow_task_id(), key.partition_id())))
     }
 
     /// Builds a create flownode task transaction.
     ///
-    /// Puts `__flownode_task/{flownode_id}/{task_id}/{partition_id}` keys.
+    /// Puts `__flownode_task/{flownode_id}/{flow_task_id}/{partition_id}` keys.
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
-        task_id: FlowTaskId,
+        catalog: &str,
+        flow_task_id: FlowTaskId,
         flownode_ids: I,
     ) -> Txn {
         let txns = flownode_ids
             .into_iter()
             .map(|(partition_id, flownode_id)| {
-                let key = FlownodeTaskKey::new(flownode_id, task_id, partition_id);
-                let raw_key = key.as_raw_key();
-                TxnOp::Put(raw_key.clone(), vec![])
+                let key = FlownodeTaskKey::new(
+                    catalog.to_string(),
+                    flownode_id,
+                    flow_task_id,
+                    partition_id,
+                )
+                .to_bytes();
+                TxnOp::Put(key, vec![])
             })
             .collect::<Vec<_>>();
 
@@ -145,26 +232,27 @@ impl FlownodeTaskManager {
 
 #[cfg(test)]
 mod tests {
-    use super::FlownodeTaskKey;
-    use crate::key::TableMetaKey;
+    use crate::key::flownode_task::FlownodeTaskKey;
+    use crate::key::scope::MetaKey;
 
     #[test]
     fn test_key_serialization() {
-        let flownode_task = FlownodeTaskKey::new(1, 2, 0);
+        let flownode_task = FlownodeTaskKey::new("my_catalog".to_string(), 1, 2, 0);
         assert_eq!(
-            b"__flownode_task/1/2/0".to_vec(),
-            flownode_task.as_raw_key()
+            b"__flow_task/my_catalog/flownode/1/2/0".to_vec(),
+            flownode_task.to_bytes()
         );
-        let prefix = FlownodeTaskKey::range_start_key(1);
-        assert_eq!("__flownode_task/1/", &prefix);
+        let prefix = FlownodeTaskKey::range_start_key("my_catalog".to_string(), 1);
+        assert_eq!(b"__flow_task/my_catalog/flownode/1/".to_vec(), prefix);
     }
 
     #[test]
-    fn test_strip_task_id_and_partition_id() {
-        let key = b"__flownode_task/1/10/0".to_vec();
-        assert_eq!(
-            (10, 0),
-            FlownodeTaskKey::strip_task_id_and_partition_id(&key).unwrap()
-        );
+    fn test_key_deserialization() {
+        let bytes = b"__flow_task/my_catalog/flownode/1/2/0".to_vec();
+        let key = FlownodeTaskKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key.catalog(), "my_catalog");
+        assert_eq!(key.flownode_id(), 1);
+        assert_eq!(key.flow_task_id(), 2);
+        assert_eq!(key.partition_id(), 0);
     }
 }

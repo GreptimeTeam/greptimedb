@@ -36,16 +36,16 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Flow task key: `__flow_task/{catalog}/id/{task_id}`
+//! 6. Flow task key: `__flow_task/{catalog}/id/{flow_task_id}`
 //!     - Stores metadata of the task.
 //!
-//! 7. Flow task key: `__flow_task/{catalog}/name/{task_name}`
-//!     - Mapping {catalog}/{task_name} to {task_id}
+//! 7. Flow task name key: `__flow_task/{catalog}/name/{task_name}`
+//!     - Mapping {catalog}/{task_name} to {flow_task_id}
 //!
-//! 8. Flownode task key: `__flow_task/{catalog}/flownode/{flownode_id}/{task_id}/{partition_id}`
-//!     - Mapping {flownode_id} to {task_id}
+//! 8. Flownode task key: `__flow_task/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
+//!     - Mapping {flownode_id} to {flow_task_id}
 //!
-//! 9. Table task key: `__table_task/{catalog}/source_table/{table_id}/{flownode_id}/{task_id}/{partition_id}`
+//! 9. Table task key: `__table_task/{catalog}/source_table/{table_id}/{flownode_id}/{flow_task_id}/{partition_id}`
 //!     - Mapping source table's {table_id} to {flownode_id}
 //!     - Used in `Flownode` booting.
 //!
@@ -121,10 +121,6 @@ pub const MAINTENANCE_KEY: &str = "maintenance";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
-pub const TABLE_TASK_KEY_PREFIX: &str = "__table_task";
-pub const FLOWNODE_TASK_KEY_PREFIX: &str = "__flownode_task";
-pub const FLOW_TASK_KEY_PREFIX: &str = "__flow_task";
-pub const FLOW_TASK_NAME_KEY_PREFIX: &str = "__flow_task_name";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
@@ -144,20 +140,6 @@ pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 pub type FlowTaskId = u32;
 /// The partition of flow task.
 pub type PartitionId = u32;
-
-lazy_static! {
-    static ref FLOWNODE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{FLOWNODE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)$"
-    ))
-    .unwrap();
-}
-
-lazy_static! {
-    static ref TABLE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{TABLE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)/([0-9]*)$"
-    ))
-    .unwrap();
-}
 
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =

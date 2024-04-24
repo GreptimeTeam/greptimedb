@@ -67,26 +67,32 @@ impl FlowMetadataManager {
     /// Creates metadata for task and returns an error if different metadata exists.
     pub async fn create_flow_metadata(
         &self,
-        task_id: FlowTaskId,
+        flow_task_id: FlowTaskId,
         flow_task_value: FlowTaskValue,
     ) -> Result<()> {
         let (create_flow_task_name_txn, on_create_flow_task_name_failure) =
             self.flow_task_name_manager.build_create_txn(
                 &flow_task_value.catalog_name,
                 &flow_task_value.task_name,
-                task_id,
+                flow_task_id,
             )?;
 
-        let (create_flow_task_txn, on_create_flow_task_failure) = self
-            .flow_task_manager
-            .build_create_txn(task_id, &flow_task_value)?;
+        let (create_flow_task_txn, on_create_flow_task_failure) =
+            self.flow_task_manager.build_create_txn(
+                &flow_task_value.catalog_name,
+                flow_task_id,
+                &flow_task_value,
+            )?;
 
-        let create_flownode_task_txn = self
-            .flownode_task_manager
-            .build_create_txn(task_id, flow_task_value.flownode_ids().clone());
+        let create_flownode_task_txn = self.flownode_task_manager.build_create_txn(
+            &flow_task_value.catalog_name,
+            flow_task_id,
+            flow_task_value.flownode_ids().clone(),
+        );
 
         let create_table_task_txn = self.table_task_manager.build_create_txn(
-            task_id,
+            &flow_task_value.catalog_name,
+            flow_task_id,
             flow_task_value.flownode_ids().clone(),
             flow_task_value.source_table_ids(),
         );
@@ -104,25 +110,25 @@ impl FlowMetadataManager {
             let remote_flow_task_name = on_create_flow_task_name_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: format!(
-                    "Reads the empty flow task name during the creating flow task, task_id: {task_id}"
+                    "Reads the empty flow task name during the creating flow task, flow_task_id: {flow_task_id}"
                 ),
                 })?
                 .into_inner();
             ensure!(
-                remote_flow_task_name.task_id() == task_id,
+                remote_flow_task_name.flow_task_id() == flow_task_id,
                 error::TaskAlreadyExistsSnafu {
                     task_name: format!(
                         "{}.{}",
                         flow_task_value.catalog_name, flow_task_value.task_name
                     ),
-                    task_id,
+                    flow_task_id,
                 }
             );
 
             let remote_flow_task = on_create_flow_task_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg: format!(
-                    "Reads the empty flow task during the creating flow task, task_id: {task_id}"
+                    "Reads the empty flow task during the creating flow task, flow_task_id: {flow_task_id}"
                 ),
                 })?
                 .into_inner();
@@ -148,10 +154,11 @@ mod tests {
     #[tokio::test]
     async fn test_create_flow_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let task_id = 10;
+        let catalog_name = "greptime";
         let flow_task_value = FlowTaskValue {
-            catalog_name: "greptime".to_string(),
+            catalog_name: catalog_name.to_string(),
             task_name: "task".to_string(),
             source_tables: vec![1024, 1025, 1026],
             sink_table: 2049,
@@ -172,14 +179,14 @@ mod tests {
             .unwrap();
         let got = flow_metadata_manager
             .flow_task_manager()
-            .get(task_id)
+            .get(catalog_name, task_id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(got, flow_task_value);
         let tasks = flow_metadata_manager
             .flownode_task_manager()
-            .tasks(1)
+            .tasks(catalog_name, 1)
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -187,11 +194,20 @@ mod tests {
         for table_id in [1024, 1025, 1026] {
             let nodes = flow_metadata_manager
                 .table_task_manager()
-                .nodes(table_id)
+                .nodes(catalog_name, table_id)
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
-            assert_eq!(nodes, vec![TableTaskKey::new(table_id, 1, task_id, 0)]);
+            assert_eq!(
+                nodes,
+                vec![TableTaskKey::new(
+                    catalog_name.to_string(),
+                    table_id,
+                    1,
+                    task_id,
+                    0
+                )]
+            );
         }
     }
 

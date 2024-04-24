@@ -14,33 +14,99 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 use table::metadata::TableId;
 
-use super::txn_helper::TxnOpGetResponseSet;
-use super::{DeserializedValueWithBytes, PartitionId};
-use crate::error::Result;
-use crate::key::{txn_helper, FlowTaskId, TableMetaKey, TableMetaValue, FLOW_TASK_KEY_PREFIX};
+use crate::error::{self, Result};
+use crate::key::scope::{CatalogScoped, FlowTaskScoped, MetaKey};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::key::{txn_helper, DeserializedValueWithBytes, FlowTaskId, PartitionId, TableMetaValue};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
 
-/// The key of flow task metadata.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FlowTaskKey {
-    task_id: FlowTaskId,
+const FLOW_TASK_KEY_PREFIX: &str = "id";
+
+lazy_static! {
+    static ref FLOW_TASK_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{FLOW_TASK_KEY_PREFIX}/([0-9]*)$")).unwrap();
 }
 
-impl FlowTaskKey {
-    /// Returns a [FlowTaskKey] with the specified `task_id`.
-    pub fn new(task_id: FlowTaskId) -> FlowTaskKey {
-        FlowTaskKey { task_id }
+/// The key stores the metadata of the task.
+///
+/// The layout: `__flow_task/{catalog}/id/{flow_task_id}`.
+pub struct FlowTaskKey(FlowTaskScoped<CatalogScoped<FlowTaskKeyInner>>);
+
+impl MetaKey<FlowTaskKey> for FlowTaskKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKey> {
+        Ok(FlowTaskKey(FlowTaskScoped::<
+            CatalogScoped<FlowTaskKeyInner>,
+        >::from_bytes(bytes)?))
     }
 }
 
-impl TableMetaKey for FlowTaskKey {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!("{FLOW_TASK_KEY_PREFIX}/{}", self.task_id).into_bytes()
+impl FlowTaskKey {
+    /// Returns the [FlowTaskKey].
+    pub fn new(catalog: String, flow_task_id: FlowTaskId) -> FlowTaskKey {
+        let inner = FlowTaskKeyInner::new(flow_task_id);
+        FlowTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+    }
+
+    /// Returns the catalog.
+    pub fn catalog(&self) -> &str {
+        self.0.catalog()
+    }
+
+    /// Returns the [FlowTaskId].
+    pub fn flow_task_id(&self) -> FlowTaskId {
+        self.0.flow_task_id
+    }
+}
+
+/// The key of flow task metadata.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FlowTaskKeyInner {
+    flow_task_id: FlowTaskId,
+}
+
+impl FlowTaskKeyInner {
+    /// Returns a [FlowTaskKey] with the specified `flow_task_id`.
+    pub fn new(flow_task_id: FlowTaskId) -> FlowTaskKeyInner {
+        FlowTaskKeyInner { flow_task_id }
+    }
+}
+
+impl MetaKey<FlowTaskKeyInner> for FlowTaskKeyInner {
+    fn to_bytes(&self) -> Vec<u8> {
+        format!("{FLOW_TASK_KEY_PREFIX}/{}", self.flow_task_id).into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKeyInner> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            error::InvalidTableMetadataSnafu {
+                err_msg: format!(
+                    "FlowTaskKeyInner '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        let captures =
+            FLOW_TASK_KEY_PATTERN
+                .captures(key)
+                .context(error::InvalidTableMetadataSnafu {
+                    err_msg: format!("Invalid FlowTaskKeyInner '{key}'"),
+                })?;
+        // Safety: pass the regex check above
+        let flow_task_id = captures[1].parse::<FlowTaskId>().unwrap();
+        Ok(FlowTaskKeyInner { flow_task_id })
     }
 }
 
@@ -90,22 +156,27 @@ impl FlowTaskManager {
         Self { kv_backend }
     }
 
-    /// Returns the [FlowTaskValue] of specified `task_id`.
-    pub async fn get(&self, task_id: FlowTaskId) -> Result<Option<FlowTaskValue>> {
-        let key = FlowTaskKey::new(task_id);
-        let raw_key = key.as_raw_key();
+    /// Returns the [FlowTaskValue] of specified `flow_task_id`.
+    pub async fn get(
+        &self,
+        catalog: &str,
+        flow_task_id: FlowTaskId,
+    ) -> Result<Option<FlowTaskValue>> {
+        let key = FlowTaskKey::new(catalog.to_string(), flow_task_id).to_bytes();
         self.kv_backend
-            .get(&raw_key)
+            .get(&key)
             .await?
             .map(|x| FlowTaskValue::try_from_raw_value(&x.value))
             .transpose()
     }
 
-    /// Builds a create flow task transaction, it is expected that the `__flow_task/{task_id}` wasn't occupied.
+    /// Builds a create flow task transaction.
+    /// It is expected that the `__flow_task/{flow_task_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub(crate) fn build_create_txn(
         &self,
-        task_id: FlowTaskId,
+        catalog: &str,
+        flow_task_id: FlowTaskId,
         flow_task_value: &FlowTaskValue,
     ) -> Result<(
         Txn,
@@ -113,16 +184,13 @@ impl FlowTaskManager {
             &mut TxnOpGetResponseSet,
         ) -> Result<Option<DeserializedValueWithBytes<FlowTaskValue>>>,
     )> {
-        let key = FlowTaskKey::new(task_id);
-        let raw_key = key.as_raw_key();
-        let txn = txn_helper::build_put_if_absent_txn(
-            raw_key.clone(),
-            flow_task_value.try_as_raw_value()?,
-        );
+        let key = FlowTaskKey::new(catalog.to_string(), flow_task_id).to_bytes();
+        let txn =
+            txn_helper::build_put_if_absent_txn(key.clone(), flow_task_value.try_as_raw_value()?);
 
         Ok((
             txn,
-            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
         ))
     }
 }
@@ -133,7 +201,18 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let flow_task = FlowTaskKey::new(2);
-        assert_eq!(b"__flow_task/2".to_vec(), flow_task.as_raw_key());
+        let flow_task = FlowTaskKey::new("my_catalog".to_string(), 2);
+        assert_eq!(
+            b"__flow_task/my_catalog/id/2".to_vec(),
+            flow_task.to_bytes()
+        );
+    }
+
+    #[test]
+    fn test_key_deserialization() {
+        let bytes = b"__flow_task/my_catalog/id/2".to_vec();
+        let key = FlowTaskKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key.catalog(), "my_catalog");
+        assert_eq!(key.flow_task_id(), 2);
     }
 }

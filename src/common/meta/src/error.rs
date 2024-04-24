@@ -242,10 +242,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Task already exists, task: {}, task_id: {}", task_name, task_id))]
+    #[snafu(display(
+        "Task already exists, task: {}, flow_task_id: {}",
+        task_name,
+        flow_task_id
+    ))]
     TaskAlreadyExists {
         task_name: String,
-        task_id: FlowTaskId,
+        flow_task_id: FlowTaskId,
         location: Location,
     },
 

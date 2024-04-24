@@ -15,13 +15,14 @@
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
+use lazy_static::lazy_static;
+use regex::Regex;
 use snafu::OptionExt;
 use table::metadata::TableId;
 
+use super::scope::{BytesAdapter, CatalogScoped, FlowTaskScoped, MetaKey};
 use crate::error::{self, Result};
-use crate::key::{
-    FlowTaskId, PartitionId, TableMetaKey, TABLE_TASK_KEY_PATTERN, TABLE_TASK_KEY_PREFIX,
-};
+use crate::key::{FlowTaskId, PartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -29,27 +30,103 @@ use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::FlownodeId;
 
+const TABLE_TASK_KEY_PREFIX: &str = "source_table";
+
+lazy_static! {
+    static ref TABLE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{TABLE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)/([0-9]*)$"
+    ))
+    .unwrap();
+}
+
 /// The key of mapping [TableId] to [FlownodeId] and [TaskId].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TableTaskKey {
+struct TableTaskKeyInner {
     table_id: TableId,
     flownode_id: FlownodeId,
-    task_id: FlowTaskId,
+    flow_task_id: FlowTaskId,
     partition_id: PartitionId,
+}
+
+/// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
+///
+/// The layout: `__flow_task/{catalog}/table/{table_id}/{flownode_id}/{flow_task_id}/{partition_id}`.
+#[derive(Debug, PartialEq)]
+pub struct TableTaskKey(FlowTaskScoped<CatalogScoped<TableTaskKeyInner>>);
+
+impl MetaKey<TableTaskKey> for TableTaskKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<TableTaskKey> {
+        Ok(TableTaskKey(FlowTaskScoped::<
+            CatalogScoped<TableTaskKeyInner>,
+        >::from_bytes(bytes)?))
+    }
 }
 
 impl TableTaskKey {
     /// Returns a new [TableTaskKey].
     pub fn new(
+        catalog: String,
         table_id: TableId,
         flownode_id: FlownodeId,
-        task_id: FlowTaskId,
+        flow_task_id: FlowTaskId,
         partition_id: PartitionId,
     ) -> TableTaskKey {
+        let inner = TableTaskKeyInner::new(table_id, flownode_id, flow_task_id, partition_id);
+        TableTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+    }
+
+    /// The prefix used to retrieve all [TableTaskKey]s with the specified `table_id`.
+    pub fn range_start_key(catalog: String, table_id: TableId) -> Vec<u8> {
+        let catalog_scoped_key = CatalogScoped::new(
+            catalog,
+            BytesAdapter::from(TableTaskKeyInner::range_start_key(table_id).into_bytes()),
+        );
+
+        FlowTaskScoped::new(catalog_scoped_key).to_bytes()
+    }
+
+    /// Returns the catalog.
+    pub fn catalog(&self) -> &str {
+        self.0.catalog()
+    }
+
+    /// Returns the source [TableId].
+    pub fn source_table_id(&self) -> TableId {
+        self.0.table_id
+    }
+
+    /// Returns the [FlowTaskId].
+    pub fn flow_task_id(&self) -> FlowTaskId {
+        self.0.flow_task_id
+    }
+
+    /// Returns the [FlownodeId].
+    pub fn flownode_id(&self) -> FlownodeId {
+        self.0.flownode_id
+    }
+
+    /// Returns the [PartitionId].
+    pub fn partition_id(&self) -> PartitionId {
+        self.0.partition_id
+    }
+}
+
+impl TableTaskKeyInner {
+    /// Returns a new [TableTaskKey].
+    fn new(
+        table_id: TableId,
+        flownode_id: FlownodeId,
+        flow_task_id: FlowTaskId,
+        partition_id: PartitionId,
+    ) -> TableTaskKeyInner {
         Self {
             table_id,
             flownode_id,
-            task_id,
+            flow_task_id,
             partition_id,
         }
     }
@@ -59,54 +136,53 @@ impl TableTaskKey {
     }
 
     /// The prefix used to retrieve all [TableTaskKey]s with the specified `table_id`.
-    pub fn range_start_key(table_id: TableId) -> String {
+    fn range_start_key(table_id: TableId) -> String {
         format!("{}/", Self::prefix(table_id))
     }
+}
 
-    /// Strips the [TaskId] from bytes.
-    pub fn strip_key(raw_key: &[u8]) -> Result<TableTaskKey> {
-        let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
+impl MetaKey<TableTaskKeyInner> for TableTaskKeyInner {
+    fn to_bytes(&self) -> Vec<u8> {
+        format!(
+            "{TABLE_TASK_KEY_PREFIX}/{}/{}/{}/{}",
+            self.table_id, self.flownode_id, self.flow_task_id, self.partition_id
+        )
+        .into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<TableTaskKeyInner> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
-                    "FlownodeTaskKey '{}' is not a valid UTF8 string: {e}",
-                    String::from_utf8_lossy(raw_key)
+                    "TableTaskKeyInner '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
                 ),
             }
             .build()
         })?;
         let captures =
             TABLE_TASK_KEY_PATTERN
-                .captures(&key)
+                .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid FlownodeTaskKey '{key}'"),
+                    err_msg: format!("Invalid TableTaskKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
         let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
-        let task_id = captures[3].parse::<FlowTaskId>().unwrap();
+        let flow_task_id = captures[3].parse::<FlowTaskId>().unwrap();
         let partition_id = captures[4].parse::<PartitionId>().unwrap();
-        Ok(TableTaskKey::new(
+        Ok(TableTaskKeyInner::new(
             table_id,
             flownode_id,
-            task_id,
+            flow_task_id,
             partition_id,
         ))
     }
 }
 
-impl TableMetaKey for TableTaskKey {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!(
-            "{TABLE_TASK_KEY_PREFIX}/{}/{}/{}/{}",
-            self.table_id, self.flownode_id, self.task_id, self.partition_id
-        )
-        .into_bytes()
-    }
-}
-
-/// Decodes `KeyValue` to ((),[TableTaskKey])
+/// Decodes `KeyValue` to [TableTaskKey].
 pub fn table_task_decoder(kv: KeyValue) -> Result<TableTaskKey> {
-    TableTaskKey::strip_key(&kv.key)
+    TableTaskKey::from_bytes(&kv.key)
 }
 
 /// The manager of [TableTaskKey].
@@ -121,10 +197,13 @@ impl TableTaskManager {
     }
 
     /// Retrieves all ([FlownodeId], [TaskId])s of the specified `table_id`.
-    pub fn nodes(&self, table_id: TableId) -> BoxStream<'static, Result<TableTaskKey>> {
-        let start_key = TableTaskKey::range_start_key(table_id);
-        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
-
+    pub fn nodes(
+        &self,
+        catalog: &str,
+        table_id: TableId,
+    ) -> BoxStream<'static, Result<TableTaskKey>> {
+        let start_key = TableTaskKey::range_start_key(catalog.to_string(), table_id);
+        let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
             req,
@@ -140,7 +219,8 @@ impl TableTaskManager {
     /// Puts `__table_task/{table_id}/{node_id}/{partition_id}` keys.
     pub fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
         &self,
-        task_id: FlowTaskId,
+        catalog: &str,
+        flow_task_id: FlowTaskId,
         flownode_ids: I,
         source_table_ids: &[TableId],
     ) -> Txn {
@@ -149,8 +229,14 @@ impl TableTaskManager {
             .flat_map(|(partition_id, flownode_id)| {
                 source_table_ids.iter().map(move |table_id| {
                     TxnOp::Put(
-                        TableTaskKey::new(*table_id, flownode_id, task_id, partition_id)
-                            .as_raw_key(),
+                        TableTaskKey::new(
+                            catalog.to_string(),
+                            *table_id,
+                            flownode_id,
+                            flow_task_id,
+                            partition_id,
+                        )
+                        .to_bytes(),
                         vec![],
                     )
                 })
@@ -167,21 +253,26 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let table_task_key = TableTaskKey::new(1024, 1, 2, 0);
+        let table_task_key = TableTaskKey::new("my_catalog".to_string(), 1024, 1, 2, 0);
         assert_eq!(
-            b"__table_task/1024/1/2/0".to_vec(),
-            table_task_key.as_raw_key()
+            b"__flow_task/my_catalog/source_table/1024/1/2/0".to_vec(),
+            table_task_key.to_bytes(),
         );
-        let prefix = TableTaskKey::range_start_key(1024);
-        assert_eq!("__table_task/1024/", &prefix);
+        let prefix = TableTaskKey::range_start_key("my_catalog".to_string(), 1024);
+        assert_eq!(
+            b"__flow_task/my_catalog/source_table/1024/".to_vec(),
+            prefix
+        );
     }
 
     #[test]
-    fn test_strip_task_id() {
-        let key = b"__table_task/1/10/100/0".to_vec();
-        assert_eq!(
-            TableTaskKey::new(1, 10, 100, 0),
-            TableTaskKey::strip_key(&key).unwrap()
-        );
+    fn test_key_deserialization() {
+        let bytes = b"__flow_task/my_catalog/source_table/1024/1/2/0".to_vec();
+        let key = TableTaskKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key.catalog(), "my_catalog");
+        assert_eq!(key.source_table_id(), 1024);
+        assert_eq!(key.flownode_id(), 1);
+        assert_eq!(key.flow_task_id(), 2);
+        assert_eq!(key.partition_id(), 0);
     }
 }
