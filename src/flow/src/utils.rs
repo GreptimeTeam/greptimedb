@@ -396,13 +396,18 @@ impl Arrangement {
     pub fn get(&self, now: Timestamp, key: &Row) -> Option<DiffRow> {
         // FAST PATH:
         //
-        // If `now <= lowest_ts in the spine`, and it's full arrangement, we can directly return the value
-        // from the current state (which is the first batch in the spine).
-        if let Some((lowest_ts, batch)) = self.spine.first_key_value()
-            && now <= *lowest_ts
+        // If `now <= last_compaction_time`, and it's full arrangement, we can directly return the value
+        // from the current state (which should be the first batch in the spine if it exist).
+        if let Some(last_compaction_time) = self.last_compaction_time()
+            && now <= last_compaction_time
             && self.full_arrangement
         {
-            return batch.get(key).and_then(|updates| updates.first().cloned());
+            // if the last compaction time's batch is not exist, it means the spine doesn't have it's first batch as current value
+            return self
+                .spine
+                .get(&last_compaction_time)
+                .and_then(|batch| batch.get(key))
+                .and_then(|updates| updates.first().cloned());
         }
 
         // SLOW PATH:
@@ -826,24 +831,25 @@ mod test {
         assert_eq!(arr.get_updates_in_range(1..7), sorted);
     }
 
-    // #[test]
-    // fn test_full_arrangement_get_from_first_entry() {
-    //     let mut arr = Arrangement::default();
+    #[test]
+    fn test_full_arrangement_get_from_first_entry() {
+        let mut arr = Arrangement::default();
+        // will form {3: [1, 2, 3]}
+        let updates = vec![
+            (kv(lit("a"), lit("x")), 3 /* ts */, 1 /* diff */),
+            (kv(lit("b"), lit("y")), 1 /* ts */, 1 /* diff */),
+            (kv(lit("b"), lit("y")), 2 /* ts */, -1 /* diff */),
+        ];
+        arr.apply_updates(0, updates).unwrap();
+        assert_eq!(arr.get(2, &lit("b")), None /* deleted */);
+        arr.full_arrangement = true;
+        assert_eq!(arr.get(2, &lit("b")), None /* still deleted */);
 
-    //     // will form {3: [1, 2, 3]}
-    //     let updates = vec![
-    //         (kv(lit("a"), lit("x")), 3 /* ts */, 1 /* diff */),
-    //         (kv(lit("b"), lit("y")), 1 /* ts */, 1 /* diff */),
-    //         (kv(lit("b"), lit("y")), 2 /* ts */, -1 /* diff */),
-    //     ];
-    //     arr.apply_updates(0, updates).unwrap();
+        arr.compact_to(1).unwrap();
 
-    //     assert_eq!(arr.get(2, &lit("b")), None /* deleted */);
-
-    //     arr.full_arrangement = true;
-    //     assert_eq!(
-    //         arr.get(2, &lit("b")),
-    //         Some((lit("y"), 1, 1)) /* come back? */
-    //     );
-    // }
+        assert_eq!(
+            arr.get(1, &lit("b")),
+            Some((lit("y"), 1, 1)) /* fast path */
+        );
+    }
 }
