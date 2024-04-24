@@ -25,9 +25,6 @@ Change the instance root directory(the default value: `/tmp/unstable_greptime/`)
 ```
 GT_FUZZ_INSTANCE_ROOT_DIR = /path/to/
 ```
-
-
-
 ## Run
 1. List all fuzz targets
 ```bash

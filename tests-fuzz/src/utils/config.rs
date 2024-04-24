@@ -39,6 +39,7 @@ pub fn render_config_file<C: Serialize>(template_path: &str, context: &C) -> Str
     tt.render(template_path, context).unwrap()
 }
 
+// Writes config file to `output_path`.
 pub async fn write_config_file<C: Serialize>(
     template_path: &str,
     context: &C,
