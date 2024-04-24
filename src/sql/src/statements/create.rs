@@ -498,8 +498,8 @@ CREATE EXTERNAL TABLE city (
 )
 ENGINE=file
 WITH(
-  format = csv,
-  location = /var/data/city.csv
+  format = 'csv',
+  location = '/var/data/city.csv'
 )"#,
                     &new_sql
                 );
