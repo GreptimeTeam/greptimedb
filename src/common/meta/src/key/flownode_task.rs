@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
@@ -56,7 +55,7 @@ impl FlownodeTaskKey {
     }
 
     /// Strips the [TaskId] from bytes.
-    pub fn strip_task_id(raw_key: &[u8]) -> Result<TaskId> {
+    pub fn strip_task_id_and_partition_id(raw_key: &[u8]) -> Result<(TaskId, PartitionId)> {
         let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
@@ -74,7 +73,8 @@ impl FlownodeTaskKey {
                 })?;
         // Safety: pass the regex check above
         let task_id = captures[2].parse::<TaskId>().unwrap();
-        Ok(task_id)
+        let partition_id = captures[3].parse::<PartitionId>().unwrap();
+        Ok((task_id, partition_id))
     }
 }
 
@@ -94,10 +94,8 @@ pub struct FlownodeTaskManager {
 }
 
 /// Decodes `KeyValue` to ((),[TaskId])
-pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<((), TaskId)> {
-    let task_id = FlownodeTaskKey::strip_task_id(&kv.key)?;
-
-    Ok(((), task_id))
+pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<(TaskId, PartitionId)> {
+    FlownodeTaskKey::strip_task_id_and_partition_id(&kv.key)
 }
 
 impl FlownodeTaskManager {
@@ -107,7 +105,10 @@ impl FlownodeTaskManager {
     }
 
     /// Retrieves all [TaskId]s of the specified `flownode_id`.
-    pub fn tasks(&self, flownode_id: FlownodeId) -> BoxStream<'static, Result<TaskId>> {
+    pub fn tasks(
+        &self,
+        flownode_id: FlownodeId,
+    ) -> BoxStream<'static, Result<(TaskId, PartitionId)>> {
         let start_key = FlownodeTaskKey::range_start_key(flownode_id);
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 
@@ -118,7 +119,7 @@ impl FlownodeTaskManager {
             Arc::new(flownode_task_key_decoder),
         );
 
-        Box::pin(stream.map(|kv| kv.map(|kv| kv.1)))
+        Box::pin(stream)
     }
 
     /// Builds a create flownode task transaction.
@@ -157,8 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_task_id() {
+    fn test_strip_task_id_and_partition_id() {
         let key = b"__flownode_task/1/10/0".to_vec();
-        assert_eq!(10, FlownodeTaskKey::strip_task_id(&key).unwrap());
+        assert_eq!(
+            (10, 0),
+            FlownodeTaskKey::strip_task_id_and_partition_id(&key).unwrap()
+        );
     }
 }

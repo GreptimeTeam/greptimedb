@@ -182,7 +182,7 @@ mod tests {
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
-        assert_eq!(tasks, vec![task_id]);
+        assert_eq!(tasks, vec![(task_id, 0)]);
         for table_id in [1024, 1025, 1026] {
             let nodes = flow_metadata_manager
                 .table_task_manager()
