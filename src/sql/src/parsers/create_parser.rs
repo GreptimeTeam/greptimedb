@@ -150,10 +150,8 @@ impl<'a> ParserContext<'a> {
             .parse_options(Keyword::WITH)
             .context(SyntaxSnafu)?
             .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect::<HashMap<String, String>>();
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
         for key in options.keys() {
             ensure!(
                 validate_table_option(key),

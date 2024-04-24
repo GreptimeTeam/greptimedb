@@ -129,10 +129,8 @@ impl<'a> ParserContext<'a> {
 
         let with = options
             .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect();
+            .map(parse_option_string)
+            .collect::<Result<With>>()?;
 
         let connection_options = self
             .parser
@@ -141,10 +139,8 @@ impl<'a> ParserContext<'a> {
 
         let connection = connection_options
             .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect();
+            .map(parse_option_string)
+            .collect::<Result<Connection>>()?;
 
         Ok((with, connection, location))
     }

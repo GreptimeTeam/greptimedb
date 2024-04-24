@@ -16,7 +16,9 @@ use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use sqlparser::ast::{Expr, ObjectName, Value};
+use sqlparser::ast::{Expr, ObjectName, SqlOption, Value};
+
+use crate::error::{InvalidTableOptionValueSnafu, Result};
 
 static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -46,16 +48,16 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
     format!("{}", Inner { name })
 }
 
-pub fn parse_option_string(value: Expr) -> Option<String> {
-    match value {
-        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => {
-            Some(v)
-        }
-        Expr::Value(Value::Number(v, l)) => {
-            Some(format!("{}{long}", v, long = if l { "L" } else { "" }))
-        }
-        _ => None,
-    }
+pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
+    let (key, value) = (option.name, option.value);
+    let v = match value {
+        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
+        Expr::Identifier(v) => v.value,
+        Expr::Value(Value::Number(v, l)) => format!("{}{long}", v, long = if l { "L" } else { "" }),
+        value => return InvalidTableOptionValueSnafu { key, value }.fail(),
+    };
+    let k = key.value.to_lowercase();
+    Ok((k, v))
 }
 
 /// Use regex to match and replace common seen secret values in SQL.
