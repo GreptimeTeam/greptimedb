@@ -344,8 +344,13 @@ fn reduce_distinct_subgraph(
 ///
 /// the data being send is just new rows that represent the new output after given input is processed
 ///
-/// i.e: for example before new updates comes in, the output of query `SELECT sum(number) FROM table`
-/// is 10, and after new updates comes in, the output is 15, then the new row being send is (15, now, 1)
+/// i.e: for example before new updates comes in, the output of query `SELECT sum(number), count(number) FROM table`
+/// is (10,2(), and after new updates comes in, the output is (15,3), then the new row being send is ((15, 3), now, 1)
+///
+/// while it will also update key -> accums's value, for example if it is empty before, it will become something like
+/// |offset| accum for sum | accum for count |
+/// where offset is a single value holding the end offset of each accumulator
+/// and the rest is the actual accumulator values which could be multiple values
 fn reduce_accum_subgraph(
     arrange: &ArrangeHandler,
     distinct_input: &Option<Vec<ArrangeHandler>>,
