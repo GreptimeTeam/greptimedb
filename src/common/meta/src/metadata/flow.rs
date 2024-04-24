@@ -115,6 +115,7 @@ impl FlowMetadataManager {
                         "{}.{}",
                         flow_task_value.catalog_name, flow_task_value.task_name
                     ),
+                    task_id,
                 }
             );
 
