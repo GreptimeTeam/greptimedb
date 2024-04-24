@@ -429,6 +429,12 @@ pub enum Error {
     #[snafu(display("Invalid role: {}", role))]
     InvalidRole { role: i32, location: Location },
 
+    #[snafu(display("Delimiter not found, key: {}", key))]
+    DelimiterNotFound { key: String },
+
+    #[snafu(display("Invalid prefix: {}, key: {}", prefix, key))]
+    MismatchPrefix { prefix: String, key: String },
+
     #[snafu(display("Failed to move values: {err_msg}"))]
     MoveValues { err_msg: String, location: Location },
 
@@ -503,7 +509,9 @@ impl ErrorExt for Error {
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
-            | TaskAlreadyExists { .. } => StatusCode::InvalidArguments,
+            | TaskAlreadyExists { .. }
+            | MismatchPrefix { .. }
+            | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

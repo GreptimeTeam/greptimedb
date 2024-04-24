@@ -62,6 +62,7 @@ pub mod flow_task;
 pub mod flow_task_name;
 pub mod flownode_task;
 pub mod schema_name;
+pub mod scope;
 pub mod table_info;
 pub mod table_name;
 pub mod table_task;
