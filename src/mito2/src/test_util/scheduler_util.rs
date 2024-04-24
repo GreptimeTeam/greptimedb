@@ -16,19 +16,25 @@
 
 use std::sync::Arc;
 
+use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
+use store_api::metadata::RegionMetadataRef;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
+use crate::config::MitoConfig;
 use crate::flush::FlushScheduler;
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::region::{ManifestContext, ManifestContextRef, RegionState};
 use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::worker::WorkerListener;
 
 /// Scheduler mocker.
 pub(crate) struct SchedulerEnv {
@@ -73,7 +79,13 @@ impl SchedulerEnv {
     ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
-        CompactionScheduler::new(scheduler, request_sender, Arc::new(CacheManager::default()))
+        CompactionScheduler::new(
+            scheduler,
+            request_sender,
+            Arc::new(CacheManager::default()),
+            Arc::new(MitoConfig::default()),
+            WorkerListener::default(),
+        )
     }
 
     /// Creates a new flush scheduler.
@@ -81,6 +93,27 @@ impl SchedulerEnv {
         let scheduler = self.get_scheduler();
 
         FlushScheduler::new(scheduler)
+    }
+
+    /// Creates a new manifest context.
+    pub(crate) async fn mock_manifest_context(
+        &self,
+        metadata: RegionMetadataRef,
+    ) -> ManifestContextRef {
+        Arc::new(ManifestContext::new(
+            RegionManifestManager::new(
+                metadata,
+                RegionManifestOptions {
+                    manifest_dir: "".to_string(),
+                    object_store: self.access_layer.object_store().clone(),
+                    compress_type: CompressionType::Uncompressed,
+                    checkpoint_distance: 10,
+                },
+            )
+            .await
+            .unwrap(),
+            RegionState::Writable,
+        ))
     }
 
     fn get_scheduler(&self) -> SchedulerRef {

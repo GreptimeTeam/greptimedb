@@ -382,17 +382,17 @@ impl Batch {
         self.take_in_place(&indices)
     }
 
-    /// Returns ids of fields in the [Batch] after applying the `projection`.
+    /// Returns ids and datatypes of fields in the [Batch] after applying the `projection`.
     pub(crate) fn projected_fields(
         metadata: &RegionMetadata,
         projection: &[ColumnId],
-    ) -> Vec<ColumnId> {
+    ) -> Vec<(ColumnId, ConcreteDataType)> {
         let projected_ids: HashSet<_> = projection.iter().copied().collect();
         metadata
             .field_columns()
             .filter_map(|column| {
                 if projected_ids.contains(&column.column_id) {
-                    Some(column.column_id)
+                    Some((column.column_id, column.column_schema.data_type.clone()))
                 } else {
                     None
                 }

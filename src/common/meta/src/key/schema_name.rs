@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -103,11 +102,11 @@ impl TableMetaKey for SchemaNameKey<'_> {
 }
 
 /// Decodes `KeyValue` to ({schema},())
-pub fn schema_decoder(kv: KeyValue) -> Result<(String, ())> {
+pub fn schema_decoder(kv: KeyValue) -> Result<String> {
     let str = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
     let schema_name = SchemaNameKey::try_from(str)?;
 
-    Ok((schema_name.schema.to_string(), ()))
+    Ok(schema_name.schema.to_string())
 }
 
 impl<'a> TryFrom<&'a str> for SchemaNameKey<'a> {
@@ -193,7 +192,7 @@ impl SchemaManager {
             Arc::new(schema_decoder),
         );
 
-        Box::pin(stream.map(|kv| kv.map(|kv| kv.0)))
+        Box::pin(stream)
     }
 }
 

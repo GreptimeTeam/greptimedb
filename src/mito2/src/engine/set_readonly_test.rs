@@ -66,7 +66,7 @@ async fn test_set_readonly_gracefully() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.status_code(), StatusCode::RegionReadonly);
+    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
 
     engine.set_writable(region_id, true).unwrap();
 
