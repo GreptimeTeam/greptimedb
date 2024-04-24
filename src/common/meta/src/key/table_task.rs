@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use snafu::OptionExt;
 use table::metadata::TableId;
 
@@ -106,10 +105,8 @@ impl TableMetaKey for TableTaskKey {
 }
 
 /// Decodes `KeyValue` to ((),[TableTaskKey])
-pub fn table_task_decoder(kv: KeyValue) -> Result<((), TableTaskKey)> {
-    let key = TableTaskKey::strip_key(&kv.key)?;
-
-    Ok(((), key))
+pub fn table_task_decoder(kv: KeyValue) -> Result<TableTaskKey> {
+    TableTaskKey::strip_key(&kv.key)
 }
 
 /// The manager of [TableTaskKey].
@@ -135,7 +132,7 @@ impl TableTaskManager {
             Arc::new(table_task_decoder),
         );
 
-        Box::pin(stream.map(|kv| kv.map(|kv| kv.1)))
+        Box::pin(stream)
     }
 
     /// Builds a create table task transaction.
