@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -41,6 +43,17 @@ impl DropTable {
     }
 }
 
+impl Display for DropTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DROP TABLE")?;
+        if self.drop_if_exists() {
+            f.write_str(" IF EXISTS")?;
+        }
+        let table_name = self.table_name();
+        write!(f, r#" {table_name}"#)
+    }
+}
+
 /// DROP DATABASE statement.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct DropDatabase {
@@ -64,5 +77,115 @@ impl DropDatabase {
 
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
+    }
+}
+
+impl Display for DropDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DROP DATABASE")?;
+        if self.drop_if_exists() {
+            f.write_str(" IF EXISTS")?;
+        }
+        let name = self.name();
+        write!(f, r#" {name}"#)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_display_drop_database() {
+        let sql = r"drop database test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropDatabase { .. });
+
+        match &stmts[0] {
+            Statement::DropDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP DATABASE test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"drop database if exists test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropDatabase { .. });
+
+        match &stmts[0] {
+            Statement::DropDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP DATABASE IF EXISTS test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_drop_table() {
+        let sql = r"drop table test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropTable { .. });
+
+        match &stmts[0] {
+            Statement::DropTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP TABLE test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"drop table if exists test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropTable { .. });
+
+        match &stmts[0] {
+            Statement::DropTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP TABLE IF EXISTS test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
     }
 }
