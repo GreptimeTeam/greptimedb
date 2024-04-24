@@ -20,8 +20,7 @@ use sqlparser::ast::Expr;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
-use crate::statements::OptionMap;
-use crate::util::redact_option_secret;
+use crate::statements::{redact_and_sort_options, OptionMap};
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -48,19 +47,21 @@ macro_rules! format_list_comma {
     };
 }
 
-macro_rules! format_sorted_hashmap {
-    ($hashmap:expr) => {{
-        let hashmap = $hashmap;
-        let mut sorted_keys: Vec<&String> = hashmap.keys().collect();
-        sorted_keys.sort();
-        let mut result = String::new();
-        for key in sorted_keys {
-            if let Some(val) = hashmap.get(key) {
-                result.push_str(&redact_option_secret(key, val));
+fn format_table_constraint(constraints: &[TableConstraint]) -> String {
+    constraints
+        .iter()
+        .map(|c| {
+            if is_time_index(c) {
+                let TableConstraint::Unique { columns, .. } = c else {
+                    unreachable!()
+                };
+
+                format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
+            } else {
+                format_indent!(c)
             }
-        }
-        result
-    }};
+        })
+        .join(LINE_SEP)
 }
 
 /// Time index name, used in table constraints.
@@ -88,58 +89,6 @@ pub struct CreateTable {
     /// Table options in `WITH`.
     pub options: Vec<SqlOption>,
     pub partitions: Option<Partitions>,
-}
-
-impl CreateTable {
-    fn format_constraints(&self) -> String {
-        self.constraints
-            .iter()
-            .map(|c| {
-                if is_time_index(c) {
-                    let TableConstraint::Unique { columns, .. } = c else {
-                        unreachable!()
-                    };
-
-                    format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
-                } else {
-                    format_indent!(c)
-                }
-            })
-            .join(LINE_SEP)
-    }
-
-    #[inline]
-    fn format_partitions(&self) -> String {
-        if let Some(partitions) = &self.partitions {
-            format!("{}\n", partitions)
-        } else {
-            String::default()
-        }
-    }
-
-    #[inline]
-    fn format_if_not_exists(&self) -> &str {
-        if self.if_not_exists {
-            "IF NOT EXISTS"
-        } else {
-            ""
-        }
-    }
-
-    #[inline]
-    fn format_options(&self) -> String {
-        if self.options.is_empty() {
-            String::default()
-        } else {
-            let options: Vec<&SqlOption> = self.options.iter().sorted().collect();
-            let options = format_list_indent!(options);
-            format!(
-                r#"WITH(
-{options}
-)"#
-            )
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
@@ -182,36 +131,37 @@ impl Display for Partitions {
                 "PARTITION ON COLUMNS ({}) (\n{}\n)",
                 format_list_comma!(self.column_list),
                 format_list_indent!(self.exprs),
-            )
-        } else {
-            write!(f, "")
+            )?;
         }
+        Ok(())
     }
 }
 
 impl Display for CreateTable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let if_not_exists = self.format_if_not_exists();
-        let name = &self.name;
-        let columns = format_list_indent!(self.columns);
-        let constraints = self.format_constraints();
-        let partitions = self.format_partitions();
-        let engine = &self.engine;
-        let options = self.format_options();
-        let maybe_external = if self.engine == FILE_ENGINE {
-            "EXTERNAL "
-        } else {
-            ""
-        };
-        write!(
-            f,
-            r#"CREATE {maybe_external}TABLE {if_not_exists} {name} (
-{columns},
-{constraints}
-)
-{partitions}ENGINE={engine}
-{options}"#
-        )
+        write!(f, "CREATE ")?;
+        if self.engine == FILE_ENGINE {
+            write!(f, "EXTERNAL ")?;
+        }
+        write!(f, "TABLE ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        writeln!(f, "{} (", &self.name)?;
+        writeln!(f, "{},", format_list_indent!(self.columns))?;
+        writeln!(f, "{}", format_table_constraint(&self.constraints))?;
+        writeln!(f, ")")?;
+        if let Some(partitions) = &self.partitions {
+            writeln!(f, "{partitions}")?;
+        }
+        writeln!(f, "ENGINE={}", &self.engine)?;
+        if !self.options.is_empty() {
+            writeln!(f, "WITH(")?;
+            let options: Vec<&SqlOption> = self.options.iter().sorted().collect();
+            writeln!(f, "{}", format_list_indent!(options))?;
+            write!(f, ")")?;
+        }
+        Ok(())
     }
 }
 
@@ -234,12 +184,11 @@ impl CreateDatabase {
 
 impl Display for CreateDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CREATE DATABASE")?;
+        write!(f, "CREATE DATABASE ")?;
         if self.if_not_exists {
-            f.write_str(" IF NOT EXISTS")?;
+            write!(f, "IF NOT EXISTS ")?;
         }
-        let name = &self.name;
-        write!(f, r#" {name}"#)
+        write!(f, "{}", &self.name)
     }
 }
 
@@ -256,56 +205,24 @@ pub struct CreateExternalTable {
     pub engine: String,
 }
 
-impl CreateExternalTable {
-    fn format_constraints(&self) -> String {
-        self.constraints
-            .iter()
-            .map(|c| {
-                if is_time_index(c) {
-                    let TableConstraint::Unique { columns, .. } = c else {
-                        unreachable!()
-                    };
-
-                    format_indent!("{}TIME INDEX ({})", format_list_comma!(columns))
-                } else {
-                    format_indent!(c)
-                }
-            })
-            .join(LINE_SEP)
-    }
-}
-
 impl Display for CreateExternalTable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let if_not_exists = match self.if_not_exists {
-            true => "IF NOT EXISTS",
-            false => "",
-        };
-
-        let options = if self.options.map.is_empty() {
-            String::default()
-        } else {
-            let options = format_sorted_hashmap!(&self.options.map);
-            format!(
-                r#"WITH(
-{options}
-)"#
-            )
-        };
-
-        let name = &self.name;
-        let columns = format_list_indent!(self.columns);
-        let constraints = self.format_constraints();
-        let engine = &self.engine;
-        write!(
-            f,
-            r#"CREATE EXTERNAL TABLE {if_not_exists} {name} (
-{columns},
-{constraints}
-)
-ENGINE={engine}
-{options}"#
-        )
+        write!(f, "CREATE EXTERNAL TABLE ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        writeln!(f, "{} (", &self.name)?;
+        writeln!(f, "{},", format_list_indent!(self.columns))?;
+        writeln!(f, "{}", format_table_constraint(&self.constraints))?;
+        writeln!(f, ")")?;
+        writeln!(f, "ENGINE={}", &self.engine)?;
+        if !self.options.map.is_empty() {
+            let options = redact_and_sort_options(&self.options);
+            writeln!(f, "WITH(")?;
+            writeln!(f, "{}", format_list_indent!(options))?;
+            write!(f, ")")?;
+        }
+        Ok(())
     }
 }
 
@@ -571,7 +488,7 @@ CREATE TABLE t2 LIKE t1"#,
                 let new_sql = format!("\n{}", create);
                 assert_eq!(
                     r#"
-CREATE EXTERNAL TABLE  city (
+CREATE EXTERNAL TABLE city (
   host STRING,
   ts TIMESTAMP,
   cpu FLOAT64 DEFAULT 0,
@@ -581,7 +498,8 @@ CREATE EXTERNAL TABLE  city (
 )
 ENGINE=file
 WITH(
-format = csv,location = /var/data/city.csv,
+  format = csv,
+  location = /var/data/city.csv
 )"#,
                     &new_sql
                 );

@@ -68,8 +68,7 @@ fn redact_and_sort_options(options: &OptionMap) -> Vec<String> {
         if let Some(val) = options.get(key) {
             let redacted = REDACTED_OPTIONS
                 .iter()
-                .find(|opt| opt.eq_ignore_ascii_case(key))
-                .is_some();
+                .any(|opt| opt.eq_ignore_ascii_case(key));
             if redacted {
                 result.push(format!("{key} = ******"));
             } else {

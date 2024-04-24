@@ -17,7 +17,7 @@ use std::fmt::Display;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::statements::{OptionMap, redact_and_sort_options};
+use crate::statements::{redact_and_sort_options, OptionMap};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Copy {
