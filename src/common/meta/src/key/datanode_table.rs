@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use store_api::storage::RegionNumber;
@@ -126,10 +125,8 @@ impl DatanodeTableValue {
 }
 
 /// Decodes `KeyValue` to ((),`DatanodeTableValue`)
-pub fn datanode_table_value_decoder(kv: KeyValue) -> Result<((), DatanodeTableValue)> {
-    let value = DatanodeTableValue::try_from_raw_value(&kv.value)?;
-
-    Ok(((), value))
+pub fn datanode_table_value_decoder(kv: KeyValue) -> Result<DatanodeTableValue> {
+    DatanodeTableValue::try_from_raw_value(&kv.value)
 }
 
 pub struct DatanodeTableManager {
@@ -163,7 +160,7 @@ impl DatanodeTableManager {
             Arc::new(datanode_table_value_decoder),
         );
 
-        Box::pin(stream.map(|kv| kv.map(|kv| kv.1)))
+        Box::pin(stream)
     }
 
     /// Builds the create datanode table transactions. It only executes while the primary keys comparing successes.

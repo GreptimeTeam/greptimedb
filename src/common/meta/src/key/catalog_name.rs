@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -84,11 +83,11 @@ impl<'a> TryFrom<&'a str> for CatalogNameKey<'a> {
 }
 
 /// Decoder `KeyValue` to ({catalog},())
-pub fn catalog_decoder(kv: KeyValue) -> Result<(String, ())> {
+pub fn catalog_decoder(kv: KeyValue) -> Result<String> {
     let str = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
     let catalog_name = CatalogNameKey::try_from(str)?;
 
-    Ok((catalog_name.catalog.to_string(), ()))
+    Ok(catalog_name.catalog.to_string())
 }
 
 pub struct CatalogManager {
@@ -134,7 +133,7 @@ impl CatalogManager {
             Arc::new(catalog_decoder),
         );
 
-        Box::pin(stream.map(|kv| kv.map(|kv| kv.0)))
+        Box::pin(stream)
     }
 }
 

@@ -102,15 +102,10 @@ impl LeaderCachedKvBackend {
                 self.store.clone(),
                 RangeRequest::new().with_prefix(prefix.as_bytes()),
                 DEFAULT_PAGE_SIZE,
-                Arc::new(|kv| Ok((kv, ()))),
+                Arc::new(|kv| Ok(kv)),
             );
 
-            let kvs = stream
-                .try_collect::<Vec<_>>()
-                .await?
-                .into_iter()
-                .map(|(kv, _)| kv)
-                .collect();
+            let kvs = stream.try_collect::<Vec<_>>().await?.into_iter().collect();
 
             self.cache
                 .batch_put(BatchPutRequest {
