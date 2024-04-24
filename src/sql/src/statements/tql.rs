@@ -33,6 +33,22 @@ impl Display for Tql {
     }
 }
 
+// TODO: encapsulate shard TQL args into a struct and implement Display for it.
+fn format_tql(
+    f: &mut std::fmt::Formatter<'_>,
+    start: &str,
+    end: &str,
+    step: &str,
+    lookback: Option<&str>,
+    query: &str,
+) -> std::fmt::Result {
+    write!(f, "({start}, {end}, {step}")?;
+    if let Some(lookback) = lookback {
+        write!(f, ", {lookback}")?;
+    }
+    write!(f, ") {query}")
+}
+
 /// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlEval {
@@ -45,14 +61,15 @@ pub struct TqlEval {
 
 impl Display for TqlEval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TQL EVAL(")?;
-        write!(f, "{}, ", &self.start)?;
-        write!(f, "{}, ", &self.end)?;
-        write!(f, "{}", &self.step)?;
-        if let Some(lookback) = &self.lookback {
-            write!(f, ", {}", lookback)?;
-        }
-        write!(f, ") {}", &self.query)
+        write!(f, "TQL EVAL")?;
+        format_tql(
+            f,
+            &self.start,
+            &self.end,
+            &self.step,
+            self.lookback.as_deref(),
+            &self.query,
+        )
     }
 }
 
@@ -74,14 +91,14 @@ impl Display for TqlExplain {
         if self.is_verbose {
             write!(f, "VERBOSE ")?;
         }
-        write!(f, "(")?;
-        write!(f, "{}, ", &self.start)?;
-        write!(f, "{}, ", &self.end)?;
-        write!(f, "{}", &self.step)?;
-        if let Some(lookback) = &self.lookback {
-            write!(f, ", {}", lookback)?;
-        }
-        write!(f, ") {}", &self.query)
+        format_tql(
+            f,
+            &self.start,
+            &self.end,
+            &self.step,
+            self.lookback.as_deref(),
+            &self.query,
+        )
     }
 }
 
@@ -103,14 +120,14 @@ impl Display for TqlAnalyze {
         if self.is_verbose {
             write!(f, "VERBOSE ")?;
         }
-        write!(f, "(")?;
-        write!(f, "{}, ", &self.start)?;
-        write!(f, "{}, ", &self.end)?;
-        write!(f, "{}", &self.step)?;
-        if let Some(lookback) = &self.lookback {
-            write!(f, ", {}", lookback)?;
-        }
-        write!(f, ") {}", &self.query)
+        format_tql(
+            f,
+            &self.start,
+            &self.end,
+            &self.step,
+            self.lookback.as_deref(),
+            &self.query,
+        )
     }
 }
 

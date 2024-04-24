@@ -61,18 +61,21 @@ use crate::error::{
 
 const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 
+/// Convert the options into redacted and sorted key-value string. Options with key in
+/// [REDACTED_OPTIONS] will be converted into `<key> = '******'`.
 fn redact_and_sort_options(options: &OptionMap) -> Vec<String> {
-    let mut result = vec![];
-    let keys = options.as_ref().keys().sorted();
+    let options = options.as_ref();
+    let mut result = Vec::with_capacity(options.len());
+    let keys = options.keys().sorted();
     for key in keys {
         if let Some(val) = options.get(key) {
             let redacted = REDACTED_OPTIONS
                 .iter()
                 .any(|opt| opt.eq_ignore_ascii_case(key));
             if redacted {
-                result.push(format!("{key} = ******"));
+                result.push(format!("{key} = '******'"));
             } else {
-                result.push(format!("{key} = {val}"));
+                result.push(format!("{key} = '{}'", val.escape_default()));
             }
         }
     }
