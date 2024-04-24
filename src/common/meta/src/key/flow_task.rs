@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod flow_task;
+pub(crate) mod flow_task_info;
 pub(crate) mod flow_task_name;
 pub(crate) mod flownode_task;
 pub(crate) mod table_task;
@@ -21,10 +21,10 @@ use std::ops::Deref;
 
 use snafu::{ensure, OptionExt};
 
-use self::flow_task::FlowTaskValue;
+use self::flow_task_info::FlowTaskInfoValue;
 use crate::ensure_values;
 use crate::error::{self, Result};
-use crate::key::flow_task::flow_task::FlowTaskManager;
+use crate::key::flow_task::flow_task_info::FlowTaskInfoManager;
 use crate::key::flow_task::flow_task_name::FlowTaskNameManager;
 use crate::key::flow_task::flownode_task::FlownodeTaskManager;
 use crate::key::flow_task::table_task::TableTaskManager;
@@ -85,7 +85,7 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
 /// - Retrieve metadata of the task.
 /// - Delete metadata of the task.
 pub struct FlowMetadataManager {
-    flow_task_manager: FlowTaskManager,
+    flow_task_manager: FlowTaskInfoManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
     flow_task_name_manager: FlowTaskNameManager,
@@ -96,7 +96,7 @@ impl FlowMetadataManager {
     /// Returns a new [FlowMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            flow_task_manager: FlowTaskManager::new(kv_backend.clone()),
+            flow_task_manager: FlowTaskInfoManager::new(kv_backend.clone()),
             flow_task_name_manager: FlowTaskNameManager::new(kv_backend.clone()),
             flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
             table_task_manager: TableTaskManager::new(kv_backend.clone()),
@@ -105,7 +105,7 @@ impl FlowMetadataManager {
     }
 
     /// Returns the [FlowTaskManager].
-    pub fn flow_task_manager(&self) -> &FlowTaskManager {
+    pub fn flow_task_manager(&self) -> &FlowTaskInfoManager {
         &self.flow_task_manager
     }
 
@@ -123,7 +123,7 @@ impl FlowMetadataManager {
     pub async fn create_flow_metadata(
         &self,
         flow_task_id: FlowTaskId,
-        flow_task_value: FlowTaskValue,
+        flow_task_value: FlowTaskInfoValue,
     ) -> Result<()> {
         let (create_flow_task_name_txn, on_create_flow_task_name_failure) =
             self.flow_task_name_manager.build_create_txn(
@@ -253,7 +253,7 @@ mod tests {
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let task_id = 10;
         let catalog_name = "greptime";
-        let flow_task_value = FlowTaskValue {
+        let flow_task_value = FlowTaskInfoValue {
             catalog_name: catalog_name.to_string(),
             task_name: "task".to_string(),
             source_tables: vec![1024, 1025, 1026],
@@ -312,7 +312,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue {
+        let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
             source_tables: vec![1024, 1025, 1026],
@@ -328,7 +328,7 @@ mod tests {
             .await
             .unwrap();
         // Creates again.
-        let flow_task_value = FlowTaskValue {
+        let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
             source_tables: vec![1024, 1025, 1026],
@@ -351,7 +351,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
-        let flow_task_value = FlowTaskValue {
+        let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
             source_tables: vec![1024, 1025, 1026],
@@ -367,7 +367,7 @@ mod tests {
             .await
             .unwrap();
         // Creates again.
-        let flow_task_value = FlowTaskValue {
+        let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
             source_tables: vec![1024, 1025, 1026],

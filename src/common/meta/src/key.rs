@@ -36,8 +36,8 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Flow task key: `__flow_task/{catalog}/id/{flow_task_id}`
-//!     - Stores metadata of the task.
+//! 6. Flow task info key: `__flow_task/{catalog}/info/{flow_task_id}`
+//!     - Stores metadata of the flow task.
 //!
 //! 7. Flow task name key: `__flow_task/{catalog}/name/{task_name}`
 //!     - Mapping {catalog}/{task_name} to {flow_task_id}
@@ -99,7 +99,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
-use self::flow_task::flow_task::FlowTaskValue;
+use self::flow_task::flow_task_info::FlowTaskInfoValue;
 use self::flow_task::flow_task_name::FlowTaskNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
@@ -1030,7 +1030,7 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     DatanodeTableValue,
-    FlowTaskValue,
+    FlowTaskInfoValue,
     FlowTaskNameValue
 }
 
