@@ -181,7 +181,7 @@ pub fn write_tag(
     )
 }
 
-/// Write i64 data as a field into the table data.
+/// Write float64 data as a field into the table data.
 pub fn write_f64(
     table_data: &mut TableData,
     name: impl ToString,

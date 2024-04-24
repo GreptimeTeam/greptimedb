@@ -115,24 +115,24 @@ mod tests {
     }
 
     #[test]
-    fn to_nanos_basic() {
+    fn test_to_nanos_basic() {
         assert_eq!(Precision::Second.to_nanos(1), Some(1_000_000_000));
         assert_eq!(Precision::Minute.to_nanos(1), Some(60 * 1_000_000_000));
     }
 
     #[test]
-    fn to_millis_basic() {
+    fn test_to_millis_basic() {
         assert_eq!(Precision::Second.to_millis(1), Some(1_000));
         assert_eq!(Precision::Minute.to_millis(1), Some(60_000));
     }
 
     #[test]
-    fn to_nanos_overflow() {
+    fn test_to_nanos_overflow() {
         assert_eq!(Precision::Hour.to_nanos(i64::MAX / 100), None);
     }
 
     #[test]
-    fn zero_input() {
+    fn test_zero_input() {
         assert_eq!(Precision::Second.to_nanos(0), Some(0));
         assert_eq!(Precision::Minute.to_millis(0), Some(0));
     }
