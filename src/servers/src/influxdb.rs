@@ -52,7 +52,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             .context(InfluxdbLineProtocolSnafu)?;
 
         let mut multi_table_data = MultiTableData::new();
-
+        let precision = unwrap_or_default_precision(value.precision);
         for line in &lines {
             let table_name = line.series.measurement.as_str();
             let tags = &line.series.tag_set;
@@ -87,7 +87,6 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             row_writer::write_fields(table_data, fields, &mut one_row)?;
 
             // timestamp
-            let precision = unwrap_or_default_precision(value.precision);
             row_writer::write_ts_to_nanos(
                 table_data,
                 INFLUXDB_TIMESTAMP_COLUMN_NAME,
@@ -298,21 +297,21 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
     fn extract_string_value(value: &ValueData) -> &str {
         match value {
             ValueData::StringValue(v) => v,
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 
     fn extract_f64_value(value: &ValueData) -> f64 {
         match value {
             ValueData::F64Value(v) => *v,
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 
     fn extract_ts_nanos_value(value: &ValueData) -> i64 {
         match value {
             ValueData::TimestampNanosecondValue(v) => *v,
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 }
