@@ -43,6 +43,7 @@ use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
+use itertools::Itertools;
 pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ExactNumberInfo, UnaryOperator};
@@ -57,6 +58,27 @@ use crate::error::{
     ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
+
+const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
+
+fn redact_and_sort_options(options: &OptionMap) -> Vec<String> {
+    let mut result = vec![];
+    let keys = options.as_ref().keys().sorted();
+    for key in keys {
+        if let Some(val) = options.get(key) {
+            let redacted = REDACTED_OPTIONS
+                .iter()
+                .find(|opt| opt.eq_ignore_ascii_case(key))
+                .is_some();
+            if redacted {
+                result.push(format!("{key} = ******"));
+            } else {
+                result.push(format!("{key} = {val}"));
+            }
+        }
+    }
+    result
+}
 
 fn parse_string_to_value(
     column_name: &str,

@@ -17,23 +17,7 @@ use std::fmt::Display;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::statements::OptionMap;
-use crate::util::redact_option_secret;
-
-macro_rules! format_sorted_hashmap {
-    ($hashmap:expr) => {{
-        let hashmap = $hashmap;
-        let mut sorted_keys: Vec<&String> = hashmap.keys().collect();
-        sorted_keys.sort();
-        let mut result = String::new();
-        for key in sorted_keys {
-            if let Some(val) = hashmap.get(key) {
-                result.push_str(&redact_option_secret(key, val));
-            }
-        }
-        result
-    }};
-}
+use crate::statements::{OptionMap, redact_and_sort_options};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Copy {
@@ -58,25 +42,26 @@ pub enum CopyTable {
 
 impl Display for CopyTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CopyTable::To(s) => {
-                let table_name = &s.table_name;
-                let with = s.format_with();
-                let connection = s.format_connection();
-                let location = &s.location;
-                write!(f, r#"COPY {table_name} TO {location} {with} {connection}"#)
+        write!(f, "COPY ")?;
+        let (with, connection) = match self {
+            CopyTable::To(args) => {
+                write!(f, "{} TO {}", &args.table_name, &args.location)?;
+                (&args.with, &args.connection)
             }
-            CopyTable::From(s) => {
-                let table_name = &s.table_name;
-                let with = s.format_with();
-                let connection = s.format_connection();
-                let location = &s.location;
-                write!(
-                    f,
-                    r#"COPY {table_name} FROM {location} {with} {connection}"#
-                )
+            CopyTable::From(args) => {
+                write!(f, "{} FROM {}", &args.table_name, &args.location)?;
+                (&args.with, &args.connection)
             }
+        };
+        if !with.map.is_empty() {
+            let options = redact_and_sort_options(with);
+            write!(f, " WITH ({})", options.join(", "))?;
         }
+        if !connection.map.is_empty() {
+            let options = redact_and_sort_options(connection);
+            write!(f, " CONNECTION ({})", options.join(", "))?;
+        }
+        Ok(())
     }
 }
 
@@ -88,28 +73,26 @@ pub enum CopyDatabase {
 
 impl Display for CopyDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CopyDatabase::To(s) => {
-                let database_name = &s.database_name;
-                let with = s.format_with();
-                let connection = s.format_connection();
-                let location = &s.location;
-                write!(
-                    f,
-                    r#"COPY DATABASE {database_name} TO {location} {with} {connection}"#
-                )
+        write!(f, "COPY DATABASE ")?;
+        let (with, connection) = match self {
+            CopyDatabase::To(args) => {
+                write!(f, "{} TO {}", &args.database_name, &args.location)?;
+                (&args.with, &args.connection)
             }
-            CopyDatabase::From(s) => {
-                let database_name = &s.database_name;
-                let with = s.format_with();
-                let connection = s.format_connection();
-                let location = &s.location;
-                write!(
-                    f,
-                    r#"COPY DATABASE {database_name} FROM {location} {with} {connection}"#
-                )
+            CopyDatabase::From(args) => {
+                write!(f, "{} FROM {}", &args.database_name, &args.location)?;
+                (&args.with, &args.connection)
             }
+        };
+        if !with.map.is_empty() {
+            let options = redact_and_sort_options(with);
+            write!(f, " WITH ({})", options.join(", "))?;
         }
+        if !connection.map.is_empty() {
+            let options = redact_and_sort_options(connection);
+            write!(f, " CONNECTION ({})", options.join(", "))?;
+        }
+        Ok(())
     }
 }
 
@@ -121,36 +104,6 @@ pub struct CopyDatabaseArgument {
     pub location: String,
 }
 
-impl CopyDatabaseArgument {
-    #[inline]
-    fn format_with(&self) -> String {
-        if self.with.map.is_empty() {
-            String::default()
-        } else {
-            let options = format_sorted_hashmap!(&self.with.map);
-            format!(
-                r#"WITH(
-{options}
-)"#
-            )
-        }
-    }
-
-    #[inline]
-    fn format_connection(&self) -> String {
-        if self.connection.map.is_empty() {
-            String::default()
-        } else {
-            let options = format_sorted_hashmap!(&self.connection.map);
-            format!(
-                r#"CONNECTION(
-{options}
-)"#
-            )
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct CopyTableArgument {
     pub table_name: ObjectName,
@@ -158,36 +111,6 @@ pub struct CopyTableArgument {
     pub connection: OptionMap,
     /// Copy tbl [To|From] 'location'.
     pub location: String,
-}
-
-impl CopyTableArgument {
-    #[inline]
-    fn format_with(&self) -> String {
-        if self.with.map.is_empty() {
-            String::default()
-        } else {
-            let options = format_sorted_hashmap!(&self.with.map);
-            format!(
-                r#"WITH(
-{options}
-)"#
-            )
-        }
-    }
-
-    #[inline]
-    fn format_connection(&self) -> String {
-        if self.connection.map.is_empty() {
-            String::default()
-        } else {
-            let options = format_sorted_hashmap!(&self.connection.map);
-            format!(
-                r#"CONNECTION(
-{options}
-)"#
-            )
-        }
-    }
 }
 
 #[cfg(test)]
@@ -227,14 +150,9 @@ mod tests {
 
         match &stmts[0] {
             Statement::Copy(copy) => {
-                let new_sql = format!("\n{}", copy);
+                let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"
-COPY tbl FROM s3://my-bucket/data.parquet WITH(
-format = parquet,pattern = .*parquet.*,
-) CONNECTION(
-region = us-west-2,secret_access_key = ******,
-)"#,
+                    r#"COPY tbl FROM s3://my-bucket/data.parquet WITH (format = parquet, pattern = .*parquet.*) CONNECTION (region = us-west-2, secret_access_key = ******)"#,
                     &new_sql
                 );
             }
@@ -257,14 +175,9 @@ region = us-west-2,secret_access_key = ******,
 
         match &stmts[0] {
             Statement::Copy(copy) => {
-                let new_sql = format!("\n{}", copy);
+                let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"
-COPY tbl TO s3://my-bucket/data.parquet WITH(
-format = parquet,pattern = .*parquet.*,
-) CONNECTION(
-region = us-west-2,secret_access_key = ******,
-)"#,
+                    r#"COPY tbl TO s3://my-bucket/data.parquet WITH (format = parquet, pattern = .*parquet.*) CONNECTION (region = us-west-2, secret_access_key = ******)"#,
                     &new_sql
                 );
             }
@@ -287,14 +200,9 @@ region = us-west-2,secret_access_key = ******,
 
         match &stmts[0] {
             Statement::Copy(copy) => {
-                let new_sql = format!("\n{}", copy);
+                let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"
-COPY DATABASE db1 FROM s3://my-bucket/data.parquet WITH(
-format = parquet,pattern = .*parquet.*,
-) CONNECTION(
-region = us-west-2,secret_access_key = ******,
-)"#,
+                    r#"COPY DATABASE db1 FROM s3://my-bucket/data.parquet WITH (format = parquet, pattern = .*parquet.*) CONNECTION (region = us-west-2, secret_access_key = ******)"#,
                     &new_sql
                 );
             }
@@ -317,14 +225,9 @@ region = us-west-2,secret_access_key = ******,
 
         match &stmts[0] {
             Statement::Copy(copy) => {
-                let new_sql = format!("\n{}", copy);
+                let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"
-COPY DATABASE db1 TO s3://my-bucket/data.parquet WITH(
-format = parquet,pattern = .*parquet.*,
-) CONNECTION(
-region = us-west-2,secret_access_key = ******,
-)"#,
+                    r#"COPY DATABASE db1 TO s3://my-bucket/data.parquet WITH (format = parquet, pattern = .*parquet.*) CONNECTION (region = us-west-2, secret_access_key = ******)"#,
                     &new_sql
                 );
             }
