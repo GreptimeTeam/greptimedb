@@ -28,6 +28,7 @@ pub trait MetaKey<T> {
     fn from_bytes(bytes: &[u8]) -> Result<T>;
 }
 
+/// The key of `{catalog}/` scope.
 #[derive(Debug, PartialEq)]
 pub struct CatalogScoped<T> {
     inner: T,

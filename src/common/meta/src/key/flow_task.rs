@@ -34,6 +34,7 @@ use crate::key::FlowTaskId;
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
+/// The key of `__flow_task/` scope.
 #[derive(Debug, PartialEq)]
 pub struct FlowTaskScoped<T> {
     inner: T,
