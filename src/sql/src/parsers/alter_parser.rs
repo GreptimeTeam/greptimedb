@@ -281,7 +281,8 @@ mod tests {
                 .unwrap_err();
 
         let err = result.output_msg();
-        assert!(err.contains("expect keyword TYPE or TO after ALTER TABLE ALTER COLUMN a, found STRING"));
+        assert!(err
+            .contains("expect keyword TYPE or TO after ALTER TABLE ALTER COLUMN a, found STRING"));
 
         let sql = "ALTER TABLE my_metric_1 ALTER COLUMN a TYPE STRING";
         let mut result =
