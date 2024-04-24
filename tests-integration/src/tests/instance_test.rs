@@ -553,7 +553,7 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
                             memory double,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#,
+                        ) engine=mito;"#,
     )
     .await
     .data;
@@ -1431,7 +1431,7 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
         cpu double default 0,
         TIME INDEX (ts),
         PRIMARY KEY(host)
-    ) engine=mito with(regions=1);"#,
+    ) engine=mito;"#,
     );
     let output = execute_sql(&instance, &create_sql).await.data;
     assert!(matches!(output, OutputData::AffectedRows(0)));
@@ -1548,7 +1548,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
                             memory double,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#,
+                        ) engine=mito;"#,
     )
     .await
     .data;

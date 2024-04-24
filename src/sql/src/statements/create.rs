@@ -385,7 +385,7 @@ ENGINE=mito
       )
       PARTITION ON COLUMNS (host) ()
       engine=mito
-      with(regions=1, ttl='7d', hello='world');
+      with(ttl='7d', hello='world');
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
