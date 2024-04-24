@@ -26,8 +26,7 @@ use common_time::Timestamp;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    IncompatibleSchemaSnafu, InfluxdbLinesWriteSnafu, Result, TimePrecisionSnafu,
-    TimestampOverflowSnafu,
+    IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
 };
 
 pub struct TableData {
@@ -295,7 +294,7 @@ fn write_ts_to(
         })?,
         None => {
             let timestamp = Timestamp::current_time(Nanosecond);
-            let unit: TimeUnit = precision.try_into().context(InfluxdbLinesWriteSnafu)?;
+            let unit: TimeUnit = precision.try_into().context(RowWriterSnafu)?;
             let timestamp = timestamp
                 .convert_to(unit)
                 .with_context(|| TimePrecisionSnafu {
