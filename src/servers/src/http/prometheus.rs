@@ -312,6 +312,8 @@ pub async fn labels_query(
     if queries.is_empty() {
         queries = form_params.matches.0;
     }
+
+    // Fetch all columns if no query matcher is provided
     if queries.is_empty() {
         match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
             Ok(labels) => {
@@ -323,6 +325,7 @@ pub async fn labels_query(
         }
     }
 
+    // Otherwise, run queries and extract column name from result set.
     let start = params
         .start
         .or(form_params.start)
@@ -331,7 +334,6 @@ pub async fn labels_query(
         .end
         .or(form_params.end)
         .unwrap_or_else(current_time_rfc3339);
-
     let lookback = params
         .lookback
         .or(form_params.lookback)
@@ -380,6 +382,7 @@ pub async fn labels_query(
     resp
 }
 
+/// For `/labels` API without matcher
 async fn get_all_column_names(
     catalog: &str,
     schema: &str,
@@ -397,6 +400,10 @@ async fn get_all_column_names(
             labels.insert(column.name.to_string());
         }
     }
+
+    let _ = labels.insert(METRIC_NAME.to_string());
+    let _ = labels.remove(GREPTIME_TIMESTAMP);
+    let _ = labels.remove(GREPTIME_VALUE);
 
     let mut labels_vec = labels.into_iter().collect::<Vec<_>>();
     labels_vec.sort_unstable();

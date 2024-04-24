@@ -472,6 +472,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     // labels without match[] param
     let res = client.get("/v1/prometheus/api/v1/labels").send().await;
     assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "__name__", "cpu", "host", "memory", "number", "ts"
+        ]))
+        .unwrap()
+    );
 
     // labels query with multiple match[] params
     let res = client
