@@ -3,11 +3,12 @@ description: 'Fuzz test given setup and service'
 inputs:
   target:
     description: "The fuzz target to test"
+  max-total-time:
+    description: "Max total time(secs)"
 runs:
   using: composite
   steps:
   - name: Run Fuzz Test
     shell: bash
-    run: cargo fuzz run ${{ inputs.target }} --fuzz-dir tests-fuzz -D -s none -- -max_total_time=120
-    env:
-      GT_MYSQL_ADDR: 127.0.0.1:4002
+    run: cargo fuzz run ${{ inputs.target }} --fuzz-dir tests-fuzz -D -s none -- -max_total_time=${{ inputs.max-total-time }}
+

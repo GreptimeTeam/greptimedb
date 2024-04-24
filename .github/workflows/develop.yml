@@ -163,8 +163,61 @@ jobs:
         uses: ./.github/actions/fuzz-test
         env:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
         with:
           target: ${{ matrix.target }}
+          max-total-time: 120
+
+  unstable-fuzztest:
+    name: Unstable Fuzz Test
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ "unstable_fuzz_create_table_standalone" ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "fuzz-test-targets"
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt update && sudo apt install -y libfuzzer-14-dev
+          cargo install cargo-fuzz
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+          GT_FUZZ_BINARY_PATH: ./bins/greptime
+          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/unstable-greptime/
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+      - name: Upload unstable fuzz test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unstable-fuzz-logs
+          path: /tmp/unstable-greptime/
+          retention-days: 3
+
 
   sqlness:
     name: Sqlness Test
