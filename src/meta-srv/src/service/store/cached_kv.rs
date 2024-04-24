@@ -102,7 +102,7 @@ impl LeaderCachedKvBackend {
                 self.store.clone(),
                 RangeRequest::new().with_prefix(prefix.as_bytes()),
                 DEFAULT_PAGE_SIZE,
-                Arc::new(|kv| Ok(kv)),
+                Arc::new(Ok),
             );
 
             let kvs = stream.try_collect::<Vec<_>>().await?.into_iter().collect();
