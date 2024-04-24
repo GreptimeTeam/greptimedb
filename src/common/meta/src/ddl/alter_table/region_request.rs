@@ -211,14 +211,48 @@ mod tests {
             )
             .await
             .unwrap();
-        {
-            let add_column_task = AlterTableTask {
-                alter_table: AlterExpr {
-                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                    table_name: table_name.to_string(),
-                    kind: Some(Kind::AddColumns(AddColumns {
-                        add_columns: vec![AddColumn {
+
+        let task = AlterTableTask {
+            alter_table: AlterExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                kind: Some(Kind::AddColumns(AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(PbColumnDef {
+                            name: "my_tag3".to_string(),
+                            data_type: ColumnDataType::String as i32,
+                            is_nullable: true,
+                            default_constraint: b"hello".to_vec(),
+                            semantic_type: SemanticType::Tag as i32,
+                            comment: String::new(),
+                            ..Default::default()
+                        }),
+                        location: Some(AddColumnLocation {
+                            location_type: LocationType::After as i32,
+                            after_column_name: "my_tag2".to_string(),
+                        }),
+                    }],
+                })),
+            },
+        };
+
+        let mut procedure =
+            AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
+        procedure.on_prepare().await.unwrap();
+        let Some(Body::Alter(alter_region_request)) =
+            procedure.make_alter_region_request(region_id).unwrap().body
+        else {
+            unreachable!()
+        };
+        assert_eq!(alter_region_request.region_id, region_id.as_u64());
+        assert_eq!(alter_region_request.schema_version, 1);
+        assert_eq!(
+            alter_region_request.kind,
+            Some(region::alter_request::Kind::AddColumns(
+                region::AddColumns {
+                    add_columns: vec![region::AddColumn {
+                        column_def: Some(RegionColumnDef {
                             column_def: Some(PbColumnDef {
                                 name: "my_tag3".to_string(),
                                 data_type: ColumnDataType::String as i32,
@@ -228,99 +262,113 @@ mod tests {
                                 comment: String::new(),
                                 ..Default::default()
                             }),
-                            location: Some(AddColumnLocation {
-                                location_type: LocationType::After as i32,
-                                after_column_name: "my_tag2".to_string(),
-                            }),
-                        }],
-                    })),
-                },
-            };
+                            column_id: 3,
+                        }),
+                        location: Some(AddColumnLocation {
+                            location_type: LocationType::After as i32,
+                            after_column_name: "my_tag2".to_string(),
+                        }),
+                    }]
+                }
+            ))
+        );
+    }
 
-            let mut procedure = AlterTableProcedure::new(
-                cluster_id,
-                table_id,
-                add_column_task,
-                ddl_context.clone(),
-            )
-            .unwrap();
-            procedure.on_prepare().await.unwrap();
-            let Some(Body::Alter(alter_region_request)) =
-                procedure.make_alter_region_request(region_id).unwrap().body
-            else {
-                unreachable!()
-            };
-            assert_eq!(alter_region_request.region_id, region_id.as_u64());
-            assert_eq!(alter_region_request.schema_version, 1);
-            assert_eq!(
-                alter_region_request.kind,
-                Some(region::alter_request::Kind::AddColumns(
-                    region::AddColumns {
-                        add_columns: vec![region::AddColumn {
-                            column_def: Some(RegionColumnDef {
-                                column_def: Some(PbColumnDef {
-                                    name: "my_tag3".to_string(),
-                                    data_type: ColumnDataType::String as i32,
-                                    is_nullable: true,
-                                    default_constraint: b"hello".to_vec(),
-                                    semantic_type: SemanticType::Tag as i32,
-                                    comment: String::new(),
-                                    ..Default::default()
-                                }),
-                                column_id: 3,
-                            }),
-                            location: Some(AddColumnLocation {
-                                location_type: LocationType::After as i32,
-                                after_column_name: "my_tag2".to_string(),
-                            }),
-                        }]
-                    }
-                ))
-            );
-        }
-        {
-            let change_column_type_task = AlterTableTask {
-                alter_table: AlterExpr {
-                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                    table_name: table_name.to_string(),
-                    kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
-                        change_column_types: vec![ChangeColumnType {
-                            column_name: "cpu".to_string(),
-                            target_type: ColumnDataType::String as i32,
-                            target_type_extension: None,
-                        }],
-                    })),
-                },
-            };
+    #[tokio::test]
+    async fn test_make_alter_column_type_region_request() {
+        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(datanode_manager);
+        let cluster_id = 1;
+        let table_id = 1024;
+        let region_id = RegionId::new(table_id, 1);
+        let table_name = "foo";
 
-            let mut procedure = AlterTableProcedure::new(
-                cluster_id,
-                table_id,
-                change_column_type_task,
-                ddl_context,
+        let create_table = TestCreateTableExprBuilder::default()
+            .column_defs([
+                TestColumnDefBuilder::default()
+                    .name("ts")
+                    .data_type(ColumnDataType::TimestampMillisecond)
+                    .semantic_type(SemanticType::Timestamp)
+                    .build()
+                    .unwrap()
+                    .into(),
+                TestColumnDefBuilder::default()
+                    .name("host")
+                    .data_type(ColumnDataType::String)
+                    .semantic_type(SemanticType::Tag)
+                    .build()
+                    .unwrap()
+                    .into(),
+                TestColumnDefBuilder::default()
+                    .name("cpu")
+                    .data_type(ColumnDataType::Float64)
+                    .semantic_type(SemanticType::Field)
+                    .build()
+                    .unwrap()
+                    .into(),
+            ])
+            .table_id(table_id)
+            .time_index("ts")
+            .primary_keys(["host".into()])
+            .table_name(table_name)
+            .build()
+            .unwrap()
+            .into();
+        let table_info = build_raw_table_info_from_expr(&create_table);
+
+        // Puts a value to table name key.
+        ddl_context
+            .table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![RegionRoute {
+                    region: Region::new_test(region_id),
+                    leader_peer: Some(Peer::empty(1)),
+                    follower_peers: vec![],
+                    leader_status: None,
+                    leader_down_since: None,
+                }]),
+                HashMap::new(),
             )
+            .await
             .unwrap();
-            procedure.on_prepare().await.unwrap();
-            let Some(Body::Alter(alter_region_request)) =
-                procedure.make_alter_region_request(region_id).unwrap().body
-            else {
-                unreachable!()
-            };
-            assert_eq!(alter_region_request.region_id, region_id.as_u64());
-            assert_eq!(alter_region_request.schema_version, 1);
-            assert_eq!(
-                alter_region_request.kind,
-                Some(region::alter_request::Kind::ChangeColumnTypes(
-                    region::ChangeColumnTypes {
-                        change_column_types: vec![region::ChangeColumnType {
-                            column_name: "cpu".to_string(),
-                            target_type: ColumnDataType::String as i32,
-                            target_type_extension: None,
-                        }]
-                    }
-                ))
-            );
-        }
+
+        let task = AlterTableTask {
+            alter_table: AlterExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
+                    change_column_types: vec![ChangeColumnType {
+                        column_name: "cpu".to_string(),
+                        target_type: ColumnDataType::String as i32,
+                        target_type_extension: None,
+                    }],
+                })),
+            },
+        };
+
+        let mut procedure =
+            AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
+        procedure.on_prepare().await.unwrap();
+        let Some(Body::Alter(alter_region_request)) =
+            procedure.make_alter_region_request(region_id).unwrap().body
+        else {
+            unreachable!()
+        };
+        assert_eq!(alter_region_request.region_id, region_id.as_u64());
+        assert_eq!(alter_region_request.schema_version, 1);
+        assert_eq!(
+            alter_region_request.kind,
+            Some(region::alter_request::Kind::ChangeColumnTypes(
+                region::ChangeColumnTypes {
+                    change_column_types: vec![region::ChangeColumnType {
+                        column_name: "cpu".to_string(),
+                        target_type: ColumnDataType::String as i32,
+                        target_type_extension: None,
+                    }]
+                }
+            ))
+        );
     }
 }

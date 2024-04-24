@@ -462,8 +462,8 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let columns = x
                     .change_column_types
                     .into_iter()
-                    .map(|x| x.try_into())
-                    .collect::<Result<Vec<_>>>()?;
+                    .map(|x| x.into())
+                    .collect::<Vec<_>>();
                 AlterKind::ChangeColumnTypes { columns }
             }
             alter_request::Kind::DropColumns(x) => {
@@ -624,20 +624,18 @@ impl ChangeColumnType {
     }
 }
 
-impl TryFrom<v1::region::ChangeColumnType> for ChangeColumnType {
-    type Error = MetadataError;
-
-    fn try_from(change_column_type: v1::region::ChangeColumnType) -> Result<Self> {
+impl From<v1::region::ChangeColumnType> for ChangeColumnType {
+    fn from(change_column_type: v1::region::ChangeColumnType) -> Self {
         let target_type = ColumnDataTypeWrapper::new(
             change_column_type.target_type(),
             change_column_type.target_type_extension,
         )
         .into();
 
-        Ok(ChangeColumnType {
+        ChangeColumnType {
             column_name: change_column_type.column_name,
             target_type,
-        })
+        }
     }
 }
 
