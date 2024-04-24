@@ -21,7 +21,6 @@ use catalog::CatalogManagerRef;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use common_telemetry::tracing;
@@ -313,16 +312,22 @@ pub async fn labels_query(
         queries = form_params.matches.0;
     }
 
+    // Fetch all tag columns. It will be used as white-list for tag names.
+    let mut labels = match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await
+    {
+        Ok(labels) => labels,
+        Err(e) => {
+            return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg())
+        }
+    };
+    // insert the special metric name label
+    let _ = labels.insert(METRIC_NAME.to_string());
+
     // Fetch all columns if no query matcher is provided
     if queries.is_empty() {
-        match get_all_column_names(&catalog, &schema, &handler.catalog_manager()).await {
-            Ok(labels) => {
-                return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
-            }
-            Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg())
-            }
-        }
+        let mut labels_vec = labels.into_iter().collect::<Vec<_>>();
+        labels_vec.sort_unstable();
+        return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels_vec));
     }
 
     // Otherwise, run queries and extract column name from result set.
@@ -339,8 +344,8 @@ pub async fn labels_query(
         .or(form_params.lookback)
         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
 
-    let mut labels = HashSet::new();
-    let _ = labels.insert(METRIC_NAME.to_string());
+    let mut fetched_labels = HashSet::new();
+    let _ = fetched_labels.insert(METRIC_NAME.to_string());
 
     let mut merge_map = HashMap::new();
     for query in queries {
@@ -354,7 +359,8 @@ pub async fn labels_query(
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
         if let Err(err) =
-            retrieve_labels_name_from_query_result(result, &mut labels, &mut merge_map).await
+            retrieve_labels_name_from_query_result(result, &mut fetched_labels, &mut merge_map)
+                .await
         {
             // Prometheus won't report error if querying nonexist label and metric
             if err.status_code() != StatusCode::TableNotFound
@@ -368,10 +374,11 @@ pub async fn labels_query(
         }
     }
 
-    let _ = labels.remove(GREPTIME_TIMESTAMP);
-    let _ = labels.remove(GREPTIME_VALUE);
+    // intersect `fetched_labels` with `labels` to filter out non-tag columns
+    fetched_labels.retain(|l| labels.contains(l));
+    let _ = labels.insert(METRIC_NAME.to_string());
 
-    let mut sorted_labels: Vec<String> = labels.into_iter().collect();
+    let mut sorted_labels: Vec<String> = fetched_labels.into_iter().collect();
     sorted_labels.sort();
     let merge_map = merge_map
         .into_iter()
@@ -382,12 +389,12 @@ pub async fn labels_query(
     resp
 }
 
-/// For `/labels` API without matcher
+/// Get all tag column name of the given schema
 async fn get_all_column_names(
     catalog: &str,
     schema: &str,
     manager: &CatalogManagerRef,
-) -> std::result::Result<Vec<String>, catalog::error::Error> {
+) -> std::result::Result<HashSet<String>, catalog::error::Error> {
     let table_names = manager.table_names(catalog, schema).await?;
 
     let mut labels = HashSet::new();
@@ -395,19 +402,12 @@ async fn get_all_column_names(
         let Some(table) = manager.table(catalog, schema, &table_name).await? else {
             continue;
         };
-        let schema = table.schema();
-        for column in schema.column_schemas() {
-            labels.insert(column.name.to_string());
+        for column in table.primary_key_columns() {
+            labels.insert(column.name);
         }
     }
 
-    let _ = labels.insert(METRIC_NAME.to_string());
-    let _ = labels.remove(GREPTIME_TIMESTAMP);
-    let _ = labels.remove(GREPTIME_VALUE);
-
-    let mut labels_vec = labels.into_iter().collect::<Vec<_>>();
-    labels_vec.sort_unstable();
-    Ok(labels_vec)
+    Ok(labels)
 }
 
 async fn retrieve_series_from_query_result(
