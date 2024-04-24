@@ -53,7 +53,7 @@ pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
     let v = match value {
         Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
         Expr::Identifier(v) => v.value,
-        Expr::Value(Value::Number(v, l)) => format!("{}{long}", v, long = if l { "L" } else { "" }),
+        Expr::Value(Value::Number(v, _)) => format!("{v}"),
         value => return InvalidTableOptionValueSnafu { key, value }.fail(),
     };
     let k = key.value.to_lowercase();
