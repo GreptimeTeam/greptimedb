@@ -27,8 +27,7 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterExpr, CreateDatabaseExpr, CreateFlowTaskExpr, CreateTableExpr, DropDatabaseExpr,
-    DropFlowTaskExpr, DropTableExpr, SchemaScopedTableName as PbSchemaScopedTableName,
-    TruncateTableExpr,
+    DropFlowTaskExpr, DropTableExpr, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -724,46 +723,13 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
     }
 }
 
-/// The table name of `schema_name`.
-pub struct SchemaScopedTableName {
-    schema_name: String,
-    table_name: String,
-}
-
-impl From<PbSchemaScopedTableName> for SchemaScopedTableName {
-    fn from(
-        PbSchemaScopedTableName {
-            schema_name,
-            table_name,
-        }: PbSchemaScopedTableName,
-    ) -> Self {
-        SchemaScopedTableName {
-            schema_name,
-            table_name,
-        }
-    }
-}
-
-impl From<SchemaScopedTableName> for PbSchemaScopedTableName {
-    fn from(
-        SchemaScopedTableName {
-            schema_name,
-            table_name,
-        }: SchemaScopedTableName,
-    ) -> Self {
-        PbSchemaScopedTableName {
-            schema_name,
-            table_name,
-        }
-    }
-}
-
 /// Create flow task
 pub struct CreateFlowTask {
     pub catalog_name: String,
     pub task_name: String,
-    pub source_table_names: Vec<SchemaScopedTableName>,
-    pub sink_table_name: SchemaScopedTableName,
+    pub source_table_names: Vec<TableName>,
+    pub sink_table_name: TableName,
+    pub or_replace: bool,
     pub create_if_not_exists: bool,
     pub expire_when: String,
     pub comment: String,
@@ -780,6 +746,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             task_name,
             source_table_names,
             sink_table_name,
+            or_replace,
             create_if_not_exists,
             expire_when,
             comment,
@@ -798,6 +765,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
                     err_msg: "expected sink_table_name",
                 })?
                 .into(),
+            or_replace,
             create_if_not_exists,
             expire_when,
             comment,
@@ -814,6 +782,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             task_name,
             source_table_names,
             sink_table_name,
+            or_replace,
             create_if_not_exists,
             expire_when,
             comment,
@@ -827,6 +796,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
                 task_name,
                 source_table_names: source_table_names.into_iter().map(Into::into).collect(),
                 sink_table_name: Some(sink_table_name.into()),
+                or_replace,
                 create_if_not_exists,
                 expire_when,
                 comment,
