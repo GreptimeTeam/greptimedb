@@ -52,6 +52,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid query plan: {source}"))]
+    InvalidQueryPlan {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid query: prost can't decode substrait plan: {inner}"))]
+    InvalidQueryProst {
+        inner: api::DecodeError,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid query, can't transform to substrait: {source}"))]
+    InvalidQuerySubstrait {
+        source: substrait::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Invalid query: {reason}"))]
     InvalidQuery { reason: String, location: Location },
 
@@ -93,9 +111,12 @@ impl ErrorExt for Error {
             }
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. } => StatusCode::TableNotFound,
-            &Self::InvalidQuery { .. } | &Self::Plan { .. } | &Self::Datatypes { .. } => {
-                StatusCode::PlanQuery
-            }
+            Self::InvalidQueryPlan { .. }
+            | Self::InvalidQuerySubstrait { .. }
+            | Self::InvalidQueryProst { .. }
+            | &Self::InvalidQuery { .. }
+            | &Self::Plan { .. }
+            | &Self::Datatypes { .. } => StatusCode::PlanQuery,
             Self::NoProtoType { .. } => StatusCode::Unexpected,
             &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
