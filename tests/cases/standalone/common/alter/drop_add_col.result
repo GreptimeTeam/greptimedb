@@ -64,3 +64,4 @@ SELECT * FROM test WHERE j = 0;
 DROP TABLE test;
 
 Affected Rows: 0
+
