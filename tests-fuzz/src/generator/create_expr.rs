@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
@@ -213,8 +212,6 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
 pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
     #[builder(default = "Box::new(WordGenerator)")]
     name_generator: Box<dyn Random<Ident, R>>,
-    #[builder(default)]
-    _phantom: PhantomData<R>,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExprGenerator<R> {
@@ -254,8 +251,6 @@ pub struct CreateLogicalTableExprGenerator<R: Rng + 'static> {
     #[builder(default = "Box::new(WordGenerator)")]
     name_generator: Box<dyn Random<Ident, R>>,
     labels: usize,
-    #[builder(default)]
-    _phantom: PhantomData<R>,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprGenerator<R> {
