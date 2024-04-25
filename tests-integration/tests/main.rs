@@ -30,5 +30,3 @@ http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 sql_tests!(File);
 
 region_migration_tests!(File);
-
-// TODO(niebayes): add integration tests for remote wal.

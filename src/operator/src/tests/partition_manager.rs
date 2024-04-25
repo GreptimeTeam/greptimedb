@@ -76,7 +76,6 @@ pub fn new_test_table_info(
 }
 
 fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
-    // TODO(niebayes): construct region wal options for test.
     let _ = regions;
     HashMap::default()
 }
