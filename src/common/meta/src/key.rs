@@ -53,10 +53,10 @@
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
 //! To simplify the managers used in struct fields and function parameters, we define "unify"
-//! table metadata manager: [TableMetadataManager] 
+//! table metadata manager: [TableMetadataManager]
 //! and flow task metadata manager: [FlowTaskMetadataManager](crate::key::flow_task::FlowTaskMetadataManager).
 //! It contains all the managers defined above. It's recommended to just use this manager only.
-//! 
+//!
 //! The whole picture of flow task keys will be like this:
 //!
 //! __flow_task/
@@ -79,7 +79,6 @@
 //!         {flownode_id}/
 //!           {task_id}/
 //!             {partition_id}
-
 
 pub mod catalog_name;
 pub mod datanode_table;
