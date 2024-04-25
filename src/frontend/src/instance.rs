@@ -650,7 +650,7 @@ mod tests {
                             ts TIMESTAMP,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
+                        ) engine=mito;"#;
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test drop table

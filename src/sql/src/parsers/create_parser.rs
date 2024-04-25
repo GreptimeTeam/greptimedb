@@ -34,8 +34,8 @@ use crate::parser::ParserContext;
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateTable, CreateTableLike, Partitions, TIME_INDEX,
 };
-use crate::statements::get_data_type_by_alias_name;
 use crate::statements::statement::Statement;
+use crate::statements::{get_data_type_by_alias_name, OptionMap};
 use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
@@ -73,32 +73,12 @@ impl<'a> ParserContext<'a> {
         }
 
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
-        let options = self
-            .parser
-            .parse_options(Keyword::WITH)
-            .context(SyntaxSnafu)?
-            .into_iter()
-            .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_lowercase(), v))
-                } else {
-                    None
-                }
-            })
-            .collect::<HashMap<String, String>>();
-        for key in options.keys() {
-            ensure!(
-                validate_table_option(key),
-                InvalidTableOptionSnafu {
-                    key: key.to_string()
-                }
-            );
-        }
+        let options = self.parse_create_table_options()?;
         Ok(Statement::CreateExternalTable(CreateExternalTable {
             name: table_name,
             columns,
             constraints,
-            options: options.into(),
+            options,
             if_not_exists,
             engine,
         }))
@@ -149,20 +129,7 @@ impl<'a> ParserContext<'a> {
         }
 
         let engine = self.parse_table_engine(default_engine())?;
-        let options = self
-            .parser
-            .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu)?;
-        for option in options.iter() {
-            ensure!(
-                validate_table_option(&option.name.value),
-                InvalidTableOptionSnafu {
-                    key: option.name.value.to_string()
-                }
-            );
-        }
-        // Sorts options so that `test_display_create_table` can always pass.
-        let options = options.into_iter().sorted().collect();
+        let options = self.parse_create_table_options()?;
         let create_table = CreateTable {
             if_not_exists,
             name: table_name,
@@ -175,6 +142,25 @@ impl<'a> ParserContext<'a> {
         };
 
         Ok(Statement::CreateTable(create_table))
+    }
+
+    fn parse_create_table_options(&mut self) -> Result<OptionMap> {
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
+        for key in options.keys() {
+            ensure!(
+                validate_table_option(key),
+                InvalidTableOptionSnafu {
+                    key: key.to_string()
+                }
+            );
+        }
+        Ok(options.into())
     }
 
     /// "PARTITION BY ..." syntax:
@@ -1415,7 +1401,7 @@ ENGINE=mito";
                              memory float64,
                              TIME INDEX (ts),
                              PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             with(ttl='10s');
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -1449,9 +1435,9 @@ ENGINE=mito";
                     }
                 );
                 let options = &c.options;
-                assert_eq!(1, options.len());
-                assert_eq!("regions", &options[0].name.to_string());
-                assert_eq!("1", &options[0].value.to_string());
+                assert_eq!(1, options.map.len());
+                let (k, v) = options.map.iter().next().unwrap();
+                assert_eq!(("ttl", "10s"), (k.as_str(), v.as_str()));
             }
             _ => unreachable!(),
         }
@@ -1465,8 +1451,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -1483,8 +1468,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -1498,8 +1482,7 @@ ENGINE=mito";
                              t timestamp,
                              memory float64,
                              TIME INDEX (t),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());

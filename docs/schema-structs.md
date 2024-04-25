@@ -73,7 +73,7 @@ CREATE TABLE cpu (
     usage_system DOUBLE,
     datacenter STRING,
     TIME INDEX (ts),
-    PRIMARY KEY(datacenter, host)) ENGINE=mito WITH(regions=1);
+    PRIMARY KEY(datacenter, host)) ENGINE=mito;
 ```
 
 Then the table's `TableMeta` may look like this:
@@ -249,7 +249,7 @@ CREATE TABLE cpu (
     usage_system DOUBLE,
     datacenter STRING,
     TIME INDEX (ts),
-    PRIMARY KEY(datacenter, host)) ENGINE=mito WITH(regions=1);
+    PRIMARY KEY(datacenter, host)) ENGINE=mito;
 
 select ts, usage_system from cpu;
 ```

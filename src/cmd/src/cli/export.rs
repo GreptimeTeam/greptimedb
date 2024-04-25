@@ -492,9 +492,7 @@ mod tests {
 )
 
 ENGINE=mito
-WITH(
-  regions = 1
-);
+;
 "#;
         assert_eq!(res.trim(), expect.trim());
 

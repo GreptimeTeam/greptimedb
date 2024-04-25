@@ -21,6 +21,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::{Location, Snafu};
+use sqlparser::ast::Ident;
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value as SqlValue};
@@ -141,6 +142,13 @@ pub enum Error {
     #[snafu(display("Unrecognized table option key: {}", key))]
     InvalidTableOption { key: String, location: Location },
 
+    #[snafu(display("Unrecognized table option key: {}, value: {}", key, value))]
+    InvalidTableOptionValue {
+        key: Ident,
+        value: Expr,
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
         location: Location,
@@ -201,6 +209,7 @@ impl ErrorExt for Error {
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
             InvalidColumnOption { .. }
+            | InvalidTableOptionValue { .. }
             | InvalidDatabaseName { .. }
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }

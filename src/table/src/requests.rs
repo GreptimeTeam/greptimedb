@@ -53,7 +53,6 @@ pub fn validate_table_option(key: &str) -> bool {
         // common keys:
         WRITE_BUFFER_SIZE_KEY,
         TTL_KEY,
-        REGIONS_KEY,
         STORAGE_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
@@ -80,7 +79,6 @@ pub struct TableOptions {
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
-pub const REGIONS_KEY: &str = "regions";
 pub const STORAGE_KEY: &str = "storage";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
@@ -113,7 +111,7 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
             options.ttl = Some(ttl_value);
         }
         options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
-            if k != WRITE_BUFFER_SIZE_KEY && k != REGIONS_KEY && k != TTL_KEY {
+            if k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY {
                 Some((k.clone(), v.clone()))
             } else {
                 None
@@ -281,7 +279,6 @@ mod tests {
         assert!(validate_table_option(FILE_TABLE_FORMAT_KEY));
         assert!(validate_table_option(FILE_TABLE_PATTERN_KEY));
         assert!(validate_table_option(TTL_KEY));
-        assert!(validate_table_option(REGIONS_KEY));
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
         assert!(!validate_table_option("foo"));

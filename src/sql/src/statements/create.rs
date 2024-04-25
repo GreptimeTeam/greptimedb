@@ -19,7 +19,7 @@ use itertools::Itertools;
 use sqlparser::ast::Expr;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
+use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
 use crate::statements::{redact_and_sort_options, OptionMap};
 
 const LINE_SEP: &str = ",\n";
@@ -86,8 +86,8 @@ pub struct CreateTable {
     pub columns: Vec<ColumnDef>,
     pub engine: String,
     pub constraints: Vec<TableConstraint>,
-    /// Table options in `WITH`.
-    pub options: Vec<SqlOption>,
+    /// Table options in `WITH`. All keys are lowercase.
+    pub options: OptionMap,
     pub partitions: Option<Partitions>,
 }
 
@@ -155,11 +155,9 @@ impl Display for CreateTable {
             writeln!(f, "{partitions}")?;
         }
         writeln!(f, "ENGINE={}", &self.engine)?;
-        if !self.options.is_empty() {
-            writeln!(f, "WITH(")?;
-            let options: Vec<&SqlOption> = self.options.iter().sorted().collect();
-            writeln!(f, "{}", format_list_indent!(options))?;
-            write!(f, ")")?;
+        if !self.options.map.is_empty() {
+            let options = redact_and_sort_options(&self.options);
+            write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
         }
         Ok(())
     }
@@ -198,8 +196,7 @@ pub struct CreateExternalTable {
     pub name: ObjectName,
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<TableConstraint>,
-    /// Table options in `WITH`.
-    /// All keys are lowercase.
+    /// Table options in `WITH`. All keys are lowercase.
     pub options: OptionMap,
     pub if_not_exists: bool,
     pub engine: String,
@@ -218,9 +215,7 @@ impl Display for CreateExternalTable {
         writeln!(f, "ENGINE={}", &self.engine)?;
         if !self.options.map.is_empty() {
             let options = redact_and_sort_options(&self.options);
-            writeln!(f, "WITH(")?;
-            writeln!(f, "{}", format_list_indent!(options))?;
-            write!(f, ")")?;
+            write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
         }
         Ok(())
     }
@@ -266,7 +261,7 @@ mod tests {
                             host > 'a',
                        )
                        engine=mito
-                       with(regions=1, ttl='7d', storage='File');
+                       with(ttl='7d', storage='File');
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -292,7 +287,6 @@ PARTITION ON COLUMNS (host) (
 )
 ENGINE=mito
 WITH(
-  regions = 1,
   storage = 'File',
   ttl = '7d'
 )"#,
@@ -369,14 +363,14 @@ ENGINE=mito
       )
       PARTITION ON COLUMNS (host) ()
       engine=mito
-      with(regions=1, ttl='7d', 'compaction.type'='world');
+      with(ttl='7d', 'compaction.type'='world');
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         match &result[0] {
             Statement::CreateTable(c) => {
-                assert_eq!(3, c.options.len());
+                assert_eq!(2, c.options.map.len());
             }
             _ => unreachable!(),
         }
@@ -391,7 +385,7 @@ ENGINE=mito
       )
       PARTITION ON COLUMNS (host) ()
       engine=mito
-      with(regions=1, ttl='7d', hello='world');
+      with(ttl='7d', hello='world');
 ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());

@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use sqlparser::ast::{Expr, ObjectName, SqlOption, Value};
+
+use crate::error::{InvalidTableOptionValueSnafu, Result};
 
 static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -47,29 +48,16 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
     format!("{}", Inner { name })
 }
 
-pub fn parse_option_string(value: Expr) -> Option<String> {
-    match value {
-        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => {
-            Some(v)
-        }
-        _ => None,
-    }
-}
-
-/// Converts options to HashMap<String, String>.
-/// All keys are lowercase.
-pub fn to_lowercase_options_map(opts: &[SqlOption]) -> HashMap<String, String> {
-    let mut map = HashMap::with_capacity(opts.len());
-    for SqlOption { name, value } in opts {
-        let value_str = match value {
-            Expr::Value(Value::SingleQuotedString(s))
-            | Expr::Value(Value::DoubleQuotedString(s)) => s.clone(),
-            Expr::Identifier(i) => i.value.clone(),
-            _ => value.to_string(),
-        };
-        let _ = map.insert(name.value.to_lowercase().clone(), value_str);
-    }
-    map
+pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
+    let (key, value) = (option.name, option.value);
+    let v = match value {
+        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
+        Expr::Identifier(v) => v.value,
+        Expr::Value(Value::Number(v, _)) => v.to_string(),
+        value => return InvalidTableOptionValueSnafu { key, value }.fail(),
+    };
+    let k = key.value.to_lowercase();
+    Ok((k, v))
 }
 
 /// Use regex to match and replace common seen secret values in SQL.
