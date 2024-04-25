@@ -315,20 +315,18 @@ impl SqlQueryHandler for Instance {
                         break;
                     }
 
-                    match self.query_statement(stmt, query_ctx.clone()).await {
+                    match self.query_statement(stmt.clone(), query_ctx.clone()).await {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
                             results.push(output_result);
                         }
                         Err(e) => {
-                            let redacted = sql::util::redact_sql_secrets(query.as_ref());
                             if e.status_code().should_log_error() {
-                                error!(e; "Failed to execute query: {redacted}");
+                                error!(e; "Failed to execute query: {stmt}");
                             } else {
-                                debug!("Failed to execute query: {redacted}, {e}");
+                                debug!("Failed to execute query: {stmt}, {e}");
                             }
-
                             results.push(Err(e));
                             break;
                         }
@@ -448,9 +446,7 @@ impl PrometheusHandler for Instance {
             .execute_stmt(stmt, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| ExecuteQuerySnafu {
-                query: format!("{query:?}"),
-            })?;
+            .with_context(|_| ExecuteQuerySnafu)?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
     }

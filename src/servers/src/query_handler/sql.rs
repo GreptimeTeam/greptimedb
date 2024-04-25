@@ -84,10 +84,7 @@ where
             .do_query(query, query_ctx)
             .await
             .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu { query })
-            })
+            .map(|x| x.map_err(BoxedError::new).context(error::ExecuteQuerySnafu))
             .collect()
     }
 
@@ -109,12 +106,8 @@ where
             .await
             .into_iter()
             .map(|x| {
-                x.map_err(BoxedError::new).with_context(|_| {
-                    let query_literal = format!("{query:?}");
-                    error::ExecuteQuerySnafu {
-                        query: query_literal,
-                    }
-                })
+                x.map_err(BoxedError::new)
+                    .with_context(|_| error::ExecuteQuerySnafu)
             })
             .collect()
     }
