@@ -293,7 +293,7 @@ fn update_reduce_distinct_arrange(
 
     // 2. Truncate all updates stored in arrangement within that range.
     let run_compaction = || {
-        arrange.write().compaction_to(now)?;
+        arrange.write().compact_to(now)?;
         Ok(())
     };
     err_collector.run(run_compaction);
@@ -449,7 +449,7 @@ fn reduce_accum_subgraph(
     }
     err_collector.run(|| {
         arrange.apply_updates(now, all_updates)?;
-        arrange.compaction_to(now)
+        arrange.compact_to(now)
     });
 
     // for all arranges involved, schedule next time this subgraph should run
