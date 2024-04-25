@@ -30,7 +30,7 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random}
 use crate::ir::create_expr::{ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder};
 use crate::ir::{
     column_options_generator, generate_columns, generate_random_value,
-    partible_column_options_generator, primary_key_column_options_generator,
+    partible_column_options_generator, primary_key_and_not_null_column_options_generator,
     ts_column_options_generator, Column, ColumnTypeGenerator, CreateDatabaseExpr, CreateTableExpr,
     Ident, PartibleColumnTypeGenerator, StringColumnTypeGenerator, TsColumnTypeGenerator,
 };
@@ -246,12 +246,9 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
 pub struct CreateLogicalTableExprGenerator<R: Rng + 'static> {
     physical_table_ctx: TableContextRef,
     labels: usize,
-    #[builder(default = "false")]
     if_not_exists: bool,
     #[builder(default = "Box::new(WordGenerator)")]
     name_generator: Box<dyn Random<Ident, R>>,
-    #[builder(default = "Box::new(StringColumnTypeGenerator)")]
-    label_column_type_generator: ConcreteDataTypeGenerator<R>,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprGenerator<R> {
@@ -288,8 +285,8 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprG
         logical_table.columns.extend(generate_columns(
             rng,
             column_names,
-            self.label_column_type_generator.as_ref(),
-            Box::new(primary_key_column_options_generator),
+            &StringColumnTypeGenerator,
+            Box::new(primary_key_and_not_null_column_options_generator),
         ));
 
         logical_table.columns.iter_mut().for_each(|column| {
@@ -420,6 +417,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
+            .if_not_exists(false)
             .build()
             .unwrap()
             .generate(&mut rng)
@@ -443,6 +441,7 @@ mod tests {
         let logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
             .physical_table_ctx(physical_table_ctx)
             .labels(5)
+            .if_not_exists(false)
             .build()
             .unwrap()
             .generate(&mut rng)
@@ -477,6 +476,7 @@ mod tests {
     fn test_create_logical_table_expr_generator_deterministic() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
         let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
+            .if_not_exists(false)
             .build()
             .unwrap()
             .generate(&mut rng)
@@ -490,6 +490,7 @@ mod tests {
         let logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
             .physical_table_ctx(physical_table_ctx)
             .labels(5)
+            .if_not_exists(false)
             .build()
             .unwrap()
             .generate(&mut rng)

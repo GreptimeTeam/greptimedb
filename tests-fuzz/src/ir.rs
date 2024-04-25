@@ -64,7 +64,7 @@ lazy_static! {
         ConcreteDataType::datetime_datatype(),
     ];
     pub static ref STRING_DATA_TYPES: Vec<ConcreteDataType> =
-        vec![ConcreteDataType::string_datatype(),];
+        vec![ConcreteDataType::string_datatype()];
 }
 
 impl_random!(ConcreteDataType, ColumnTypeGenerator, DATA_TYPES);
@@ -326,7 +326,7 @@ pub fn ts_column_options_generator<R: Rng + 'static>(
     vec![ColumnOption::TimeIndex]
 }
 
-pub fn primary_key_column_options_generator<R: Rng + 'static>(
+pub fn primary_key_and_not_null_column_options_generator<R: Rng + 'static>(
     _: &mut R,
     _: &ConcreteDataType,
 ) -> Vec<ColumnOption> {

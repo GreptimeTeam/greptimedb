@@ -34,7 +34,7 @@ use tests_fuzz::generator::create_expr::{
     CreateLogicalTableExprGeneratorBuilder, CreatePhysicalTableExprGeneratorBuilder,
 };
 use tests_fuzz::generator::Generator;
-use tests_fuzz::ir::{primary_key_column_options_generator, Column};
+use tests_fuzz::ir::{primary_key_and_not_null_column_options_generator, Column};
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections, Connections};
@@ -88,7 +88,7 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
     let mut physical_table_columns = create_physical_table_expr.columns.clone();
     physical_table_columns.push({
         let column_type = ConcreteDataType::uint64_datatype();
-        let options = primary_key_column_options_generator(&mut rng, &column_type);
+        let options = primary_key_and_not_null_column_options_generator(&mut rng, &column_type);
         Column {
             name: "__tsid".into(),
             column_type,
@@ -97,7 +97,7 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
     });
     physical_table_columns.push({
         let column_type = ConcreteDataType::uint32_datatype();
-        let options = primary_key_column_options_generator(&mut rng, &column_type);
+        let options = primary_key_and_not_null_column_options_generator(&mut rng, &column_type);
         Column {
             name: "__table_id".into(),
             column_type,
