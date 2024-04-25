@@ -321,8 +321,8 @@ mod tests {
         assert_eq!(
             alter_region_request.kind,
             Some(region::alter_request::Kind::ChangeColumnTypes(
-                region::ChangeColumnTypes {
-                    change_column_types: vec![region::ChangeColumnType {
+                ChangeColumnTypes {
+                    change_column_types: vec![ChangeColumnType {
                         column_name: "cpu".to_string(),
                         target_type: ColumnDataType::String as i32,
                         target_type_extension: None,
