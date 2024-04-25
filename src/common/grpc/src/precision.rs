@@ -18,6 +18,8 @@ use common_time::timestamp::TimeUnit;
 
 use crate::Error;
 
+/// Precision represents the precision of a timestamp.
+/// It is used to convert timestamps between different precisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precision {
     Nanosecond,
