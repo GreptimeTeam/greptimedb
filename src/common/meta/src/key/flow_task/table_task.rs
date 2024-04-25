@@ -40,7 +40,7 @@ lazy_static! {
     .unwrap();
 }
 
-/// The key of mapping [TableId] to [FlownodeId] and [TaskId].
+/// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TableTaskKeyInner {
     table_id: TableId,
@@ -197,7 +197,7 @@ impl TableTaskManager {
         Self { kv_backend }
     }
 
-    /// Retrieves all ([FlownodeId], [TaskId])s of the specified `table_id`.
+    /// Retrieves all [TableTaskKey]s of the specified `table_id`.
     pub fn nodes(
         &self,
         catalog: &str,

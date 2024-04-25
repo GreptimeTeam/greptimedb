@@ -116,7 +116,7 @@ pub struct FlowTaskNameValue {
 }
 
 impl FlowTaskNameValue {
-    /// Returns a [FlowTaskNameValue] with specified [TaskId].
+    /// Returns a [FlowTaskNameValue] with specified [FlowTaskId].
     pub fn new(flow_task_id: FlowTaskId) -> Self {
         Self { flow_task_id }
     }
@@ -150,7 +150,7 @@ impl FlowTaskNameManager {
     }
 
     /// Builds a create flow task name transaction.
-    /// It's expected that the `__flow_task_name/{catalog}/{name}` wasn't occupied.
+    /// It's expected that the `__flow_task/{catalog}/name/{task_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub fn build_create_txn(
         &self,

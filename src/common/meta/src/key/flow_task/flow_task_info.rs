@@ -172,7 +172,7 @@ impl FlowTaskInfoManager {
     }
 
     /// Builds a create flow task transaction.
-    /// It is expected that the `__flow_task/{flow_task_id}` wasn't occupied.
+    /// It is expected that the `__flow_task/{catalog}/info/{flow_task_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub(crate) fn build_create_txn(
         &self,

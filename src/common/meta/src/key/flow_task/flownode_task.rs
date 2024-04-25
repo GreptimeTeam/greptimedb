@@ -100,7 +100,7 @@ impl FlownodeTaskKey {
     }
 }
 
-/// The key of mapping [FlownodeId] to [TaskId].
+/// The key of mapping [FlownodeId] to [FlowTaskId].
 pub struct FlownodeTaskKeyInner {
     flownode_id: FlownodeId,
     flow_task_id: FlowTaskId,
@@ -108,7 +108,7 @@ pub struct FlownodeTaskKeyInner {
 }
 
 impl FlownodeTaskKeyInner {
-    /// Returns a [FlownodeTaskKey] with the specified `flow_node` and `flow_task_id`.
+    /// Returns a [FlownodeTaskKey] with the specified `flownode_id`, `flow_task_id` and `partition_id`.
     pub fn new(
         flownode_id: FlownodeId,
         flow_task_id: FlowTaskId,
@@ -185,7 +185,7 @@ impl FlownodeTaskManager {
         Self { kv_backend }
     }
 
-    /// Retrieves all [TaskId]s of the specified `flownode_id`.
+    /// Retrieves all [FlowTaskId] and [PartitionId]s of the specified `flownode_id`.
     pub fn tasks(
         &self,
         catalog: &str,
