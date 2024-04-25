@@ -18,12 +18,14 @@ use std::{fs, path};
 use async_trait::async_trait;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
+use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::ddl_manager::DdlManager;
+use common_meta::key::flow_task::{FlowTaskMetadataManager, FlowTaskMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -45,6 +47,7 @@ use frontend::server::Services;
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
+use meta_srv::metasrv::{FLOW_TASK_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -411,8 +414,14 @@ impl StartCommand {
         let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
         let table_id_sequence = Arc::new(
-            SequenceBuilder::new("table_id", kv_backend.clone())
+            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
+        let flow_task_id_sequence = Arc::new(
+            SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_FLOW_TASK_ID as u64)
                 .step(10)
                 .build(),
         );
@@ -420,21 +429,25 @@ impl StartCommand {
             opts.wal_meta.clone(),
             kv_backend.clone(),
         ));
-
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
-
+        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
+        let flow_task_meta_allocator = Arc::new(
+            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_task_id_sequence),
+        );
 
         let ddl_task_executor = Self::create_ddl_task_executor(
-            table_metadata_manager,
             procedure_manager.clone(),
             node_manager.clone(),
             multi_cache_invalidator,
+            table_metadata_manager,
             table_meta_allocator,
+            flow_task_metadata_manager,
+            flow_task_meta_allocator,
         )
         .await?;
 
@@ -462,11 +475,13 @@ impl StartCommand {
     }
 
     pub async fn create_ddl_task_executor(
-        table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
         node_manager: NodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
+        table_metadata_manager: TableMetadataManagerRef,
         table_meta_allocator: TableMetadataAllocatorRef,
+        flow_metadata_manager: FlowTaskMetadataManagerRef,
+        flow_metadata_allocator: FlowTaskMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
@@ -475,6 +490,8 @@ impl StartCommand {
                 cache_invalidator,
                 table_metadata_manager,
                 table_meta_allocator,
+                flow_metadata_manager,
+                flow_metadata_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
                 true,
             )

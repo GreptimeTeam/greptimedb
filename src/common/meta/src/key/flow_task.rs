@@ -18,6 +18,7 @@ pub(crate) mod flownode_task;
 pub(crate) mod table_task;
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use common_telemetry::info;
 use snafu::{ensure, OptionExt};
@@ -81,6 +82,8 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
         Ok(FlowTaskScoped { inner })
     }
 }
+
+pub type FlowTaskMetadataManagerRef = Arc<FlowTaskMetadataManager>;
 
 /// The manager of metadata, provides ability to:
 /// - Create metadata of the task.

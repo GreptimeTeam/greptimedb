@@ -18,11 +18,13 @@ use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
+use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
+use common_meta::key::flow_task::{FlowTaskMetadataManager, FlowTaskMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -35,6 +37,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
+use super::FLOW_TASK_ID_SEQ;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
@@ -201,6 +204,9 @@ impl MetasrvBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
+        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(
+            leader_cached_kv_backend.clone() as _,
+        ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
@@ -231,7 +237,15 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
-
+        // TODO(weny): use the real allocator.
+        let flow_task_metadata_allocator = Arc::new(
+            FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
+                SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
+                    .initial(MIN_USER_FLOW_TASK_ID as u64)
+                    .step(10)
+                    .build(),
+            )),
+        );
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let ddl_manager = build_ddl_manager(
@@ -241,6 +255,8 @@ impl MetasrvBuilder {
             &mailbox,
             &table_metadata_manager,
             &table_metadata_allocator,
+            &flow_task_metadata_manager,
+            &flow_task_metadata_allocator,
             &opening_region_keeper,
         )?;
 
@@ -397,6 +413,8 @@ fn build_ddl_manager(
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
     table_metadata_allocator: &TableMetadataAllocatorRef,
+    flow_task_metadata_manager: &FlowTaskMetadataManagerRef,
+    flow_task_metadata_allocator: &FlowTaskMetadataAllocatorRef,
     memory_region_keeper: &MemoryRegionKeeperRef,
 ) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
@@ -424,6 +442,8 @@ fn build_ddl_manager(
             cache_invalidator,
             table_metadata_manager.clone(),
             table_metadata_allocator.clone(),
+            flow_task_metadata_manager.clone(),
+            flow_task_metadata_allocator.clone(),
             memory_region_keeper.clone(),
             true,
         )
