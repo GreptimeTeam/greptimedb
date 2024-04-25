@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_grpc::writer::Precision;
+use common_grpc::precision::Precision;
 use common_telemetry::tracing;
 use session::context::QueryContextRef;
 
@@ -123,7 +123,7 @@ fn parse_time_precision(value: &str) -> Result<Precision> {
 
 #[cfg(test)]
 mod tests {
-    use common_grpc::writer::Precision;
+    use common_grpc::precision::Precision;
 
     use crate::http::influxdb::parse_time_precision;
 

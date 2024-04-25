@@ -15,7 +15,7 @@
 pub mod channel_manager;
 pub mod error;
 pub mod flight;
+pub mod precision;
 pub mod select;
-pub mod writer;
 
 pub use error::Error;
