@@ -26,6 +26,10 @@ use snafu::ResultExt;
 use sqlx::{MySql, Pool};
 use tests_fuzz::context::TableContext;
 use tests_fuzz::error::{self, Result};
+use tests_fuzz::fake::{
+    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
+    MappedGenerator, WordGenerator,
+};
 use tests_fuzz::generator::create_expr::{
     CreateLogicalTableExprGeneratorBuilder, CreatePhysicalTableExprGeneratorBuilder,
 };
@@ -64,6 +68,10 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
 
     // Create physical table
     let create_physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
+        .name_generator(Box::new(MappedGenerator::new(
+            WordGenerator,
+            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+        )))
         .build()
         .unwrap()
         .generate(&mut rng)?;
@@ -96,11 +104,15 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
     });
 
     // Create logical table
-    let table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
+    let physical_table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
     let labels = rng.gen_range(1..=5);
 
     let create_logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
-        .table_ctx(table_ctx.clone())
+        .name_generator(Box::new(MappedGenerator::new(
+            WordGenerator,
+            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+        )))
+        .physical_table_ctx(physical_table_ctx)
         .labels(labels)
         .build()
         .unwrap()
