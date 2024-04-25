@@ -39,10 +39,10 @@ impl HealthChecker for HttpHealthChecker {
                         info!("Health checked!");
                         return;
                     }
-                    info!("Failed to health, status: {}", resp.status());
+                    info!("Failed to check health, status: {}", resp.status());
                 }
                 Err(err) => {
-                    info!("Failed to health, err: {err:?}");
+                    info!("Failed to check health, error: {err:?}");
                 }
             }
 
@@ -52,6 +52,6 @@ impl HealthChecker for HttpHealthChecker {
     }
 
     fn wait_timeout(&self) -> Duration {
-        Duration::from_secs(10)
+        Duration::from_secs(5)
     }
 }
