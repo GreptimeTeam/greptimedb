@@ -624,8 +624,8 @@ impl ChangeColumnType {
     }
 }
 
-impl From<v1::region::ChangeColumnType> for ChangeColumnType {
-    fn from(change_column_type: v1::region::ChangeColumnType) -> Self {
+impl From<v1::ChangeColumnType> for ChangeColumnType {
+    fn from(change_column_type: v1::ChangeColumnType) -> Self {
         let target_type = ColumnDataTypeWrapper::new(
             change_column_type.target_type(),
             change_column_type.target_type_extension,

@@ -15,9 +15,10 @@
 use api::v1::alter_expr::Kind;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
-    alter_request, AddColumn, AddColumns, AlterRequest, ChangeColumnType, ChangeColumnTypes,
-    DropColumn, DropColumns, RegionColumnDef, RegionRequest, RegionRequestHeader,
+    alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
+    RegionRequest, RegionRequestHeader,
 };
+use api::v1::{ChangeColumnType, ChangeColumnTypes};
 use common_telemetry::tracing_context::TracingContext;
 use snafu::OptionExt;
 use store_api::storage::RegionId;
