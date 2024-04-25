@@ -25,10 +25,7 @@ use snafu::{ensure, ResultExt};
 use super::Generator;
 use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
-use crate::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
-};
+use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::{ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder};
 use crate::ir::{
@@ -212,14 +209,14 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
 pub struct CreatePhysicalTableExprGenerator<R: Rng + 'static> {
     #[builder(default = "Box::new(WordGenerator)")]
     name_generator: Box<dyn Random<Ident, R>>,
+    #[builder(default = "false")]
+    if_not_exists: bool,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExprGenerator<R> {
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<CreateTableExpr> {
-        let if_not_exists = rng.gen_bool(0.5);
-
         Ok(CreateTableExpr {
             table_name: self.name_generator.gen(rng),
             columns: vec![
@@ -234,7 +231,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
                     options: vec![],
                 },
             ],
-            if_not_exists,
+            if_not_exists: self.if_not_exists,
             partition: None,
             engine: "metric".to_string(),
             options: [("physical_metric_table".to_string(), "".into())].into(),
@@ -248,9 +245,13 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
 #[builder(pattern = "owned")]
 pub struct CreateLogicalTableExprGenerator<R: Rng + 'static> {
     physical_table_ctx: TableContextRef,
+    labels: usize,
+    #[builder(default = "false")]
+    if_not_exists: bool,
     #[builder(default = "Box::new(WordGenerator)")]
     name_generator: Box<dyn Random<Ident, R>>,
-    labels: usize,
+    #[builder(default = "Box::new(StringColumnTypeGenerator)")]
+    label_column_type_generator: ConcreteDataTypeGenerator<R>,
 }
 
 impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprGenerator<R> {
@@ -266,53 +267,51 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprG
         );
 
         // Generates the logical table columns based on the physical table.
-        let physical_table_name = self.physical_table_ctx.name.to_string().replace('`', "");
-        let table_generator = CreateTableExprGeneratorBuilder::default()
-            .name_generator(Box::new(MappedGenerator::new(
-                WordGenerator,
-                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
-            )))
-            .columns(self.labels)
-            .engine("metric")
-            .column_type_generator(Box::new(StringColumnTypeGenerator))
-            .column_options_generator(Box::new(primary_key_column_options_generator))
-            .with_clause([("on_physical_table".to_string(), physical_table_name)])
-            .build()
-            .unwrap();
-
-        let mut table = table_generator.generate(rng)?;
-        table.table_name = self
+        let logical_table_name = self
             .physical_table_ctx
             .generate_unique_table_name(rng, self.name_generator.as_ref());
+        let mut logical_table = CreateTableExpr {
+            table_name: logical_table_name,
+            columns: self.physical_table_ctx.columns.clone(),
+            if_not_exists: self.if_not_exists,
+            partition: None,
+            engine: "metric".to_string(),
+            options: [(
+                "on_physical_table".to_string(),
+                self.physical_table_ctx.name.value.clone().into(),
+            )]
+            .into(),
+            primary_keys: vec![],
+        };
 
-        let logical_ts = table.columns.iter().position(|column| {
-            column
-                .options
-                .iter()
-                .any(|option| option == &ColumnOption::TimeIndex)
-        });
-        table.columns.remove(logical_ts.unwrap());
-        table.columns.iter_mut().for_each(|column| {
+        let column_names = self.name_generator.choose(rng, self.labels);
+        logical_table.columns.extend(generate_columns(
+            rng,
+            column_names,
+            self.label_column_type_generator.as_ref(),
+            Box::new(primary_key_column_options_generator),
+        ));
+
+        logical_table.columns.iter_mut().for_each(|column| {
             if column.column_type == ConcreteDataType::string_datatype() {
                 column
                     .options
                     .retain(|option| option == &ColumnOption::PrimaryKey);
             }
         });
-        table
-            .columns
-            .extend(self.physical_table_ctx.columns.clone());
 
+        // Currently only the `primary key` option is kept in physical table,
+        // so we only keep the `primary key` option in the logical table for fuzz test.
         let mut primary_keys = vec![];
-        for (idx, column) in table.columns.iter().enumerate() {
+        for (idx, column) in logical_table.columns.iter().enumerate() {
             if column.is_primary_key() {
                 primary_keys.push(idx);
             }
         }
         primary_keys.shuffle(rng);
-        table.primary_keys = primary_keys;
+        logical_table.primary_keys = primary_keys;
 
-        Ok(table)
+        Ok(logical_table)
     }
 }
 
@@ -460,7 +459,7 @@ mod tests {
             .to_string();
 
         assert_eq!(logical_table_expr.engine, "metric");
-        assert_eq!(logical_table_expr.columns.len(), 6);
+        assert_eq!(logical_table_expr.columns.len(), 7);
         assert_eq!(logical_ts_name, physical_ts_name);
         assert!(logical_table_expr
             .columns
@@ -483,7 +482,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let physical_table_serialized = serde_json::to_string(&physical_table_expr).unwrap();
-        let physical_table_expected = r#"{"table_name":{"value":"qui","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"physical_metric_table":{"String":""}},"primary_keys":[]}"#;
+        let physical_table_expected = r#"{"table_name":{"value":"expedita","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"physical_metric_table":{"String":""}},"primary_keys":[]}"#;
         assert_eq!(physical_table_expected, physical_table_serialized);
 
         let physical_table_ctx = Arc::new(TableContext::from(&physical_table_expr));
@@ -497,7 +496,7 @@ mod tests {
             .unwrap();
 
         let logical_table_serialized = serde_json::to_string(&logical_table_expr).unwrap();
-        let logical_table_expected = r#"{"table_name":{"value":"nostrum","quote_style":null},"columns":[{"name":{"value":"NATUs","quote_style":"`"},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"adipisci","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"cUMqUe","quote_style":"`"},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"MOLestIAS","quote_style":"`"},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"qui"}},"primary_keys":[0,2,3,1]}"#;
+        let logical_table_expected = r#"{"table_name":{"value":"impedit","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]},{"name":{"value":"qui","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"totam","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"molestias","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"natus","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"cumque","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"expedita"}},"primary_keys":[2,5,3,6,4]}"#;
         assert_eq!(logical_table_expected, logical_table_serialized);
     }
 

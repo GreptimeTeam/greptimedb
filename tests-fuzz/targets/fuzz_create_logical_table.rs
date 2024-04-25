@@ -67,11 +67,13 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
 
     // Create physical table
+    let physical_table_if_not_exists = rng.gen_bool(0.5);
     let create_physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
+        .if_not_exists(physical_table_if_not_exists)
         .build()
         .unwrap()
         .generate(&mut rng)?;
@@ -106,6 +108,7 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
     // Create logical table
     let physical_table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
     let labels = rng.gen_range(1..=5);
+    let logical_table_if_not_exists = rng.gen_bool(0.5);
 
     let create_logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
@@ -114,6 +117,7 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
         )))
         .physical_table_ctx(physical_table_ctx)
         .labels(labels)
+        .if_not_exists(logical_table_if_not_exists)
         .build()
         .unwrap()
         .generate(&mut rng)?;
