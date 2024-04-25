@@ -18,6 +18,7 @@ use datafusion_sql::parser::Statement as DfStatement;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
+use super::create::CreateFlowTask;
 use super::drop::DropDatabase;
 use super::show::ShowVariables;
 use crate::error::{ConvertToDfStatementSnafu, Error};
@@ -54,6 +55,8 @@ pub enum Statement {
     CreateExternalTable(CreateExternalTable),
     // CREATE TABLE ... LIKE
     CreateTableLike(CreateTableLike),
+    // CREATE TASK
+    CreateFlowTask(CreateFlowTask),
     // DROP TABLE
     DropTable(DropTable),
     // DROP DATABASE
@@ -100,6 +103,7 @@ impl Display for Statement {
             Statement::CreateTable(s) => s.fmt(f),
             Statement::CreateExternalTable(s) => s.fmt(f),
             Statement::CreateTableLike(s) => s.fmt(f),
+            Statement::CreateFlowTask(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
             Statement::CreateDatabase(s) => s.fmt(f),

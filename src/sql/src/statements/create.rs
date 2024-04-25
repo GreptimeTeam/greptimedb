@@ -16,7 +16,7 @@ use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
 use itertools::Itertools;
-use sqlparser::ast::Expr;
+use sqlparser::ast::{Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
@@ -239,6 +239,46 @@ impl Display for CreateTableLike {
         let table_name = &self.table_name;
         let source_name = &self.source_name;
         write!(f, r#"CREATE TABLE {table_name} LIKE {source_name}"#)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub struct CreateFlowTask {
+    /// Task name
+    pub task_name: ObjectName,
+    /// Output (sink) table name
+    pub output_table_name: ObjectName,
+    /// Whether to replace existing task
+    pub or_replace: bool,
+    /// Create if not exist
+    pub if_not_exists: bool,
+    /// `EXPIRE_WHEN`
+    pub expire_when: Option<Expr>,
+    /// Comment string
+    pub comment: Option<String>,
+    /// SQL statement
+    pub query: Box<Query>,
+}
+
+impl Display for CreateFlowTask {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CREATE ")?;
+        if self.or_replace {
+            write!(f, "OR REPLACE ")?;
+        }
+        write!(f, "TASK ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{} ", &self.task_name)?;
+        write!(f, "OUTPUT AS {} ", &self.output_table_name)?;
+        if let Some(expire_when) = &self.expire_when {
+            write!(f, "EXPIRE WHEN {} ", expire_when)?;
+        }
+        if let Some(comment) = &self.comment {
+            write!(f, "COMMENT '{}' ", comment)?;
+        }
+        write!(f, "AS {}", &self.query)
     }
 }
 
