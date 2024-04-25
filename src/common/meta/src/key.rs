@@ -52,9 +52,34 @@
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
-//! To simplify the managers used in struct fields and function parameters, we define a "unify"
-//! table metadata manager: [TableMetadataManager]. It contains all the managers defined above.
-//! It's recommended to just use this manager only.
+//! To simplify the managers used in struct fields and function parameters, we define "unify"
+//! table metadata manager: [TableMetadataManager] 
+//! and flow task metadata manager: [FlowTaskMetadataManager](crate::key::flow_task::FlowTaskMetadataManager).
+//! It contains all the managers defined above. It's recommended to just use this manager only.
+//! 
+//! The whole picture of flow task keys will be like this:
+//!
+//! __flow_task/
+//!  {catalog}/
+//!    info/
+//!      {tsak_id}
+//!
+//!  name/
+//!    {task_name}
+//!
+//!  flownode/
+//!    flownode_id/
+//!      {flownode_id}/
+//!        {task_id}/
+//!          {partition_id}
+//!
+//!  source_table/
+//!    flow_task/
+//!      {table_id}/
+//!         {flownode_id}/
+//!           {task_id}/
+//!             {partition_id}
+
 
 pub mod catalog_name;
 pub mod datanode_table;
@@ -138,11 +163,11 @@ pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 /// The id of flow task.
 pub type FlowTaskId = u32;
 /// The partition of flow task.
-pub type PartitionId = u32;
+pub type FlowTaskPartitionId = u32;
 
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9]*)/([0-9]*)$")).unwrap();
+        Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
 }
 
 lazy_static! {

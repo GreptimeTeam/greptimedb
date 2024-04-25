@@ -24,7 +24,9 @@ use crate::error::{self, Result};
 use crate::key::flow_task::FlowTaskScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{txn_helper, DeserializedValueWithBytes, FlowTaskId, PartitionId, TableMetaValue};
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, FlowTaskId, FlowTaskPartitionId, TableMetaValue,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
@@ -33,7 +35,7 @@ const FLOW_TASK_INFO_KEY_PREFIX: &str = "info";
 
 lazy_static! {
     static ref FLOW_TASK_INFO_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{FLOW_TASK_INFO_KEY_PREFIX}/([0-9]*)$")).unwrap();
+        Regex::new(&format!("^{FLOW_TASK_INFO_KEY_PREFIX}/([0-9]+)$")).unwrap();
 }
 
 /// The key stores the metadata of the task.
@@ -119,7 +121,7 @@ pub struct FlowTaskInfoValue {
     /// The sink table used by the task.
     pub(crate) sink_table: TableId,
     /// Which flow nodes this task is running on.
-    pub(crate) flownode_ids: BTreeMap<PartitionId, FlownodeId>,
+    pub(crate) flownode_ids: BTreeMap<FlowTaskPartitionId, FlownodeId>,
     /// The catalog name.
     pub(crate) catalog_name: String,
     /// The task name.
@@ -136,7 +138,7 @@ pub struct FlowTaskInfoValue {
 
 impl FlowTaskInfoValue {
     /// Returns the `flownode_id`.
-    pub fn flownode_ids(&self) -> &BTreeMap<PartitionId, FlownodeId> {
+    pub fn flownode_ids(&self) -> &BTreeMap<FlowTaskPartitionId, FlownodeId> {
         &self.flownode_ids
     }
 

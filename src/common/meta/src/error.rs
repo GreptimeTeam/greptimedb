@@ -434,10 +434,14 @@ pub enum Error {
     InvalidRole { role: i32, location: Location },
 
     #[snafu(display("Delimiter not found, key: {}", key))]
-    DelimiterNotFound { key: String },
+    DelimiterNotFound { key: String, location: Location },
 
     #[snafu(display("Invalid prefix: {}, key: {}", prefix, key))]
-    MismatchPrefix { prefix: String, key: String },
+    MismatchPrefix {
+        prefix: String,
+        key: String,
+        location: Location,
+    },
 
     #[snafu(display("Failed to move values: {err_msg}"))]
     MoveValues { err_msg: String, location: Location },

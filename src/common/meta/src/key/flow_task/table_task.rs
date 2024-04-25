@@ -23,7 +23,7 @@ use table::metadata::TableId;
 use crate::error::{self, Result};
 use crate::key::flow_task::FlowTaskScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
-use crate::key::{FlowTaskId, PartitionId};
+use crate::key::{FlowTaskId, FlowTaskPartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -35,7 +35,7 @@ const TABLE_TASK_KEY_PREFIX: &str = "source_table";
 
 lazy_static! {
     static ref TABLE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{TABLE_TASK_KEY_PREFIX}/([0-9]*)/([0-9]*)/([0-9]*)/([0-9]*)$"
+        "^{TABLE_TASK_KEY_PREFIX}/([0-9]+)/([0-9]+)/([0-9]+)/([0-9]+)$"
     ))
     .unwrap();
 }
@@ -46,7 +46,7 @@ struct TableTaskKeyInner {
     table_id: TableId,
     flownode_id: FlownodeId,
     flow_task_id: FlowTaskId,
-    partition_id: PartitionId,
+    partition_id: FlowTaskPartitionId,
 }
 
 /// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
@@ -74,7 +74,7 @@ impl TableTaskKey {
         table_id: TableId,
         flownode_id: FlownodeId,
         flow_task_id: FlowTaskId,
-        partition_id: PartitionId,
+        partition_id: FlowTaskPartitionId,
     ) -> TableTaskKey {
         let inner = TableTaskKeyInner::new(table_id, flownode_id, flow_task_id, partition_id);
         TableTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
@@ -111,7 +111,7 @@ impl TableTaskKey {
     }
 
     /// Returns the [PartitionId].
-    pub fn partition_id(&self) -> PartitionId {
+    pub fn partition_id(&self) -> FlowTaskPartitionId {
         self.0.partition_id
     }
 }
@@ -122,7 +122,7 @@ impl TableTaskKeyInner {
         table_id: TableId,
         flownode_id: FlownodeId,
         flow_task_id: FlowTaskId,
-        partition_id: PartitionId,
+        partition_id: FlowTaskPartitionId,
     ) -> TableTaskKeyInner {
         Self {
             table_id,
@@ -171,7 +171,7 @@ impl MetaKey<TableTaskKeyInner> for TableTaskKeyInner {
         let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
         let flow_task_id = captures[3].parse::<FlowTaskId>().unwrap();
-        let partition_id = captures[4].parse::<PartitionId>().unwrap();
+        let partition_id = captures[4].parse::<FlowTaskPartitionId>().unwrap();
         Ok(TableTaskKeyInner::new(
             table_id,
             flownode_id,
@@ -218,7 +218,7 @@ impl TableTaskManager {
     /// Builds a create table task transaction.
     ///
     /// Puts `__table_task/{table_id}/{node_id}/{partition_id}` keys.
-    pub fn build_create_txn<I: IntoIterator<Item = (PartitionId, FlownodeId)>>(
+    pub fn build_create_txn<I: IntoIterator<Item = (FlowTaskPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
         flow_task_id: FlowTaskId,
