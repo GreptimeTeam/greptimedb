@@ -18,14 +18,16 @@ use std::result;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
-    CreateDatabaseTask as PbCreateDatabaseTask, CreateTableTask as PbCreateTableTask,
-    CreateTableTasks as PbCreateTableTasks, DdlTaskRequest as PbDdlTaskRequest,
-    DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
+    CreateDatabaseTask as PbCreateDatabaseTask, CreateFlowTask as PbCreateFlowTask,
+    CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
+    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
+    DropDatabaseTask as PbDropDatabaseTask, DropFlowTask as PbDropFlowTask,
     DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr,
+    AlterExpr, CreateDatabaseExpr, CreateFlowTaskExpr, CreateTableExpr, DropDatabaseExpr,
+    DropFlowTaskExpr, DropTableExpr, SchemaScopedTableName as PbSchemaScopedTableName,
     TruncateTableExpr,
 };
 use base64::engine::general_purpose;
@@ -719,6 +721,158 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
                 drop_if_exists,
             }),
         })
+    }
+}
+
+/// The table name of `schema_name`.
+pub struct SchemaScopedTableName {
+    schema_name: String,
+    table_name: String,
+}
+
+impl From<PbSchemaScopedTableName> for SchemaScopedTableName {
+    fn from(
+        PbSchemaScopedTableName {
+            schema_name,
+            table_name,
+        }: PbSchemaScopedTableName,
+    ) -> Self {
+        SchemaScopedTableName {
+            schema_name,
+            table_name,
+        }
+    }
+}
+
+impl From<SchemaScopedTableName> for PbSchemaScopedTableName {
+    fn from(
+        SchemaScopedTableName {
+            schema_name,
+            table_name,
+        }: SchemaScopedTableName,
+    ) -> Self {
+        PbSchemaScopedTableName {
+            schema_name,
+            table_name,
+        }
+    }
+}
+
+/// Create flow task
+pub struct CreateFlowTask {
+    pub catalog_name: String,
+    pub task_name: String,
+    pub source_table_names: Vec<SchemaScopedTableName>,
+    pub sink_table_name: SchemaScopedTableName,
+    pub create_if_not_exists: bool,
+    pub expire_when: String,
+    pub comment: String,
+    pub sql: String,
+    pub options: HashMap<String, String>,
+}
+
+impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateFlowTask) -> Result<Self> {
+        let CreateFlowTaskExpr {
+            catalog_name,
+            task_name,
+            source_table_names,
+            sink_table_name,
+            create_if_not_exists,
+            expire_when,
+            comment,
+            sql,
+            task_options,
+        } = pb.create_flow_task.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create_flow_task",
+        })?;
+
+        Ok(CreateFlowTask {
+            catalog_name,
+            task_name,
+            source_table_names: source_table_names.into_iter().map(Into::into).collect(),
+            sink_table_name: sink_table_name
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected sink_table_name",
+                })?
+                .into(),
+            create_if_not_exists,
+            expire_when,
+            comment,
+            sql,
+            options: task_options,
+        })
+    }
+}
+
+impl From<CreateFlowTask> for PbCreateFlowTask {
+    fn from(
+        CreateFlowTask {
+            catalog_name,
+            task_name,
+            source_table_names,
+            sink_table_name,
+            create_if_not_exists,
+            expire_when,
+            comment,
+            sql,
+            options,
+        }: CreateFlowTask,
+    ) -> Self {
+        PbCreateFlowTask {
+            create_flow_task: Some(CreateFlowTaskExpr {
+                catalog_name,
+                task_name,
+                source_table_names: source_table_names.into_iter().map(Into::into).collect(),
+                sink_table_name: Some(sink_table_name.into()),
+                create_if_not_exists,
+                expire_when,
+                comment,
+                sql,
+                task_options: options,
+            }),
+        }
+    }
+}
+
+/// Drop flow task
+pub struct DropFlowTask {
+    pub catalog_name: String,
+    pub task_name: String,
+}
+
+impl TryFrom<PbDropFlowTask> for DropFlowTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropFlowTask) -> Result<Self> {
+        let DropFlowTaskExpr {
+            catalog_name,
+            task_name,
+        } = pb.drop_flow_task.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected sink_table_name",
+        })?;
+        Ok(DropFlowTask {
+            catalog_name,
+            task_name,
+        })
+    }
+}
+
+impl From<DropFlowTask> for PbDropFlowTask {
+    fn from(
+        DropFlowTask {
+            catalog_name,
+            task_name,
+        }: DropFlowTask,
+    ) -> Self {
+        PbDropFlowTask {
+            drop_flow_task: Some(DropFlowTaskExpr {
+                catalog_name,
+                task_name,
+            }),
+        }
     }
 }
 
