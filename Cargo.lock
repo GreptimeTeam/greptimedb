@@ -3511,6 +3511,7 @@ dependencies = [
  "common-decimal",
  "common-error",
  "common-macro",
+ "common-meta",
  "common-telemetry",
  "common-time",
  "datafusion-common",
