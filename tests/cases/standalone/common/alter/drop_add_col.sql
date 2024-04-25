@@ -2,7 +2,7 @@ CREATE TABLE test(i TIMESTAMP TIME INDEX, j INTEGER, k INTEGER NOT NULL);
 
 INSERT INTO test(i, j, k) VALUES (1, 11, 5), (2, 12, 5);
 
-SELECT * FROM test;
+SELECT * FROM test order by i;
 
 SELECT FLUSH_TABLE('test');
 
@@ -14,8 +14,8 @@ INSERT INTO test(i, j, k) VALUES (3, 0, 6);
 
 INSERT INTO test VALUES (4, 7, 0);
 
-SELECT * FROM test;
+SELECT * FROM test order by i;
 
-SELECT * FROM test WHERE j = 0;
+SELECT * FROM test WHERE j = 0 order by i;
 
 DROP TABLE test;
