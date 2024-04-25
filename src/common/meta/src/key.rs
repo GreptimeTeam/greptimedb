@@ -64,21 +64,21 @@
 //!    info/
 //!      {tsak_id}
 //!
-//!  name/
-//!    {task_name}
+//!    name/
+//!      {task_name}
 //!
-//!  flownode/
-//!    flownode_id/
-//!      {flownode_id}/
-//!        {task_id}/
-//!          {partition_id}
+//!    flownode/
+//!      flownode_id/
+//!        {flownode_id}/
+//!          {task_id}/
+//!            {partition_id}
 //!
-//!  source_table/
-//!    flow_task/
-//!      {table_id}/
-//!         {flownode_id}/
-//!           {task_id}/
-//!             {partition_id}
+//!    source_table/
+//!      flow_task/
+//!        {table_id}/
+//!           {flownode_id}/
+//!             {task_id}/
+//!               {partition_id}
 
 pub mod catalog_name;
 pub mod datanode_table;
