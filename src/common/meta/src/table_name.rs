@@ -14,7 +14,7 @@
 
 use std::fmt::{Display, Formatter};
 
-use api::v1::meta::TableName as PbTableName;
+use api::v1::TableName as PbTableName;
 use serde::{Deserialize, Serialize};
 use table::table_reference::TableReference;
 
