@@ -140,23 +140,23 @@ mod tests {
         ChangeColumnTypes, ColumnDataType, ColumnDef as PbColumnDef, SemanticType,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, TableId};
 
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::test_util::columns::TestColumnDefBuilder;
     use crate::ddl::test_util::create_table::{
         build_raw_table_info_from_expr, TestCreateTableExprBuilder,
     };
+    use crate::ddl::DdlContext;
     use crate::key::table_route::TableRouteValue;
     use crate::peer::Peer;
     use crate::rpc::ddl::AlterTableTask;
     use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
-    #[tokio::test]
-    async fn test_make_alter_region_request() {
-        let node_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(node_manager);
+    async fn prepare_ddl_context() -> (DdlContext, u64, TableId, RegionId, String) {
+        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(datanode_manager);
         let cluster_id = 1;
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);
@@ -211,12 +211,25 @@ mod tests {
             )
             .await
             .unwrap();
+        (
+            ddl_context,
+            cluster_id,
+            table_id,
+            region_id,
+            table_name.to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_make_alter_region_request() {
+        let (ddl_context, cluster_id, table_id, region_id, table_name) =
+            prepare_ddl_context().await;
 
         let task = AlterTableTask {
             alter_table: AlterExpr {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: table_name.to_string(),
+                table_name,
                 kind: Some(Kind::AddColumns(AddColumns {
                     add_columns: vec![AddColumn {
                         column_def: Some(PbColumnDef {
@@ -276,68 +289,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_make_alter_column_type_region_request() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(datanode_manager);
-        let cluster_id = 1;
-        let table_id = 1024;
-        let region_id = RegionId::new(table_id, 1);
-        let table_name = "foo";
-
-        let create_table = TestCreateTableExprBuilder::default()
-            .column_defs([
-                TestColumnDefBuilder::default()
-                    .name("ts")
-                    .data_type(ColumnDataType::TimestampMillisecond)
-                    .semantic_type(SemanticType::Timestamp)
-                    .build()
-                    .unwrap()
-                    .into(),
-                TestColumnDefBuilder::default()
-                    .name("host")
-                    .data_type(ColumnDataType::String)
-                    .semantic_type(SemanticType::Tag)
-                    .build()
-                    .unwrap()
-                    .into(),
-                TestColumnDefBuilder::default()
-                    .name("cpu")
-                    .data_type(ColumnDataType::Float64)
-                    .semantic_type(SemanticType::Field)
-                    .build()
-                    .unwrap()
-                    .into(),
-            ])
-            .table_id(table_id)
-            .time_index("ts")
-            .primary_keys(["host".into()])
-            .table_name(table_name)
-            .build()
-            .unwrap()
-            .into();
-        let table_info = build_raw_table_info_from_expr(&create_table);
-
-        // Puts a value to table name key.
-        ddl_context
-            .table_metadata_manager
-            .create_table_metadata(
-                table_info,
-                TableRouteValue::physical(vec![RegionRoute {
-                    region: Region::new_test(region_id),
-                    leader_peer: Some(Peer::empty(1)),
-                    follower_peers: vec![],
-                    leader_status: None,
-                    leader_down_since: None,
-                }]),
-                HashMap::new(),
-            )
-            .await
-            .unwrap();
+        let (ddl_context, cluster_id, table_id, region_id, table_name) =
+            prepare_ddl_context().await;
 
         let task = AlterTableTask {
             alter_table: AlterExpr {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: table_name.to_string(),
+                table_name,
                 kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
                     change_column_types: vec![ChangeColumnType {
                         column_name: "cpu".to_string(),
