@@ -38,7 +38,6 @@ use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{
     column_def_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
 };
-use sql::util::to_lowercase_options_map;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
 
