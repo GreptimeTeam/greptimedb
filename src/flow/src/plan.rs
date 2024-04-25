@@ -18,12 +18,15 @@
 mod join;
 mod reduce;
 
+use std::collections::BTreeSet;
+
 use datatypes::arrow::ipc::Map;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::error::Error;
 use crate::expr::{
-    AggregateExpr, EvalError, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr,
+    AggregateExpr, EvalError, GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
+    TypedExpr,
 };
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
@@ -181,4 +184,46 @@ pub enum Plan {
         /// Whether to consolidate the output, e.g., cancel negated records.
         consolidate_output: bool,
     },
+}
+
+impl Plan {
+    /// Find all the used collection in the plan
+    pub fn find_used_collection(&self) -> BTreeSet<GlobalId> {
+        fn recur_find_use(plan: &Plan, used: &mut BTreeSet<GlobalId>) {
+            match plan {
+                Plan::Get { id } => {
+                    match id {
+                        Id::Local(_) => (),
+                        Id::Global(g) => {
+                            used.insert(*g);
+                        }
+                    };
+                }
+                Plan::Let { value, body, .. } => {
+                    recur_find_use(value, used);
+                    recur_find_use(body, used);
+                }
+                Plan::Mfp { input, .. } => {
+                    recur_find_use(input, used);
+                }
+                Plan::Reduce { input, .. } => {
+                    recur_find_use(input, used);
+                }
+                Plan::Join { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(input, used);
+                    }
+                }
+                Plan::Union { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(input, used);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut ret = Default::default();
+        recur_find_use(self, &mut ret);
+        ret
+    }
 }
