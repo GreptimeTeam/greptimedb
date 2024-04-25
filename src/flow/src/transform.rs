@@ -93,7 +93,8 @@ impl FunctionExtensions {
 
 /// To reuse existing code for parse sql, the sql is first parsed into a datafusion logical plan,
 /// then to a substrait plan, and finally to a flow plan.
-/// TODO: check if use empty `QueryContext` influence anything
+///
+/// TODO(discord9): check if use empty `QueryContext` influence anything
 pub async fn sql_to_flow_plan(
     ctx: &mut FlowWorkerContext,
     engine: &Arc<dyn QueryEngine>,
@@ -147,6 +148,7 @@ mod test {
             id_to_name: HashMap::from([(gid, name.clone())]),
             name_to_id: HashMap::from([(name.clone(), gid)]),
             schema: HashMap::from([(gid, schema)]),
+            ..Default::default()
         }
     }
 

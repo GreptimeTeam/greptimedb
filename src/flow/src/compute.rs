@@ -17,3 +17,7 @@
 mod render;
 mod state;
 mod types;
+
+pub(crate) use render::Context;
+pub(crate) use state::DataflowState;
+pub(crate) use types::ErrCollector;

@@ -21,15 +21,20 @@ datatypes.workspace = true
 enum_dispatch = "0.3"
 # This fork is simply for keeping our dependency in our org, and pin the version
 # it is the same with upstream repo
+common-meta.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true
 num-traits = "0.2"
+prost.workspace = true
+query.workspace = true
 serde.workspace = true
 servers.workspace = true
+session.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
 strum.workspace = true
 substrait.workspace = true
+table.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 

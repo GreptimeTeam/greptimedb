@@ -45,6 +45,7 @@ use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, Arrangement};
 
 mod map;
 mod reduce;
+mod src_sink;
 
 /// The Context for build a Operator with id of `GlobalId`
 pub struct Context<'referred, 'df> {
@@ -52,13 +53,15 @@ pub struct Context<'referred, 'df> {
     pub df: &'referred mut Hydroflow<'df>,
     pub compute_state: &'referred mut DataflowState,
     /// a list of all collections being used in the operator
+    ///
+    /// TODO(discord9): remove extra clone by counting usage and remove it on last usage?
     pub input_collection: BTreeMap<GlobalId, CollectionBundle>,
     /// used by `Get`/`Let` Plan for getting/setting local variables
     ///
     /// TODO(discord9): consider if use Vec<(LocalId, CollectionBundle)> instead
-    local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
+    pub local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
     // Collect all errors in this operator's evaluation
-    err_collector: ErrCollector,
+    pub err_collector: ErrCollector,
 }
 
 impl<'referred, 'df> Drop for Context<'referred, 'df> {
