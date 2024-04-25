@@ -19,7 +19,7 @@ use snafu::OptionExt;
 use crate::error::{self, Result};
 
 /// The delimiter of key.
-pub const DELIMITER: u8 = b'/';
+pub(crate) const DELIMITER: u8 = b'/';
 
 /// The key of metadata.
 pub trait MetaKey<T> {
