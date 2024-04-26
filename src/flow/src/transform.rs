@@ -137,17 +137,18 @@ mod test {
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
+    use crate::adapter::TriMap;
     use crate::repr::ColumnType;
 
     pub fn create_test_ctx() -> FlowWorkerContext {
         let gid = GlobalId::User(0);
         let name = vec!["numbers".to_string()];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-
+        let mut tri_map = TriMap::new();
+        tri_map.insert(name.clone(), 0, gid);
         FlowWorkerContext {
-            id_to_name: HashMap::from([(gid, name.clone())]),
-            name_to_id: HashMap::from([(name.clone(), gid)]),
             schema: HashMap::from([(gid, schema)]),
+            table_repr: tri_map,
             ..Default::default()
         }
     }

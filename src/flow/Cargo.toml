@@ -24,6 +24,7 @@ enum_dispatch = "0.3"
 common-meta.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true
+minstant = "0.1.7"
 num-traits = "0.2"
 prost.workspace = true
 query.workspace = true
@@ -32,6 +33,7 @@ servers.workspace = true
 session.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
+store-api.workspace = true
 strum.workspace = true
 substrait.workspace = true
 table.workspace = true

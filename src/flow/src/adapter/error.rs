@@ -42,6 +42,13 @@ pub enum Error {
     #[snafu(display("Table not found: {name}"))]
     TableNotFound { name: String, location: Location },
 
+    #[snafu(display("Table not found: {msg}, meta error: {source}"))]
+    TableNotFoundMeta {
+        source: common_meta::error::Error,
+        msg: String,
+        location: Location,
+    },
+
     #[snafu(display("Table already exist: {name}"))]
     TableAlreadyExist { name: String, location: Location },
 
@@ -110,7 +117,9 @@ impl ErrorExt for Error {
                 StatusCode::Internal
             }
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
-            Self::TableNotFound { .. } => StatusCode::TableNotFound,
+            Self::TableNotFound { .. } | Self::TableNotFoundMeta { .. } => {
+                StatusCode::TableNotFound
+            }
             Self::InvalidQueryPlan { .. }
             | Self::InvalidQuerySubstrait { .. }
             | Self::InvalidQueryProst { .. }

@@ -51,6 +51,9 @@ pub type DiffRow = (Row, Timestamp, Diff);
 /// Row with key-value pair, timestamp and diff
 pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 
+/// broadcast channel capacity, set to a arbitrary value
+pub const BOARDCAST_CAP: usize = 1024;
+
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 ///
 /// support types are: `Date`, `DateTime`, `TimeStamp`, `i64`
