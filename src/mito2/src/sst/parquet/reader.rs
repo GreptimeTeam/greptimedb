@@ -451,7 +451,7 @@ struct Metrics {
 }
 
 /// Builder to build a [ParquetRecordBatchReader] for a row group.
-struct RowGroupReaderBuilder {
+pub(crate) struct RowGroupReaderBuilder {
     /// SST file to read.
     ///
     /// Holds the file handle to avoid the file purge purge it.
@@ -477,7 +477,7 @@ impl RowGroupReaderBuilder {
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
-    async fn build(
+    pub(crate) async fn build(
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
