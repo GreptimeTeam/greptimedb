@@ -18,7 +18,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDataTypeExtension,
-    CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
+    CreateFlowTaskExpr, CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -34,7 +34,7 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
+use sql::statements::create::{CreateExternalTable, CreateFlowTask, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
@@ -486,6 +486,24 @@ pub(crate) fn to_alter_expr(
         schema_name,
         table_name,
         kind: Some(kind),
+    })
+}
+
+fn to_create_flow_task_expr(
+    create_task: CreateFlowTask,
+    query_ctx: QueryContextRef,
+) -> Result<CreateFlowTaskExpr> {
+    Ok(CreateFlowTaskExpr {
+        catalog_name: query_ctx.current_catalog().to_string(),
+        task_name: create_task.task_name,
+        source_table_names: todo!(),
+        sink_table_name: todo!(),
+        create_if_not_exists: create_task.if_not_exists,
+        or_replace: create_task.or_replace,
+        expire_when: create_task.expire_when.to_string(),
+        comment: create_task.comment,
+        sql: create_task.query.to_string(),
+        task_options: HashMap::new(),
     })
 }
 

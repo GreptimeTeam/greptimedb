@@ -45,7 +45,9 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
-use sql::statements::create::{CreateExternalTable, CreateTable, CreateTableLike, Partitions};
+use sql::statements::create::{
+    CreateExternalTable, CreateFlowTask, CreateTable, CreateTableLike, Partitions,
+};
 use sql::statements::sql_value_to_value;
 use sqlparser::ast::{Expr, Ident, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
@@ -318,6 +320,17 @@ impl StatementExecutor {
             .into_iter()
             .map(|x| DistTable::table(Arc::new(x)))
             .collect())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn create_flow_task(
+        &self,
+        stmt: CreateFlowTask,
+        query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        // TODO: do some verification
+
+        todo!()
     }
 
     #[tracing::instrument(skip_all)]
