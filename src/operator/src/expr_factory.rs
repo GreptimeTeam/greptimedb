@@ -126,13 +126,13 @@ pub(crate) async fn create_external_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let mut table_options = create.options;
+    let mut table_options = create.options.into_map();
 
-    let (object_store, files) = prepare_file_table_files(&table_options.map)
+    let (object_store, files) = prepare_file_table_files(&table_options)
         .await
         .context(PrepareFileTableSnafu)?;
 
-    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options.map)
+    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
         .await
         .context(InferFileTableSchemaSnafu)?
         .column_schemas;
@@ -173,7 +173,7 @@ pub(crate) async fn create_external_expr(
         time_index,
         primary_keys,
         create_if_not_exists: create.if_not_exists,
-        table_options: table_options.map,
+        table_options,
         table_id: None,
         engine: create.engine.to_string(),
     };
@@ -189,7 +189,8 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
 
     let time_index = find_time_index(&create.constraints)?;
     let table_options = HashMap::from(
-        &TableOptions::try_from(create.options.as_ref()).context(UnrecognizedTableOptionSnafu)?,
+        &TableOptions::try_from(&create.options.clone().into_map())
+            .context(UnrecognizedTableOptionSnafu)?,
     );
 
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;

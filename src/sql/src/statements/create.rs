@@ -20,7 +20,7 @@ use sqlparser::ast::Expr;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
-use crate::statements::{redact_and_sort_options, OptionMap};
+use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -155,8 +155,8 @@ impl Display for CreateTable {
             writeln!(f, "{partitions}")?;
         }
         writeln!(f, "ENGINE={}", &self.engine)?;
-        if !self.options.map.is_empty() {
-            let options = redact_and_sort_options(&self.options);
+        if !self.options.is_empty() {
+            let options = self.options.kv_pairs();
             write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
         }
         Ok(())
@@ -213,8 +213,8 @@ impl Display for CreateExternalTable {
         writeln!(f, "{}", format_table_constraint(&self.constraints))?;
         writeln!(f, ")")?;
         writeln!(f, "ENGINE={}", &self.engine)?;
-        if !self.options.map.is_empty() {
-            let options = redact_and_sort_options(&self.options);
+        if !self.options.is_empty() {
+            let options = self.options.kv_pairs();
             write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
         }
         Ok(())
@@ -370,7 +370,7 @@ ENGINE=mito
                 .unwrap();
         match &result[0] {
             Statement::CreateTable(c) => {
-                assert_eq!(2, c.options.map.len());
+                assert_eq!(2, c.options.len());
             }
             _ => unreachable!(),
         }
