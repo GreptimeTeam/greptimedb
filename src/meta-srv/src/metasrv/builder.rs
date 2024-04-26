@@ -21,15 +21,16 @@ use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
-use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
+use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
+use common_meta::ddl::DdlContext;
+use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
-use common_meta::key::flow_task::{FlowTaskMetadataManager, FlowTaskMetadataManagerRef};
-use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::key::flow_task::FlowTaskMetadataManager;
+use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
+use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
@@ -246,25 +247,46 @@ impl MetasrvBuilder {
                     .build(),
             )),
         );
-        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
-
-        let ddl_manager = build_ddl_manager(
-            &options,
-            node_manager,
-            &procedure_manager,
-            &mailbox,
-            &table_metadata_manager,
-            &table_metadata_allocator,
-            &flow_task_metadata_manager,
-            &flow_task_metadata_allocator,
-            &opening_region_keeper,
-        )?;
+        let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
+        let node_manager = node_manager.unwrap_or_else(|| {
+            let datanode_client_channel_config = ChannelConfig::new()
+                .timeout(Duration::from_millis(
+                    options.datanode.client_options.timeout_millis,
+                ))
+                .connect_timeout(Duration::from_millis(
+                    options.datanode.client_options.connect_timeout_millis,
+                ))
+                .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
+            Arc::new(DatanodeClients::new(datanode_client_channel_config))
+        });
+        let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
+            mailbox.clone(),
+            MetasrvInfo {
+                server_addr: options.server_addr.clone(),
+            },
+        ));
+        let ddl_manager = Arc::new(
+            DdlManager::try_new(
+                DdlContext {
+                    node_manager,
+                    cache_invalidator,
+                    memory_region_keeper: memory_region_keeper.clone(),
+                    table_metadata_manager: table_metadata_manager.clone(),
+                    table_metadata_allocator: table_metadata_allocator.clone(),
+                    flow_task_metadata_manager: flow_task_metadata_manager.clone(),
+                    flow_task_metadata_allocator: flow_task_metadata_allocator.clone(),
+                },
+                procedure_manager.clone(),
+                true,
+            )
+            .context(error::InitDdlManagerSnafu)?,
+        );
 
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             procedure_manager.clone(),
             DefaultContextFactory::new(
                 table_metadata_manager.clone(),
-                opening_region_keeper.clone(),
+                memory_region_keeper.clone(),
                 mailbox.clone(),
                 options.server_addr.clone(),
             ),
@@ -305,7 +327,7 @@ impl MetasrvBuilder {
                 let region_lease_handler = RegionLeaseHandler::new(
                     distributed_time_constants::REGION_LEASE_SECS,
                     table_metadata_manager.clone(),
-                    opening_region_keeper.clone(),
+                    memory_region_keeper.clone(),
                 );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
@@ -360,7 +382,7 @@ impl MetasrvBuilder {
             )
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
-            memory_region_keeper: opening_region_keeper,
+            memory_region_keeper,
             region_migration_manager,
         })
     }
@@ -404,51 +426,6 @@ fn build_procedure_manager(
             .map(|v| v.as_bytes() as usize),
     );
     Arc::new(LocalManager::new(manager_config, Arc::new(state_store)))
-}
-
-fn build_ddl_manager(
-    options: &MetasrvOptions,
-    datanode_clients: Option<NodeManagerRef>,
-    procedure_manager: &ProcedureManagerRef,
-    mailbox: &MailboxRef,
-    table_metadata_manager: &TableMetadataManagerRef,
-    table_metadata_allocator: &TableMetadataAllocatorRef,
-    flow_task_metadata_manager: &FlowTaskMetadataManagerRef,
-    flow_task_metadata_allocator: &FlowTaskMetadataAllocatorRef,
-    memory_region_keeper: &MemoryRegionKeeperRef,
-) -> Result<DdlManagerRef> {
-    let datanode_clients = datanode_clients.unwrap_or_else(|| {
-        let datanode_client_channel_config = ChannelConfig::new()
-            .timeout(Duration::from_millis(
-                options.datanode.client_options.timeout_millis,
-            ))
-            .connect_timeout(Duration::from_millis(
-                options.datanode.client_options.connect_timeout_millis,
-            ))
-            .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
-        Arc::new(DatanodeClients::new(datanode_client_channel_config))
-    });
-    let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
-        mailbox.clone(),
-        MetasrvInfo {
-            server_addr: options.server_addr.clone(),
-        },
-    ));
-
-    Ok(Arc::new(
-        DdlManager::try_new(
-            procedure_manager.clone(),
-            datanode_clients,
-            cache_invalidator,
-            table_metadata_manager.clone(),
-            table_metadata_allocator.clone(),
-            flow_task_metadata_manager.clone(),
-            flow_task_metadata_allocator.clone(),
-            memory_region_keeper.clone(),
-            true,
-        )
-        .context(error::InitDdlManagerSnafu)?,
-    ))
 }
 
 impl Default for MetasrvBuilder {

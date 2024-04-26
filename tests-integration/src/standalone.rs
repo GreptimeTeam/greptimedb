@@ -22,6 +22,7 @@ use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
+use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow_task::FlowTaskMetadataManager;
 use common_meta::key::TableMetadataManager;
@@ -151,24 +152,26 @@ impl GreptimeDbStandaloneBuilder {
             mix_options.wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_task_meta_allocator = Arc::new(
+        let flow_task_metadata_allocator = Arc::new(
             FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_task_id_sequence),
         );
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(
+                DdlContext {
+                    node_manager: node_manager.clone(),
+                    cache_invalidator: multi_cache_invalidator,
+                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                    table_metadata_manager,
+                    table_metadata_allocator,
+                    flow_task_metadata_manager,
+                    flow_task_metadata_allocator,
+                },
                 procedure_manager.clone(),
-                node_manager.clone(),
-                multi_cache_invalidator,
-                table_metadata_manager,
-                table_meta_allocator,
-                flow_task_metadata_manager,
-                flow_task_meta_allocator,
-                Arc::new(MemoryRegionKeeper::default()),
                 register_procedure_loaders,
             )
             .unwrap(),

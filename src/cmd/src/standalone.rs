@@ -23,7 +23,7 @@ use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
-use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow_task::{FlowTaskMetadataManager, FlowTaskMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -479,20 +479,22 @@ impl StartCommand {
         node_manager: NodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_meta_allocator: TableMetadataAllocatorRef,
-        flow_metadata_manager: FlowTaskMetadataManagerRef,
-        flow_metadata_allocator: FlowTaskMetadataAllocatorRef,
+        table_metadata_allocator: TableMetadataAllocatorRef,
+        flow_task_metadata_manager: FlowTaskMetadataManagerRef,
+        flow_task_metadata_allocator: FlowTaskMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
+                DdlContext {
+                    node_manager,
+                    cache_invalidator,
+                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                    table_metadata_manager,
+                    table_metadata_allocator,
+                    flow_task_metadata_manager,
+                    flow_task_metadata_allocator,
+                },
                 procedure_manager,
-                node_manager,
-                cache_invalidator,
-                table_metadata_manager,
-                table_meta_allocator,
-                flow_metadata_manager,
-                flow_metadata_allocator,
-                Arc::new(MemoryRegionKeeper::default()),
                 true,
             )
             .context(InitDdlManagerSnafu)?,
