@@ -23,12 +23,12 @@ use crate::adapter::error::{Error, InvalidQuerySnafu, NotImplementedSnafu, PlanS
 use crate::expr::{MapFilterProject, TypedExpr};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, RelationType};
-use crate::transform::{FlowWorkerContext, FunctionExtensions};
+use crate::transform::{FlowNodeContext, FunctionExtensions};
 
 impl TypedPlan {
     /// Convert Substrait Plan into Flow's TypedPlan
     pub fn from_substrait_plan(
-        ctx: &mut FlowWorkerContext,
+        ctx: &mut FlowNodeContext,
         plan: &SubPlan,
     ) -> Result<TypedPlan, Error> {
         // Register function extension
@@ -62,7 +62,7 @@ impl TypedPlan {
     /// Convert Substrait Rel into Flow's TypedPlan
     /// TODO: SELECT DISTINCT(does it get compile with something else?)
     pub fn from_substrait_rel(
-        ctx: &mut FlowWorkerContext,
+        ctx: &mut FlowNodeContext,
         rel: &Rel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {

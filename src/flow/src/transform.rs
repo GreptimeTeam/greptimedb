@@ -28,7 +28,7 @@ use crate::adapter::error::{
     Error, InvalidQueryPlanSnafu, InvalidQueryProstSnafu, InvalidQuerySubstraitSnafu,
     NotImplementedSnafu, TableNotFoundSnafu,
 };
-use crate::adapter::FlowWorkerContext;
+use crate::adapter::FlowNodeContext;
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::RelationType;
@@ -96,7 +96,7 @@ impl FunctionExtensions {
 ///
 /// TODO(discord9): check if use empty `QueryContext` influence anything
 pub async fn sql_to_flow_plan(
-    ctx: &mut FlowWorkerContext,
+    ctx: &mut FlowNodeContext,
     engine: &Arc<dyn QueryEngine>,
     sql: &str,
 ) -> Result<TypedPlan, Error> {
@@ -140,13 +140,13 @@ mod test {
     use crate::adapter::TriMap;
     use crate::repr::ColumnType;
 
-    pub fn create_test_ctx() -> FlowWorkerContext {
+    pub fn create_test_ctx() -> FlowNodeContext {
         let gid = GlobalId::User(0);
         let name = vec!["numbers".to_string()];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
         let mut tri_map = TriMap::new();
         tri_map.insert(name.clone(), 0, gid);
-        FlowWorkerContext {
+        FlowNodeContext {
             schema: HashMap::from([(gid, schema)]),
             table_repr: tri_map,
             ..Default::default()
