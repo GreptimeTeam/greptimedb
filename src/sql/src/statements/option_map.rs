@@ -85,7 +85,7 @@ impl OptionMap {
         }
         for key in self.secrets.keys().sorted() {
             if self.secrets.contains_key(key) {
-                result.push(format!("{key} = '******"));
+                result.push(format!("{key} = '******'"));
             }
         }
         result
