@@ -85,7 +85,7 @@ impl OptionMap {
         }
         for key in self.secrets.keys().sorted() {
             if let Some(val) = self.secrets.get(key) {
-                result.push(format!("{key} = '{val:?}'"));
+                result.push(format!("{key} = {val:?}"));
             }
         }
         result
