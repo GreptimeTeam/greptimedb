@@ -635,7 +635,7 @@ mod tests {
         match &dn_opts.storage.providers[1] {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
-                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    "SecretBox<alloc::string::String>([REDACTED])".to_string(),
                     format!("{:?}", s3_config.access_key_id)
                 );
             }

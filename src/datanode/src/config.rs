@@ -308,7 +308,7 @@ mod tests {
         match &opts.storage.store {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
-                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    "SecretBox<alloc::string::String>([REDACTED])".to_string(),
                     format!("{:?}", cfg.access_key_id)
                 );
                 assert_eq!("access_key_id", cfg.access_key_id.expose_secret());
