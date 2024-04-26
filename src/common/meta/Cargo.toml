@@ -30,6 +30,7 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
 datafusion-common.workspace = true
+datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true

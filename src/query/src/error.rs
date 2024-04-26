@@ -140,13 +140,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to encode Substrait logical plan"))]
-    EncodeSubstraitLogicalPlan {
-        source: substrait::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("General SQL error"))]
     Sql {
         #[snafu(implicit)]
@@ -340,7 +333,6 @@ impl ErrorExt for Error {
             | ColumnSchemaNoDefault { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
-            EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),
 
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.status_code(),
 

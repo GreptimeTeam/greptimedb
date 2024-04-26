@@ -75,7 +75,7 @@ pub enum Error {
     DecodeLogicalPlan {
         #[snafu(implicit)]
         location: Location,
-        source: common_query::error::Error,
+        source: substrait::error::Error,
     },
 
     #[snafu(display("Incorrect internal state: {}", state))]
@@ -387,6 +387,14 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("DataFusion"))]
+    DataFusion {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -439,7 +447,8 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownInstance { .. }
             | RegionEngineNotFound { .. }
-            | UnsupportedOutput { .. } => StatusCode::Internal,
+            | UnsupportedOutput { .. }
+            | DataFusion { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,

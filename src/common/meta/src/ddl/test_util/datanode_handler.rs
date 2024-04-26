@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::region::RegionResponse;
-use api::v1::region::{QueryRequest, RegionRequest};
+use api::v1::region::RegionRequest;
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
@@ -22,6 +22,7 @@ use snafu::{ResultExt, Snafu};
 use tokio::sync::mpsc;
 
 use crate::error::{self, Error, Result};
+use crate::node_manager::QueryRequest;
 use crate::peer::Peer;
 use crate::test_util::MockDatanodeHandler;
 

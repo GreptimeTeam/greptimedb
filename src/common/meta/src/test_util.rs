@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use api::region::RegionResponse;
 use api::v1::flow::{FlowRequest, FlowResponse};
-use api::v1::region::{InsertRequests, QueryRequest, RegionRequest};
+use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
@@ -30,7 +30,7 @@ use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
 use crate::node_manager::{
-    Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef,
+    Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef, QueryRequest,
 };
 use crate::peer::Peer;
 use crate::region_keeper::MemoryRegionKeeper;
