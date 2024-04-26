@@ -129,21 +129,17 @@ impl AggregateUDFImpl for DfUdafAdapter {
         (self.accumulator)(acc_args)
     }
 
-    fn state_fields(
-        &self,
-        name: &str,
-        _value_type: ArrowDataType,
-        _ordering_fields: Vec<Field>,
-    ) -> Result<Vec<Field>> {
-        self.creator
-            .state_types()
-            .map(|x| {
-                (0..x.len())
-                    .zip(x)
-                    .map(|(i, t)| Field::new(format!("{}_{}", name, i), t.as_arrow_type(), true))
-                    .collect::<Vec<_>>()
+    fn state_fields(&self, name: &str, _: ArrowDataType, _: Vec<Field>) -> Result<Vec<Field>> {
+        let state_types = self.creator.state_types()?;
+        let fields = state_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let name = format!("{name}_{i}");
+                Field::new(name, t.as_arrow_type(), true)
             })
-            .map_err(|e| e.into())
+            .collect::<Vec<_>>();
+        Ok(fields)
     }
 }
 
