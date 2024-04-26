@@ -212,9 +212,6 @@ impl<'a> ParserContext<'a> {
 
     /// "CREATE TASK" clause
     fn parse_create_flow_task(&mut self, or_replace: bool) -> Result<Statement> {
-        // consume `TASK`
-        // let _ = self.parser.next_token();
-
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
