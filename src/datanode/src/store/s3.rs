@@ -15,8 +15,8 @@
 use common_telemetry::logging::info;
 use object_store::services::S3;
 use object_store::{util, ObjectStore};
-use secrecy::ExposeSecret;
 use snafu::prelude::*;
+use common_base::secrets::ExposeSecret;
 
 use crate::config::S3Config;
 use crate::error::{self, Result};

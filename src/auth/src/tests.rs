@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use secrecy::ExposeSecret;
-
+use common_base::secrets::ExposeSecret;
 use crate::error::{
     AccessDeniedSnafu, Result, UnsupportedPasswordTypeSnafu, UserNotFoundSnafu,
     UserPasswordMismatchSnafu,

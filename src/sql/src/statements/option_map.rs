@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 
 use itertools::Itertools;
-use secrecy::{ExposeSecret, SecretString};
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
+use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
 
 const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 
@@ -31,7 +31,7 @@ pub struct OptionMap {
 impl OptionMap {
     pub fn insert(&mut self, k: String, v: String) {
         if REDACTED_OPTIONS.contains(&k.as_str()) {
-            self.secrets.insert(k, SecretString::new(v));
+            self.secrets.insert(k, SecretString::new(Box::new(v)));
         } else {
             self.options.insert(k, v);
         }
@@ -146,9 +146,7 @@ impl VisitMut for OptionMap {
             v.visit(visitor)?;
         }
         for (_, v) in self.secrets.iter_mut() {
-            let mut v = v.expose_secret().to_string();
-            let val = &mut v;
-            val.visit(visitor)?;
+            v.expose_secret_mut().visit(visitor)?;
         }
         ControlFlow::Continue(())
     }

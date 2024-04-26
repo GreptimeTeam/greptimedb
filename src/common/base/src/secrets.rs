@@ -37,6 +37,14 @@ use std::{any, fmt};
 use serde::{de, ser, Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub type SecretString = SecretBox<String>;
+
+impl From<String> for SecretString {
+    fn from(value: String) -> Self {
+        SecretString::new(Box::new(value))
+    }
+}
+
 /// Wrapper type for values that contains secrets, which attempts to limit
 /// accidental exposure and ensure secrets are wiped from memory when dropped.
 /// (e.g. passwords, cryptographic keys, access tokens or other credentials)
@@ -134,7 +142,7 @@ impl<S: Zeroize> Debug for SecretBox<S> {
 
 impl<S> Clone for SecretBox<S>
 where
-    S: CloneableSecret,
+    S: Clone + Zeroize,
 {
     fn clone(&self) -> Self {
         SecretBox {
@@ -154,9 +162,6 @@ impl<S: Zeroize> ExposeSecretMut<S> for SecretBox<S> {
         self.inner_secret.as_mut()
     }
 }
-
-/// Marker trait for secrets which are allowed to be cloned
-pub trait CloneableSecret: Clone + Zeroize {}
 
 /// Expose a reference to an inner secret
 pub trait ExposeSecret<S> {

@@ -24,8 +24,8 @@ use common_wal::config::DatanodeWalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use common_base::secrets::SecretString;
 use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
@@ -285,8 +285,7 @@ pub enum RegionEngineConfig {
 
 #[cfg(test)]
 mod tests {
-    use secrecy::ExposeSecret;
-
+    use common_base::secrets::ExposeSecret;
     use super::*;
 
     #[test]

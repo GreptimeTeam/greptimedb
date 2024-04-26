@@ -15,8 +15,8 @@
 use common_telemetry::logging::info;
 use object_store::services::Azblob;
 use object_store::{util, ObjectStore};
-use secrecy::ExposeSecret;
 use snafu::prelude::*;
+use common_base::secrets::ExposeSecret;
 
 use crate::config::AzblobConfig;
 use crate::error::{self, Result};

@@ -28,9 +28,9 @@ use common_telemetry::warn;
 use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use headers::Header;
-use secrecy::SecretString;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
+use common_base::secrets::SecretString;
 
 use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use super::PUBLIC_APIS;
@@ -319,8 +319,6 @@ fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>)
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
-
-    use secrecy::ExposeSecret;
 
     use super::*;
 

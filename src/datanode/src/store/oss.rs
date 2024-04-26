@@ -15,8 +15,8 @@
 use common_telemetry::logging::info;
 use object_store::services::Oss;
 use object_store::{util, ObjectStore};
-use secrecy::ExposeSecret;
 use snafu::prelude::*;
+use common_base::secrets::ExposeSecret;
 
 use crate::config::OssConfig;
 use crate::error::{self, Result};

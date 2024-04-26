@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use digest::Digest;
-use secrecy::SecretString;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt};
+use common_base::secrets::SecretString;
 
 use crate::error::{IllegalParamSnafu, InvalidConfigSnafu, Result, UserPasswordMismatchSnafu};
 use crate::user_info::DefaultUserInfo;
