@@ -77,6 +77,10 @@ pub(crate) struct ParquetReaderBuilder {
     cache_manager: Option<CacheManagerRef>,
     /// Index applier.
     index_applier: Option<SstIndexApplierRef>,
+    /// Expected metadata of the region while reading the SST.
+    /// This is usually the latest metadata of the region. The reader use
+    /// it get the correct column id of a column by name.
+    expected_metadata: Option<RegionMetadataRef>,
 }
 
 impl ParquetReaderBuilder {
@@ -95,16 +99,19 @@ impl ParquetReaderBuilder {
             projection: None,
             cache_manager: None,
             index_applier: None,
+            expected_metadata: None,
         }
     }
 
     /// Attaches the predicate to the builder.
+    #[must_use]
     pub fn predicate(mut self, predicate: Option<Predicate>) -> ParquetReaderBuilder {
         self.predicate = predicate;
         self
     }
 
     /// Attaches the time range to the builder.
+    #[must_use]
     pub fn time_range(mut self, time_range: Option<TimestampRange>) -> ParquetReaderBuilder {
         self.time_range = time_range;
         self
@@ -113,12 +120,14 @@ impl ParquetReaderBuilder {
     /// Attaches the projection to the builder.
     ///
     /// The reader only applies the projection to fields.
+    #[must_use]
     pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
         self.projection = projection;
         self
     }
 
     /// Attaches the cache to the builder.
+    #[must_use]
     pub fn cache(mut self, cache: Option<CacheManagerRef>) -> ParquetReaderBuilder {
         self.cache_manager = cache;
         self
@@ -128,6 +137,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
         self.index_applier = index_applier;
+        self
+    }
+
+    /// Attaches the expected metadata to the builder.
+    #[must_use]
+    pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
+        self.expected_metadata = expected_metadata;
         self
     }
 
@@ -386,14 +402,12 @@ impl ParquetReaderBuilder {
         let num_row_groups = parquet_meta.num_row_groups();
 
         let region_meta = read_format.metadata();
-        let column_ids = region_meta
-            .column_metadatas
-            .iter()
-            .map(|c| c.column_id)
-            .collect();
-
         let row_groups = parquet_meta.row_groups();
-        let stats = RowGroupPruningStats::new(row_groups, read_format, column_ids);
+        let stats =
+            RowGroupPruningStats::new(row_groups, read_format, self.expected_metadata.clone());
+        // Here we use the schema of the SST to build the physical expression. If the column
+        // in the SST doesn't have the same column id as the column in the expected metadata,
+        // we will get a None statistics for that column.
         let row_groups = predicate
             .prune_with_stats(&stats, region_meta.schema.arrow_schema())
             .iter()
