@@ -105,6 +105,7 @@ fn create_proto_alter_kind(
             })))
         }
         Kind::RenameTable(_) => Ok(None),
+        Kind::ChangeColumnTypes(_) => unimplemented!(),
     }
 }
 
