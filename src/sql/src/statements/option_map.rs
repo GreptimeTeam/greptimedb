@@ -56,7 +56,7 @@ impl OptionMap {
     }
 
     pub fn to_str_map(&self) -> HashMap<&str, &str> {
-        let mut map = HashMap::new();
+        let mut map = HashMap::with_capacity(self.len());
         map.extend(self.options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         map.extend(
             self.secrets
@@ -67,7 +67,8 @@ impl OptionMap {
     }
 
     pub fn into_map(self) -> HashMap<String, String> {
-        let mut map = self.options;
+        let mut map = HashMap::with_capacity(self.len());
+        map.extend(self.options);
         map.extend(
             self.secrets
                 .into_iter()
