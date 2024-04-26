@@ -63,10 +63,14 @@ pub struct FlowNodeManager<'subgraph> {
     tick_manager: FlowTickManager,
 }
 
+/// Just check if NodeManager's other fields are `Send` so later we can refactor so A Flow Node Manager
+/// can manage multiple flow worker(thread) then we can run multiple flow worker in a single flow node manager
 #[test]
-fn check() {
+fn check_is_send() {
     fn is_send<T: Send>() {}
+    is_send::<TableIdNameMapper>();
     is_send::<FlowWorkerContext>();
+    is_send::<FlowTickManager>();
 }
 
 /// mapping of table name <-> table id should be query from tableinfo manager
