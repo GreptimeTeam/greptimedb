@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Dummy catalog for region servers.
+//! Dummy catalog for region server.
 
 use std::any::Any;
 use std::sync::{Arc, Mutex};
@@ -127,7 +127,7 @@ impl SchemaProvider for DummySchemaProvider {
     }
 }
 
-/// For [TableProvider](TableProvider) and [DummyCatalogList]
+/// For [TableProvider] and [DummyCatalogList]
 #[derive(Clone)]
 pub struct DummyTableProvider {
     region_id: RegionId,
