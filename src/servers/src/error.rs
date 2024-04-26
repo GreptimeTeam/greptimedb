@@ -97,9 +97,8 @@ pub enum Error {
         error: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[snafu(display("Failed to execute query, query: {}", query))]
+    #[snafu(display("Failed to execute query"))]
     ExecuteQuery {
-        query: String,
         location: Location,
         source: BoxedError,
     },
