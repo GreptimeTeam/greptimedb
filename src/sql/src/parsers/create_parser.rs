@@ -138,11 +138,12 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_if_not_exist(&mut self) -> Result<bool> {
-        if !self.parser.parse_keyword(Keyword::IF) {
-            return Ok(false);
+        match self.parser.peek_token().token {
+            Token::Word(w) if Keyword::IF != w.keyword => return Ok(false),
+            _ => {}
         }
 
-        if self.parser.parse_keyword(Keyword::NOT) {
+        if self.parser.parse_keywords(&[Keyword::IF, Keyword::NOT]) {
             return self
                 .parser
                 .expect_keyword(Keyword::EXISTS)
@@ -154,7 +155,7 @@ impl<'a> ParserContext<'a> {
                 });
         }
 
-        if self.parser.parse_keyword(Keyword::EXISTS) {
+        if self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]) {
             return UnsupportedSnafu {
                 sql: self.sql,
                 keyword: "EXISTS",
