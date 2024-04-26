@@ -165,7 +165,7 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateFlowTask(stmt) => {
-                let _ = self.create_flow_task(stmt, query_ctx).await?;
+                self.create_flow_task(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,

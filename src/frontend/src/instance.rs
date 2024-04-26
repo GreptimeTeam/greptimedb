@@ -494,6 +494,10 @@ pub fn check_permission(
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
+        Statement::CreateFlowTask(stmt) => {
+            // TODO: should also validate source table name here?
+            validate_param(&stmt.output_table_name, query_ctx)?;
+        }
         Statement::Alter(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }

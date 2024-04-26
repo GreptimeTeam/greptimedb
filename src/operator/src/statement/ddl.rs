@@ -330,7 +330,11 @@ impl StatementExecutor {
     ) -> Result<()> {
         // TODO: do some verification
 
-        todo!()
+        let _expr = expr_factory::to_create_flow_task_expr(stmt, query_ctx)?;
+
+        // TODO: invoke procedure
+
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]

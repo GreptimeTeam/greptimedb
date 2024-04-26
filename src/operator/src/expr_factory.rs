@@ -19,10 +19,12 @@ use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDataTypeExtension,
     CreateFlowTaskExpr, CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
+    TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
+use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
@@ -36,14 +38,15 @@ use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateFlowTask, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
+use sql::util::extract_tables_from_query;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu,
-    InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
-    SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
+    ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
+    InferFileTableSchemaSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -487,19 +490,67 @@ pub(crate) fn to_alter_expr(
     })
 }
 
-fn to_create_flow_task_expr(
+pub fn to_create_flow_task_expr(
     create_task: CreateFlowTask,
     query_ctx: QueryContextRef,
 ) -> Result<CreateFlowTaskExpr> {
+    // retrieve sink table name
+    let sink_table_ref =
+        object_name_to_table_reference(create_task.output_table_name.clone().into(), true)
+            .with_context(|_| ConvertIdentifierSnafu {
+                ident: create_task.output_table_name.to_string(),
+            })?;
+    let catalog = sink_table_ref
+        .catalog()
+        .unwrap_or(query_ctx.current_catalog())
+        .to_string();
+    let schema = sink_table_ref
+        .schema()
+        .unwrap_or(query_ctx.current_schema())
+        .to_string();
+    let sink_table_name = TableName {
+        catalog_name: catalog,
+        schema_name: schema,
+        table_name: sink_table_ref.table().to_string(),
+    };
+
+    let source_table_names = extract_tables_from_query(&create_task.query)
+        .map(|name| {
+            let reference = object_name_to_table_reference(name.clone().into(), true)
+                .with_context(|_| ConvertIdentifierSnafu {
+                    ident: name.to_string(),
+                })?;
+            let catalog = reference
+                .catalog()
+                .unwrap_or(query_ctx.current_catalog())
+                .to_string();
+            let schema = reference
+                .schema()
+                .unwrap_or(query_ctx.current_schema())
+                .to_string();
+            let table_name = TableName {
+                catalog_name: catalog,
+                schema_name: schema,
+                table_name: reference.table().to_string(),
+            };
+            Ok(table_name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(CreateFlowTaskExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
-        task_name: create_task.task_name,
-        source_table_names: todo!(),
-        sink_table_name: todo!(),
+        task_name: create_task.task_name.to_string(),
+        source_table_names,
+        sink_table_name: Some(sink_table_name),
         create_if_not_exists: create_task.if_not_exists,
         or_replace: create_task.or_replace,
-        expire_when: create_task.expire_when.to_string(),
-        comment: create_task.comment,
+        // TODO: change this field to optional in proto
+        expire_when: create_task
+            .expire_when
+            .map(|e| e.to_string())
+            .unwrap_or_default(),
+        // TODO: change this field to optional in proto
+        comment: create_task.comment.unwrap_or_default(),
         sql: create_task.query.to_string(),
         task_options: HashMap::new(),
     })
