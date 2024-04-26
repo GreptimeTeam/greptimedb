@@ -17,7 +17,7 @@ use std::sync::Arc;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::datanode_manager::NodeManagerRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
@@ -42,7 +42,7 @@ pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
     cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     heartbeat_task: Option<HeartbeatTask>,
@@ -52,7 +52,7 @@ impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
         catalog_manager: CatalogManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        datanode_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {

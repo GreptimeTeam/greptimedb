@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::datanode_manager::{Datanode, DatanodeManager};
+use common_meta::datanode_manager::{DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 
@@ -44,11 +44,16 @@ impl Debug for DatanodeClients {
 }
 
 #[async_trait::async_trait]
-impl DatanodeManager for DatanodeClients {
-    async fn datanode(&self, datanode: &Peer) -> Arc<dyn Datanode> {
+impl NodeManager for DatanodeClients {
+    async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
         let client = self.get_client(datanode).await;
 
         Arc::new(RegionRequester::new(client))
+    }
+
+    async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+        // TODO(weny): Support it.
+        unimplemented!()
     }
 }
 

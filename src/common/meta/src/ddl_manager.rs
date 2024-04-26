@@ -23,7 +23,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::TableId;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
-use crate::datanode_manager::DatanodeManagerRef;
+use crate::datanode_manager::NodeManagerRef;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
@@ -64,7 +64,7 @@ pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoade
 /// The [DdlManager] provides the ability to execute Ddl.
 pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     table_metadata_allocator: TableMetadataAllocatorRef,
@@ -75,7 +75,7 @@ pub struct DdlManager {
 impl DdlManager {
     pub fn try_new(
         procedure_manager: ProcedureManagerRef,
-        datanode_clients: DatanodeManagerRef,
+        datanode_clients: NodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
         table_metadata_allocator: TableMetadataAllocatorRef,
@@ -716,7 +716,7 @@ mod tests {
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
-    use crate::datanode_manager::{DatanodeManager, DatanodeRef};
+    use crate::datanode_manager::{DatanodeRef, FlownodeRef, NodeManager};
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
@@ -734,8 +734,12 @@ mod tests {
     pub struct DummyDatanodeManager;
 
     #[async_trait::async_trait]
-    impl DatanodeManager for DummyDatanodeManager {
+    impl NodeManager for DummyDatanodeManager {
         async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
+            unimplemented!()
+        }
+
+        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
             unimplemented!()
         }
     }

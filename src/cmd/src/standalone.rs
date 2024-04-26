@@ -21,7 +21,7 @@ use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::datanode_manager::NodeManagerRef;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::ddl_manager::DdlManager;
@@ -468,7 +468,7 @@ impl StartCommand {
     pub async fn create_ddl_task_executor(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        datanode_manager: NodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_meta_allocator: TableMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {

@@ -20,7 +20,7 @@ pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
-use crate::datanode_manager::{Datanode, DatanodeManager, DatanodeManagerRef, DatanodeRef};
+use crate::datanode_manager::{Datanode, DatanodeRef, FlownodeRef, NodeManager, NodeManagerRef};
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
@@ -74,24 +74,28 @@ impl<T: MockDatanodeHandler> Datanode for MockDatanode<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: MockDatanodeHandler + 'static> DatanodeManager for MockDatanodeManager<T> {
+impl<T: MockDatanodeHandler + 'static> NodeManager for MockDatanodeManager<T> {
     async fn datanode(&self, peer: &Peer) -> DatanodeRef {
         Arc::new(MockDatanode {
             peer: peer.clone(),
             handler: self.handler.clone(),
         })
     }
+
+    async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+        unimplemented!()
+    }
 }
 
 /// Returns a test purpose [DdlContext].
-pub fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
+pub fn new_ddl_context(datanode_manager: NodeManagerRef) -> DdlContext {
     let kv_backend = Arc::new(MemoryKvBackend::new());
     new_ddl_context_with_kv_backend(datanode_manager, kv_backend)
 }
 
 /// Returns a test purpose [DdlContext] with a specified [KvBackendRef].
 pub fn new_ddl_context_with_kv_backend(
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
     kv_backend: KvBackendRef,
 ) -> DdlContext {
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));

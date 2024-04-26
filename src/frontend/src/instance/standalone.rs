@@ -19,7 +19,7 @@ use api::v1::region::{QueryRequest, RegionRequest, RegionResponse as RegionRespo
 use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::{Datanode, DatanodeManager, DatanodeRef};
+use common_meta::datanode_manager::{Datanode, DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::peer::Peer;
 use common_recordbatch::SendableRecordBatchStream;
@@ -34,9 +34,13 @@ use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 pub struct StandaloneDatanodeManager(pub RegionServer);
 
 #[async_trait]
-impl DatanodeManager for StandaloneDatanodeManager {
+impl NodeManager for StandaloneDatanodeManager {
     async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
         RegionInvoker::arc(self.0.clone())
+    }
+
+    async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+        unimplemented!()
     }
 }
 

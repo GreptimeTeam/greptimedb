@@ -19,7 +19,7 @@ use std::{iter, mem};
 use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequests};
 use catalog::CatalogManagerRef;
-use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::datanode_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
@@ -40,7 +40,7 @@ use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
 pub struct Deleter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
 }
 
 pub type DeleterRef = Arc<Deleter>;
@@ -49,7 +49,7 @@ impl Deleter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        datanode_manager: NodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,

@@ -25,7 +25,7 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
-use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::datanode_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
@@ -57,7 +57,7 @@ use crate::statement::StatementExecutor;
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -66,7 +66,7 @@ impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        datanode_manager: NodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
