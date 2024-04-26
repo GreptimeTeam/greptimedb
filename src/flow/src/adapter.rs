@@ -59,7 +59,7 @@ pub struct FlowNodeManager<'subgraph> {
     pub task_states: BTreeMap<TaskId, ActiveDataflowState<'subgraph>>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     query_engine: Arc<dyn QueryEngine>,
-    srv_map: TableIdNameMapper,
+    srv_map: TableInfoSource,
     /// contains mapping from table name to global id, and table schema
     worker_context: FlowWorkerContext,
     tick_manager: FlowTickManager,
@@ -70,18 +70,21 @@ pub struct FlowNodeManager<'subgraph> {
 #[test]
 fn check_is_send() {
     fn is_send<T: Send>() {}
-    is_send::<TableIdNameMapper>();
+    is_send::<TableInfoSource>();
     is_send::<FlowWorkerContext>();
     is_send::<FlowTickManager>();
 }
 
 /// mapping of table name <-> table id should be query from tableinfo manager
-pub struct TableIdNameMapper {
+pub struct TableInfoSource {
     /// for query `TableId -> TableName` mapping
     table_info_manager: TableInfoManager,
 }
 
-impl TableIdNameMapper {
+impl TableInfoSource {
+    pub fn new(table_info_manager: TableInfoManager) -> Self {
+        TableInfoSource { table_info_manager }
+    }
     /// query metasrv about the table name and table id
     pub async fn get_table_name(&self, table_id: &TableId) -> Result<TableName, Error> {
         self.table_info_manager
@@ -514,7 +517,7 @@ impl FlowWorkerContext {
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,
-        srv_map: &TableIdNameMapper,
+        srv_map: &TableInfoSource,
         table_id: TableId,
     ) -> GlobalId {
         if let Some((_name, gid)) = self.table_repr.get_by_table_id(&table_id) {

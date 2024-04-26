@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "mem-footprint"
+path = "bin/mem_footprint.rs"
+
 [lints]
 workspace = true
 
