@@ -23,7 +23,6 @@ use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::key::FlowTaskId;
 use crate::peer::Peer;
 use crate::DatanodeId;
 
@@ -242,14 +241,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Task already exists, task: {}, flow_task_id: {}",
-        task_name,
-        flow_task_id
-    ))]
+    #[snafu(display("Task already exists, task: {}", task_name,))]
     TaskAlreadyExists {
         task_name: String,
-        flow_task_id: FlowTaskId,
         location: Location,
     },
 

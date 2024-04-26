@@ -714,7 +714,7 @@ mod tests {
     use crate::state_store::KvStateStore;
     use crate::wal_options_allocator::WalOptionsAllocator;
 
-    /// A dummy implemented [DatanodeManager].
+    /// A dummy implemented [NodeManager].
     pub struct DummyDatanodeManager;
 
     #[async_trait::async_trait]

@@ -724,6 +724,7 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
 }
 
 /// Create flow task
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlowTask {
     pub catalog_name: String,
     pub flow_name: String,

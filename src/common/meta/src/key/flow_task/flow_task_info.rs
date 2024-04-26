@@ -29,6 +29,7 @@ use crate::key::{
 };
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::table_name::TableName;
 use crate::FlownodeId;
 
 const FLOW_TASK_INFO_KEY_PREFIX: &str = "info";
@@ -117,9 +118,9 @@ impl MetaKey<FlowTaskInfoKeyInner> for FlowTaskInfoKeyInner {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowTaskInfoValue {
     /// The source tables used by the task.
-    pub(crate) source_tables: Vec<TableId>,
+    pub(crate) source_table_ids: Vec<TableId>,
     /// The sink table used by the task.
-    pub(crate) sink_table: TableId,
+    pub(crate) sink_table_name: TableName,
     /// Which flow nodes this task is running on.
     pub(crate) flownode_ids: BTreeMap<FlowTaskPartitionId, FlownodeId>,
     /// The catalog name.
@@ -144,7 +145,7 @@ impl FlowTaskInfoValue {
 
     /// Returns the `source_table`.
     pub fn source_table_ids(&self) -> &[TableId] {
-        &self.source_tables
+        &self.source_table_ids
     }
 }
 
