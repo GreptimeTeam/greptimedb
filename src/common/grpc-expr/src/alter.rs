@@ -92,7 +92,6 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         Kind::RenameTable(RenameTable { new_table_name }) => {
             AlterKind::RenameTable { new_table_name }
         }
-        Kind::ChangeColumnTypes(_) => unimplemented!(),
     };
 
     let request = AlterTableRequest {
