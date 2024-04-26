@@ -18,7 +18,6 @@ use api::v1::region::{
     alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
     RegionRequest, RegionRequestHeader,
 };
-use api::v1::{ChangeColumnType, ChangeColumnTypes};
 use common_telemetry::tracing_context::TracingContext;
 use snafu::OptionExt;
 use store_api::storage::RegionId;
@@ -92,23 +91,7 @@ fn create_proto_alter_kind(
                 add_columns,
             })))
         }
-        Kind::ChangeColumnTypes(x) => {
-            let change_column_types = x
-                .change_column_types
-                .iter()
-                .map(|change_column_type| ChangeColumnType {
-                    column_name: change_column_type.column_name.clone(),
-                    target_type: change_column_type.target_type,
-                    target_type_extension: change_column_type.target_type_extension.clone(),
-                })
-                .collect();
-
-            Ok(Some(alter_request::Kind::ChangeColumnTypes(
-                ChangeColumnTypes {
-                    change_column_types,
-                },
-            )))
-        }
+        Kind::ChangeColumnTypes(x) => Ok(Some(alter_request::Kind::ChangeColumnTypes(x.clone()))),
         Kind::DropColumns(x) => {
             let drop_columns = x
                 .drop_columns

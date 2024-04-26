@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt::{self};
+use std::fmt;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
