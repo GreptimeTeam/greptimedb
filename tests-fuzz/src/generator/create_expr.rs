@@ -30,9 +30,9 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random}
 use crate::ir::create_expr::{ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder};
 use crate::ir::{
     column_options_generator, generate_columns, generate_random_value,
-    partible_column_options_generator, primary_key_and_not_null_column_options_generator,
-    ts_column_options_generator, Column, ColumnTypeGenerator, CreateDatabaseExpr, CreateTableExpr,
-    Ident, PartibleColumnTypeGenerator, StringColumnTypeGenerator, TsColumnTypeGenerator,
+    partible_column_options_generator, primary_key_options_generator, ts_column_options_generator,
+    Column, ColumnTypeGenerator, CreateDatabaseExpr, CreateTableExpr, Ident,
+    PartibleColumnTypeGenerator, StringColumnTypeGenerator, TsColumnTypeGenerator,
 };
 
 #[derive(Builder)]
@@ -286,16 +286,8 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateLogicalTableExprG
             rng,
             column_names,
             &StringColumnTypeGenerator,
-            Box::new(primary_key_and_not_null_column_options_generator),
+            Box::new(primary_key_options_generator),
         ));
-
-        logical_table.columns.iter_mut().for_each(|column| {
-            if column.column_type == ConcreteDataType::string_datatype() {
-                column
-                    .options
-                    .retain(|option| option == &ColumnOption::PrimaryKey);
-            }
-        });
 
         // Currently only the `primary key` option is kept in physical table,
         // so we only keep the `primary key` option in the logical table for fuzz test.

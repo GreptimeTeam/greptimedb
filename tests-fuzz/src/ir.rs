@@ -333,6 +333,13 @@ pub fn primary_key_and_not_null_column_options_generator<R: Rng + 'static>(
     vec![ColumnOption::PrimaryKey, ColumnOption::NotNull]
 }
 
+pub fn primary_key_options_generator<R: Rng + 'static>(
+    _: &mut R,
+    _: &ConcreteDataType,
+) -> Vec<ColumnOption> {
+    vec![ColumnOption::PrimaryKey]
+}
+
 /// Generates columns with given `names`.
 pub fn generate_columns<R: Rng + 'static>(
     rng: &mut R,
