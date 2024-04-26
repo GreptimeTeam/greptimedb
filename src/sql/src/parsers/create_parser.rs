@@ -41,7 +41,7 @@ use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
-pub const TASK: &str = "TASK";
+pub const FLOW: &str = "FLOW";
 pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
 pub const WHEN: &str = "WHEN";
@@ -67,7 +67,7 @@ impl<'a> ParserContext<'a> {
                             Keyword::NoKeyword => {
                                 let uppercase = w.value.to_uppercase();
                                 match uppercase.as_str() {
-                                    TASK => self.parse_create_flow_task(true),
+                                    FLOW => self.parse_create_flow_task(true),
                                     _ => self.unsupported(w.to_string()),
                                 }
                             }
@@ -78,9 +78,10 @@ impl<'a> ParserContext<'a> {
                 }
 
                 Keyword::NoKeyword => {
+                    let _ = self.parser.next_token();
                     let uppercase = w.value.to_uppercase();
                     match uppercase.as_str() {
-                        TASK => self.parse_create_flow_task(false),
+                        FLOW => self.parse_create_flow_task(false),
                         _ => self.unsupported(w.to_string()),
                     }
                 }
@@ -177,13 +178,15 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::CreateTable(create_table))
     }
 
-    /// "CREATE TASK" clause
+    /// "CREATE FLOW TASK" clause
     fn parse_create_flow_task(&mut self, or_replace: bool) -> Result<Statement> {
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
         let task_name = self.intern_parse_table_name()?;
+
+        println!("{:?}", task_name);
 
         self.parser
             .expect_token(&Token::make_keyword(SINK))
@@ -1018,7 +1021,7 @@ mod tests {
     #[test]
     fn test_parse_create_flow_task() {
         let sql = r"
-CREATE OR REPLACE TASK IF NOT EXISTS task_1
+CREATE OR REPLACE FLOW IF NOT EXISTS task_1
 SINK TO schema_1.table_1
 EXPIRE WHEN timestamp < now() - INTERVAL '5m'
 COMMENT 'test comment'
@@ -1086,9 +1089,9 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         assert_eq!(create_task, &expected);
 
-        // create task without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE WHEN` and `COMMENT`
+        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE WHEN` and `COMMENT`
         let sql = r"
-CREATE TASK task_1
+CREATE FLOW task_2
 SINK TO schema_1.table_1
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
