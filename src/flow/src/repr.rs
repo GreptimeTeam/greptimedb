@@ -27,7 +27,7 @@ use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use itertools::Itertools;
-pub(crate) use relation::{ColumnType, RelationDesc, RelationType};
+pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
