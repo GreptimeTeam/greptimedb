@@ -446,7 +446,7 @@ impl PrometheusHandler for Instance {
             .execute_stmt(stmt, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| ExecuteQuerySnafu)?;
+            .context(ExecuteQuerySnafu)?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
     }

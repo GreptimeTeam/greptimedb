@@ -105,10 +105,7 @@ where
             .do_promql_query(query, query_ctx)
             .await
             .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new)
-                    .with_context(|_| error::ExecuteQuerySnafu)
-            })
+            .map(|x| x.map_err(BoxedError::new).context(error::ExecuteQuerySnafu))
             .collect()
     }
 
