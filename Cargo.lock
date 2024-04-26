@@ -1682,6 +1682,7 @@ dependencies = [
  "serde",
  "snafu",
  "toml 0.8.12",
+ "zeroize",
 ]
 
 [[package]]
