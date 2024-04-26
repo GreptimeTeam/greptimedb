@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
+use common_base::secrets::SecretString;
 use digest::Digest;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt};
-use common_base::secrets::SecretString;
 
 use crate::error::{IllegalParamSnafu, InvalidConfigSnafu, Result, UserPasswordMismatchSnafu};
 use crate::user_info::DefaultUserInfo;

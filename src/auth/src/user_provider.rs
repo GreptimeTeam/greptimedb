@@ -21,8 +21,8 @@ use std::io;
 use std::io::BufRead;
 use std::path::Path;
 
-use snafu::{ensure, OptionExt, ResultExt};
 use common_base::secrets::ExposeSecret;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::common::{Identity, Password};
 use crate::error::{

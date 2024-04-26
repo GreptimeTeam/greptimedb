@@ -152,7 +152,7 @@ mod tests {
             Statement::Copy(copy) => {
                 let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"COPY tbl FROM s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = Secret([REDACTED alloc::string::String]))"#,
+                    r#"COPY tbl FROM s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = '******')"#,
                     &new_sql
                 );
             }
@@ -177,7 +177,7 @@ mod tests {
             Statement::Copy(copy) => {
                 let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"COPY tbl TO s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = Secret([REDACTED alloc::string::String]))"#,
+                    r#"COPY tbl TO s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = '******')"#,
                     &new_sql
                 );
             }
@@ -202,7 +202,7 @@ mod tests {
             Statement::Copy(copy) => {
                 let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"COPY DATABASE db1 FROM s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = Secret([REDACTED alloc::string::String]))"#,
+                    r#"COPY DATABASE db1 FROM s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = '******')"#,
                     &new_sql
                 );
             }
@@ -227,7 +227,7 @@ mod tests {
             Statement::Copy(copy) => {
                 let new_sql = format!("{}", copy);
                 assert_eq!(
-                    r#"COPY DATABASE db1 TO s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = Secret([REDACTED alloc::string::String]))"#,
+                    r#"COPY DATABASE db1 TO s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = '******')"#,
                     &new_sql
                 );
             }

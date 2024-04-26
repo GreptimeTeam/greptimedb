@@ -21,6 +21,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use common_base::secrets::SecretString;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -30,7 +31,6 @@ use common_time::Timezone;
 use headers::Header;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
-use common_base::secrets::SecretString;
 
 use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use super::PUBLIC_APIS;
@@ -319,6 +319,8 @@ fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>)
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+
+    use common_base::secrets::ExposeSecret;
 
     use super::*;
 

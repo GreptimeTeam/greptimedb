@@ -15,6 +15,7 @@
 //! Datanode configurations
 
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
@@ -25,7 +26,6 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
-use common_base::secrets::SecretString;
 use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
@@ -286,6 +286,7 @@ pub enum RegionEngineConfig {
 #[cfg(test)]
 mod tests {
     use common_base::secrets::ExposeSecret;
+
     use super::*;
 
     #[test]

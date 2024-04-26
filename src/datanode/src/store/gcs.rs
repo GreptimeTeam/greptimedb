@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::secrets::ExposeSecret;
 use common_telemetry::logging::info;
 use object_store::services::Gcs;
 use object_store::{util, ObjectStore};
 use snafu::prelude::*;
-use common_base::secrets::ExposeSecret;
 
 use crate::config::GcsConfig;
 use crate::error::{self, Result};

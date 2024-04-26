@@ -81,7 +81,9 @@ pub const TTL_KEY: &str = "ttl";
 pub const STORAGE_KEY: &str = "storage";
 
 impl TableOptions {
-    pub fn from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(iter: U) -> Result<TableOptions> {
+    pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
+        iter: U,
+    ) -> Result<TableOptions> {
         let mut options = TableOptions::default();
 
         let kvs: HashMap<String, String> = iter
@@ -306,7 +308,7 @@ mod tests {
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
-        let serialized = TableOptions::from_iter(&serialized_map).unwrap();
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
 
         let options = TableOptions {
@@ -315,7 +317,7 @@ mod tests {
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
-        let serialized = TableOptions::from_iter(&serialized_map).unwrap();
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
 
         let options = TableOptions {
@@ -324,7 +326,7 @@ mod tests {
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
         };
         let serialized_map = HashMap::from(&options);
-        let serialized = TableOptions::from_iter(&serialized_map).unwrap();
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
     }
 }
