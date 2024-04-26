@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
+use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
 use itertools::Itertools;
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
-use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
 
 const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 
@@ -84,8 +84,8 @@ impl OptionMap {
             }
         }
         for key in self.secrets.keys().sorted() {
-            if let Some(val) = self.secrets.get(key) {
-                result.push(format!("{key} = {val:?}"));
+            if self.secrets.get(key).is_some() {
+                result.push(format!("{key} = '******"));
             }
         }
         result

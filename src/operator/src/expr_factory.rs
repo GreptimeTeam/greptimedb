@@ -189,7 +189,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
 
     let time_index = find_time_index(&create.constraints)?;
     let table_options = HashMap::from(
-        &TableOptions::try_from(&create.options.clone().into_map())
+        &TableOptions::from_iter(create.options.to_str_map())
             .context(UnrecognizedTableOptionSnafu)?,
     );
 

@@ -37,6 +37,7 @@ use std::{any, fmt};
 use serde::{de, ser, Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Wrapper type for strings that contains secrets. See also [SecretBox].
 pub type SecretString = SecretBox<String>;
 
 impl From<String> for SecretString {
