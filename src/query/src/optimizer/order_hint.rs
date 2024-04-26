@@ -20,7 +20,8 @@ use datafusion_common::Result as DataFusionResult;
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
-use table::table::adapter::DfTableProviderAdapter;
+
+use crate::dummy_catalog::DummyTableProvider;
 
 /// This rule will pass the nearest order requirement to the leaf table
 /// scan node as ordering hint.
@@ -66,10 +67,11 @@ impl OrderHintRule {
                     .as_any()
                     .downcast_ref::<DefaultTableSource>()
                 {
+                    // The provider in the region server is [DummyTableProvider].
                     if let Some(adapter) = source
                         .table_provider
                         .as_any()
-                        .downcast_ref::<DfTableProviderAdapter>()
+                        .downcast_ref::<DummyTableProvider>()
                     {
                         let mut opts = Vec::with_capacity(order_expr.len());
                         for sort in order_expr {
@@ -129,41 +131,38 @@ mod test {
 
     use datafusion_expr::{col, LogicalPlanBuilder};
     use datafusion_optimizer::OptimizerContext;
-    use table::table::numbers::NumbersTable;
+    use store_api::storage::RegionId;
 
     use super::*;
+    use crate::optimizer::test_util::mock_table_provider;
 
     #[test]
-    #[allow(clippy::bool_assert_comparison)]
     fn set_order_hint() {
-        let numbers_table = NumbersTable::table(0);
-        let adapter = Arc::new(DfTableProviderAdapter::new(numbers_table));
-        let table_source = Arc::new(DefaultTableSource::new(adapter.clone()));
-
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let plan = LogicalPlanBuilder::scan("t", table_source, None)
             .unwrap()
-            .sort(vec![col("number").sort(true, false)])
+            .sort(vec![col("ts").sort(true, false)])
             .unwrap()
-            .sort(vec![col("number").sort(false, true)])
+            .sort(vec![col("ts").sort(false, true)])
             .unwrap()
             .build()
             .unwrap();
 
         let context = OptimizerContext::default();
-        let _ = OrderHintRule.try_optimize(&plan, &context).unwrap();
+        OrderHintRule.try_optimize(&plan, &context).unwrap();
 
         // should read the first (with `.sort(true, false)`) sort option
-        let scan_req = adapter.get_scan_req();
-        assert_eq!("number", &scan_req.output_ordering.clone().unwrap()[0].name);
+        let scan_req = provider.scan_request();
         assert_eq!(
-            true,
-            !scan_req.output_ordering.clone().unwrap()[0]
-                .options
-                .descending // the previous parameter is `asc`
-        );
-        assert_eq!(
-            false,
-            scan_req.output_ordering.unwrap()[0].options.nulls_first
+            OrderOption {
+                name: "ts".to_string(),
+                options: SortOptions {
+                    descending: false,
+                    nulls_first: false
+                }
+            },
+            scan_req.output_ordering.as_ref().unwrap()[0]
         );
     }
 }
