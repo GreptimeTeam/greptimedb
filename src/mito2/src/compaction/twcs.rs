@@ -36,7 +36,7 @@ const LEVEL_COMPACTED: Level = 1;
 /// candidates.
 pub struct TwcsPicker {
     max_active_window_runs: usize,
-    max_inactive_window_files: usize,
+    max_inactive_window_runs: usize,
     time_window_seconds: Option<i64>,
 }
 
@@ -44,7 +44,7 @@ impl Debug for TwcsPicker {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsPicker")
             .field("max_active_window_runs", &self.max_active_window_runs)
-            .field("max_inactive_window_files", &self.max_inactive_window_files)
+            .field("max_inactive_window_runs", &self.max_inactive_window_runs)
             .finish()
     }
 }
@@ -52,11 +52,11 @@ impl Debug for TwcsPicker {
 impl TwcsPicker {
     pub fn new(
         max_active_window_runs: usize,
-        max_inactive_window_files: usize,
+        max_inactive_window_runs: usize,
         time_window_seconds: Option<i64>,
     ) -> Self {
         Self {
-            max_inactive_window_files,
+            max_inactive_window_runs,
             max_active_window_runs,
             time_window_seconds,
         }
@@ -75,36 +75,42 @@ impl TwcsPicker {
             let files_in_window = &files.files;
             // we only remove deletion markers once no file in current window overlaps with any other window.
             let filter_deleted = !files.overlapping;
+            let sorted_runs = find_sorted_runs(files_in_window.clone());
 
             if let Some(active_window) = active_window
                 && *window == active_window
             {
-                if files_in_window.len() > self.max_active_window_runs {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: LEVEL_COMPACTED, // we only have two levels and always compact to l1
-                        inputs: files_in_window.clone(),
-                        filter_deleted,
-                        output_time_range: None, // we do not enforce output time range in twcs compactions.
-                    });
+                if sorted_runs.len() > self.max_active_window_runs {
+                    let files_to_compact = reduce_runs(sorted_runs, self.max_active_window_runs);
+                    for inputs in files_to_compact {
+                        output.push(CompactionOutput {
+                            output_file_id: FileId::random(),
+                            output_level: LEVEL_COMPACTED, // we only have two levels and always compact to l1
+                            inputs,
+                            filter_deleted,
+                        output_time_range: None, // we do not enforce output time range in twcs compactions.});
+                    }
                 } else {
                     debug!("Active window not present or no enough sorted runs in active window {:?}, window: {}, current run: {}", active_window, *window, sorted_runs.len());
                 }
             } else {
                 // not active writing window
-                if files_in_window.len() > self.max_inactive_window_files {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: LEVEL_COMPACTED,
-                        inputs: files_in_window.clone(),
-                        filter_deleted,
-                        output_time_range: None,
-                    });
+                if sorted_runs.len() > self.max_inactive_window_runs {
+                    let files_to_merge = reduce_runs(sorted_runs, self.max_inactive_window_runs);
+                    for inputs in files_to_merge {
+                        output.push(CompactionOutput {
+                            output_file_id: FileId::random(),
+                            output_level: LEVEL_COMPACTED,
+                            inputs,
+                            filter_deleted,
+                        output_time_range: None,});
+                    }
                 } else {
                     debug!(
-                        "No enough files, current: {}, max_inactive_window_files: {}",
-                        files_in_window.len(),
-                        self.max_inactive_window_files
+                        "No enough runs in inactive window {}, current: {}, max_inactive_window_runs: {}",
+                        *window,
+                        sorted_runs.len(),
+                        self.max_inactive_window_runs
                     )
                 }
             }

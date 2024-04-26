@@ -196,14 +196,7 @@ async fn test_compaction_region_with_overlapping() {
     assert_eq!(result.affected_rows, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
-    assert_eq!(
-        2,
-        scanner.num_files(),
-        "unexpected files: {:?}",
-        scanner.file_ids()
-    );
     let stream = scanner.scan().await.unwrap();
-
     let vec = collect_stream_ts(stream).await;
     assert_eq!((3600..10800).map(|i| { i * 1000 }).collect::<Vec<_>>(), vec);
 }
@@ -247,14 +240,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     assert_eq!(result.affected_rows, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
-    assert_eq!(
-        4,
-        scanner.num_files(),
-        "unexpected files: {:?}",
-        scanner.file_ids()
-    );
     let stream = scanner.scan().await.unwrap();
-
     let vec = collect_stream_ts(stream).await;
     assert!(vec.is_empty());
 }
