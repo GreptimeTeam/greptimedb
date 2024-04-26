@@ -9494,6 +9494,7 @@ dependencies = [
  "itertools 0.10.5",
  "lazy_static",
  "regex",
+ "secrecy",
  "snafu",
  "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
  "sqlparser_derive 0.1.1",
