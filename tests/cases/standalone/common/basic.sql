@@ -31,7 +31,7 @@ create table foo (
     cpu double default 0,
     TIME INDEX (ts),
     PRIMARY KEY(host)
-) engine=mito with(regions=1);
+) engine=mito;
 
 insert into foo (host, cpu, ts) values ('host1', 1.1, '2000-01-01 00:00:00+00:00');
 

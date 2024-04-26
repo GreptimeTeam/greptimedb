@@ -109,7 +109,6 @@ impl GrpcQueryHandler for Instance {
 
                 match expr {
                     DdlExpr::CreateTable(mut expr) => {
-                        // TODO(weny): supports to create multiple region table.
                         let _ = self
                             .statement_executor
                             .create_table_inner(&mut expr, None, &ctx)
@@ -137,6 +136,12 @@ impl GrpcQueryHandler for Instance {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.statement_executor.truncate_table(table_name).await?
+                    }
+                    DdlExpr::CreateFlowTask(_) => {
+                        unimplemented!()
+                    }
+                    DdlExpr::DropFlowTask(_) => {
+                        unimplemented!()
                     }
                 }
             }
@@ -175,6 +180,16 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
         }
         Expr::TruncateTable(expr) => {
             check_and_fill!(expr);
+        }
+        Expr::CreateFlowTask(expr) => {
+            if expr.catalog_name.is_empty() {
+                expr.catalog_name = catalog.to_string();
+            }
+        }
+        Expr::DropFlowTask(expr) => {
+            if expr.catalog_name.is_empty() {
+                expr.catalog_name = catalog.to_string();
+            }
         }
     }
 }

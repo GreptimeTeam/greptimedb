@@ -23,6 +23,7 @@ use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
+use crate::key::FlowTaskId;
 use crate::peer::Peer;
 use crate::DatanodeId;
 
@@ -241,6 +242,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Task already exists, task: {}, flow_task_id: {}",
+        task_name,
+        flow_task_id
+    ))]
+    TaskAlreadyExists {
+        task_name: String,
+        flow_task_id: FlowTaskId,
+        location: Location,
+    },
+
     #[snafu(display("Catalog already exists, catalog: {}", catalog))]
     CatalogAlreadyExists { catalog: String, location: Location },
 
@@ -421,6 +433,16 @@ pub enum Error {
     #[snafu(display("Invalid role: {}", role))]
     InvalidRole { role: i32, location: Location },
 
+    #[snafu(display("Delimiter not found, key: {}", key))]
+    DelimiterNotFound { key: String, location: Location },
+
+    #[snafu(display("Invalid prefix: {}, key: {}", prefix, key))]
+    MismatchPrefix {
+        prefix: String,
+        key: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to move values: {err_msg}"))]
     MoveValues { err_msg: String, location: Location },
 
@@ -494,7 +516,10 @@ impl ErrorExt for Error {
             | EmptyKey { .. }
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
-            | CreateLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
+            | CreateLogicalTablesInvalidArguments { .. }
+            | TaskAlreadyExists { .. }
+            | MismatchPrefix { .. }
+            | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

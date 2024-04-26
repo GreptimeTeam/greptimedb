@@ -21,6 +21,7 @@ use std::hash::{Hash, Hasher};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
+use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
@@ -351,10 +352,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 &mut one_row,
             )?;
             // timestamp
-            row_writer::write_ts_millis(
+            row_writer::write_ts_to_millis(
                 table_data,
                 GREPTIME_TIMESTAMP,
                 Some(series.samples[0].timestamp),
+                Precision::Millisecond,
                 &mut one_row,
             )?;
 
@@ -369,10 +371,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 // value
                 row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
                 // timestamp
-                row_writer::write_ts_millis(
+                row_writer::write_ts_to_millis(
                     table_data,
                     GREPTIME_TIMESTAMP,
                     Some(*timestamp),
+                    Precision::Millisecond,
                     &mut one_row,
                 )?;
 

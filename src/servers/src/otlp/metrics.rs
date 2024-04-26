@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::{RowInsertRequests, Value};
-use common_grpc::writer::Precision;
+use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
@@ -117,7 +117,7 @@ fn write_attributes(
 }
 
 fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: i64) -> Result<()> {
-    row_writer::write_ts_precision(
+    row_writer::write_ts_to_nanos(
         table,
         GREPTIME_TIMESTAMP,
         Some(time_nano),

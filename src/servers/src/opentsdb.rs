@@ -23,6 +23,7 @@ use std::sync::Arc;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
+use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_runtime::Runtime;
 use common_telemetry::logging::{debug, error, warn};
@@ -156,10 +157,11 @@ pub fn data_point_to_grpc_row_insert_requests(
         // value
         row_writer::write_f64(table_data, GREPTIME_VALUE, value, &mut one_row)?;
         // timestamp
-        row_writer::write_ts_millis(
+        row_writer::write_ts_to_millis(
             table_data,
             GREPTIME_TIMESTAMP,
             Some(timestamp),
+            Precision::Millisecond,
             &mut one_row,
         )?;
 

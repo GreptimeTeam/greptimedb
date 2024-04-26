@@ -134,9 +134,7 @@ PARTITION ON COLUMNS (n) (
 |       |   n >= 10 AND n < 100               |
 |       | )                                   |
 |       | ENGINE=mito                         |
-|       | WITH(                               |
-|       |   regions = 4                       |
-|       | )                                   |
+|       |                                     |
 +-------+-------------------------------------+"#
     } else {
         r#"+-------+-------------------------------------+
@@ -151,9 +149,7 @@ PARTITION ON COLUMNS (n) (
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
-|       | WITH(                               |
-|       |   regions = 1                       |
-|       | )                                   |
+|       |                                     |
 +-------+-------------------------------------+"#
     };
 
@@ -228,8 +224,7 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
 ENGINE=file
 WITH(
   format = 'csv',
-  location = '{location}',
-  regions = 1
+  location = '{location}'
 )"#
     );
     assert_eq!(actual.to_string(), expect);
@@ -560,7 +555,7 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
                             memory double,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#,
+                        ) engine=mito;"#,
     )
     .await
     .data;
@@ -1438,7 +1433,7 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
         cpu double default 0,
         TIME INDEX (ts),
         PRIMARY KEY(host)
-    ) engine=mito with(regions=1);"#,
+    ) engine=mito;"#,
     );
     let output = execute_sql(&instance, &create_sql).await.data;
     assert!(matches!(output, OutputData::AffectedRows(0)));
@@ -1555,7 +1550,7 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
                             memory double,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#,
+                        ) engine=mito;"#,
     )
     .await
     .data;
@@ -2085,7 +2080,6 @@ PARTITION ON COLUMNS ("a") (
 )
 ENGINE=mito
 WITH(
-  regions = 1,
   storage = '{storage_name}'
 )"#
                 )
@@ -2100,7 +2094,6 @@ WITH(
 
 ENGINE=mito
 WITH(
-  regions = 1,
   storage = '{storage_name}'
 )"#
                 )
