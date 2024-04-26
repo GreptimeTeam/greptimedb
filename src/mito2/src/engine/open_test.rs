@@ -44,6 +44,7 @@ async fn test_engine_open_empty() {
                 region_dir: "empty".to_string(),
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -76,6 +77,7 @@ async fn test_engine_open_existing() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -123,7 +125,10 @@ async fn test_engine_open_readonly() {
     let err = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                entry_id: None,
+            }),
         )
         .await
         .unwrap_err();
@@ -165,6 +170,7 @@ async fn test_engine_region_open_with_options() {
                 region_dir,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -210,6 +216,7 @@ async fn test_engine_region_open_with_custom_store() {
                 region_dir,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -270,6 +277,7 @@ async fn test_open_region_skip_wal_replay() {
                 region_dir: region_dir.to_string(),
                 options: Default::default(),
                 skip_wal_replay: true,
+                wal_reader: None,
             }),
         )
         .await
@@ -299,6 +307,7 @@ async fn test_open_region_skip_wal_replay() {
                 region_dir,
                 options: Default::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await

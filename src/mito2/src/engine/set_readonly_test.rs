@@ -61,7 +61,10 @@ async fn test_set_readonly_gracefully() {
     let error = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                entry_id: None,
+            }),
         )
         .await
         .unwrap_err();

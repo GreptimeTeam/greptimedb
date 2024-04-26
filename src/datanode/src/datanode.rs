@@ -31,6 +31,7 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
+use futures::StreamExt;
 use futures_util::future::try_join_all;
 use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
@@ -46,10 +47,12 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
+use store_api::logstore::LogStore;
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
-use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::region_request::{RegionOpenRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
+use store_api::wal_reader::WalReader;
 use tokio::fs;
 use tokio::sync::Notify;
 
@@ -69,6 +72,11 @@ use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store;
 
 const OPEN_REGION_PARALLELISM: usize = 16;
+
+enum LogStoreImpl {
+    RaftEngine(Arc<RaftEngineLogStore>),
+    Kafka(Arc<KafkaLogStore>),
+}
 
 /// Datanode service.
 pub struct Datanode {
@@ -210,7 +218,10 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let region_server = self.new_region_server(region_event_listener).await?;
+        let mut log_store = None;
+        let region_server = self
+            .new_region_server(region_event_listener, &mut log_store)
+            .await?;
 
         let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
         let table_values = datanode_table_manager
@@ -219,8 +230,12 @@ impl DatanodeBuilder {
             .await
             .context(GetMetadataSnafu)?;
 
-        let open_all_regions =
-            open_all_regions(region_server.clone(), table_values, !controlled_by_metasrv);
+        let open_all_regions = open_all_regions(
+            region_server.clone(),
+            table_values,
+            !controlled_by_metasrv,
+            log_store,
+        );
 
         if self.opts.init_regions_in_background {
             // Opens regions in background.
@@ -286,12 +301,19 @@ impl DatanodeBuilder {
             .await
             .context(GetMetadataSnafu)?;
 
-        open_all_regions(region_server.clone(), table_values, open_with_writable).await
+        open_all_regions(
+            region_server.clone(),
+            table_values,
+            open_with_writable,
+            None,
+        )
+        .await
     }
 
     async fn new_region_server(
         &self,
         event_listener: RegionServerEventListenerRef,
+        log_store: &mut Option<LogStoreImpl>,
     ) -> Result<RegionServer> {
         let opts = &self.opts;
 
@@ -323,7 +345,7 @@ impl DatanodeBuilder {
         );
 
         let object_store_manager = Self::build_object_store_manager(opts).await?;
-        let engines = Self::build_store_engines(opts, object_store_manager).await?;
+        let engines = Self::build_store_engines(opts, object_store_manager, log_store).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -337,14 +359,19 @@ impl DatanodeBuilder {
     async fn build_store_engines(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
+        log_store: &mut Option<LogStoreImpl>,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let mito_engine =
-                        Self::build_mito_engine(opts, object_store_manager.clone(), config.clone())
-                            .await?;
+                    let mito_engine = Self::build_mito_engine(
+                        opts,
+                        object_store_manager.clone(),
+                        config.clone(),
+                        log_store,
+                    )
+                    .await?;
 
                     let metric_engine = MetricEngine::new(mito_engine.clone());
                     engines.push(Arc::new(mito_engine) as _);
@@ -367,25 +394,34 @@ impl DatanodeBuilder {
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
         config: MitoConfig,
+        log_store: &mut Option<LogStoreImpl>,
     ) -> Result<MitoEngine> {
         let mito_engine = match &opts.wal {
-            DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
-                &opts.storage.data_home,
-                config,
-                Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
-                    .await?,
-                object_store_manager,
-            )
-            .await
-            .context(BuildMitoEngineSnafu)?,
-            DatanodeWalConfig::Kafka(kafka_config) => MitoEngine::new(
-                &opts.storage.data_home,
-                config,
-                Self::build_kafka_log_store(kafka_config).await?,
-                object_store_manager,
-            )
-            .await
-            .context(BuildMitoEngineSnafu)?,
+            DatanodeWalConfig::RaftEngine(raft_engine_config) => {
+                let store =
+                    Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
+                        .await?;
+                if log_store.is_none() {
+                    *log_store = Some(LogStoreImpl::RaftEngine(store.clone()));
+                };
+                MitoEngine::new(
+                    &opts.storage.data_home,
+                    config,
+                    store.clone(),
+                    object_store_manager,
+                )
+                .await
+                .context(BuildMitoEngineSnafu)?
+            }
+            DatanodeWalConfig::Kafka(kafka_config) => {
+                let store = Self::build_kafka_log_store(kafka_config).await?;
+                if log_store.is_none() {
+                    *log_store = Some(LogStoreImpl::Kafka(store.clone()));
+                };
+                MitoEngine::new(&opts.storage.data_home, config, store, object_store_manager)
+                    .await
+                    .context(BuildMitoEngineSnafu)?
+            }
         };
         Ok(mito_engine)
     }
@@ -447,6 +483,7 @@ async fn open_all_regions(
     region_server: RegionServer,
     table_values: Vec<DatanodeTableValue>,
     open_with_writable: bool,
+    log_store: Option<LogStoreImpl>,
 ) -> Result<()> {
     let mut regions = vec![];
     for table_value in table_values {
@@ -467,14 +504,18 @@ async fn open_all_regions(
             ));
         }
     }
+
     info!("going to open {} region(s)", regions.len());
     let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
     let mut tasks = vec![];
+    let wal_reader = WalReader::default();
 
+    // TODO(niebayes): add metrics for openning regions.
     let region_server_ref = &region_server;
     for (region_id, engine, store_path, options) in regions {
         let region_dir = region_dir(&store_path, region_id);
         let semaphore_moved = semaphore.clone();
+        let wal_reader_moved = wal_reader.clone();
 
         tasks.push(async move {
             let _permit = semaphore_moved.acquire().await;
@@ -486,6 +527,7 @@ async fn open_all_regions(
                         region_dir,
                         options,
                         skip_wal_replay: false,
+                        wal_reader: Some(wal_reader_moved),
                     }),
                 )
                 .await?;
@@ -501,8 +543,46 @@ async fn open_all_regions(
     }
     let _ = try_join_all(tasks).await?;
 
+    if let Some(log_store) = log_store {
+        match log_store {
+            LogStoreImpl::RaftEngine(raft_engine_log_store) => {
+                replay_all_regions(wal_reader, raft_engine_log_store, region_server).await?
+            }
+            LogStoreImpl::Kafka(kafka_log_store) => {
+                replay_all_regions(wal_reader, kafka_log_store, region_server).await?
+            }
+        }
+    }
+
     info!("all regions are opened");
 
+    Ok(())
+}
+
+async fn replay_all_regions<S: LogStore>(
+    wal_reader: WalReader,
+    log_store: Arc<S>,
+    region_server: RegionServer,
+) -> Result<()> {
+    // TODO(niebayes): add metrics for replaying regions.
+    info!("Start replaying all regions");
+    let mut stream = wal_reader.read(log_store).await.unwrap();
+    while let Some(result) = stream.next().await {
+        // FIXME(niebayes): handle errors.
+        let wal_entries = result.unwrap();
+        for wal_entry in wal_entries {
+            region_server
+                .handle_request(
+                    wal_entry.region_id,
+                    RegionRequest::Put(RegionPutRequest {
+                        rows: wal_entry.rows,
+                        entry_id: Some(wal_entry.entry_id),
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+    }
     Ok(())
 }
 

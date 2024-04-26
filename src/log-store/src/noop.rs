@@ -78,11 +78,17 @@ impl LogStore for NoopLogStore {
         &self,
         _ns: &Self::Namespace,
         _entry_id: EntryId,
+        _filter_by_region_id: bool,
     ) -> Result<store_api::logstore::entry_stream::SendableEntryStream<'_, Self::Entry, Self::Error>>
     {
         Ok(Box::pin(futures::stream::once(futures::future::ready(Ok(
             vec![],
         )))))
+    }
+
+    /// Applies a group by operations on the input namespaces.
+    fn group_by_namespaces(&self, _namespaces: &[Self::Namespace]) -> Vec<Vec<Self::Namespace>> {
+        vec![vec![]]
     }
 
     async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {

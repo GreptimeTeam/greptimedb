@@ -77,6 +77,7 @@ impl MetricEngineInner {
             options: request.options.clone(),
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
+            wal_reader: None,
         };
 
         let mut data_region_options = request.options;
@@ -86,6 +87,7 @@ impl MetricEngineInner {
             options: data_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
+            wal_reader: None,
         };
 
         let metadata_region_id = utils::to_metadata_region_id(region_id);

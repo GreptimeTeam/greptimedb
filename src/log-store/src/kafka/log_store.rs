@@ -19,6 +19,7 @@ use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::options::WalOptions;
 use futures_util::StreamExt;
+use itertools::Itertools;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
 use snafu::ResultExt;
@@ -133,6 +134,7 @@ impl LogStore for KafkaLogStore {
         &self,
         ns: &Self::Namespace,
         entry_id: EntryId,
+        filter_by_region_id: bool,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
         metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
@@ -214,7 +216,7 @@ impl LogStore for KafkaLogStore {
 
                 // Filters records by namespace.
                 let record = Record::try_from(kafka_record)?;
-                if record.meta.ns != ns_clone {
+                if filter_by_region_id && record.meta.ns != ns_clone {
                     if check_termination(offset, end_offset, &entry_records)? {
                         break;
                     }
@@ -236,6 +238,17 @@ impl LogStore for KafkaLogStore {
             }
         });
         Ok(Box::pin(stream))
+    }
+
+    /// Applies a group by operations on the input namespaces. Retains one namespace for each namespace group.
+    fn group_by_namespaces(&self, namespaces: &[Self::Namespace]) -> Vec<Vec<Self::Namespace>> {
+        // Groups by the namespaces by topic.
+        namespaces
+            .iter()
+            .group_by(|ns| ns.topic.clone())
+            .into_iter()
+            .map(|(_, group)| group.cloned().collect())
+            .collect()
     }
 
     /// Creates a namespace of the associated Namespace type.
@@ -446,7 +459,7 @@ mod tests {
             for region_id in which {
                 let ctx = region_contexts.get_mut(&region_id).unwrap();
                 let stream = logstore
-                    .read(&ctx.ns, ctx.flushed_entry_id + 1)
+                    .read(&ctx.ns, ctx.flushed_entry_id + 1, true)
                     .await
                     .unwrap();
                 let mut got = stream

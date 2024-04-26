@@ -251,6 +251,7 @@ async fn test_engine_truncate_reopen() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -355,6 +356,7 @@ async fn test_engine_truncate_during_flush() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await

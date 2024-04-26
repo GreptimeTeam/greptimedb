@@ -25,3 +25,4 @@ pub mod path_utils;
 pub mod region_engine;
 pub mod region_request;
 pub mod storage;
+pub mod wal_reader;

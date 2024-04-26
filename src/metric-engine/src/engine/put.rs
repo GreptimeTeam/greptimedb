@@ -211,6 +211,7 @@ mod tests {
         let rows = test_util::build_rows(1, 5);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            entry_id: None,
         });
 
         // write data
@@ -284,6 +285,7 @@ mod tests {
         let rows = test_util::build_rows(3, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            entry_id: None,
         });
 
         // write data
@@ -305,6 +307,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            entry_id: None,
         });
 
         engine
@@ -324,6 +327,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            entry_id: None,
         });
 
         engine

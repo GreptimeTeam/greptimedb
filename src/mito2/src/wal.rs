@@ -77,7 +77,7 @@ impl<S: LogStore> Wal<S> {
             let namespace = self.store.namespace(region_id.into(), wal_options);
             let mut stream = self
                 .store
-                .read(&namespace, start_id)
+                .read(&namespace, start_id, true)
                 .await
                 .map_err(BoxedError::new)
                 .context(ReadWalSnafu { region_id })?;

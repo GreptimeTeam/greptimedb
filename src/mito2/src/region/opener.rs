@@ -27,6 +27,7 @@ use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
+use store_api::wal_reader::WalReader;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
@@ -60,6 +61,7 @@ pub(crate) struct RegionOpener {
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
+    wal_reader: Option<WalReader>,
     intermediate_manager: IntermediateManager,
     time_provider: Option<TimeProviderRef>,
 }
@@ -84,6 +86,7 @@ impl RegionOpener {
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
+            wal_reader: None,
             intermediate_manager,
             time_provider: None,
         }
@@ -116,6 +119,12 @@ impl RegionOpener {
     /// Sets the `skip_wal_replay`.
     pub(crate) fn skip_wal_replay(mut self, skip: bool) -> Self {
         self.skip_wal_replay = skip;
+        self
+    }
+
+    /// Sets the `wal_reader`.
+    pub(crate) fn wal_reader(mut self, wal_reader: Option<WalReader>) -> Self {
+        self.wal_reader = wal_reader;
         self
     }
 
@@ -306,20 +315,24 @@ impl RegionOpener {
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
-            info!(
-                "Start replaying memtable at flushed_entry_id + 1 {} for region {}",
-                flushed_entry_id + 1,
-                region_id
-            );
-            replay_memtable(
-                wal,
-                &wal_options,
-                region_id,
-                flushed_entry_id,
-                &version_control,
-                config.allow_stale_entries,
-            )
-            .await?;
+            if let Some(wal_reader) = self.wal_reader.as_ref() {
+                wal_reader.register_region(region_id, flushed_entry_id + 1, wal_options.clone());
+            } else {
+                info!(
+                    "Start replaying memtable. region = {}, start entry id = {}",
+                    region_id,
+                    flushed_entry_id + 1,
+                );
+                replay_memtable(
+                    wal,
+                    &wal_options,
+                    region_id,
+                    flushed_entry_id,
+                    &version_control,
+                    config.allow_stale_entries,
+                )
+                .await?;
+            }
         } else {
             info!("Skip the WAL replay for region: {}", region_id);
         }

@@ -63,6 +63,7 @@ async fn test_catchup_with_last_entry_id() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -158,6 +159,7 @@ async fn test_catchup_with_incorrect_last_entry_id() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -237,6 +239,7 @@ async fn test_catchup_without_last_entry_id() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -317,6 +320,7 @@ async fn test_catchup_with_manifest_update() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await

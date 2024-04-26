@@ -27,13 +27,14 @@ use datatypes::data_type::ConcreteDataType;
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
-use crate::logstore::entry;
+use crate::logstore::{entry, EntryId};
 use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
+use crate::wal_reader::WalReader;
 
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
@@ -83,8 +84,15 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
         .into_iter()
         .filter_map(|r| {
             let region_id = r.region_id.into();
-            r.rows
-                .map(|rows| (region_id, RegionRequest::Put(RegionPutRequest { rows })))
+            r.rows.map(|rows| {
+                (
+                    region_id,
+                    RegionRequest::Put(RegionPutRequest {
+                        rows,
+                        entry_id: None,
+                    }),
+                )
+            })
         })
         .collect();
     Ok(requests)
@@ -158,6 +166,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             region_dir,
             options: open.options,
             skip_wal_replay: false,
+            wal_reader: None,
         }),
     )])
 }
@@ -217,6 +226,9 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 pub struct RegionPutRequest {
     /// Rows to put.
     pub rows: Rows,
+    /// If the rows are inserted from outside, the entry id is None.
+    /// If the rows are read from wal, the entry id is Some.
+    pub entry_id: Option<EntryId>,
 }
 
 #[derive(Debug)]
@@ -308,6 +320,9 @@ pub struct RegionOpenRequest {
     pub options: HashMap<String, String>,
     /// To skip replaying the WAL.
     pub skip_wal_replay: bool,
+    /// Delays replaying the region if the wal reader is Some.
+    /// The wal reader records necessary information for replaying the region and then replays all regions in a batching manner.
+    pub wal_reader: Option<WalReader>,
 }
 
 /// Close region request.

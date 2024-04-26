@@ -119,6 +119,7 @@ async fn test_region_replay() {
                 region_dir,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                wal_reader: None,
             }),
         )
         .await
@@ -500,7 +501,13 @@ async fn test_absent_and_invalid_columns() {
         rows,
     };
     let err = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                entry_id: None,
+            }),
+        )
         .await
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());

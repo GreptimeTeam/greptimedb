@@ -289,6 +289,7 @@ impl LogStore for RaftEngineLogStore {
         &self,
         ns: &Self::Namespace,
         entry_id: EntryId,
+        _filter_by_region_id: bool,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>> {
         metrics::METRIC_RAFT_ENGINE_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_RAFT_ENGINE_READ_ELAPSED.start_timer();
@@ -348,6 +349,12 @@ impl LogStore for RaftEngineLogStore {
             }
         });
         Ok(Box::pin(s))
+    }
+
+    /// Applies a group by operations on the input namespaces.
+    fn group_by_namespaces(&self, namespaces: &[Self::Namespace]) -> Vec<Vec<Self::Namespace>> {
+        // The raft-engine log store treats each namespace a namespace group.
+        namespaces.iter().map(|ns| vec![ns.clone()]).collect()
     }
 
     async fn create_namespace(&self, ns: &Self::Namespace) -> Result<()> {
@@ -530,7 +537,10 @@ mod tests {
             assert_eq!(i, response.last_entry_id);
         }
         let mut entries = HashSet::with_capacity(1024);
-        let mut s = logstore.read(&Namespace::with_id(1), 0).await.unwrap();
+        let mut s = logstore
+            .read(&Namespace::with_id(1), 0, false)
+            .await
+            .unwrap();
         while let Some(r) = s.next().await {
             let vec = r.unwrap();
             entries.extend(vec.into_iter().map(|e| e.id));
@@ -561,7 +571,7 @@ mod tests {
                 .await
                 .is_ok());
             let entries = logstore
-                .read(&Namespace::with_id(1), 1)
+                .read(&Namespace::with_id(1), 1, false)
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -577,8 +587,13 @@ mod tests {
         .await
         .unwrap();
 
-        let entries =
-            collect_entries(logstore.read(&Namespace::with_id(1), 1).await.unwrap()).await;
+        let entries = collect_entries(
+            logstore
+                .read(&Namespace::with_id(1), 1, false)
+                .await
+                .unwrap(),
+        )
+        .await;
         assert_eq!(1, entries.len());
         assert_eq!(1, entries[0].id);
         assert_eq!(1, entries[0].namespace_id);
@@ -653,7 +668,7 @@ mod tests {
         logstore.obsolete(namespace.clone(), 100).await.unwrap();
         assert_eq!(101, logstore.engine.first_index(namespace.id).unwrap());
 
-        let res = logstore.read(&namespace, 100).await.unwrap();
+        let res = logstore.read(&namespace, 100, false).await.unwrap();
         let mut vec = collect_entries(res).await;
         vec.sort_by(|a, b| a.id.partial_cmp(&b.id).unwrap());
         assert_eq!(101, vec.first().unwrap().id);

@@ -72,6 +72,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .skip_wal_replay(request.skip_wal_replay)
         .parse_options(request.options)?
+        .wal_reader(request.wal_reader)
         .cache(Some(self.cache_manager.clone()))
         .open(&self.config, &self.wal)
         .await?;

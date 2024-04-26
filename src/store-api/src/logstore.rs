@@ -14,6 +14,10 @@
 
 //! LogStore APIs.
 
+pub mod entry;
+pub mod entry_stream;
+pub mod namespace;
+
 use std::collections::HashMap;
 
 use common_error::ext::ErrorExt;
@@ -24,10 +28,6 @@ pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::entry_stream::SendableEntryStream;
 pub use crate::logstore::namespace::Id as NamespaceId;
 use crate::logstore::namespace::Namespace;
-
-pub mod entry;
-pub mod entry_stream;
-pub mod namespace;
 
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
@@ -55,7 +55,12 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         ns: &Self::Namespace,
         id: EntryId,
+        filter_by_region_id: bool,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
+
+    /// Applies a group by operations on the input namespaces.
+    // TODO(niebayes): we should provide a view of group by rather than group by in-place.
+    fn group_by_namespaces(&self, namespaces: &[Self::Namespace]) -> Vec<Vec<Self::Namespace>>;
 
     /// Creates a new `Namespace` from the given ref.
     async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;

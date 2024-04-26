@@ -13,6 +13,11 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+pub mod config;
+pub mod error;
+pub mod options;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
 
 use std::net::SocketAddr;
 
@@ -20,12 +25,6 @@ use error::{EndpointIPV4NotFoundSnafu, ResolveEndpointSnafu, Result};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::net;
-
-pub mod config;
-pub mod error;
-pub mod options;
-#[cfg(any(test, feature = "testing"))]
-pub mod test_util;
 
 pub const BROKER_ENDPOINT: &str = "127.0.0.1:9092";
 pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";

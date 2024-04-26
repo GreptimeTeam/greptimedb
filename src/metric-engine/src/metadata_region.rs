@@ -446,7 +446,10 @@ impl MetadataRegion {
             }],
         };
 
-        RegionPutRequest { rows }
+        RegionPutRequest {
+            rows,
+            entry_id: None,
+        }
     }
 
     fn build_delete_request(keys: &[String]) -> RegionDeleteRequest {

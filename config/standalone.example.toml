@@ -150,6 +150,10 @@ sync_period = "10s"
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
+## The number of topics to be created upon start.
+## **It's only used when the provider is `kafka`**.
+num_topics = 64
+
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
 ## **It's only used when the provider is `kafka`**.

@@ -295,6 +295,7 @@ mod test {
             region_dir: env.default_region_dir(),
             options: physical_region_option,
             skip_wal_replay: false,
+            wal_reader: None,
         };
         engine
             .handle_request(physical_region_id, RegionRequest::Open(open_request))
@@ -317,6 +318,7 @@ mod test {
             region_dir: env.default_region_dir(),
             options: HashMap::new(),
             skip_wal_replay: false,
+            wal_reader: None,
         };
         engine
             .handle_request(
