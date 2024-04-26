@@ -228,7 +228,7 @@ impl<'a> ParserContext<'a> {
 
         Ok(Statement::CreateFlowTask(CreateFlowTask {
             task_name,
-            output_table_name,
+            sink_table_name: output_table_name,
             or_replace,
             if_not_exists,
             expire_when,
@@ -1038,7 +1038,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                 value: "task_1".to_string(),
                 quote_style: None,
             }]),
-            output_table_name: ObjectName(vec![
+            sink_table_name: ObjectName(vec![
                 Ident {
                     value: "schema_1".to_string(),
                     quote_style: None,

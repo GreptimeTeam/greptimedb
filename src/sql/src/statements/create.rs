@@ -242,7 +242,7 @@ pub struct CreateFlowTask {
     /// Task name
     pub task_name: ObjectName,
     /// Output (sink) table name
-    pub output_table_name: ObjectName,
+    pub sink_table_name: ObjectName,
     /// Whether to replace existing task
     pub or_replace: bool,
     /// Create if not exist
@@ -266,7 +266,7 @@ impl Display for CreateFlowTask {
             write!(f, "IF NOT EXISTS ")?;
         }
         write!(f, "{} ", &self.task_name)?;
-        write!(f, "OUTPUT AS {} ", &self.output_table_name)?;
+        write!(f, "OUTPUT AS {} ", &self.sink_table_name)?;
         if let Some(expire_when) = &self.expire_when {
             write!(f, "EXPIRE WHEN {} ", expire_when)?;
         }

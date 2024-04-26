@@ -496,9 +496,9 @@ pub fn to_create_flow_task_expr(
 ) -> Result<CreateFlowTaskExpr> {
     // retrieve sink table name
     let sink_table_ref =
-        object_name_to_table_reference(create_task.output_table_name.clone().into(), true)
+        object_name_to_table_reference(create_task.sink_table_name.clone().into(), true)
             .with_context(|_| ConvertIdentifierSnafu {
-                ident: create_task.output_table_name.to_string(),
+                ident: create_task.sink_table_name.to_string(),
             })?;
     let catalog = sink_table_ref
         .catalog()
