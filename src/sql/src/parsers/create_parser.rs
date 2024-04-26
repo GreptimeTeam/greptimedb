@@ -186,8 +186,6 @@ impl<'a> ParserContext<'a> {
 
         let task_name = self.intern_parse_table_name()?;
 
-        println!("{:?}", task_name);
-
         self.parser
             .expect_token(&Token::make_keyword(SINK))
             .context(SyntaxSnafu)?;
