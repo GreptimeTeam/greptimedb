@@ -20,7 +20,7 @@ use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::datanode_manager::NodeManagerRef;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
@@ -79,7 +79,7 @@ pub struct MetasrvBuilder {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
-    datanode_manager: Option<DatanodeManagerRef>,
+    datanode_manager: Option<NodeManagerRef>,
     plugins: Option<Plugins>,
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
@@ -141,7 +141,7 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn datanode_manager(mut self, datanode_manager: DatanodeManagerRef) -> Self {
+    pub fn datanode_manager(mut self, datanode_manager: NodeManagerRef) -> Self {
         self.datanode_manager = Some(datanode_manager);
         self
     }
@@ -392,7 +392,7 @@ fn build_procedure_manager(
 
 fn build_ddl_manager(
     options: &MetasrvOptions,
-    datanode_clients: Option<DatanodeManagerRef>,
+    datanode_clients: Option<NodeManagerRef>,
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,

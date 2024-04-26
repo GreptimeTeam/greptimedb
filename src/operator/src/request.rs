@@ -18,7 +18,7 @@ use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{CompactRequest, FlushRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
-use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::datanode_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::logging::{error, info};
 use common_telemetry::tracing_context::TracingContext;
@@ -39,7 +39,7 @@ use crate::region_req_factory::RegionRequestFactory;
 pub struct Requester {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
 }
 
 pub type RequesterRef = Arc<Requester>;
@@ -48,7 +48,7 @@ impl Requester {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        datanode_manager: NodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,

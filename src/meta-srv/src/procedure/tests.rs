@@ -21,7 +21,7 @@ use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, SemanticType};
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::MITO2_ENGINE;
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::datanode_manager::NodeManagerRef;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
@@ -173,7 +173,7 @@ fn test_region_request_builder() {
 async fn new_datanode_manager(
     region_server: &EchoRegionServer,
     region_routes: &[RegionRoute],
-) -> DatanodeManagerRef {
+) -> NodeManagerRef {
     let clients = DatanodeClients::default();
 
     let datanodes = find_leaders(region_routes);

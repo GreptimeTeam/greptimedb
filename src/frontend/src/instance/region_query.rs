@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::v1::region::QueryRequest;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::datanode_manager::NodeManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
@@ -29,13 +29,13 @@ use crate::error::{FindTableRouteSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    datanode_manager: NodeManagerRef,
 }
 
 impl FrontendRegionQueryHandler {
     pub fn arc(
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        datanode_manager: NodeManagerRef,
     ) -> Arc<Self> {
         Arc::new(Self {
             partition_manager,
