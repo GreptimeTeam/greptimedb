@@ -22,6 +22,7 @@ includes = [
 excludes = [
     # copied sources
     "src/common/base/src/readable_size.rs",
+    "src/common/base/src/secrets.rs",
     "src/servers/src/repeated_field.rs",
     "src/servers/src/http/test_helpers.rs",
 ]
