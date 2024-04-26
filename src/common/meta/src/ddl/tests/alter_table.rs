@@ -55,8 +55,8 @@ fn test_rename_alter_table_task(table_name: &str, new_table_name: &str) -> Alter
 
 #[tokio::test]
 async fn test_on_prepare_table_exists_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo", 1024);
     // Puts a value to table name key.
@@ -78,8 +78,8 @@ async fn test_on_prepare_table_exists_err() {
 
 #[tokio::test]
 async fn test_on_prepare_table_not_exists_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_rename_alter_table_task("non-exists", "foo");
     let mut procedure = AlterTableProcedure::new(cluster_id, 1024, task, ddl_context).unwrap();
@@ -91,8 +91,8 @@ async fn test_on_prepare_table_not_exists_err() {
 async fn test_on_submit_alter_request() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher(tx);
-    let datanode_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_id = 1024;
     let table_name = "foo";
@@ -175,10 +175,10 @@ async fn test_on_submit_alter_request() {
 
 #[tokio::test]
 async fn test_on_submit_alter_request_with_outdated_request() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(
+    let node_manager = Arc::new(MockDatanodeManager::new(
         RequestOutdatedErrorDatanodeHandler,
     ));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_id = 1024;
     let table_name = "foo";
@@ -236,8 +236,8 @@ async fn test_on_submit_alter_request_with_outdated_request() {
 
 #[tokio::test]
 async fn test_on_update_metadata_rename() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_name = "foo";
     let new_table_name = "bar";
@@ -287,8 +287,8 @@ async fn test_on_update_metadata_rename() {
 
 #[tokio::test]
 async fn test_on_update_metadata_add_columns() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
