@@ -478,7 +478,7 @@ impl RowGroupReaderBuilder {
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
     async fn build(
-        &mut self,
+        &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
     ) -> Result<ParquetRecordBatchReader> {
