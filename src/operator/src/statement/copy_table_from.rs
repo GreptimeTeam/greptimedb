@@ -377,6 +377,11 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
+        let max_insert_rows = req
+            .with
+            .get("max_insert_rows")
+            .and_then(|val| val.parse::<usize>().ok())
+            .unwrap_or(1000);
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -426,6 +431,10 @@ impl StatementExecutor {
                     let (rows, cost) = batch_insert(&mut pending, &mut pending_mem_size).await?;
                     rows_inserted += rows;
                     insert_cost += cost;
+                }
+
+                if rows_inserted >= max_insert_rows {
+                    break;
                 }
             }
 
