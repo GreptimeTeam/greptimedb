@@ -140,8 +140,8 @@ impl Export {
         });
         let rpc_request = GreptimeRequest {
             header: Some(RequestHeader {
-                catalog: catalog,
-                schema: schema,
+                catalog,
+                schema,
                 authorization: self.auth_header.clone(),
                 dbname: String::default(),
                 timezone: String::default(),
