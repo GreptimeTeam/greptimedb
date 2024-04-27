@@ -33,6 +33,7 @@ rand.workspace = true
 rskafka.workspace = true
 serde.workspace = true
 store-api.workspace = true
+tests-integration.workspace = true
 tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true

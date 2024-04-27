@@ -24,14 +24,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use client::error::ServerSnafu;
-use client::{
-    Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
+use client::{Client, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
+use tests_integration::database::Database as DB;
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
 

@@ -23,6 +23,8 @@ use api::v1::{
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
+use client::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
+use client::{from_grpc_response, Client, Result};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
@@ -34,8 +36,7 @@ use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
-use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
+use crate::stream_insert::StreamInserter;
 
 pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 
@@ -127,12 +128,10 @@ impl Database {
     }
 
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
         self.handle(Request::Inserts(requests)).await
     }
 
     pub async fn row_insert(&self, requests: RowInsertRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
         self.handle(Request::RowInserts(requests)).await
     }
 
@@ -157,7 +156,6 @@ impl Database {
     }
 
     pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_DELETE.start_timer();
         self.handle(Request::Deletes(request)).await
     }
 
@@ -188,7 +186,6 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        let _timer = metrics::METRIC_GRPC_SQL.start_timer();
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
         }))
@@ -196,7 +193,6 @@ impl Database {
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_LOGICAL_PLAN.start_timer();
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::LogicalPlan(logical_plan)),
         }))
@@ -210,7 +206,6 @@ impl Database {
         end: &str,
         step: &str,
     ) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_PROMQL_RANGE_QUERY.start_timer();
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::PromRangeQuery(PromRangeQuery {
                 query: promql.to_string(),
@@ -224,7 +219,6 @@ impl Database {
     }
 
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_CREATE_TABLE.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
         }))
@@ -232,7 +226,6 @@ impl Database {
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_ALTER.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(expr)),
         }))
@@ -240,7 +233,6 @@ impl Database {
     }
 
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_DROP_TABLE.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(expr)),
         }))
@@ -248,7 +240,6 @@ impl Database {
     }
 
     pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_TRUNCATE_TABLE.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::TruncateTable(expr)),
         }))
@@ -256,8 +247,6 @@ impl Database {
     }
 
     async fn do_get(&self, request: Request) -> Result<Output> {
-        // FIXME(paomian): should be added some labels for metrics
-        let _timer = metrics::METRIC_GRPC_DO_GET.start_timer();
         let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
@@ -267,7 +256,7 @@ impl Database {
 
         let response = client.mut_inner().do_get(request).await.map_err(|e| {
             let tonic_code = e.code();
-            let e: error::Error = e.into();
+            let e: Error = e.into();
             let code = e.status_code();
             let msg = e.to_string();
             let error = Error::FlightGet {
@@ -358,8 +347,14 @@ pub struct FlightContext {
 mod tests {
     use api::v1::auth_header::AuthScheme;
     use api::v1::{AuthHeader, Basic};
+    use clap::Parser;
+    use client::Client;
+    use cmd::error::Result as CmdResult;
+    use cmd::options::{CliOptions, Options};
+    use cmd::{cli, standalone, App};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
-    use crate::database::FlightContext;
+    use super::{Database, FlightContext};
 
     #[test]
     fn test_flight_ctx() {
@@ -381,5 +376,73 @@ mod tests {
                 auth_scheme: Some(AuthScheme::Basic(_)),
             })
         ))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let standalone = standalone::Command::parse_from([
+            "standalone",
+            "start",
+            "--data-home",
+            &*output_dir.path().to_string_lossy(),
+        ]);
+        let Options::Standalone(standalone_opts) =
+            standalone.load_options(&CliOptions::default())?
+        else {
+            unreachable!()
+        };
+        let mut instance = standalone.build(*standalone_opts).await?;
+        instance.start().await?;
+
+        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        database
+            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
+            .await
+            .unwrap();
+        database
+            .sql(
+                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
+                        ts TIMESTAMP,
+                        TIME INDEX (ts)
+                    ) engine=mito;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let cli = cli::Command::parse_from([
+            "cli",
+            "export",
+            "--addr",
+            "127.0.0.1:4001",
+            "--output-dir",
+            &*output_dir.path().to_string_lossy(),
+            "--target",
+            "create-table",
+        ]);
+        let mut cli_app = cli.build().await?;
+        cli_app.start().await?;
+
+        instance.stop().await?;
+
+        let output_file = output_dir
+            .path()
+            .join("greptime-cli.export.create_table.sql");
+        let res = std::fs::read_to_string(output_file).unwrap();
+        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+
+ENGINE=mito
+;
+"#;
+        assert_eq!(res.trim(), expect.trim());
+
+        Ok(())
     }
 }

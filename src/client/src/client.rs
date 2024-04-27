@@ -28,21 +28,21 @@ use tonic::transport::Channel;
 use crate::load_balance::{LoadBalance, Loadbalancer};
 use crate::{error, Result};
 
-pub(crate) struct DatabaseClient {
-    pub(crate) inner: GreptimeDatabaseClient<Channel>,
+pub struct DatabaseClient {
+    pub inner: GreptimeDatabaseClient<Channel>,
 }
 
-pub(crate) struct FlightClient {
+pub struct FlightClient {
     addr: String,
     client: FlightServiceClient<Channel>,
 }
 
 impl FlightClient {
-    pub(crate) fn addr(&self) -> &str {
+    pub fn addr(&self) -> &str {
         &self.addr
     }
 
-    pub(crate) fn mut_inner(&mut self) -> &mut FlightServiceClient<Channel> {
+    pub fn mut_inner(&mut self) -> &mut FlightServiceClient<Channel> {
         &mut self.client
     }
 }
@@ -154,7 +154,7 @@ impl Client {
             .as_bytes() as usize
     }
 
-    pub(crate) fn make_flight_client(&self) -> Result<FlightClient> {
+    pub fn make_flight_client(&self) -> Result<FlightClient> {
         let (addr, channel) = self.find_channel()?;
         Ok(FlightClient {
             addr,
@@ -164,7 +164,7 @@ impl Client {
         })
     }
 
-    pub(crate) fn make_database_client(&self) -> Result<DatabaseClient> {
+    pub fn make_database_client(&self) -> Result<DatabaseClient> {
         let (_, channel) = self.find_channel()?;
         Ok(DatabaseClient {
             inner: GreptimeDatabaseClient::new(channel)

@@ -18,14 +18,13 @@ use api::v1::{
     AuthHeader, GreptimeRequest, GreptimeResponse, InsertRequest, InsertRequests, RequestHeader,
     RowInsertRequest, RowInsertRequests,
 };
+use client::error::{self, Result};
+use client::from_grpc_response;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Response, Status};
-
-use crate::error::{self, Result};
-use crate::from_grpc_response;
 
 /// A structure that provides some methods for streaming data insert.
 ///

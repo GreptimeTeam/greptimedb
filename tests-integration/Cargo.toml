@@ -13,11 +13,13 @@ workspace = true
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
+async-stream.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum.workspace = true
 catalog.workspace = true
 chrono.workspace = true
+clap.workspace = true
 client = { workspace = true, features = ["testing"] }
 cmd.workspace = true
 common-base.workspace = true
@@ -38,6 +40,7 @@ datatypes.workspace = true
 dotenv.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
+futures-util.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 mysql_async = { version = "0.33", default-features = false, features = [
@@ -53,6 +56,7 @@ secrecy = "0.8"
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
+snafu.workspace = true
 sql.workspace = true
 sqlx = { version = "0.6", features = [
     "runtime-tokio-rustls",
@@ -65,6 +69,7 @@ table.workspace = true
 tempfile.workspace = true
 time = "0.3"
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tower = "0.4"
 uuid.workspace = true

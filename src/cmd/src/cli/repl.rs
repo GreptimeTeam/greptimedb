@@ -19,7 +19,7 @@ use std::time::Instant;
 use catalog::kvbackend::{
     CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager,
 };
-use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
@@ -85,20 +85,21 @@ impl Repl {
         }
 
         let client = Client::with_urls([&cmd.grpc_addr]);
-        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-
-        let query_engine = if let Some(meta_addr) = &cmd.meta_addr {
-            create_query_engine(meta_addr).await.map(Some)?
-        } else {
-            None
-        };
-
-        Ok(Self {
-            rl,
-            prompt: "> ".to_string(),
-            database,
-            query_engine,
-        })
+        todo!()
+        // let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        //
+        // let query_engine = if let Some(meta_addr) = &cmd.meta_addr {
+        //     create_query_engine(meta_addr).await.map(Some)?
+        // } else {
+        //     None
+        // };
+        //
+        // Ok(Self {
+        //     rl,
+        //     prompt: "> ".to_string(),
+        //     database,
+        //     query_engine,
+        // })
     }
 
     /// Parse the next command
