@@ -16,6 +16,8 @@ tokio-console = ["common-telemetry/tokio-console"]
 workspace = true
 
 [dependencies]
+api.workspace = true
+arrow-flight.workspace = true
 async-trait.workspace = true
 auth.workspace = true
 catalog.workspace = true
@@ -26,6 +28,7 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-error.workspace = true
+common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-procedure.workspace = true

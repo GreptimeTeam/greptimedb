@@ -15,15 +15,22 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use api::v1::greptime_request::Request;
+use api::v1::query_request::Query;
+use arrow_flight::Ticket;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use client::api::v1::auth_header::AuthScheme;
-use client::api::v1::Basic;
-use client::{Client, Database, OutputData, DEFAULT_SCHEMA_NAME};
+use client::api::v1::{AuthHeader, Basic, GreptimeRequest, QueryRequest, RequestHeader};
+use client::region::RegionRequester;
+use client::{Client, OutputData, DEFAULT_SCHEMA_NAME};
+use common_query::Output;
 use common_recordbatch::util::collect;
+use common_telemetry::tracing_context::W3cTrace;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{StringVector, Vector};
+use prost::Message;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -88,43 +95,70 @@ impl ExportCommand {
                 addr: self.addr.clone(),
             })?;
         let (catalog, schema) = split_database(&self.database)?;
-        let mut database_client = Database::new(
-            catalog.clone(),
-            schema.clone().unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
-            client,
-        );
 
-        if let Some(auth_basic) = &self.auth_basic {
+        let auth_header = if let Some(auth_basic) = &self.auth_basic {
             let (username, password) = auth_basic.split_once(':').context(IllegalConfigSnafu {
                 msg: "auth_basic cannot be split by ':'".to_string(),
             })?;
-            database_client.set_auth(AuthScheme::Basic(Basic {
-                username: username.to_string(),
-                password: password.to_string(),
-            }));
-        }
+            Some(AuthHeader {
+                auth_scheme: Some(AuthScheme::Basic(Basic {
+                    username: username.to_string(),
+                    password: password.to_string(),
+                })),
+            })
+        } else {
+            None
+        };
 
         Ok(Instance::new(Box::new(Export {
-            client: database_client,
             catalog,
             schema,
             output_dir: self.output_dir.clone(),
             parallelism: self.export_jobs,
             target: self.target.clone(),
+            auth_header,
+            region_requester: RegionRequester::new(client),
         })))
     }
 }
 
 pub struct Export {
-    client: Database,
     catalog: String,
     schema: Option<String>,
     output_dir: String,
     parallelism: usize,
     target: ExportTarget,
+    auth_header: Option<AuthHeader>,
+    region_requester: RegionRequester,
 }
 
 impl Export {
+    /// Execute a sql query.
+    async fn sql(&self, sql: &str, catalog: String, schema: String) -> Result<Output> {
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql.to_string())),
+        });
+        let rpc_request = GreptimeRequest {
+            header: Some(RequestHeader {
+                catalog: catalog,
+                schema: schema,
+                authorization: self.auth_header.clone(),
+                dbname: String::default(),
+                timezone: String::default(),
+                tracing_context: W3cTrace::new(),
+            }),
+            request: Some(request),
+        };
+        let ticket = Ticket {
+            ticket: rpc_request.encode_to_vec().into(),
+        };
+
+        self.region_requester
+            .do_get_output(ticket)
+            .await
+            .with_context(|_| RequestDatabaseSnafu { sql })
+    }
+
     /// Iterate over all db names.
     ///
     /// Newbie: `db_name` is catalog + schema.
@@ -132,15 +166,13 @@ impl Export {
         if let Some(schema) = &self.schema {
             Ok(vec![(self.catalog.clone(), schema.clone())])
         } else {
-            let mut client = self.client.clone();
-            client.set_catalog(self.catalog.clone());
-            let result =
-                client
-                    .sql("show databases")
-                    .await
-                    .with_context(|_| RequestDatabaseSnafu {
-                        sql: "show databases".to_string(),
-                    })?;
+            let result = self
+                .sql(
+                    "show databases",
+                    self.catalog.clone(),
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                )
+                .await?;
             let OutputData::Stream(stream) = result.data else {
                 NotDataFromOutputSnafu.fail()?
             };
@@ -175,13 +207,9 @@ impl Export {
             information_schema.tables where table_type = \'BASE TABLE\'\
             and table_catalog = \'{catalog}\' and table_schema = \'{schema}\'",
         );
-        let mut client = self.client.clone();
-        client.set_catalog(catalog);
-        client.set_schema(schema);
-        let result = client
-            .sql(&sql)
-            .await
-            .with_context(|_| RequestDatabaseSnafu { sql })?;
+        let result = self
+            .sql(&sql, catalog.to_string(), schema.to_string())
+            .await?;
         let OutputData::Stream(stream) = result.data else {
             NotDataFromOutputSnafu.fail()?
         };
@@ -230,13 +258,9 @@ impl Export {
             r#"show create table "{}"."{}"."{}""#,
             catalog, schema, table
         );
-        let mut client = self.client.clone();
-        client.set_catalog(catalog);
-        client.set_schema(schema);
-        let result = client
-            .sql(&sql)
-            .await
-            .with_context(|_| RequestDatabaseSnafu { sql })?;
+        let result = self
+            .sql(&sql, catalog.to_string(), schema.to_string())
+            .await?;
         let OutputData::Stream(stream) = result.data else {
             NotDataFromOutputSnafu.fail()?
         };
@@ -321,20 +345,13 @@ impl Export {
                     .context(FileIoSnafu)?;
                 let output_dir = Path::new(&self.output_dir).join(format!("{catalog}-{schema}/"));
 
-                let mut client = self.client.clone();
-                client.set_catalog(catalog.clone());
-                client.set_schema(schema.clone());
-
                 // copy database to
                 let sql = format!(
                     "copy database {} to '{}' with (format='parquet');",
                     schema,
                     output_dir.to_str().unwrap()
                 );
-                client
-                    .sql(sql.clone())
-                    .await
-                    .context(RequestDatabaseSnafu { sql })?;
+                self.sql(&sql, catalog.clone(), schema.clone()).await?;
                 info!("finished exporting {catalog}.{schema} data");
 
                 // export copy from sql

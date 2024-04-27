@@ -26,12 +26,13 @@ use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::datanode_manager::Datanode;
 use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
-use snafu::{location, Location, OptionExt, ResultExt};
+use snafu::{ensure, location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
 
 use crate::error::{
@@ -164,6 +165,94 @@ impl RegionRequester {
             metrics,
         };
         Ok(Box::pin(record_batch_stream))
+    }
+
+    pub async fn do_get_output(&self, ticket: Ticket) -> Result<Output> {
+        let mut flight_client = self.client.make_flight_client()?;
+        let response = flight_client
+            .mut_inner()
+            .do_get(ticket)
+            .await
+            .map_err(|e| {
+                let tonic_code = e.code();
+                let e: error::Error = e.into();
+                let code = e.status_code();
+                let msg = e.to_string();
+                let error = Error::FlightGet {
+                    tonic_code,
+                    addr: flight_client.addr().to_string(),
+                    source: BoxedError::new(ServerSnafu { code, msg }.build()),
+                };
+                error!(
+                    e; "Failed to do Flight get, addr: {}, code: {}",
+                    flight_client.addr(),
+                    tonic_code
+                );
+                error
+            })?;
+
+        let flight_data_stream = response.into_inner();
+        let mut decoder = FlightDecoder::default();
+
+        let mut flight_message_stream = flight_data_stream.map(move |flight_data| {
+            flight_data
+                .map_err(Error::from)
+                .and_then(|data| decoder.try_decode(data).context(ConvertFlightDataSnafu))
+        });
+
+        let Some(first_flight_message) = flight_message_stream.next().await else {
+            return IllegalFlightMessagesSnafu {
+                reason: "Expect the response not to be empty",
+            }
+            .fail();
+        };
+
+        let first_flight_message = first_flight_message?;
+
+        match first_flight_message {
+            FlightMessage::AffectedRows(rows) => {
+                ensure!(
+                    flight_message_stream.next().await.is_none(),
+                    IllegalFlightMessagesSnafu {
+                        reason: "Expect 'AffectedRows' Flight messages to be the one and the only!"
+                    }
+                );
+                Ok(Output::new_with_affected_rows(rows))
+            }
+            FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
+                IllegalFlightMessagesSnafu {
+                    reason: "The first flight message cannot be a RecordBatch or Metrics message",
+                }
+                .fail()
+            }
+            FlightMessage::Schema(schema) => {
+                let stream = Box::pin(stream!({
+                    while let Some(flight_message) = flight_message_stream.next().await {
+                        let flight_message = flight_message
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?;
+                        match flight_message {
+                            FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                            FlightMessage::Metrics(_) => {}
+                            FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {
+                                yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
+                                        .fail()
+                                        .map_err(BoxedError::new)
+                                        .context(ExternalSnafu);
+                                break;
+                            }
+                        }
+                    }
+                }));
+                let record_batch_stream = RecordBatchStreamWrapper {
+                    schema,
+                    stream,
+                    output_ordering: None,
+                    metrics: Default::default(),
+                };
+                Ok(Output::new_with_stream(Box::pin(record_batch_stream)))
+            }
+        }
     }
 
     async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
