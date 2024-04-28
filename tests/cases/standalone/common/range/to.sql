@@ -26,6 +26,17 @@ SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO '2023-01-01T00:00:0
 
 SELECT ts, min(val) RANGE (INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) TO '1900-01-01T00:00:00+01:00' by (1) ORDER BY ts;
 
+SELECT ts, min(val) RANGE (now() - (now() - INTERVAL '2' day + INTERVAL '1' day)) FROM host ALIGN (now() - (now() - INTERVAL '2' day + INTERVAL '1' day)) TO (now() - (now() + INTERVAL '1' hour)) by (1) ORDER BY ts;
+
+-- TODO(Taylor-lagrange): coerce issue in datatype `Duration(Nanosecond)`(made by `now() - now()`) and `Interval(MonthDayNano)`
+SELECT ts, host, min(val) RANGE (now() - now() + INTERVAL '1' day) FROM host ALIGN '1d' TO '2023-01-01T00:00:00+01:00' ORDER BY host, ts;
+
+-- non-positive duration
+
+SELECT ts, min(val) RANGE (INTERVAL '1' day - INTERVAL '2' day) FROM host ALIGN (INTERVAL '1' day) TO '1900-01-01T00:00:00+01:00' by (1) ORDER BY ts;
+
+SELECT ts, min(val) RANGE (INTERVAL '1' day - INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) TO '1900-01-01T00:00:00+01:00' by (1) ORDER BY ts;
+
 --- ALIGN TO with time zone ---
 set time_zone='Asia/Shanghai';
 

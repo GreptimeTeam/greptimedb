@@ -19,6 +19,7 @@ use std::time::Duration;
 use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
+use chrono::Utc;
 use common_time::interval::NANOS_PER_MILLI;
 use common_time::timestamp::TimeUnit;
 use common_time::{Interval, Timestamp, Timezone};
@@ -27,10 +28,13 @@ use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
+use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
     Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
     Projection,
 };
+use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datatypes::prelude::ConcreteDataType;
 use promql_parser::util::parse_duration;
 use session::context::QueryContextRef;
@@ -108,34 +112,77 @@ fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
 /// Parse a duraion expr:
 /// 1. duration string (e.g. `'1h'`)
 /// 2. Interval expr (e.g. `INTERVAL '1 year 3 hours 20 minutes'`)
+/// 3. A expr can be evaluate at logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
 fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
-    let interval_to_duration = |interval: Interval| -> Duration {
-        Duration::from_millis((interval.to_nanosecond() / NANOS_PER_MILLI as i128) as u64)
-    };
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => {
             parse_duration(str).map_err(DataFusionError::Plan)
         }
-        Some(Expr::Literal(ScalarValue::IntervalYearMonth(Some(i)))) => {
-            Ok(interval_to_duration(Interval::from_i32(*i)))
+        Some(expr) => {
+            let ms = evaluate_expr_to_millisecond(args, i)?;
+            if ms <= 0 {
+                return Err(dispose_parse_error(Some(expr)));
+            }
+            Ok(Duration::from_millis(ms as u64))
         }
-        Some(Expr::Literal(ScalarValue::IntervalDayTime(Some(i)))) => {
-            Ok(interval_to_duration(Interval::from_i64(*i)))
-        }
-        Some(Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(i)))) => {
-            Ok(interval_to_duration(Interval::from_i128(*i)))
-        }
-        other => Err(dispose_parse_error(other)),
+        None => Err(dispose_parse_error(None)),
     }
+}
+
+/// Evaluate a time calculation expr, case like:
+/// 1. `INTERVAL '1' day + INTERVAL '1 year 2 hours 3 minutes'`
+/// 2. `now() - INTERVAL '1' day`
+/// 3. A expr can be evaluate at logical plan stage (e.g. `now() - INTERVAL '1' day`)
+/// Output a millisecond timestamp
+fn evaluate_expr_to_millisecond(args: &[Expr], i: usize) -> DFResult<i64> {
+    let Some(expr) = args.get(i) else {
+        return Err(dispose_parse_error(None));
+    };
+    let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
+    let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(DFSchema::empty()));
+    let interval_to_ms =
+        |interval: Interval| -> i64 { (interval.to_nanosecond() / NANOS_PER_MILLI as i128) as i64 };
+    let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
+    match simplify_expr {
+        Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _))
+        | Expr::Literal(ScalarValue::DurationNanosecond(ts_nanos)) => {
+            ts_nanos.map(|v| v / 1_000_000)
+        }
+        Expr::Literal(ScalarValue::TimestampMicrosecond(ts_micros, _))
+        | Expr::Literal(ScalarValue::DurationMicrosecond(ts_micros)) => {
+            ts_micros.map(|v| v / 1_000)
+        }
+        Expr::Literal(ScalarValue::TimestampMillisecond(ts_millis, _))
+        | Expr::Literal(ScalarValue::DurationMillisecond(ts_millis)) => ts_millis,
+        Expr::Literal(ScalarValue::TimestampSecond(ts_secs, _))
+        | Expr::Literal(ScalarValue::DurationSecond(ts_secs)) => ts_secs.map(|v| v * 1_000),
+        Expr::Literal(ScalarValue::IntervalYearMonth(interval)) => {
+            interval.map(|v| interval_to_ms(Interval::from_i32(v)))
+        }
+        Expr::Literal(ScalarValue::IntervalDayTime(interval)) => {
+            interval.map(|v| interval_to_ms(Interval::from_i64(v)))
+        }
+        Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => {
+            interval.map(|v| interval_to_ms(Interval::from_i128(v)))
+        }
+        _ => None,
+    }
+    .ok_or(DataFusionError::Plan(format!(
+        "{} is not a expr can be evaluate and use in range query",
+        expr.display_name().unwrap_or_default()
+    )))
 }
 
 /// Parse the `align to` clause and return a UTC timestamp with unit of millisecond,
 /// which is used as the basis for dividing time slot during the align operation.
 /// 1. NOW: align to current execute time
 /// 2. Timestamp string: align to specific timestamp
-/// 3. leave empty (as Default Option): align to unix epoch 0 (timezone aware)
+/// 3. A expr can be evaluate at logical plan stage (e.g. `now() - INTERVAL '1' day`)
+/// 4. leave empty (as Default Option): align to unix epoch 0 (timezone aware)
 fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
-    let s = parse_str_expr(args, i)?;
+    let Ok(s) = parse_str_expr(args, i) else {
+        return evaluate_expr_to_millisecond(args, i);
+    };
     let upper = s.to_uppercase();
     match upper.as_str() {
         "NOW" => return Ok(Timestamp::current_millis().value()),
@@ -477,6 +524,7 @@ mod test {
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use datafusion_expr::{BinaryExpr, Operator};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::QueryContext;
@@ -712,7 +760,7 @@ mod test {
             .to_string();
         assert_eq!(
             error,
-            "Error during planning: Illegal argument `Int64(5)` in range select query"
+            "Error during planning: Int64(5) is not a expr can be evaluate and use in range query"
         )
     }
 
@@ -754,8 +802,33 @@ mod test {
             parse_duration_expr(&args, 0).unwrap(),
             parse_duration("1y4w").unwrap()
         );
-        // test err
+        // test index err
         assert!(parse_duration_expr(&args, 10).is_err());
+        // test evaluate expr
+        let args = vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+            op: Operator::Plus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+        })];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap().as_millis(),
+            interval_to_ms(Interval::from_year_month(20))
+        );
+        let args = vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+            op: Operator::Minus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+        })];
+        // test zero interval error
+        assert!(parse_duration_expr(&args, 0).is_err());
     }
 
     #[test]
@@ -787,19 +860,34 @@ mod test {
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00+08:00".into(),
         )))];
-        assert!(parse_align_to(&args, 0, None).unwrap() == -8 * 60 * 60 * 1000);
+        assert_eq!(parse_align_to(&args, 0, None).unwrap(), -8 * 60 * 60 * 1000);
         // timezone
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00".into(),
         )))];
-        assert!(
+        assert_eq!(
             parse_align_to(
                 &args,
                 0,
                 Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
             )
-            .unwrap()
-                == -8 * 60 * 60 * 1000
+            .unwrap(),
+            -8 * 60 * 60 * 1000
+        );
+        // test evaluate expr
+        let args = vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+            op: Operator::Plus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+        })];
+        assert_eq!(
+            parse_align_to(&args, 0, None).unwrap(),
+            // 20 month
+            20 * 30 * 24 * 60 * 60 * 1000
         );
     }
 }
