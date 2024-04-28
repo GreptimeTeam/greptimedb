@@ -116,7 +116,7 @@ impl AlterLogicalTablesProcedure {
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for peer in leaders {
-            let requester = self.context.datanode_manager.datanode(&peer).await;
+            let requester = self.context.node_manager.datanode(&peer).await;
             let request = self.make_request(&peer, &physical_table_route.region_routes)?;
 
             alter_region_tasks.push(async move {

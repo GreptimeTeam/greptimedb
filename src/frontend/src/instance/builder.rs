@@ -17,10 +17,10 @@ use std::sync::Arc;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
-use common_meta::datanode_manager::NodeManagerRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
@@ -42,7 +42,7 @@ pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
     cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
-    datanode_manager: NodeManagerRef,
+    node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     heartbeat_task: Option<HeartbeatTask>,
@@ -52,14 +52,14 @@ impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
         catalog_manager: CatalogManagerRef,
-        datanode_manager: NodeManagerRef,
+        node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
             cache_invalidator: None,
             catalog_manager,
-            datanode_manager,
+            node_manager,
             plugins: None,
             procedure_executor,
             heartbeat_task: None,
@@ -89,7 +89,7 @@ impl FrontendBuilder {
 
     pub async fn try_build(self) -> Result<Instance> {
         let kv_backend = self.kv_backend;
-        let datanode_manager = self.datanode_manager;
+        let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
 
         let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
@@ -99,22 +99,22 @@ impl FrontendBuilder {
             .unwrap_or_else(|| Arc::new(DummyCacheInvalidator));
 
         let region_query_handler =
-            FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
+            FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
-            datanode_manager.clone(),
+            node_manager.clone(),
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
-            datanode_manager.clone(),
+            node_manager.clone(),
         ));
         let requester = Arc::new(Requester::new(
             self.catalog_manager.clone(),
             partition_manager,
-            datanode_manager.clone(),
+            node_manager.clone(),
         ));
         let table_mutation_handler = Arc::new(TableMutationOperator::new(
             inserter.clone(),

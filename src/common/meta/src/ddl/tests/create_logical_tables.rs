@@ -33,8 +33,8 @@ use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
 #[tokio::test]
 async fn test_on_prepare_physical_table_not_found() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let tasks = vec![test_create_logical_table_task("foo")];
     let physical_table_id = 1024u32;
@@ -46,8 +46,8 @@ async fn test_on_prepare_physical_table_not_found() {
 
 #[tokio::test]
 async fn test_on_prepare() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -81,8 +81,8 @@ async fn test_on_prepare() {
 
 #[tokio::test]
 async fn test_on_prepare_logical_table_exists_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -127,8 +127,8 @@ async fn test_on_prepare_logical_table_exists_err() {
 
 #[tokio::test]
 async fn test_on_prepare_with_create_if_table_exists() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -175,8 +175,8 @@ async fn test_on_prepare_with_create_if_table_exists() {
 
 #[tokio::test]
 async fn test_on_prepare_part_logical_tables_exist() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -227,8 +227,8 @@ async fn test_on_prepare_part_logical_tables_exist() {
 
 #[tokio::test]
 async fn test_on_create_metadata() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -277,8 +277,8 @@ async fn test_on_create_metadata() {
 
 #[tokio::test]
 async fn test_on_create_metadata_part_logical_tables_exist() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -338,8 +338,8 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
 
 #[tokio::test]
 async fn test_on_create_metadata_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");

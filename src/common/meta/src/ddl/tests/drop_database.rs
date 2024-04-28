@@ -29,8 +29,8 @@ use crate::test_util::{new_ddl_context, MockDatanodeManager};
 async fn test_drop_database_with_logical_tables() {
     common_telemetry::init_default_ut_logging();
     let cluster_id = 1;
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     ddl_context
         .table_metadata_manager
         .schema_manager()
@@ -78,8 +78,8 @@ async fn test_drop_database_with_logical_tables() {
 async fn test_drop_database_retryable_error() {
     common_telemetry::init_default_ut_logging();
     let cluster_id = 1;
-    let datanode_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     ddl_context
         .table_metadata_manager
         .schema_manager()

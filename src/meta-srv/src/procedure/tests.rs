@@ -21,7 +21,6 @@ use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, SemanticType};
 use client::client_manager::DatanodeClients;
 use common_catalog::consts::MITO2_ENGINE;
-use common_meta::datanode_manager::NodeManagerRef;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
@@ -29,6 +28,7 @@ use common_meta::ddl::test_util::create_table::{
     build_raw_table_info_from_expr, TestCreateTableExprBuilder,
 };
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{find_leaders, RegionRoute};
 use common_procedure::Status;
@@ -170,7 +170,7 @@ fn test_region_request_builder() {
     assert_eq!(template.template(), &expected);
 }
 
-async fn new_datanode_manager(
+async fn new_node_manager(
     region_server: &EchoRegionServer,
     region_routes: &[RegionRoute],
 ) -> NodeManagerRef {
@@ -189,12 +189,12 @@ async fn new_datanode_manager(
 async fn test_on_datanode_create_regions() {
     let (region_server, mut rx) = EchoRegionServer::new();
     let region_routes = test_data::new_region_routes();
-    let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
+    let node_manager = new_node_manager(&region_server, &region_routes).await;
 
     let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(None),
-        test_data::new_ddl_context(datanode_manager),
+        test_data::new_ddl_context(node_manager),
     );
 
     procedure.set_allocated_metadata(
@@ -241,7 +241,7 @@ async fn test_on_datanode_create_regions() {
 async fn test_on_datanode_create_logical_regions() {
     let (region_server, mut rx) = EchoRegionServer::new();
     let region_routes = test_data::new_region_routes();
-    let datanode_manager = new_datanode_manager(&region_server, &region_routes).await;
+    let node_manager = new_node_manager(&region_server, &region_routes).await;
     let physical_table_route = TableRouteValue::physical(region_routes);
     let physical_table_id = 1;
 
@@ -249,7 +249,7 @@ async fn test_on_datanode_create_logical_regions() {
     let task2 = create_table_task(Some("my_table2"));
     let task3 = create_table_task(Some("my_table3"));
 
-    let ctx = test_data::new_ddl_context(datanode_manager);
+    let ctx = test_data::new_ddl_context(node_manager);
     let kv_backend = ctx.table_metadata_manager.kv_backend();
     let physical_route_txn = ctx
         .table_metadata_manager

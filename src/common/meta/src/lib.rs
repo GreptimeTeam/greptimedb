@@ -20,7 +20,6 @@
 
 pub mod cache_invalidator;
 pub mod cluster;
-pub mod datanode_manager;
 pub mod ddl;
 pub mod ddl_manager;
 pub mod distributed_time_constants;
@@ -31,6 +30,7 @@ pub mod key;
 pub mod kv_backend;
 pub mod lock_key;
 pub mod metrics;
+pub mod node_manager;
 pub mod peer;
 pub mod range_stream;
 pub mod region_keeper;

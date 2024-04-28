@@ -19,8 +19,8 @@ use api::v1::region::{QueryRequest, RegionRequest, RegionResponse as RegionRespo
 use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::{Datanode, DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::node_manager::{Datanode, DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::peer::Peer;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;

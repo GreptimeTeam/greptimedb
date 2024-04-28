@@ -159,8 +159,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_with_physical_table() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-        let ddl_context = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let ddl_context = new_ddl_context(node_manager);
         let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
         let (_, table_route) = ddl_context
             .table_metadata_manager
@@ -209,8 +209,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_logical_table() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-        let ddl_context = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let ddl_context = new_ddl_context(node_manager);
         let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
         create_logical_table(ddl_context.clone(), 0, physical_table_id, "metric").await;
         let logical_table_id = physical_table_id + 1;
@@ -313,8 +313,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_retryable_err() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
-        let ddl_context = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
+        let ddl_context = new_ddl_context(node_manager);
         let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
         let (_, table_route) = ddl_context
             .table_metadata_manager
