@@ -15,7 +15,7 @@
 pub(crate) mod flow_info;
 pub(crate) mod flow_name;
 pub(crate) mod flownode_flow;
-pub(crate) mod table_task;
+pub(crate) mod table_flow;
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowTaskManager;
 use crate::key::flow::flow_name::FlowNameManager;
 use crate::key::flow::flownode_flow::FlownodeTaskManager;
-use crate::key::flow::table_task::TableTaskManager;
+use crate::key::flow::table_flow::TableTaskManager;
 use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::FlowTaskId;
@@ -227,7 +227,7 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::*;
-    use crate::key::flow::table_task::TableTaskKey;
+    use crate::key::flow::table_flow::TableFlowKey;
     use crate::key::scope::CatalogScoped;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::table_name::TableName;
@@ -329,7 +329,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 nodes,
-                vec![TableTaskKey::new(
+                vec![TableFlowKey::new(
                     catalog_name.to_string(),
                     table_id,
                     1,
