@@ -32,11 +32,11 @@ use crate::kv_backend::KvBackendRef;
 use crate::table_name::TableName;
 use crate::FlownodeId;
 
-const FLOW_TASK_INFO_KEY_PREFIX: &str = "info";
+const FLOW_INFO_KEY_PREFIX: &str = "info";
 
 lazy_static! {
-    static ref FLOW_TASK_INFO_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{FLOW_TASK_INFO_KEY_PREFIX}/([0-9]+)$")).unwrap();
+    static ref FLOW_INFO_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{FLOW_INFO_KEY_PREFIX}/([0-9]+)$")).unwrap();
 }
 
 /// The key stores the metadata of the task.
@@ -89,7 +89,7 @@ impl FlowTaskKeyInner {
 
 impl MetaKey<FlowTaskKeyInner> for FlowTaskKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
-        format!("{FLOW_TASK_INFO_KEY_PREFIX}/{}", self.flow_task_id).into_bytes()
+        format!("{FLOW_INFO_KEY_PREFIX}/{}", self.flow_task_id).into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKeyInner> {
@@ -103,7 +103,7 @@ impl MetaKey<FlowTaskKeyInner> for FlowTaskKeyInner {
             .build()
         })?;
         let captures =
-            FLOW_TASK_INFO_KEY_PATTERN
+            FLOW_INFO_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
                     err_msg: format!("Invalid FlowTaskKeyInner '{key}'"),

@@ -27,11 +27,11 @@ use crate::key::{
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
-const FLOW_TASK_NAME_KEY_PREFIX: &str = "name";
+const FLOW_NAME_KEY_PREFIX: &str = "name";
 
 lazy_static! {
-    static ref FLOW_TASK_NAME_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{FLOW_TASK_NAME_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
+    static ref FLOW_NAME_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
 }
 
 /// The key of mapping {task_name} to [FlowTaskId].
@@ -77,7 +77,7 @@ pub struct FlowNameKeyInner {
 
 impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
-        format!("{FLOW_TASK_NAME_KEY_PREFIX}/{}", self.task_name).into_bytes()
+        format!("{FLOW_NAME_KEY_PREFIX}/{}", self.task_name).into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlowNameKeyInner> {
@@ -91,7 +91,7 @@ impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
             .build()
         })?;
         let captures =
-            FLOW_TASK_NAME_KEY_PATTERN
+            FLOW_NAME_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
                     err_msg: format!("Invalid FlowNameKeyInner '{key}'"),

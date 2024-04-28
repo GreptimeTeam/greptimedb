@@ -32,13 +32,13 @@ use crate::rpc::KeyValue;
 use crate::FlownodeId;
 
 lazy_static! {
-    static ref FLOWNODE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{FLOWNODE_TASK_KEY_PREFIX}/([0-9]+)/([0-9]+)/([0-9]+)$"
+    static ref FLOWNODE_FLOW_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{FLOWNODE_FLOW_KEY_PREFIX}/([0-9]+)/([0-9]+)/([0-9]+)$"
     ))
     .unwrap();
 }
 
-const FLOWNODE_TASK_KEY_PREFIX: &str = "flownode";
+const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 
 /// The key of mapping [FlownodeId] to [FlowTaskId].
 ///
@@ -122,7 +122,7 @@ impl FlownodeFlowKeyInner {
     }
 
     fn prefix(flownode_id: FlownodeId) -> String {
-        format!("{}/{flownode_id}", FLOWNODE_TASK_KEY_PREFIX)
+        format!("{}/{flownode_id}", FLOWNODE_FLOW_KEY_PREFIX)
     }
 
     /// The prefix used to retrieve all [FlownodeFlowKey]s with the specified `flownode_id`.
@@ -134,7 +134,7 @@ impl FlownodeFlowKeyInner {
 impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
-            "{FLOWNODE_TASK_KEY_PREFIX}/{}/{}/{}",
+            "{FLOWNODE_FLOW_KEY_PREFIX}/{}/{}/{}",
             self.flownode_id, self.flow_task_id, self.partition_id,
         )
         .into_bytes()
@@ -151,7 +151,7 @@ impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
             .build()
         })?;
         let captures =
-            FLOWNODE_TASK_KEY_PATTERN
+            FLOWNODE_FLOW_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
                     err_msg: format!("Invalid FlownodeFlowKeyInner '{key}'"),

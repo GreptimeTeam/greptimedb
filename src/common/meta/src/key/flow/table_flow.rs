@@ -31,11 +31,11 @@ use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::FlownodeId;
 
-const TABLE_TASK_KEY_PREFIX: &str = "source_table";
+const TABLE_FLOW_KEY_PREFIX: &str = "source_table";
 
 lazy_static! {
-    static ref TABLE_TASK_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{TABLE_TASK_KEY_PREFIX}/([0-9]+)/([0-9]+)/([0-9]+)/([0-9]+)$"
+    static ref TABLE_FLOW_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{TABLE_FLOW_KEY_PREFIX}/([0-9]+)/([0-9]+)/([0-9]+)/([0-9]+)$"
     ))
     .unwrap();
 }
@@ -133,7 +133,7 @@ impl TableFlowKeyInner {
     }
 
     fn prefix(table_id: TableId) -> String {
-        format!("{}/{table_id}", TABLE_TASK_KEY_PREFIX)
+        format!("{}/{table_id}", TABLE_FLOW_KEY_PREFIX)
     }
 
     /// The prefix used to retrieve all [TableFlowKey]s with the specified `table_id`.
@@ -145,7 +145,7 @@ impl TableFlowKeyInner {
 impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
-            "{TABLE_TASK_KEY_PREFIX}/{}/{}/{}/{}",
+            "{TABLE_FLOW_KEY_PREFIX}/{}/{}/{}/{}",
             self.table_id, self.flownode_id, self.flow_task_id, self.partition_id
         )
         .into_bytes()
@@ -162,7 +162,7 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
             .build()
         })?;
         let captures =
-            TABLE_TASK_KEY_PATTERN
+            TABLE_FLOW_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
                     err_msg: format!("Invalid TableFlowKeyInner '{key}'"),
