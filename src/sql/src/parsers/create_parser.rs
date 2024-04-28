@@ -67,7 +67,7 @@ impl<'a> ParserContext<'a> {
                             Keyword::NoKeyword => {
                                 let uppercase = w.value.to_uppercase();
                                 match uppercase.as_str() {
-                                    FLOW => self.parse_create_flow_task(true),
+                                    FLOW => self.parse_create_flow(true),
                                     _ => self.unsupported(w.to_string()),
                                 }
                             }
@@ -81,7 +81,7 @@ impl<'a> ParserContext<'a> {
                     let _ = self.parser.next_token();
                     let uppercase = w.value.to_uppercase();
                     match uppercase.as_str() {
-                        FLOW => self.parse_create_flow_task(false),
+                        FLOW => self.parse_create_flow(false),
                         _ => self.unsupported(w.to_string()),
                     }
                 }
@@ -171,8 +171,8 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::CreateTable(create_table))
     }
 
-    /// "CREATE FLOW TASK" clause
-    fn parse_create_flow_task(&mut self, or_replace: bool) -> Result<Statement> {
+    /// "CREATE FLOW" clause
+    fn parse_create_flow(&mut self, or_replace: bool) -> Result<Statement> {
         let if_not_exists = self.parse_if_not_exist()?;
 
         let task_name = self.intern_parse_table_name()?;
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_create_flow_task() {
+    fn test_parse_create_flow() {
         let sql = r"
 CREATE OR REPLACE FLOW IF NOT EXISTS task_1
 SINK TO schema_1.table_1

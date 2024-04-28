@@ -323,11 +323,7 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn create_flow_task(
-        &self,
-        stmt: CreateFlow,
-        query_ctx: QueryContextRef,
-    ) -> Result<()> {
+    pub async fn create_flow(&self, stmt: CreateFlow, query_ctx: QueryContextRef) -> Result<()> {
         // TODO(ruihang): do some verification
 
         let _expr = expr_factory::to_create_flow_task_expr(stmt, query_ctx)?;

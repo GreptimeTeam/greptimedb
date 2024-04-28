@@ -491,14 +491,14 @@ pub(crate) fn to_alter_expr(
 }
 
 pub fn to_create_flow_task_expr(
-    create_task: CreateFlow,
+    create_flow: CreateFlow,
     query_ctx: QueryContextRef,
 ) -> Result<CreateFlowTaskExpr> {
     // retrieve sink table name
     let sink_table_ref =
-        object_name_to_table_reference(create_task.sink_table_name.clone().into(), true)
+        object_name_to_table_reference(create_flow.sink_table_name.clone().into(), true)
             .with_context(|_| ConvertIdentifierSnafu {
-                ident: create_task.sink_table_name.to_string(),
+                ident: create_flow.sink_table_name.to_string(),
             })?;
     let catalog = sink_table_ref
         .catalog()
@@ -514,7 +514,7 @@ pub fn to_create_flow_task_expr(
         table_name: sink_table_ref.table().to_string(),
     };
 
-    let source_table_names = extract_tables_from_query(&create_task.query)
+    let source_table_names = extract_tables_from_query(&create_flow.query)
         .map(|name| {
             let reference = object_name_to_table_reference(name.clone().into(), true)
                 .with_context(|_| ConvertIdentifierSnafu {
@@ -539,19 +539,19 @@ pub fn to_create_flow_task_expr(
 
     Ok(CreateFlowTaskExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
-        task_name: create_task.task_name.to_string(),
+        task_name: create_flow.task_name.to_string(),
         source_table_names,
         sink_table_name: Some(sink_table_name),
-        create_if_not_exists: create_task.if_not_exists,
-        or_replace: create_task.or_replace,
+        create_if_not_exists: create_flow.if_not_exists,
+        or_replace: create_flow.or_replace,
         // TODO(ruihang): change this field to optional in proto
-        expire_when: create_task
+        expire_when: create_flow
             .expire_when
             .map(|e| e.to_string())
             .unwrap_or_default(),
         // TODO(ruihang): change this field to optional in proto
-        comment: create_task.comment.unwrap_or_default(),
-        sql: create_task.query.to_string(),
+        comment: create_flow.comment.unwrap_or_default(),
+        sql: create_flow.query.to_string(),
         task_options: HashMap::new(),
     })
 }
