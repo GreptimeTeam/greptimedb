@@ -53,6 +53,7 @@ use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::partition::PartitionContextRef;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -423,6 +424,20 @@ impl ParquetReaderBuilder {
     }
 }
 
+/// Simple filter with additional information for evaluating.
+struct SimpleFilterContext {
+    /// The filter.
+    filter: SimpleFilterEvaluator,
+    /// The column id in the expected region metadata.
+    column_id: ColumnId,
+    /// The semantic type of the column.
+    semantic_type: SemanticType,
+    /// The index of the column in [Batch].
+    /// If the semantic type is a tag, this is the index in the primary key.
+    /// If the semantic type is a field, this is the index in fields.
+    index_in_batch: usize,
+}
+
 /// Parquet reader metrics.
 #[derive(Debug, Default)]
 struct Metrics {
@@ -472,7 +487,7 @@ pub(crate) struct RowGroupReaderBuilder {
 
 impl RowGroupReaderBuilder {
     /// Path of the file to read.
-    fn file_path(&self) -> &str {
+    pub(crate) fn file_path(&self) -> &str {
         &self.file_path
     }
 
@@ -766,5 +781,87 @@ impl ParquetReader {
     #[cfg(test)]
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.reader_builder.parquet_meta.clone()
+    }
+}
+
+/// Reader to read a row group of a parquet file.
+pub(crate) struct ParquetRowGroupReader {
+    /// Inner parquet reader.
+    reader: ParquetRecordBatchReader,
+    /// Context of partitions.
+    context: PartitionContextRef,
+    /// Buffered batches to return.
+    batches: VecDeque<Batch>,
+    /// Scan metrics.
+    metrics: Metrics,
+}
+
+impl ParquetRowGroupReader {
+    /// Tries to fetch next [Batch] from the reader.
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let start = Instant::now();
+        if let Some(batch) = self.batches.pop_front() {
+            self.metrics.scan_cost += start.elapsed();
+            self.metrics.num_rows += batch.num_rows();
+            return Ok(Some(batch));
+        }
+
+        // We need to fetch next record batch and convert it to batches.
+        while self.batches.is_empty() {
+            let Some(record_batch) = self.fetch_next_record_batch()? else {
+                self.metrics.scan_cost += start.elapsed();
+                return Ok(None);
+            };
+            self.metrics.num_record_batches += 1;
+
+            self.context
+                .read_format()
+                .convert_record_batch(&record_batch, &mut self.batches)?;
+            self.prune_batches()?;
+            self.metrics.num_batches += self.batches.len();
+        }
+        let batch = self.batches.pop_front();
+        self.metrics.scan_cost += start.elapsed();
+        self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+        Ok(batch)
+    }
+
+    /// Tries to fetch next [RecordBatch] from the reader.
+    ///
+    /// If the reader is exhausted, reads next row group.
+    fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.reader.next().transpose().context(ArrowReaderSnafu {
+            path: self.context.file_path(),
+        })
+    }
+
+    /// Prunes batches by the pushed down predicate.
+    fn prune_batches(&mut self) -> Result<()> {
+        // fast path
+        if self.context.filters().is_empty() {
+            return Ok(());
+        }
+
+        let mut new_batches = VecDeque::new();
+        let batches = std::mem::take(&mut self.batches);
+        for batch in batches {
+            let num_rows_before_filter = batch.num_rows();
+            let Some(batch_filtered) = self.context.precise_filter(batch)? else {
+                // the entire batch is filtered out
+                self.metrics.num_rows_precise_filtered += num_rows_before_filter;
+                continue;
+            };
+
+            // update metric
+            let filtered_rows = num_rows_before_filter - batch_filtered.num_rows();
+            self.metrics.num_rows_precise_filtered += filtered_rows;
+
+            if !batch_filtered.is_empty() {
+                new_batches.push_back(batch_filtered);
+            }
+        }
+        self.batches = new_batches;
+
+        Ok(())
     }
 }
