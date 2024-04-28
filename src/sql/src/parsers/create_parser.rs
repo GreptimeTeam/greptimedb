@@ -32,7 +32,7 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateFlowTask, CreateTable, CreateTableLike, Partitions,
+    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
     TIME_INDEX,
 };
 use crate::statements::statement::Statement;
@@ -227,7 +227,7 @@ impl<'a> ParserContext<'a> {
 
         let query = Box::new(self.parser.parse_query().context(error::SyntaxSnafu)?);
 
-        Ok(Statement::CreateFlowTask(CreateFlowTask {
+        Ok(Statement::CreateFlow(CreateFlow {
             task_name,
             sink_table_name: output_table_name,
             or_replace,
@@ -1030,11 +1030,11 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                 .unwrap();
         assert_eq!(1, stmts.len());
         let create_task = match &stmts[0] {
-            Statement::CreateFlowTask(c) => c,
+            Statement::CreateFlow(c) => c,
             _ => unreachable!(),
         };
 
-        let expected = CreateFlowTask {
+        let expected = CreateFlow {
             task_name: ObjectName(vec![Ident {
                 value: "task_1".to_string(),
                 quote_style: None,
@@ -1098,7 +1098,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                 .unwrap();
         assert_eq!(1, stmts.len());
         let create_task = match &stmts[0] {
-            Statement::CreateFlowTask(c) => c,
+            Statement::CreateFlow(c) => c,
             _ => unreachable!(),
         };
         assert!(!create_task.or_replace);

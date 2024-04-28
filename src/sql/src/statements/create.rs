@@ -238,7 +238,7 @@ impl Display for CreateTableLike {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
-pub struct CreateFlowTask {
+pub struct CreateFlow {
     /// Task name
     pub task_name: ObjectName,
     /// Output (sink) table name
@@ -255,7 +255,7 @@ pub struct CreateFlowTask {
     pub query: Box<Query>,
 }
 
-impl Display for CreateFlowTask {
+impl Display for CreateFlow {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "CREATE ")?;
         if self.or_replace {

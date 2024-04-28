@@ -164,7 +164,7 @@ impl StatementExecutor {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
-            Statement::CreateFlowTask(stmt) => {
+            Statement::CreateFlow(stmt) => {
                 self.create_flow_task(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }

@@ -36,7 +36,7 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::create::{CreateExternalTable, CreateFlowTask, CreateTable, TIME_INDEX};
+use sql::statements::create::{CreateExternalTable, CreateFlow, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::extract_tables_from_query;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
@@ -491,7 +491,7 @@ pub(crate) fn to_alter_expr(
 }
 
 pub fn to_create_flow_task_expr(
-    create_task: CreateFlowTask,
+    create_task: CreateFlow,
     query_ctx: QueryContextRef,
 ) -> Result<CreateFlowTaskExpr> {
     // retrieve sink table name
