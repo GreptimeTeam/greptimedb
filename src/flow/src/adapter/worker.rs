@@ -187,47 +187,49 @@ impl<'s> Worker<'s> {
     ///
     /// This method should be called inside a `LocalSet` since it's `!Send`
     pub async fn run(&mut self) {
-        let (req_id, req) = self.itc_server.lock().await.recv().await.unwrap();
-        match req {
-            Request::Create {
-                task_id,
-                plan,
-                sink_id,
-                sink_sender,
-                source_ids,
-                src_recvs,
-                create_if_not_exist,
-            } => {
-                let task_create_result = self.create_task(
+        loop {
+            let (req_id, req) = self.itc_server.lock().await.recv().await.unwrap();
+            match req {
+                Request::Create {
                     task_id,
                     plan,
                     sink_id,
                     sink_sender,
-                    &source_ids,
+                    source_ids,
                     src_recvs,
                     create_if_not_exist,
-                );
-                self.itc_server.lock().await.resp(
-                    req_id,
-                    Response::Create {
-                        result: task_create_result,
-                    },
-                );
-            }
-            Request::Remove { task_id } => {
-                let ret = self.remove_task(task_id);
-                self.itc_server
-                    .lock()
-                    .await
-                    .resp(req_id, Response::Remove { result: ret })
-            }
-            Request::RunAvail => self.run_tick(),
-            Request::ContainTask { task_id } => {
-                let ret = self.task_states.contains_key(&task_id);
-                self.itc_server
-                    .lock()
-                    .await
-                    .resp(req_id, Response::ContainTask { result: ret })
+                } => {
+                    let task_create_result = self.create_task(
+                        task_id,
+                        plan,
+                        sink_id,
+                        sink_sender,
+                        &source_ids,
+                        src_recvs,
+                        create_if_not_exist,
+                    );
+                    self.itc_server.lock().await.resp(
+                        req_id,
+                        Response::Create {
+                            result: task_create_result,
+                        },
+                    );
+                }
+                Request::Remove { task_id } => {
+                    let ret = self.remove_task(task_id);
+                    self.itc_server
+                        .lock()
+                        .await
+                        .resp(req_id, Response::Remove { result: ret })
+                }
+                Request::RunAvail => self.run_tick(),
+                Request::ContainTask { task_id } => {
+                    let ret = self.task_states.contains_key(&task_id);
+                    self.itc_server
+                        .lock()
+                        .await
+                        .resp(req_id, Response::ContainTask { result: ret })
+                }
             }
         }
     }

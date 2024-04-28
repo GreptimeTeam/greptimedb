@@ -64,6 +64,30 @@ pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
 pub type TaskId = u64;
 pub type TableName = Vec<String>;
 
+/// This function shouldn't be called from a async context,
+///
+/// better to be called from i.e. inside a `thread::spawn`
+pub fn start_flow_node_and_one_worker(
+    frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
+    query_engine: Arc<dyn QueryEngine>,
+    table_meta: TableMetadataManagerRef,
+) {
+    let (flow_node_manager, mut worker) =
+        FlowNodeManager::new_with_worker(frontend_invoker, query_engine, table_meta);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+
+    local.block_on(&rt, async move {
+        let worker_handle = tokio::task::spawn_local(async move {
+            worker.run().await;
+        });
+        let node_handle = tokio::task::spawn_local(async move {
+            flow_node_manager.run().await;
+        });
+        tokio::try_join!(worker_handle, node_handle).unwrap();
+    });
+}
+
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
@@ -82,6 +106,14 @@ pub struct FlowNodeManager {
 }
 
 impl FlowNodeManager {
+    pub async fn run(&self) {
+        loop {
+            // TODO(discord9): start a server to listen for incoming request
+            self.run_available().await;
+            self.send_writeback_requests().await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
     pub fn new(
         frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
