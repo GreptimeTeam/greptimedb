@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod flow_info;
-pub(crate) mod flow_task_name;
+pub(crate) mod flow_name;
 pub(crate) mod flownode_task;
 pub(crate) mod table_task;
 
@@ -27,7 +27,7 @@ use self::flow_info::FlowTaskValue;
 use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowTaskManager;
-use crate::key::flow::flow_task_name::FlowTaskNameManager;
+use crate::key::flow::flow_name::FlowNameManager;
 use crate::key::flow::flownode_task::FlownodeTaskManager;
 use crate::key::flow::table_task::TableTaskManager;
 use crate::key::scope::MetaKey;
@@ -93,7 +93,7 @@ pub struct FlowMetadataManager {
     flow_task_info_manager: FlowTaskManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
-    flow_task_name_manager: FlowTaskNameManager,
+    flow_task_name_manager: FlowNameManager,
     kv_backend: KvBackendRef,
 }
 
@@ -102,15 +102,15 @@ impl FlowMetadataManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             flow_task_info_manager: FlowTaskManager::new(kv_backend.clone()),
-            flow_task_name_manager: FlowTaskNameManager::new(kv_backend.clone()),
+            flow_task_name_manager: FlowNameManager::new(kv_backend.clone()),
             flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
             table_task_manager: TableTaskManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
 
-    /// Returns the [FlowTaskNameManager].
-    pub fn flow_task_name_manager(&self) -> &FlowTaskNameManager {
+    /// Returns the [FlowNameManager].
+    pub fn flow_task_name_manager(&self) -> &FlowNameManager {
         &self.flow_task_name_manager
     }
 

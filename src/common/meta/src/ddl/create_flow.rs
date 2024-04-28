@@ -38,7 +38,11 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::flow::flow_info::FlowTaskValue;
 use crate::key::FlowTaskId;
+<<<<<<< HEAD
 use crate::lock_key::{CatalogLock, FlowTaskNameLock, TableNameLock};
+=======
+use crate::lock_key::{CatalogLock, FlowNameLock, SchemaLock, TableNameLock};
+>>>>>>> 5f63265c6a (refactor: rename to FlowName)
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};

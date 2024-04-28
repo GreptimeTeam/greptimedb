@@ -124,7 +124,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
 use self::flow::flow_info::FlowTaskValue;
-use self::flow::flow_task_name::FlowTaskNameValue;
+use self::flow::flow_name::FlowNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
@@ -1055,7 +1055,7 @@ impl_table_meta_value! {
     TableInfoValue,
     DatanodeTableValue,
     FlowTaskValue,
-    FlowTaskNameValue
+    FlowNameValue
 }
 
 impl_optional_meta_value! {

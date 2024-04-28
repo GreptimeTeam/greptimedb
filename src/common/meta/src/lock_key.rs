@@ -111,28 +111,28 @@ impl From<TableNameLock> for StringKey {
     }
 }
 
-/// [FlowTaskNameLock] prevents any procedures trying to create a flow task named it.
-pub enum FlowTaskNameLock {
+/// [FlowNameLock] prevents any procedures trying to create a flow task named it.
+pub enum FlowNameLock {
     Write(String),
 }
 
-impl FlowTaskNameLock {
+impl FlowNameLock {
     pub fn new(catalog: &str, table: &str) -> Self {
         Self::Write(format!("{catalog}.{table}"))
     }
 }
 
-impl Display for FlowTaskNameLock {
+impl Display for FlowNameLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let FlowTaskNameLock::Write(name) = self;
+        let FlowNameLock::Write(name) = self;
         write!(f, "{}/{}", FLOW_TASK_NAME_LOCK_PREFIX, name)
     }
 }
 
-impl From<FlowTaskNameLock> for StringKey {
-    fn from(value: FlowTaskNameLock) -> Self {
+impl From<FlowNameLock> for StringKey {
+    fn from(value: FlowNameLock) -> Self {
         match value {
-            FlowTaskNameLock::Write(_) => StringKey::Exclusive(value.to_string()),
+            FlowNameLock::Write(_) => StringKey::Exclusive(value.to_string()),
         }
     }
 }

@@ -37,13 +37,13 @@ lazy_static! {
 /// The key of mapping {task_name} to [FlowTaskId].
 ///
 /// The layout: `__flow_task/{catalog}/name/{task_name}`.
-pub struct FlowTaskNameKey(FlowTaskScoped<CatalogScoped<FlowTaskNameKeyInner>>);
+pub struct FlowNameKey(FlowTaskScoped<CatalogScoped<FlowNameKeyInner>>);
 
-impl FlowTaskNameKey {
-    /// Returns the [FlowTaskNameKey]
-    pub fn new(catalog: String, task_name: String) -> FlowTaskNameKey {
-        let inner = FlowTaskNameKeyInner::new(task_name);
-        FlowTaskNameKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+impl FlowNameKey {
+    /// Returns the [FlowNameKey]
+    pub fn new(catalog: String, task_name: String) -> FlowNameKey {
+        let inner = FlowNameKeyInner::new(task_name);
+        FlowNameKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
     /// Returns the catalog.
@@ -57,34 +57,34 @@ impl FlowTaskNameKey {
     }
 }
 
-impl MetaKey<FlowTaskNameKey> for FlowTaskNameKey {
+impl MetaKey<FlowNameKey> for FlowNameKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskNameKey> {
-        Ok(FlowTaskNameKey(FlowTaskScoped::<
-            CatalogScoped<FlowTaskNameKeyInner>,
+    fn from_bytes(bytes: &[u8]) -> Result<FlowNameKey> {
+        Ok(FlowNameKey(FlowTaskScoped::<
+            CatalogScoped<FlowNameKeyInner>,
         >::from_bytes(bytes)?))
     }
 }
 
 /// The key of mapping name to [FlowTaskId]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowTaskNameKeyInner {
+pub struct FlowNameKeyInner {
     pub task_name: String,
 }
 
-impl MetaKey<FlowTaskNameKeyInner> for FlowTaskNameKeyInner {
+impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!("{FLOW_TASK_NAME_KEY_PREFIX}/{}", self.task_name).into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskNameKeyInner> {
+    fn from_bytes(bytes: &[u8]) -> Result<FlowNameKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
-                    "FlowTaskNameKeyInner '{}' is not a valid UTF8 string: {e}",
+                    "FlowNameKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
                 ),
             }
@@ -94,29 +94,29 @@ impl MetaKey<FlowTaskNameKeyInner> for FlowTaskNameKeyInner {
             FLOW_TASK_NAME_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid FlowTaskNameKeyInner '{key}'"),
+                    err_msg: format!("Invalid FlowNameKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
         let task = captures[1].to_string();
-        Ok(FlowTaskNameKeyInner { task_name: task })
+        Ok(FlowNameKeyInner { task_name: task })
     }
 }
 
-impl FlowTaskNameKeyInner {
-    /// Returns a [FlowTaskNameKeyInner].
+impl FlowNameKeyInner {
+    /// Returns a [FlowNameKeyInner].
     pub fn new(task: String) -> Self {
         Self { task_name: task }
     }
 }
 
-/// The value of [FlowTaskNameKey].
+/// The value of [FlowNameKey].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FlowTaskNameValue {
+pub struct FlowNameValue {
     flow_task_id: FlowTaskId,
 }
 
-impl FlowTaskNameValue {
-    /// Returns a [FlowTaskNameValue] with specified [FlowTaskId].
+impl FlowNameValue {
+    /// Returns a [FlowNameValue] with specified [FlowTaskId].
     pub fn new(flow_task_id: FlowTaskId) -> Self {
         Self { flow_task_id }
     }
@@ -127,31 +127,31 @@ impl FlowTaskNameValue {
     }
 }
 
-/// The manager of [FlowTaskNameKey].
-pub struct FlowTaskNameManager {
+/// The manager of [FlowNameKey].
+pub struct FlowNameManager {
     kv_backend: KvBackendRef,
 }
 
-impl FlowTaskNameManager {
-    /// Returns a new [FlowTaskNameManager].
+impl FlowNameManager {
+    /// Returns a new [FlowNameManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
 
-    /// Returns the [FlowTaskNameValue] of specified `catalog.task`.
-    pub async fn get(&self, catalog: &str, task: &str) -> Result<Option<FlowTaskNameValue>> {
-        let key = FlowTaskNameKey::new(catalog.to_string(), task.to_string());
+    /// Returns the [FlowNameValue] of specified `catalog.task`.
+    pub async fn get(&self, catalog: &str, task: &str) -> Result<Option<FlowNameValue>> {
+        let key = FlowNameKey::new(catalog.to_string(), task.to_string());
         let raw_key = key.to_bytes();
         self.kv_backend
             .get(&raw_key)
             .await?
-            .map(|x| FlowTaskNameValue::try_from_raw_value(&x.value))
+            .map(|x| FlowNameValue::try_from_raw_value(&x.value))
             .transpose()
     }
 
     /// Returns true if the `task` exists.
     pub async fn exists(&self, catalog: &str, task: &str) -> Result<bool> {
-        let key = FlowTaskNameKey::new(catalog.to_string(), task.to_string());
+        let key = FlowNameKey::new(catalog.to_string(), task.to_string());
         let raw_key = key.to_bytes();
         self.kv_backend.exists(&raw_key).await
     }
@@ -168,11 +168,11 @@ impl FlowTaskNameManager {
         Txn,
         impl FnOnce(
             &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<FlowTaskNameValue>>>,
+        ) -> Result<Option<DeserializedValueWithBytes<FlowNameValue>>>,
     )> {
-        let key = FlowTaskNameKey::new(catalog.to_string(), name.to_string());
+        let key = FlowNameKey::new(catalog.to_string(), name.to_string());
         let raw_key = key.to_bytes();
-        let flow_task_name_value = FlowTaskNameValue::new(flow_task_id);
+        let flow_task_name_value = FlowNameValue::new(flow_task_id);
         let txn = txn_helper::build_put_if_absent_txn(
             raw_key.clone(),
             flow_task_name_value.try_as_raw_value()?,
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let table_task_key = FlowTaskNameKey::new("my_catalog".to_string(), "my_task".to_string());
+        let table_task_key = FlowNameKey::new("my_catalog".to_string(), "my_task".to_string());
         assert_eq!(
             b"__flow_task/my_catalog/name/my_task".to_vec(),
             table_task_key.to_bytes(),
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn test_key_deserialization() {
         let bytes = b"__flow_task/my_catalog/name/my_task".to_vec();
-        let key = FlowTaskNameKey::from_bytes(&bytes).unwrap();
+        let key = FlowNameKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.task_name(), "my_task");
     }
