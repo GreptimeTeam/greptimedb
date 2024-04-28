@@ -38,11 +38,7 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::flow::flow_info::FlowTaskValue;
 use crate::key::FlowTaskId;
-<<<<<<< HEAD
-use crate::lock_key::{CatalogLock, FlowTaskNameLock, TableNameLock};
-=======
-use crate::lock_key::{CatalogLock, FlowNameLock, SchemaLock, TableNameLock};
->>>>>>> 5f63265c6a (refactor: rename to FlowName)
+use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};
@@ -63,7 +59,7 @@ impl CreateFlowProcedure {
             data: CreateFlowTaskData {
                 cluster_id,
                 task,
-                flow_task_id: None,
+                flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
                 state: CreateFlowTaskState::CreateMetadata,
@@ -80,7 +76,7 @@ impl CreateFlowProcedure {
     async fn on_prepare(&mut self) -> Result<Status> {
         self.check_creation().await?;
         self.collect_source_tables().await?;
-        self.allocate_flow_task_id().await?;
+        self.allocate_flow_id().await?;
         self.data.state = CreateFlowTaskState::CreateFlows;
 
         Ok(Status::executing(true))
@@ -117,14 +113,14 @@ impl CreateFlowProcedure {
     /// - Failed to create table metadata.
     async fn on_create_metadata(&mut self) -> Result<Status> {
         // Safety: The flow task id must be allocated.
-        let flow_task_id = self.data.flow_task_id.unwrap();
+        let flow_id = self.data.flow_id.unwrap();
         // TODO(weny): Support `or_replace`.
         self.context
             .flow_task_metadata_manager
-            .create_flow_task_metadata(flow_task_id, (&self.data).into())
+            .create_flow_task_metadata(flow_id, (&self.data).into())
             .await?;
-        info!("Created flow task metadata for flow {flow_task_id}");
-        Ok(Status::done_with_output(flow_task_id))
+        info!("Created flow task metadata for flow {flow_id}");
+        Ok(Status::done_with_output(flow_id))
     }
 }
 
@@ -166,7 +162,7 @@ impl Procedure for CreateFlowProcedure {
                 &sink_table_name.catalog_name,
             )
             .into(),
-            FlowTaskNameLock::new(catalog_name, task_name).into(),
+            FlowNameLock::new(catalog_name, task_name).into(),
         ])
     }
 }
@@ -188,18 +184,18 @@ pub struct CreateFlowTaskData {
     pub(crate) cluster_id: ClusterId,
     pub(crate) state: CreateFlowTaskState,
     pub(crate) task: CreateFlowTask,
-    pub(crate) flow_task_id: Option<FlowTaskId>,
+    pub(crate) flow_id: Option<FlowTaskId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
 }
 
 impl From<&CreateFlowTaskData> for CreateRequest {
     fn from(value: &CreateFlowTaskData) -> Self {
-        let flow_task_id = value.flow_task_id.unwrap();
+        let flow_id = value.flow_id.unwrap();
         let source_table_ids = &value.source_table_ids;
 
         CreateRequest {
-            task_id: Some(api::v1::flow::TaskId { id: flow_task_id }),
+            task_id: Some(api::v1::flow::TaskId { id: flow_id }),
             source_table_ids: source_table_ids
                 .iter()
                 .map(|table_id| api::v1::TableId { id: *table_id })

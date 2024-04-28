@@ -45,13 +45,13 @@ lazy_static! {
 struct TableFlowKeyInner {
     table_id: TableId,
     flownode_id: FlownodeId,
-    flow_task_id: FlowTaskId,
+    flow_id: FlowTaskId,
     partition_id: FlowTaskPartitionId,
 }
 
 /// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
 ///
-/// The layout: `__flow/{catalog}/table/{table_id}/{flownode_id}/{flow_task_id}/{partition_id}`.
+/// The layout: `__flow/{catalog}/table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
 pub struct TableFlowKey(FlowTaskScoped<CatalogScoped<TableFlowKeyInner>>);
 
@@ -73,10 +73,10 @@ impl TableFlowKey {
         catalog: String,
         table_id: TableId,
         flownode_id: FlownodeId,
-        flow_task_id: FlowTaskId,
+        flow_id: FlowTaskId,
         partition_id: FlowTaskPartitionId,
     ) -> TableFlowKey {
-        let inner = TableFlowKeyInner::new(table_id, flownode_id, flow_task_id, partition_id);
+        let inner = TableFlowKeyInner::new(table_id, flownode_id, flow_id, partition_id);
         TableFlowKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
@@ -101,8 +101,8 @@ impl TableFlowKey {
     }
 
     /// Returns the [FlowTaskId].
-    pub fn flow_task_id(&self) -> FlowTaskId {
-        self.0.flow_task_id
+    pub fn flow_id(&self) -> FlowTaskId {
+        self.0.flow_id
     }
 
     /// Returns the [FlownodeId].
@@ -121,13 +121,13 @@ impl TableFlowKeyInner {
     fn new(
         table_id: TableId,
         flownode_id: FlownodeId,
-        flow_task_id: FlowTaskId,
+        flow_id: FlowTaskId,
         partition_id: FlowTaskPartitionId,
     ) -> TableFlowKeyInner {
         Self {
             table_id,
             flownode_id,
-            flow_task_id,
+            flow_id,
             partition_id,
         }
     }
@@ -146,7 +146,7 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{TABLE_FLOW_KEY_PREFIX}/{}/{}/{}/{}",
-            self.table_id, self.flownode_id, self.flow_task_id, self.partition_id
+            self.table_id, self.flownode_id, self.flow_id, self.partition_id
         )
         .into_bytes()
     }
@@ -170,12 +170,12 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
         // Safety: pass the regex check above
         let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
-        let flow_task_id = captures[3].parse::<FlowTaskId>().unwrap();
+        let flow_id = captures[3].parse::<FlowTaskId>().unwrap();
         let partition_id = captures[4].parse::<FlowTaskPartitionId>().unwrap();
         Ok(TableFlowKeyInner::new(
             table_id,
             flownode_id,
-            flow_task_id,
+            flow_id,
             partition_id,
         ))
     }
@@ -221,7 +221,7 @@ impl TableTaskManager {
     pub fn build_create_txn<I: IntoIterator<Item = (FlowTaskPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
-        flow_task_id: FlowTaskId,
+        flow_id: FlowTaskId,
         flownode_ids: I,
         source_table_ids: &[TableId],
     ) -> Txn {
@@ -234,7 +234,7 @@ impl TableTaskManager {
                             catalog.to_string(),
                             *table_id,
                             flownode_id,
-                            flow_task_id,
+                            flow_id,
                             partition_id,
                         )
                         .to_bytes(),
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.source_table_id(), 1024);
         assert_eq!(key.flownode_id(), 1);
-        assert_eq!(key.flow_task_id(), 2);
+        assert_eq!(key.flow_id(), 2);
         assert_eq!(key.partition_id(), 0);
     }
 }

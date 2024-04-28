@@ -132,32 +132,29 @@ impl FlowMetadataManager {
     /// Creates metadata for task and returns an error if different metadata exists.
     pub async fn create_flow_task_metadata(
         &self,
-        flow_task_id: FlowTaskId,
+        flow_id: FlowTaskId,
         flow_task_value: FlowTaskValue,
     ) -> Result<()> {
         let (create_flow_task_name_txn, on_create_flow_task_name_failure) =
             self.flow_task_name_manager.build_create_txn(
                 &flow_task_value.catalog_name,
                 &flow_task_value.flow_name,
-                flow_task_id,
+                flow_id,
             )?;
 
-        let (create_flow_task_txn, on_create_flow_task_failure) =
-            self.flow_task_info_manager.build_create_txn(
-                &flow_task_value.catalog_name,
-                flow_task_id,
-                &flow_task_value,
-            )?;
+        let (create_flow_task_txn, on_create_flow_task_failure) = self
+            .flow_task_info_manager
+            .build_create_txn(&flow_task_value.catalog_name, flow_id, &flow_task_value)?;
 
         let create_flownode_task_txn = self.flownode_task_manager.build_create_txn(
             &flow_task_value.catalog_name,
-            flow_task_id,
+            flow_id,
             flow_task_value.flownode_ids().clone(),
         );
 
         let create_table_task_txn = self.table_task_manager.build_create_txn(
             &flow_task_value.catalog_name,
-            flow_task_id,
+            flow_id,
             flow_task_value.flownode_ids().clone(),
             flow_task_value.source_table_ids(),
         );
@@ -172,7 +169,7 @@ impl FlowMetadataManager {
             "Creating flow task {}.{}({}), with {} txn operations",
             flow_task_value.catalog_name,
             flow_task_value.flow_name,
-            flow_task_id,
+            flow_id,
             txn.max_operations()
         );
 
@@ -182,17 +179,17 @@ impl FlowMetadataManager {
             let remote_flow_task_name = on_create_flow_task_name_failure(&mut set)?
                 .with_context(||error::UnexpectedSnafu {
                     err_msg: format!(
-                    "Reads the empty flow task name during the creating flow task, flow_task_id: {flow_task_id}"
+                    "Reads the empty flow task name during the creating flow task, flow_id: {flow_id}"
                 ),
                 })?;
 
-            if remote_flow_task_name.flow_task_id() != flow_task_id {
+            if remote_flow_task_name.flow_id() != flow_id {
                 info!(
                     "Trying to create flow task {}.{}({}), but flow task({}) already exists",
                     flow_task_value.catalog_name,
                     flow_task_value.flow_name,
-                    flow_task_id,
-                    remote_flow_task_name.flow_task_id()
+                    flow_id,
+                    remote_flow_task_name.flow_id()
                 );
 
                 return error::TaskAlreadyExistsSnafu {
@@ -204,13 +201,12 @@ impl FlowMetadataManager {
                 .fail();
             }
 
-            let remote_flow_task = on_create_flow_task_failure(&mut set)?.with_context(|| {
-                error::UnexpectedSnafu {
+            let remote_flow_task =
+                on_create_flow_task_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                    "Reads the empty flow task during the creating flow task, flow_task_id: {flow_task_id}"
+                    "Reads the empty flow task during the creating flow task, flow_id: {flow_id}"
                 ),
-                }
-            })?;
+                })?;
             let op_name = "creating flow task";
             ensure_values!(*remote_flow_task, flow_task_value, op_name);
         }

@@ -112,18 +112,18 @@ impl FlowNameKeyInner {
 /// The value of [FlowNameKey].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlowNameValue {
-    flow_task_id: FlowTaskId,
+    flow_id: FlowTaskId,
 }
 
 impl FlowNameValue {
     /// Returns a [FlowNameValue] with specified [FlowTaskId].
-    pub fn new(flow_task_id: FlowTaskId) -> Self {
-        Self { flow_task_id }
+    pub fn new(flow_id: FlowTaskId) -> Self {
+        Self { flow_id }
     }
 
     /// Returns the [FlowTaskId]
-    pub fn flow_task_id(&self) -> FlowTaskId {
-        self.flow_task_id
+    pub fn flow_id(&self) -> FlowTaskId {
+        self.flow_id
     }
 }
 
@@ -163,7 +163,7 @@ impl FlowNameManager {
         &self,
         catalog: &str,
         name: &str,
-        flow_task_id: FlowTaskId,
+        flow_id: FlowTaskId,
     ) -> Result<(
         Txn,
         impl FnOnce(
@@ -172,7 +172,7 @@ impl FlowNameManager {
     )> {
         let key = FlowNameKey::new(catalog.to_string(), name.to_string());
         let raw_key = key.to_bytes();
-        let flow_task_name_value = FlowNameValue::new(flow_task_id);
+        let flow_task_name_value = FlowNameValue::new(flow_id);
         let txn = txn_helper::build_put_if_absent_txn(
             raw_key.clone(),
             flow_task_name_value.try_as_raw_value()?,

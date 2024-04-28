@@ -29,31 +29,31 @@ pub type FlowTaskMetadataAllocatorRef = Arc<FlowTaskMetadataAllocator>;
 /// - [FlownodeId] Selection.
 #[derive(Clone)]
 pub struct FlowTaskMetadataAllocator {
-    flow_task_id_sequence: SequenceRef,
+    flow_id_sequence: SequenceRef,
     partition_peer_allocator: PartitionPeerAllocatorRef,
 }
 
 impl FlowTaskMetadataAllocator {
     /// Returns the [FlowTaskMetadataAllocator] with [NoopPartitionPeerAllocator].
-    pub fn with_noop_peer_allocator(flow_task_id_sequence: SequenceRef) -> Self {
+    pub fn with_noop_peer_allocator(flow_id_sequence: SequenceRef) -> Self {
         Self {
-            flow_task_id_sequence,
+            flow_id_sequence,
             partition_peer_allocator: Arc::new(NoopPartitionPeerAllocator),
         }
     }
 
     /// Allocates a the [FlowTaskId].
-    pub(crate) async fn allocate_flow_task_id(&self) -> Result<FlowTaskId> {
-        let flow_task_id = self.flow_task_id_sequence.next().await? as FlowTaskId;
-        Ok(flow_task_id)
+    pub(crate) async fn allocate_flow_id(&self) -> Result<FlowTaskId> {
+        let flow_id = self.flow_id_sequence.next().await? as FlowTaskId;
+        Ok(flow_id)
     }
 
     /// Allocates the [FlowTaskId] and [Peer]s.
     pub async fn create(&self, partitions: usize) -> Result<(FlowTaskId, Vec<Peer>)> {
-        let flow_task_id = self.allocate_flow_task_id().await?;
+        let flow_id = self.allocate_flow_id().await?;
         let peers = self.partition_peer_allocator.alloc(partitions).await?;
 
-        Ok((flow_task_id, peers))
+        Ok((flow_id, peers))
     }
 }
 

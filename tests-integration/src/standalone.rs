@@ -142,7 +142,7 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let flow_task_id_sequence = Arc::new(
+        let flow_id_sequence = Arc::new(
             SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_FLOW_ID as u64)
                 .step(10)
@@ -157,7 +157,7 @@ impl GreptimeDbStandaloneBuilder {
             wal_options_allocator.clone(),
         ));
         let flow_task_metadata_allocator = Arc::new(
-            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_task_id_sequence),
+            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_id_sequence),
         );
 
         let ddl_task_executor = Arc::new(
