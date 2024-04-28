@@ -1759,6 +1759,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-frontend"
+version = "0.7.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-base",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "session",
+ "snafu",
+ "sql",
+]
+
+[[package]]
 name = "common-function"
 version = "0.7.2"
 dependencies = [
@@ -3555,6 +3570,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-meta",
