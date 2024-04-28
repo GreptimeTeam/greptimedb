@@ -30,6 +30,7 @@ use crate::error::Result;
 pub mod error;
 pub mod information_schema;
 pub mod kvbackend;
+#[cfg(any(test, feature = "testing"))]
 pub mod memory;
 mod metrics;
 pub mod table_source;
