@@ -25,7 +25,7 @@ use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocato
 use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow_task::{FlowTaskMetadataManager, FlowTaskMetadataManagerRef};
+use common_meta::key::flow_task::{FlowMetadataManager, FlowTaskMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -431,7 +431,7 @@ impl StartCommand {
         ));
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),

@@ -24,7 +24,7 @@ use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow_task::FlowTaskMetadataManager;
+use common_meta::key::flow_task::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
@@ -129,7 +129,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager =
             KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;

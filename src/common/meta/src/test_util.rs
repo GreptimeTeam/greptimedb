@@ -24,7 +24,7 @@ use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::task_meta::FlowTaskMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
-use crate::key::flow_task::FlowTaskMetadataManager;
+use crate::key::flow_task::FlowMetadataManager;
 use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
@@ -109,7 +109,7 @@ pub fn new_ddl_context_with_kv_backend(
         ),
         Arc::new(WalOptionsAllocator::default()),
     ));
-    let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+    let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
     let flow_task_metadata_allocator = Arc::new(
         FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
             SequenceBuilder::new("flow-test", kv_backend)

@@ -108,7 +108,7 @@ pub mod test_data {
     use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
     use common_meta::ddl::DdlContext;
-    use common_meta::key::flow_task::FlowTaskMetadataManager;
+    use common_meta::key::flow_task::FlowMetadataManager;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;
@@ -201,7 +201,7 @@ pub mod test_data {
             Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
             Arc::new(WalOptionsAllocator::default()),
         ));
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_task_metadata_allocator =
             Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
                 Arc::new(SequenceBuilder::new("test", kv_backend).build()),

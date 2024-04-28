@@ -25,7 +25,7 @@ use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
-use common_meta::key::flow_task::FlowTaskMetadataManager;
+use common_meta::key::flow_task::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -205,7 +205,7 @@ impl MetasrvBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(
+        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));

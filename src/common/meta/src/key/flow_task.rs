@@ -83,13 +83,13 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
     }
 }
 
-pub type FlowTaskMetadataManagerRef = Arc<FlowTaskMetadataManager>;
+pub type FlowTaskMetadataManagerRef = Arc<FlowMetadataManager>;
 
 /// The manager of metadata, provides ability to:
 /// - Create metadata of the task.
 /// - Retrieve metadata of the task.
 /// - Delete metadata of the task.
-pub struct FlowTaskMetadataManager {
+pub struct FlowMetadataManager {
     flow_task_info_manager: FlowTaskInfoManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
@@ -97,7 +97,7 @@ pub struct FlowTaskMetadataManager {
     kv_backend: KvBackendRef,
 }
 
-impl FlowTaskMetadataManager {
+impl FlowMetadataManager {
     /// Returns a new [FlowTaskMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
@@ -278,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_flow_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv.clone());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let task_id = 10;
         let catalog_name = "greptime";
         let sink_table_name = TableName {
@@ -343,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_metadata_task_exists_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv);
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
         let catalog_name = "greptime";
         let sink_table_name = TableName {
@@ -388,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_metadata_unexpected_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv);
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let task_id = 10;
         let catalog_name = "greptime";
         let sink_table_name = TableName {

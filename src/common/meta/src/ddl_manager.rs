@@ -760,7 +760,7 @@ mod tests {
     use crate::ddl::task_meta::FlowTaskMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::DdlContext;
-    use crate::key::flow_task::FlowTaskMetadataManager;
+    use crate::key::flow_task::FlowMetadataManager;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
@@ -792,7 +792,7 @@ mod tests {
             Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
             Arc::new(WalOptionsAllocator::default()),
         ));
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_task_metadata_allocator =
             Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
                 Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
