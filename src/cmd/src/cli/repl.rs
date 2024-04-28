@@ -258,7 +258,8 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         cached_meta_backend.clone(),
     ]));
     let catalog_list = KvBackendCatalogManager::new(
-        Mode::Standalone,
+        Mode::Distributed,
+        Some(meta_client.clone()),
         cached_meta_backend.clone(),
         multi_cache_invalidator,
     )

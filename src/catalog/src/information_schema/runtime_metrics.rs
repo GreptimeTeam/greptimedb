@@ -28,8 +28,8 @@ use datatypes::prelude::{ConcreteDataType, MutableVector};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{
-    ConstantVector, Float64VectorBuilder, StringVector, StringVectorBuilder,
-    TimestampMillisecondVector, VectorRef,
+    ConstantVector, Float64VectorBuilder, StringVectorBuilder, TimestampMillisecondVector,
+    VectorRef,
 };
 use itertools::Itertools;
 use snafu::ResultExt;
@@ -63,7 +63,7 @@ impl InformationSchemaMetrics {
             ColumnSchema::new(METRIC_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(METRIC_VALUE, ConcreteDataType::float64_datatype(), false),
             ColumnSchema::new(METRIC_LABELS, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(NODE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(NODE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(NODE_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 TIMESTAMP,
@@ -104,6 +104,7 @@ impl InformationTable for InformationSchemaMetrics {
                     .map_err(Into::into)
             }),
         ));
+
         Ok(Box::pin(
             RecordBatchStreamAdapter::try_new(stream)
                 .map_err(BoxedError::new)
@@ -118,6 +119,8 @@ struct InformationSchemaMetricsBuilder {
     metric_names: StringVectorBuilder,
     metric_values: Float64VectorBuilder,
     metric_labels: StringVectorBuilder,
+    nodes: StringVectorBuilder,
+    node_types: StringVectorBuilder,
 }
 
 impl InformationSchemaMetricsBuilder {
@@ -127,13 +130,24 @@ impl InformationSchemaMetricsBuilder {
             metric_names: StringVectorBuilder::with_capacity(42),
             metric_values: Float64VectorBuilder::with_capacity(42),
             metric_labels: StringVectorBuilder::with_capacity(42),
+            nodes: StringVectorBuilder::with_capacity(42),
+            node_types: StringVectorBuilder::with_capacity(42),
         }
     }
 
-    fn add_metric(&mut self, metric_name: &str, labels: String, metric_value: f64) {
+    fn add_metric(
+        &mut self,
+        metric_name: &str,
+        labels: String,
+        metric_value: f64,
+        node: Option<&str>,
+        node_type: &str,
+    ) {
         self.metric_names.push(Some(metric_name));
         self.metric_values.push(Some(metric_value));
         self.metric_labels.push(Some(&labels));
+        self.nodes.push(node);
+        self.node_types.push(Some(node_type));
     }
 
     async fn make_metrics(&mut self, _request: Option<ScanRequest>) -> Result<RecordBatch> {
@@ -170,6 +184,11 @@ impl InformationSchemaMetricsBuilder {
                     .join(", "),
                 // Safety: always has a sample
                 ts.samples[0].value,
+                // TODO(dennis): fetching other nodes metrics
+
+                // The node column is always `None` for standalone
+                None,
+                "standalone",
             );
         }
 
@@ -178,10 +197,7 @@ impl InformationSchemaMetricsBuilder {
 
     fn finish(&mut self) -> Result<RecordBatch> {
         let rows_num = self.metric_names.len();
-        let unknowns = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec!["unknown"])),
-            rows_num,
-        ));
+
         let timestamps = Arc::new(ConstantVector::new(
             Arc::new(TimestampMillisecondVector::from_slice([
                 current_time_millis(),
@@ -193,9 +209,8 @@ impl InformationSchemaMetricsBuilder {
             Arc::new(self.metric_names.finish()),
             Arc::new(self.metric_values.finish()),
             Arc::new(self.metric_labels.finish()),
-            // TODO(dennis): supports node and node_type for cluster
-            unknowns.clone(),
-            unknowns,
+            Arc::new(self.nodes.finish()),
+            Arc::new(self.node_types.finish()),
             timestamps,
         ];
 
@@ -232,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_make_metrics() {
-        let metrics = InformationSchemaMetrics::new();
+        let metrics = InformationSchemaMetrics::new(Mode::Standalone, None);
 
         let stream = metrics.to_stream(ScanRequest::default()).unwrap();
 

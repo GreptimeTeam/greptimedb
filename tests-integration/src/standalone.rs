@@ -133,6 +133,7 @@ impl GreptimeDbStandaloneBuilder {
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Standalone,
+            None,
             kv_backend.clone(),
             multi_cache_invalidator.clone(),
         )

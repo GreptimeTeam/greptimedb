@@ -34,6 +34,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
+use meta_client::client::MetaClient;
 use moka::future::{Cache as AsyncCache, CacheBuilder};
 use moka::sync::Cache;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -58,6 +59,7 @@ use crate::CatalogManager;
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
     mode: Mode,
+    meta_client: Option<Arc<MetaClient>>,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
@@ -104,6 +106,7 @@ const TABLE_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 impl KvBackendCatalogManager {
     pub async fn new(
         mode: Mode,
+        meta_client: Option<Arc<MetaClient>>,
         backend: KvBackendRef,
         multi_cache_invalidator: Arc<MultiCacheInvalidator>,
     ) -> Arc<Self> {
@@ -117,6 +120,7 @@ impl KvBackendCatalogManager {
 
         Arc::new_cyclic(|me| Self {
             mode,
+            meta_client,
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             system_catalog: SystemCatalog {
@@ -134,6 +138,11 @@ impl KvBackendCatalogManager {
     /// Returns the server running mode.
     pub fn running_mode(&self) -> &Mode {
         &self.mode
+    }
+
+    /// Returns the `[MetaClient]`.
+    pub fn meta_client(&self) -> Option<Arc<MetaClient>> {
+        self.meta_client.clone()
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {

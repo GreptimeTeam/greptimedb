@@ -254,6 +254,7 @@ impl StartCommand {
         ]));
         let catalog_manager = KvBackendCatalogManager::new(
             opts.mode,
+            Some(meta_client.clone()),
             cached_meta_backend.clone(),
             multi_cache_invalidator.clone(),
         )
