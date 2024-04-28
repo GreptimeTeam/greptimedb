@@ -20,8 +20,9 @@ use std::sync::Arc;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
+use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
@@ -44,32 +45,22 @@ impl PredictLinear {
     }
 
     pub fn scalar_udf(t: i64) -> ScalarUDF {
-        // TODO(LFC): Use the new Datafusion UDF impl.
-        #[allow(deprecated)]
-        ScalarUDF::new(
+        let input_types = vec![
+            // time index column
+            RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
+            // value column
+            RangeArray::convert_data_type(DataType::Float64),
+        ];
+        create_udf(
             Self::name(),
-            &Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
-            &(Arc::new(move |input: &_| Self::new(t).calc(input)) as _),
+            input_types,
+            Arc::new(DataType::Float64),
+            Volatility::Immutable,
+            Arc::new(move |input: &_| Self::new(t).predict_linear(input)) as _,
         )
     }
 
-    // time index column and value column
-    fn input_type() -> Vec<DataType> {
-        vec![
-            RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
-            RangeArray::convert_data_type(DataType::Float64),
-        ]
-    }
-
-    fn return_type() -> DataType {
-        DataType::Float64
-    }
-
-    fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+    fn predict_linear(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
         // construct matrix from input.
         assert_eq!(input.len(), 2);
         let ts_array = extract_array(&input[0])?;

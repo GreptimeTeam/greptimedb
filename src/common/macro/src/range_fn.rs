@@ -119,16 +119,12 @@ fn build_struct(
             }
 
             pub fn scalar_udf() -> ScalarUDF {
-                // TODO(LFC): Use the new Datafusion UDF impl.
-                #[allow(deprecated)]
-                ScalarUDF::new(
+                datafusion_expr::create_udf(
                     Self::name(),
-                    &Signature::new(
-                        TypeSignature::Exact(Self::input_type()),
-                        Volatility::Immutable,
-                    ),
-                    &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
-                    &(Arc::new(Self::calc) as _),
+                    Self::input_type(),
+                    Arc::new(Self::return_type()),
+                    Volatility::Immutable,
+                    Arc::new(Self::calc) as _,
                 )
             }
 
