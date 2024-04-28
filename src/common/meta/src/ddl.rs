@@ -22,7 +22,7 @@ use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::task_meta::FlowTaskMetadataAllocatorRef;
 use crate::error::Result;
-use crate::key::flow_task::FlowTaskMetadataManagerRef;
+use crate::key::flow::FlowTaskMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;

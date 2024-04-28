@@ -25,7 +25,7 @@ use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
-use common_meta::key::flow_task::FlowMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};

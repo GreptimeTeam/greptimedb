@@ -21,7 +21,7 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::flow_task::FlowTaskScoped;
+use crate::key::flow::FlowTaskScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{

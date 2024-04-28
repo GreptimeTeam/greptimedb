@@ -21,7 +21,7 @@ use regex::Regex;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow_task::FlowTaskScoped;
+use crate::key::flow::FlowTaskScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
 use crate::key::{FlowTaskId, FlowTaskPartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
@@ -233,7 +233,7 @@ impl FlownodeTaskManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::key::flow_task::flownode_task::FlownodeTaskKey;
+    use crate::key::flow::flownode_task::FlownodeTaskKey;
     use crate::key::scope::MetaKey;
 
     #[test]

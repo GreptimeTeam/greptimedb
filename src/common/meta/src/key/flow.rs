@@ -26,10 +26,10 @@ use snafu::{ensure, OptionExt};
 use self::flow_task_info::FlowTaskInfoValue;
 use crate::ensure_values;
 use crate::error::{self, Result};
-use crate::key::flow_task::flow_task_info::FlowTaskInfoManager;
-use crate::key::flow_task::flow_task_name::FlowTaskNameManager;
-use crate::key::flow_task::flownode_task::FlownodeTaskManager;
-use crate::key::flow_task::table_task::TableTaskManager;
+use crate::key::flow::flow_task_info::FlowTaskInfoManager;
+use crate::key::flow::flow_task_name::FlowTaskNameManager;
+use crate::key::flow::flownode_task::FlownodeTaskManager;
+use crate::key::flow::table_task::TableTaskManager;
 use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::FlowTaskId;
@@ -227,7 +227,7 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::*;
-    use crate::key::flow_task::table_task::TableTaskKey;
+    use crate::key::flow::table_task::TableTaskKey;
     use crate::key::scope::CatalogScoped;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::table_name::TableName;

@@ -25,7 +25,7 @@ use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocato
 use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow_task::{FlowMetadataManager, FlowTaskMetadataManagerRef};
+use common_meta::key::flow::{FlowMetadataManager, FlowTaskMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;

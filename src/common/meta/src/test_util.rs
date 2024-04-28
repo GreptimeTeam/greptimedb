@@ -24,7 +24,7 @@ use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::task_meta::FlowTaskMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
-use crate::key::flow_task::FlowMetadataManager;
+use crate::key::flow::FlowMetadataManager;
 use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;

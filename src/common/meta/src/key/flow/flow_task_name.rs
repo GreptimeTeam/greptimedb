@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow_task::FlowTaskScoped;
+use crate::key::flow::FlowTaskScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{

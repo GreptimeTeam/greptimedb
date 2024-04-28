@@ -108,7 +108,7 @@ pub mod test_data {
     use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
     use common_meta::ddl::DdlContext;
-    use common_meta::key::flow_task::FlowMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;

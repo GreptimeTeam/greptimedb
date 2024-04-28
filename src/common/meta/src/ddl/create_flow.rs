@@ -36,7 +36,7 @@ use super::utils::add_peer_context_if_needed;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::Result;
-use crate::key::flow_task::flow_task_info::FlowTaskInfoValue;
+use crate::key::flow::flow_task_info::FlowTaskInfoValue;
 use crate::key::FlowTaskId;
 use crate::lock_key::{CatalogLock, FlowTaskNameLock, TableNameLock};
 use crate::peer::Peer;

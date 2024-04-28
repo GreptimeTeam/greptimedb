@@ -21,7 +21,7 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::flow_task::FlowTaskScoped;
+use crate::key::flow::FlowTaskScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
 use crate::key::{FlowTaskId, FlowTaskPartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};

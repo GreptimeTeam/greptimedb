@@ -760,7 +760,7 @@ mod tests {
     use crate::ddl::task_meta::FlowTaskMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::DdlContext;
-    use crate::key::flow_task::FlowMetadataManager;
+    use crate::key::flow::FlowMetadataManager;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};

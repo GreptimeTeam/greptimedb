@@ -24,7 +24,7 @@ use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow_task::FlowMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
