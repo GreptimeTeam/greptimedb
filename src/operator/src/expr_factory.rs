@@ -544,12 +544,12 @@ pub fn to_create_flow_task_expr(
         sink_table_name: Some(sink_table_name),
         create_if_not_exists: create_task.if_not_exists,
         or_replace: create_task.or_replace,
-        // TODO: change this field to optional in proto
+        // TODO(ruihang): change this field to optional in proto
         expire_when: create_task
             .expire_when
             .map(|e| e.to_string())
             .unwrap_or_default(),
-        // TODO: change this field to optional in proto
+        // TODO(ruihang): change this field to optional in proto
         comment: create_task.comment.unwrap_or_default(),
         sql: create_task.query.to_string(),
         task_options: HashMap::new(),
