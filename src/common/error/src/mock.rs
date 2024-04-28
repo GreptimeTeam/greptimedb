@@ -17,8 +17,6 @@
 use std::any::Any;
 use std::fmt;
 
-use snafu::Location;
-
 use crate::ext::{ErrorExt, StackError};
 use crate::status_code::StatusCode;
 
@@ -59,10 +57,6 @@ impl std::error::Error for MockError {
 impl ErrorExt for MockError {
     fn status_code(&self) -> StatusCode {
         self.code
-    }
-
-    fn location_opt(&self) -> Option<Location> {
-        None
     }
 
     fn as_any(&self) -> &dyn Any {
