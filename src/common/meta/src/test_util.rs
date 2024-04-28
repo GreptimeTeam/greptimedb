@@ -109,7 +109,7 @@ pub fn new_ddl_context_with_kv_backend(
         ),
         Arc::new(WalOptionsAllocator::default()),
     ));
-    let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+    let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
     let flow_task_metadata_allocator = Arc::new(
         FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
             SequenceBuilder::new("flow-test", kv_backend)
@@ -124,6 +124,6 @@ pub fn new_ddl_context_with_kv_backend(
         table_metadata_allocator,
         table_metadata_manager,
         flow_task_metadata_allocator,
-        flow_task_metadata_manager,
+        flow_metadata_manager,
     }
 }

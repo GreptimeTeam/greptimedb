@@ -205,7 +205,7 @@ impl MetasrvBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
@@ -273,7 +273,7 @@ impl MetasrvBuilder {
                     memory_region_keeper: memory_region_keeper.clone(),
                     table_metadata_manager: table_metadata_manager.clone(),
                     table_metadata_allocator: table_metadata_allocator.clone(),
-                    flow_task_metadata_manager: flow_task_metadata_manager.clone(),
+                    flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_task_metadata_allocator: flow_task_metadata_allocator.clone(),
                 },
                 procedure_manager.clone(),

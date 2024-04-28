@@ -129,7 +129,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
-        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager =
             KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
@@ -168,7 +168,7 @@ impl GreptimeDbStandaloneBuilder {
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
-                    flow_task_metadata_manager,
+                    flow_metadata_manager,
                     flow_task_metadata_allocator,
                 },
                 procedure_manager.clone(),

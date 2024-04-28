@@ -30,7 +30,7 @@ impl CreateFlowProcedure {
         // Ensures the task name doesn't exist.
         let exists = self
             .context
-            .flow_task_metadata_manager
+            .flow_metadata_manager
             .flow_name_manager()
             .exists(catalog_name, task_name)
             .await?;

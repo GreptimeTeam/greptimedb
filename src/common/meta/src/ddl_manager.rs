@@ -792,7 +792,7 @@ mod tests {
             Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
             Arc::new(WalOptionsAllocator::default()),
         ));
-        let flow_task_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_task_metadata_allocator =
             Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
                 Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
@@ -807,7 +807,7 @@ mod tests {
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
                 table_metadata_allocator,
-                flow_task_metadata_manager,
+                flow_metadata_manager,
                 flow_task_metadata_allocator,
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
             },

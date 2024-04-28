@@ -116,7 +116,7 @@ impl CreateFlowProcedure {
         let flow_id = self.data.flow_id.unwrap();
         // TODO(weny): Support `or_replace`.
         self.context
-            .flow_task_metadata_manager
+            .flow_metadata_manager
             .create_flow_task_metadata(flow_id, (&self.data).into())
             .await?;
         info!("Created flow metadata for flow {flow_id}");
