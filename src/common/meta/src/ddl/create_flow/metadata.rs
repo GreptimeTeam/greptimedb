@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use snafu::OptionExt;
+
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
@@ -35,26 +37,36 @@ impl CreateFlowProcedure {
     /// Collects source table ids
     pub(crate) async fn collect_source_tables(&mut self) -> Result<()> {
         // Ensures all source tables exist.
-        let mut source_table_ids = Vec::with_capacity(self.data.task.source_table_names.len());
 
-        for name in &self.data.task.source_table_names {
-            let key = TableNameKey::new(&name.catalog_name, &name.schema_name, &name.table_name);
-            match self
-                .context
-                .table_metadata_manager
-                .table_name_manager()
-                .get(key)
-                .await?
-            {
-                Some(value) => source_table_ids.push(value.table_id()),
-                None => {
-                    return error::TableNotFoundSnafu {
+        let keys = self
+            .data
+            .task
+            .source_table_names
+            .iter()
+            .map(|name| TableNameKey::new(&name.catalog_name, &name.schema_name, &name.table_name))
+            .collect::<Vec<_>>();
+
+        let source_table_ids = self
+            .context
+            .table_metadata_manager
+            .table_name_manager()
+            .batch_get(keys)
+            .await?;
+
+        let source_table_ids = self
+            .data
+            .task
+            .source_table_names
+            .iter()
+            .zip(source_table_ids)
+            .map(|(name, table_id)| {
+                Ok(table_id
+                    .with_context(|| error::TableNotFoundSnafu {
                         table_name: name.to_string(),
-                    }
-                    .fail();
-                }
-            }
-        }
+                    })?
+                    .table_id())
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         self.data.source_table_ids = source_table_ids;
         Ok(())

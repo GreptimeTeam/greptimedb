@@ -83,7 +83,6 @@ impl CreateFlowProcedure {
     }
 
     async fn on_flownode_create_flow(&mut self) -> Result<Status> {
-        self.data.state = CreateFlowTaskState::CreateMetadata;
         // Safety: must be allocated.
         let mut create_flow_task = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
