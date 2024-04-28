@@ -166,7 +166,7 @@ impl FlowMetadataManager {
             create_table_task_txn,
         ]);
         info!(
-            "Creating flow task {}.{}({}), with {} txn operations",
+            "Creating flow {}.{}({}), with {} txn operations",
             flow_task_value.catalog_name,
             flow_task_value.flow_name,
             flow_id,
@@ -176,16 +176,18 @@ impl FlowMetadataManager {
         let mut resp = self.kv_backend.txn(txn).await?;
         if !resp.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
-            let remote_flow_flow_name = on_create_flow_flow_name_failure(&mut set)?
-                .with_context(||error::UnexpectedSnafu {
-                    err_msg: format!(
-                    "Reads the empty flow task name during the creating flow task, flow_id: {flow_id}"
+            let remote_flow_flow_name =
+                on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                    "Reads the empty flow name during the creating flow, flow_id: {flow_id}"
                 ),
+                    }
                 })?;
 
             if remote_flow_flow_name.flow_id() != flow_id {
                 info!(
-                    "Trying to create flow task {}.{}({}), but flow task({}) already exists",
+                    "Trying to create flow {}.{}({}), but flow({}) already exists",
                     flow_task_value.catalog_name,
                     flow_task_value.flow_name,
                     flow_id,
@@ -204,10 +206,10 @@ impl FlowMetadataManager {
             let remote_flow_task =
                 on_create_flow_task_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                    "Reads the empty flow task during the creating flow task, flow_id: {flow_id}"
-                ),
+                        "Reads the empty flow during the creating flow, flow_id: {flow_id}"
+                    ),
                 })?;
-            let op_name = "creating flow task";
+            let op_name = "creating flow";
             ensure_values!(*remote_flow_task, flow_task_value, op_name);
         }
 

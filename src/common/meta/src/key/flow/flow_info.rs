@@ -74,7 +74,7 @@ impl FlowTaskKey {
     }
 }
 
-/// The key of flow task metadata.
+/// The key of flow metadata.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FlowTaskKeyInner {
     flow_id: FlowTaskId,
@@ -114,7 +114,7 @@ impl MetaKey<FlowTaskKeyInner> for FlowTaskKeyInner {
     }
 }
 
-// The metadata of the flow task.
+// The metadata of the flow.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowTaskValue {
     /// The source tables used by the task.
@@ -170,7 +170,7 @@ impl FlowTaskManager {
             .transpose()
     }
 
-    /// Builds a create flow task transaction.
+    /// Builds a create flow transaction.
     /// It is expected that the `__flow/{catalog}/info/{flow_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub(crate) fn build_create_txn(

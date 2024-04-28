@@ -43,7 +43,7 @@ use crate::peer::Peer;
 use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};
 
-/// The procedure of flow task creation.
+/// The procedure of flow creation.
 pub struct CreateFlowProcedure {
     pub context: DdlContext,
     pub data: CreateFlowTaskData,
@@ -107,19 +107,19 @@ impl CreateFlowProcedure {
         Ok(Status::executing(true))
     }
 
-    /// Creates flow task metadata.
+    /// Creates flow metadata.
     ///
     /// Abort(not-retry):
     /// - Failed to create table metadata.
     async fn on_create_metadata(&mut self) -> Result<Status> {
-        // Safety: The flow task id must be allocated.
+        // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
         // TODO(weny): Support `or_replace`.
         self.context
             .flow_task_metadata_manager
             .create_flow_task_metadata(flow_id, (&self.data).into())
             .await?;
-        info!("Created flow task metadata for flow {flow_id}");
+        info!("Created flow metadata for flow {flow_id}");
         Ok(Status::done_with_output(flow_id))
     }
 }

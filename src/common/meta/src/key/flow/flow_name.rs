@@ -156,7 +156,7 @@ impl FlowNameManager {
         self.kv_backend.exists(&raw_key).await
     }
 
-    /// Builds a create flow task name transaction.
+    /// Builds a create flow name transaction.
     /// It's expected that the `__flow/{catalog}/name/{flow_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub fn build_create_txn(

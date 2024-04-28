@@ -111,7 +111,7 @@ impl From<TableNameLock> for StringKey {
     }
 }
 
-/// [FlowNameLock] prevents any procedures trying to create a flow task named it.
+/// [FlowNameLock] prevents any procedures trying to create a flow named it.
 pub enum FlowNameLock {
     Write(String),
 }

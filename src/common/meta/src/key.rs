@@ -36,10 +36,10 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Flow task info key: `__flow/{catalog}/info/{flow_id}`
-//!     - Stores metadata of the flow task.
+//! 6. Flow info key: `__flow/{catalog}/info/{flow_id}`
+//!     - Stores metadata of the flow.
 //!
-//! 7. Flow task name key: `__flow/{catalog}/name/{task_name}`
+//! 7. Flow name key: `__flow/{catalog}/name/{task_name}`
 //!     - Mapping {catalog}/{task_name} to {flow_id}
 //!
 //! 8. Flownode task key: `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
@@ -54,10 +54,10 @@
 //!
 //! To simplify the managers used in struct fields and function parameters, we define "unify"
 //! table metadata manager: [TableMetadataManager]
-//! and flow task metadata manager: [FlowTaskMetadataManager](crate::key::flow_task::FlowTaskMetadataManager).
+//! and flow metadata manager: [FlowTaskMetadataManager](crate::key::flow_task::FlowTaskMetadataManager).
 //! It contains all the managers defined above. It's recommended to just use this manager only.
 //!
-//! The whole picture of flow task keys will be like this:
+//! The whole picture of flow keys will be like this:
 //!
 //! __flow/
 //!  {catalog}/
@@ -68,17 +68,15 @@
 //!      {task_name}
 //!
 //!    flownode/
-//!      flownode_id/
+//!      {flownode_id}/
+//!        {task_id}/
+//!          {partition_id}
+//!
+//!    source_table/
+//!      {table_id}/
 //!        {flownode_id}/
 //!          {task_id}/
 //!            {partition_id}
-//!
-//!    source_table/
-//!      flow_task/
-//!        {table_id}/
-//!           {flownode_id}/
-//!             {task_id}/
-//!               {partition_id}
 
 pub mod catalog_name;
 pub mod datanode_table;
@@ -159,9 +157,9 @@ pub const CACHE_KEY_PREFIXES: [&str; 4] = [
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
-/// The id of flow task.
+/// The id of flow.
 pub type FlowTaskId = u32;
-/// The partition of flow task.
+/// The partition of flow.
 pub type FlowTaskPartitionId = u32;
 
 lazy_static! {

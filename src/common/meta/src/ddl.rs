@@ -110,8 +110,8 @@ pub struct DdlContext {
     pub table_metadata_manager: TableMetadataManagerRef,
     /// Allocator for table metadata.
     pub table_metadata_allocator: TableMetadataAllocatorRef,
-    /// Flow task metadata manager.
+    /// Flow metadata manager.
     pub flow_task_metadata_manager: FlowTaskMetadataManagerRef,
-    /// Allocator for flow task metadata.
+    /// Allocator for flow metadata.
     pub flow_task_metadata_allocator: FlowTaskMetadataAllocatorRef,
 }
