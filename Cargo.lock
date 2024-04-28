@@ -3570,6 +3570,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-meta",
