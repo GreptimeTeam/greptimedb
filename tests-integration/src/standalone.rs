@@ -38,7 +38,7 @@ use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
-use meta_srv::metasrv::{FLOW_TASK_ID_SEQ, TABLE_ID_SEQ};
+use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::Mode;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -143,7 +143,7 @@ impl GreptimeDbStandaloneBuilder {
                 .build(),
         );
         let flow_task_id_sequence = Arc::new(
-            SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
+            SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_FLOW_ID as u64)
                 .step(10)
                 .build(),

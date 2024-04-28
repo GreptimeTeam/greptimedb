@@ -38,7 +38,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
-use super::FLOW_TASK_ID_SEQ;
+use super::FLOW_ID_SEQ;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
@@ -241,7 +241,7 @@ impl MetasrvBuilder {
         // TODO(weny): use the real allocator.
         let flow_task_metadata_allocator = Arc::new(
             FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
-                SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
+                SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
