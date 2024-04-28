@@ -36,7 +36,7 @@ use crate::key::FlowTaskId;
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
-/// The key of `__flow_task/` scope.
+/// The key of `__flow/` scope.
 #[derive(Debug, PartialEq)]
 pub struct FlowTaskScoped<T> {
     inner: T,
@@ -51,7 +51,7 @@ impl<T> Deref for FlowTaskScoped<T> {
 }
 
 impl<T> FlowTaskScoped<T> {
-    const PREFIX: &'static str = "__flow_task/";
+    const PREFIX: &'static str = "__flow/";
 
     /// Returns a new [FlowTaskScoped] key.
     pub fn new(inner: T) -> FlowTaskScoped<T> {
@@ -257,12 +257,12 @@ mod tests {
                 inner: b"hi".to_vec(),
             },
         ));
-        assert_eq!(b"__flow_task/my_catalog/hi".to_vec(), key.to_bytes());
+        assert_eq!(b"__flow/my_catalog/hi".to_vec(), key.to_bytes());
     }
 
     #[test]
     fn test_flow_scoped_from_bytes() {
-        let bytes = b"__flow_task/my_catalog/hi";
+        let bytes = b"__flow/my_catalog/hi";
         let key = FlowTaskScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.inner.inner, b"hi".to_vec());

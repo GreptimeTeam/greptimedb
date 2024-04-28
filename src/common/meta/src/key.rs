@@ -36,13 +36,13 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Flow task info key: `__flow_task/{catalog}/info/{flow_task_id}`
+//! 6. Flow task info key: `__flow/{catalog}/info/{flow_task_id}`
 //!     - Stores metadata of the flow task.
 //!
-//! 7. Flow task name key: `__flow_task/{catalog}/name/{task_name}`
+//! 7. Flow task name key: `__flow/{catalog}/name/{task_name}`
 //!     - Mapping {catalog}/{task_name} to {flow_task_id}
 //!
-//! 8. Flownode task key: `__flow_task/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
+//! 8. Flownode task key: `__flow/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
 //!     - Mapping {flownode_id} to {flow_task_id}
 //!
 //! 9. Table task key: `__table_task/{catalog}/source_table/{table_id}/{flownode_id}/{flow_task_id}/{partition_id}`
@@ -59,7 +59,7 @@
 //!
 //! The whole picture of flow task keys will be like this:
 //!
-//! __flow_task/
+//! __flow/
 //!  {catalog}/
 //!    info/
 //!      {tsak_id}

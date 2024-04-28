@@ -42,7 +42,7 @@ const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 
 /// The key of mapping [FlownodeId] to [FlowTaskId].
 ///
-/// The layout `__flow_task/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
+/// The layout `__flow/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
 pub struct FlownodeFlowKey(FlowTaskScoped<CatalogScoped<FlownodeFlowKeyInner>>);
 
 impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
@@ -240,16 +240,16 @@ mod tests {
     fn test_key_serialization() {
         let flownode_task = FlownodeFlowKey::new("my_catalog".to_string(), 1, 2, 0);
         assert_eq!(
-            b"__flow_task/my_catalog/flownode/1/2/0".to_vec(),
+            b"__flow/my_catalog/flownode/1/2/0".to_vec(),
             flownode_task.to_bytes()
         );
         let prefix = FlownodeFlowKey::range_start_key("my_catalog".to_string(), 1);
-        assert_eq!(b"__flow_task/my_catalog/flownode/1/".to_vec(), prefix);
+        assert_eq!(b"__flow/my_catalog/flownode/1/".to_vec(), prefix);
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow_task/my_catalog/flownode/1/2/0".to_vec();
+        let bytes = b"__flow/my_catalog/flownode/1/2/0".to_vec();
         let key = FlownodeFlowKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flownode_id(), 1);

@@ -51,7 +51,7 @@ struct TableFlowKeyInner {
 
 /// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
 ///
-/// The layout: `__flow_task/{catalog}/table/{table_id}/{flownode_id}/{flow_task_id}/{partition_id}`.
+/// The layout: `__flow/{catalog}/table/{table_id}/{flownode_id}/{flow_task_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
 pub struct TableFlowKey(FlowTaskScoped<CatalogScoped<TableFlowKeyInner>>);
 
@@ -256,19 +256,16 @@ mod tests {
     fn test_key_serialization() {
         let table_task_key = TableFlowKey::new("my_catalog".to_string(), 1024, 1, 2, 0);
         assert_eq!(
-            b"__flow_task/my_catalog/source_table/1024/1/2/0".to_vec(),
+            b"__flow/my_catalog/source_table/1024/1/2/0".to_vec(),
             table_task_key.to_bytes(),
         );
         let prefix = TableFlowKey::range_start_key("my_catalog".to_string(), 1024);
-        assert_eq!(
-            b"__flow_task/my_catalog/source_table/1024/".to_vec(),
-            prefix
-        );
+        assert_eq!(b"__flow/my_catalog/source_table/1024/".to_vec(), prefix);
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow_task/my_catalog/source_table/1024/1/2/0".to_vec();
+        let bytes = b"__flow/my_catalog/source_table/1024/1/2/0".to_vec();
         let key = TableFlowKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.source_table_id(), 1024);

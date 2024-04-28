@@ -36,7 +36,7 @@ lazy_static! {
 
 /// The key of mapping {task_name} to [FlowTaskId].
 ///
-/// The layout: `__flow_task/{catalog}/name/{task_name}`.
+/// The layout: `__flow/{catalog}/name/{task_name}`.
 pub struct FlowNameKey(FlowTaskScoped<CatalogScoped<FlowNameKeyInner>>);
 
 impl FlowNameKey {
@@ -157,7 +157,7 @@ impl FlowNameManager {
     }
 
     /// Builds a create flow task name transaction.
-    /// It's expected that the `__flow_task/{catalog}/name/{task_name}` wasn't occupied.
+    /// It's expected that the `__flow/{catalog}/name/{task_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub fn build_create_txn(
         &self,
@@ -193,14 +193,14 @@ mod tests {
     fn test_key_serialization() {
         let table_task_key = FlowNameKey::new("my_catalog".to_string(), "my_task".to_string());
         assert_eq!(
-            b"__flow_task/my_catalog/name/my_task".to_vec(),
+            b"__flow/my_catalog/name/my_task".to_vec(),
             table_task_key.to_bytes(),
         );
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow_task/my_catalog/name/my_task".to_vec();
+        let bytes = b"__flow/my_catalog/name/my_task".to_vec();
         let key = FlowNameKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.task_name(), "my_task");

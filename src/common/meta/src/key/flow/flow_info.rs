@@ -41,7 +41,7 @@ lazy_static! {
 
 /// The key stores the metadata of the task.
 ///
-/// The layout: `__flow_task/{catalog}/info/{flow_task_id}`.
+/// The layout: `__flow/{catalog}/info/{flow_task_id}`.
 pub struct FlowTaskKey(FlowTaskScoped<CatalogScoped<FlowTaskKeyInner>>);
 
 impl MetaKey<FlowTaskKey> for FlowTaskKey {
@@ -175,7 +175,7 @@ impl FlowTaskManager {
     }
 
     /// Builds a create flow task transaction.
-    /// It is expected that the `__flow_task/{catalog}/info/{flow_task_id}` wasn't occupied.
+    /// It is expected that the `__flow/{catalog}/info/{flow_task_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub(crate) fn build_create_txn(
         &self,
@@ -206,15 +206,12 @@ mod tests {
     #[test]
     fn test_key_serialization() {
         let flow_task = FlowTaskKey::new("my_catalog".to_string(), 2);
-        assert_eq!(
-            b"__flow_task/my_catalog/info/2".to_vec(),
-            flow_task.to_bytes()
-        );
+        assert_eq!(b"__flow/my_catalog/info/2".to_vec(), flow_task.to_bytes());
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow_task/my_catalog/info/2".to_vec();
+        let bytes = b"__flow/my_catalog/info/2".to_vec();
         let key = FlowTaskKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flow_task_id(), 2);
