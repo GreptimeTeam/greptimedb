@@ -63,14 +63,4 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
 /// Create a mock harness for flow node manager
 ///
 /// containing several default table info and schema
-fn mock_harness_flow_node_manager() {
-    let kvb = MemoryKvBackend::new();
-    {
-        let table_id: TableId = 451;
-        let key = TableInfoKey::new(table_id);
-        let val = new_test_table_info_with_name(table_id, "table1", vec![1, 2, 3]);
-    }
-    let kv = Arc::new(kvb) as KvBackendRef;
-    let info_manager = TableInfoManager::new(kv);
-    let meta_src = TableInfoSource::new(info_manager);
-}
+fn mock_harness_flow_node_manager() {}

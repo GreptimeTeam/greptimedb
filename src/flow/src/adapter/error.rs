@@ -16,6 +16,7 @@
 
 use std::any::Any;
 
+use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
@@ -32,6 +33,11 @@ use crate::expr::EvalError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("External error"))]
+    External {
+        location: Location,
+        source: BoxedError,
+    },
     /// TODO(discord9): add detailed location of column
     #[snafu(display("Failed to eval stream"))]
     Eval {
@@ -130,6 +136,7 @@ impl ErrorExt for Error {
             &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
+            &Self::External { .. } => StatusCode::Unknown,
         }
     }
 

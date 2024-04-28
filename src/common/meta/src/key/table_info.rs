@@ -94,6 +94,7 @@ impl TableInfoValue {
     }
 }
 
+#[derive(Clone)]
 pub struct TableInfoManager {
     kv_backend: KvBackendRef,
 }
