@@ -17,7 +17,7 @@ use std::sync::Arc;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::options::MixOptions;
 use common_base::Plugins;
-use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
@@ -144,7 +144,7 @@ impl GreptimeDbStandaloneBuilder {
         );
         let flow_task_id_sequence = Arc::new(
             SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_FLOW_TASK_ID as u64)
+                .initial(MIN_USER_FLOW_ID as u64)
                 .step(10)
                 .build(),
         );

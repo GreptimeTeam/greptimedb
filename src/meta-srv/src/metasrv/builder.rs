@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
-use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
@@ -242,7 +242,7 @@ impl MetasrvBuilder {
         let flow_task_metadata_allocator = Arc::new(
             FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
                 SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
-                    .initial(MIN_USER_FLOW_TASK_ID as u64)
+                    .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
             )),

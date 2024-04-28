@@ -18,7 +18,7 @@ use std::{fs, path};
 use async_trait::async_trait;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
-use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -421,7 +421,7 @@ impl StartCommand {
         );
         let flow_task_id_sequence = Arc::new(
             SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_FLOW_TASK_ID as u64)
+                .initial(MIN_USER_FLOW_ID as u64)
                 .step(10)
                 .build(),
         );
