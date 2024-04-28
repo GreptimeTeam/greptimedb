@@ -20,8 +20,8 @@ use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
@@ -239,14 +239,13 @@ impl MetasrvBuilder {
             ))
         });
         // TODO(weny): use the real allocator.
-        let flow_metadata_allocator = Arc::new(
-            FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
+        let flow_metadata_allocator =
+            Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
-            )),
-        );
+            )));
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()

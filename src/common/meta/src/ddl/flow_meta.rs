@@ -21,19 +21,19 @@ use crate::key::FlowTaskId;
 use crate::peer::Peer;
 use crate::sequence::SequenceRef;
 
-/// The reference of [FlowTaskMetadataAllocator].
-pub type FlowTaskMetadataAllocatorRef = Arc<FlowTaskMetadataAllocator>;
+/// The reference of [FlowMetadataAllocator].
+pub type FlowMetadataAllocatorRef = Arc<FlowMetadataAllocator>;
 
-/// [FlowTaskMetadataAllocator] provides the ability of:
+/// [FlowMetadataAllocator] provides the ability of:
 /// - [FlowTaskId] Allocation.
 /// - [FlownodeId] Selection.
 #[derive(Clone)]
-pub struct FlowTaskMetadataAllocator {
+pub struct FlowMetadataAllocator {
     flow_id_sequence: SequenceRef,
     partition_peer_allocator: PartitionPeerAllocatorRef,
 }
 
-impl FlowTaskMetadataAllocator {
+impl FlowMetadataAllocator {
     /// Returns the [FlowTaskMetadataAllocator] with [NoopPartitionPeerAllocator].
     pub fn with_noop_peer_allocator(flow_id_sequence: SequenceRef) -> Self {
         Self {

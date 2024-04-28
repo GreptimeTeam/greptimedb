@@ -105,8 +105,8 @@ pub mod test_data {
 
     use chrono::DateTime;
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::ddl::flow_meta::FlowMetadataAllocator;
     use common_meta::ddl::table_meta::TableMetadataAllocator;
-    use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
     use common_meta::ddl::DdlContext;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::TableMetadataManager;
@@ -202,10 +202,9 @@ pub mod test_data {
             Arc::new(WalOptionsAllocator::default()),
         ));
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let flow_metadata_allocator =
-            Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
-                Arc::new(SequenceBuilder::new("test", kv_backend).build()),
-            ));
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            Arc::new(SequenceBuilder::new("test", kv_backend).build()),
+        ));
         DdlContext {
             node_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(

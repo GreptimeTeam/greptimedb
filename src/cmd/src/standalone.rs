@@ -21,8 +21,8 @@ use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
+use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::{FlowMetadataManager, FlowTaskMetadataManagerRef};
@@ -436,7 +436,7 @@ impl StartCommand {
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_meta_allocator = Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
+        let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
             flow_id_sequence,
         ));
 
@@ -481,7 +481,7 @@ impl StartCommand {
         table_metadata_manager: TableMetadataManagerRef,
         table_metadata_allocator: TableMetadataAllocatorRef,
         flow_metadata_manager: FlowTaskMetadataManagerRef,
-        flow_metadata_allocator: FlowTaskMetadataAllocatorRef,
+        flow_metadata_allocator: FlowMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(

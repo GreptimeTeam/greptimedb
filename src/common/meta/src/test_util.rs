@@ -20,8 +20,8 @@ pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
+use crate::ddl::flow_meta::FlowMetadataAllocator;
 use crate::ddl::table_meta::TableMetadataAllocator;
-use crate::ddl::task_meta::FlowTaskMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::flow::FlowMetadataManager;
@@ -110,13 +110,12 @@ pub fn new_ddl_context_with_kv_backend(
         Arc::new(WalOptionsAllocator::default()),
     ));
     let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-    let flow_metadata_allocator = Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
-        Arc::new(
+    let flow_metadata_allocator =
+        Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
             SequenceBuilder::new("flow-test", kv_backend)
                 .initial(1024)
                 .build(),
-        ),
-    ));
+        )));
     DdlContext {
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),

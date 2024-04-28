@@ -756,8 +756,8 @@ mod tests {
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
+    use crate::ddl::flow_meta::FlowMetadataAllocator;
     use crate::ddl::table_meta::TableMetadataAllocator;
-    use crate::ddl::task_meta::FlowTaskMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::DdlContext;
     use crate::key::flow::FlowMetadataManager;
@@ -793,10 +793,9 @@ mod tests {
             Arc::new(WalOptionsAllocator::default()),
         ));
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let flow_metadata_allocator =
-            Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
-                Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
-            ));
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
+        ));
 
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
         let procedure_manager = Arc::new(LocalManager::new(Default::default(), state_store));

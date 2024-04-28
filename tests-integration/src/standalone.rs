@@ -20,8 +20,8 @@ use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
+use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
-use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -156,9 +156,9 @@ impl GreptimeDbStandaloneBuilder {
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_metadata_allocator = Arc::new(
-            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_id_sequence),
-        );
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            flow_id_sequence,
+        ));
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(

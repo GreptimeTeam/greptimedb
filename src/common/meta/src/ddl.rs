@@ -19,8 +19,8 @@ use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
+use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
-use crate::ddl::task_meta::FlowTaskMetadataAllocatorRef;
 use crate::error::Result;
 use crate::key::flow::FlowTaskMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
@@ -39,9 +39,9 @@ pub mod create_table;
 mod create_table_template;
 pub mod drop_database;
 pub mod drop_table;
+pub mod flow_meta;
 mod physical_table_metadata;
 pub mod table_meta;
-pub mod task_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]
@@ -113,5 +113,5 @@ pub struct DdlContext {
     /// Flow metadata manager.
     pub flow_metadata_manager: FlowTaskMetadataManagerRef,
     /// Allocator for flow metadata.
-    pub flow_metadata_allocator: FlowTaskMetadataAllocatorRef,
+    pub flow_metadata_allocator: FlowMetadataAllocatorRef,
 }
