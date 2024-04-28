@@ -43,11 +43,6 @@ pub fn column_schemas_to_proto(
             } else {
                 SemanticType::Field
             } as i32;
-            let comment = schema
-                .metadata()
-                .get(COMMENT_KEY)
-                .cloned()
-                .unwrap_or_default();
 
             api::v1::ColumnSchema {
                 column_name: schema.name.clone(),
