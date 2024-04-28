@@ -170,7 +170,7 @@ impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
 }
 
 /// The manager of [FlownodeFlowKey].
-pub struct FlownodeTaskManager {
+pub struct FlownodeFlowManager {
     kv_backend: KvBackendRef,
 }
 
@@ -179,7 +179,7 @@ pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<FlownodeFlowKey> {
     FlownodeFlowKey::from_bytes(&kv.key)
 }
 
-impl FlownodeTaskManager {
+impl FlownodeFlowManager {
     /// Returns a new [FlownodeTaskManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }

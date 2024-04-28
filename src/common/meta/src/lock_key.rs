@@ -22,7 +22,7 @@ const CATALOG_LOCK_PREFIX: &str = "__catalog_lock";
 const SCHEMA_LOCK_PREFIX: &str = "__schema_lock";
 const TABLE_LOCK_PREFIX: &str = "__table_lock";
 const TABLE_NAME_LOCK_PREFIX: &str = "__table_name_lock";
-const FLOW_TASK_NAME_LOCK_PREFIX: &str = "__flow_name_lock";
+const FLOW_NAME_LOCK_PREFIX: &str = "__flow_name_lock";
 const REGION_LOCK_PREFIX: &str = "__region_lock";
 
 /// [CatalogLock] acquires the lock on the tenant level.
@@ -125,7 +125,7 @@ impl FlowNameLock {
 impl Display for FlowNameLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let FlowNameLock::Write(name) = self;
-        write!(f, "{}/{}", FLOW_TASK_NAME_LOCK_PREFIX, name)
+        write!(f, "{}/{}", FLOW_NAME_LOCK_PREFIX, name)
     }
 }
 

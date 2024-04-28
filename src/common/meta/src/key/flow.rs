@@ -28,8 +28,8 @@ use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowTaskManager;
 use crate::key::flow::flow_name::FlowNameManager;
-use crate::key::flow::flownode_flow::FlownodeTaskManager;
-use crate::key::flow::table_flow::TableTaskManager;
+use crate::key::flow::flownode_flow::FlownodeFlowManager;
+use crate::key::flow::table_flow::TableFlowManager;
 use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::FlowTaskId;
@@ -83,17 +83,17 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
     }
 }
 
-pub type FlowTaskMetadataManagerRef = Arc<FlowMetadataManager>;
+pub type FlowMetadataManagerRef = Arc<FlowMetadataManager>;
 
 /// The manager of metadata, provides ability to:
 /// - Create metadata of the task.
 /// - Retrieve metadata of the task.
 /// - Delete metadata of the task.
 pub struct FlowMetadataManager {
-    flow_task_info_manager: FlowTaskManager,
-    flownode_task_manager: FlownodeTaskManager,
-    table_task_manager: TableTaskManager,
-    flow_flow_name_manager: FlowNameManager,
+    flow_info_manager: FlowTaskManager,
+    flownode_flow_manager: FlownodeFlowManager,
+    table_flow_manager: TableFlowManager,
+    flow_name_manager: FlowNameManager,
     kv_backend: KvBackendRef,
 }
 
@@ -101,74 +101,73 @@ impl FlowMetadataManager {
     /// Returns a new [FlowTaskMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            flow_task_info_manager: FlowTaskManager::new(kv_backend.clone()),
-            flow_flow_name_manager: FlowNameManager::new(kv_backend.clone()),
-            flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
-            table_task_manager: TableTaskManager::new(kv_backend.clone()),
+            flow_info_manager: FlowTaskManager::new(kv_backend.clone()),
+            flow_name_manager: FlowNameManager::new(kv_backend.clone()),
+            flownode_flow_manager: FlownodeFlowManager::new(kv_backend.clone()),
+            table_flow_manager: TableFlowManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
 
     /// Returns the [FlowNameManager].
     pub fn flow_name_manager(&self) -> &FlowNameManager {
-        &self.flow_flow_name_manager
+        &self.flow_name_manager
     }
 
     /// Returns the [FlowTaskManager].
-    pub fn flow_task_info_manager(&self) -> &FlowTaskManager {
-        &self.flow_task_info_manager
+    pub fn flow_info_manager(&self) -> &FlowTaskManager {
+        &self.flow_info_manager
     }
 
-    /// Returns the [FlownodeTaskManager].
-    pub fn flownode_task_manager(&self) -> &FlownodeTaskManager {
-        &self.flownode_task_manager
+    /// Returns the [FlownodeFlowManager].
+    pub fn flownode_flow_manager(&self) -> &FlownodeFlowManager {
+        &self.flownode_flow_manager
     }
 
-    /// Returns the [TableTaskManager].
-    pub fn table_task_manager(&self) -> &TableTaskManager {
-        &self.table_task_manager
+    /// Returns the [TableFlowManager].
+    pub fn table_flow_manager(&self) -> &TableFlowManager {
+        &self.table_flow_manager
     }
 
-    /// Creates metadata for task and returns an error if different metadata exists.
-    pub async fn create_flow_task_metadata(
+    /// Creates metadata for flow and returns an error if different metadata exists.
+    pub async fn create_flow_metadata(
         &self,
         flow_id: FlowTaskId,
-        flow_task_value: FlowTaskValue,
+        flow_value: FlowTaskValue,
     ) -> Result<()> {
-        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) =
-            self.flow_flow_name_manager.build_create_txn(
-                &flow_task_value.catalog_name,
-                &flow_task_value.flow_name,
-                flow_id,
-            )?;
+        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self
+            .flow_name_manager
+            .build_create_txn(&flow_value.catalog_name, &flow_value.flow_name, flow_id)?;
 
-        let (create_flow_task_txn, on_create_flow_task_failure) = self
-            .flow_task_info_manager
-            .build_create_txn(&flow_task_value.catalog_name, flow_id, &flow_task_value)?;
-
-        let create_flownode_task_txn = self.flownode_task_manager.build_create_txn(
-            &flow_task_value.catalog_name,
+        let (create_flow_txn, on_create_flow_failure) = self.flow_info_manager.build_create_txn(
+            &flow_value.catalog_name,
             flow_id,
-            flow_task_value.flownode_ids().clone(),
+            &flow_value,
+        )?;
+
+        let create_flownode_task_txn = self.flownode_flow_manager.build_create_txn(
+            &flow_value.catalog_name,
+            flow_id,
+            flow_value.flownode_ids().clone(),
         );
 
-        let create_table_task_txn = self.table_task_manager.build_create_txn(
-            &flow_task_value.catalog_name,
+        let create_table_task_txn = self.table_flow_manager.build_create_txn(
+            &flow_value.catalog_name,
             flow_id,
-            flow_task_value.flownode_ids().clone(),
-            flow_task_value.source_table_ids(),
+            flow_value.flownode_ids().clone(),
+            flow_value.source_table_ids(),
         );
 
         let txn = Txn::merge_all(vec![
             create_flow_flow_name_txn,
-            create_flow_task_txn,
+            create_flow_txn,
             create_flownode_task_txn,
             create_table_task_txn,
         ]);
         info!(
             "Creating flow {}.{}({}), with {} txn operations",
-            flow_task_value.catalog_name,
-            flow_task_value.flow_name,
+            flow_value.catalog_name,
+            flow_value.flow_name,
             flow_id,
             txn.max_operations()
         );
@@ -188,29 +187,26 @@ impl FlowMetadataManager {
             if remote_flow_flow_name.flow_id() != flow_id {
                 info!(
                     "Trying to create flow {}.{}({}), but flow({}) already exists",
-                    flow_task_value.catalog_name,
-                    flow_task_value.flow_name,
+                    flow_value.catalog_name,
+                    flow_value.flow_name,
                     flow_id,
                     remote_flow_flow_name.flow_id()
                 );
 
                 return error::TaskAlreadyExistsSnafu {
-                    flow_name: format!(
-                        "{}.{}",
-                        flow_task_value.catalog_name, flow_task_value.flow_name
-                    ),
+                    flow_name: format!("{}.{}", flow_value.catalog_name, flow_value.flow_name),
                 }
                 .fail();
             }
 
-            let remote_flow_task =
-                on_create_flow_task_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
+            let remote_flow =
+                on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
                         "Reads the empty flow during the creating flow, flow_id: {flow_id}"
                     ),
                 })?;
             let op_name = "creating flow";
-            ensure_values!(*remote_flow_task, flow_task_value, op_name);
+            ensure_values!(*remote_flow, flow_value, op_name);
         }
 
         Ok(())
@@ -284,7 +280,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_task_value = FlowTaskValue {
+        let flow_value = FlowTaskValue {
             catalog_name: catalog_name.to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -296,23 +292,23 @@ mod tests {
             options: Default::default(),
         };
         flow_metadata_manager
-            .create_flow_task_metadata(task_id, flow_task_value.clone())
+            .create_flow_metadata(task_id, flow_value.clone())
             .await
             .unwrap();
         // Creates again.
         flow_metadata_manager
-            .create_flow_task_metadata(task_id, flow_task_value.clone())
+            .create_flow_metadata(task_id, flow_value.clone())
             .await
             .unwrap();
         let got = flow_metadata_manager
-            .flow_task_info_manager()
+            .flow_info_manager()
             .get(catalog_name, task_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(got, flow_task_value);
+        assert_eq!(got, flow_value);
         let tasks = flow_metadata_manager
-            .flownode_task_manager()
+            .flownode_flow_manager()
             .tasks(catalog_name, 1)
             .try_collect::<Vec<_>>()
             .await
@@ -320,7 +316,7 @@ mod tests {
         assert_eq!(tasks, vec![(task_id, 0)]);
         for table_id in [1024, 1025, 1026] {
             let nodes = flow_metadata_manager
-                .table_task_manager()
+                .table_flow_manager()
                 .nodes(catalog_name, table_id)
                 .try_collect::<Vec<_>>()
                 .await
@@ -349,7 +345,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_task_value = FlowTaskValue {
+        let flow_value = FlowTaskValue {
             catalog_name: "greptime".to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -361,11 +357,11 @@ mod tests {
             options: Default::default(),
         };
         flow_metadata_manager
-            .create_flow_task_metadata(task_id, flow_task_value.clone())
+            .create_flow_metadata(task_id, flow_value.clone())
             .await
             .unwrap();
         // Creates again.
-        let flow_task_value = FlowTaskValue {
+        let flow_value = FlowTaskValue {
             catalog_name: catalog_name.to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -377,7 +373,7 @@ mod tests {
             options: Default::default(),
         };
         let err = flow_metadata_manager
-            .create_flow_task_metadata(task_id + 1, flow_task_value)
+            .create_flow_metadata(task_id + 1, flow_value)
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::TaskAlreadyExists { .. });
@@ -394,7 +390,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_task_value = FlowTaskValue {
+        let flow_value = FlowTaskValue {
             catalog_name: "greptime".to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -406,7 +402,7 @@ mod tests {
             options: Default::default(),
         };
         flow_metadata_manager
-            .create_flow_task_metadata(task_id, flow_task_value.clone())
+            .create_flow_metadata(task_id, flow_value.clone())
             .await
             .unwrap();
         // Creates again.
@@ -415,7 +411,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "another_sink_table".to_string(),
         };
-        let flow_task_value = FlowTaskValue {
+        let flow_value = FlowTaskValue {
             catalog_name: "greptime".to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -427,7 +423,7 @@ mod tests {
             options: Default::default(),
         };
         let err = flow_metadata_manager
-            .create_flow_task_metadata(task_id, flow_task_value)
+            .create_flow_metadata(task_id, flow_value)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Reads the different value"));

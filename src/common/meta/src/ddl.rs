@@ -22,7 +22,7 @@ use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::error::Result;
-use crate::key::flow::FlowTaskMetadataManagerRef;
+use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
@@ -111,7 +111,7 @@ pub struct DdlContext {
     /// Allocator for table metadata.
     pub table_metadata_allocator: TableMetadataAllocatorRef,
     /// Flow metadata manager.
-    pub flow_metadata_manager: FlowTaskMetadataManagerRef,
+    pub flow_metadata_manager: FlowMetadataManagerRef,
     /// Allocator for flow metadata.
     pub flow_metadata_allocator: FlowMetadataAllocatorRef,
 }

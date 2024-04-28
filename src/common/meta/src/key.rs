@@ -54,7 +54,7 @@
 //!
 //! To simplify the managers used in struct fields and function parameters, we define "unify"
 //! table metadata manager: [TableMetadataManager]
-//! and flow metadata manager: [FlowTaskMetadataManager](crate::key::flow_task::FlowTaskMetadataManager).
+//! and flow metadata manager: [FlowTaskMetadataManager](crate::key::flow::FlowMetadataManager).
 //! It contains all the managers defined above. It's recommended to just use this manager only.
 //!
 //! The whole picture of flow keys will be like this:

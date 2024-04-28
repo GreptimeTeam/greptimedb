@@ -187,11 +187,11 @@ pub fn table_task_decoder(kv: KeyValue) -> Result<TableFlowKey> {
 }
 
 /// The manager of [TableFlowKey].
-pub struct TableTaskManager {
+pub struct TableFlowManager {
     kv_backend: KvBackendRef,
 }
 
-impl TableTaskManager {
+impl TableFlowManager {
     /// Returns a new [TableTaskManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }

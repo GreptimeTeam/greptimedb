@@ -84,13 +84,13 @@ impl CreateFlowProcedure {
 
     async fn on_flownode_create_flows(&mut self) -> Result<Status> {
         // Safety: must be allocated.
-        let mut create_flow_task = Vec::with_capacity(self.data.peers.len());
+        let mut create_flow = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
             let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
-            create_flow_task.push(async move {
+            create_flow.push(async move {
                 requester
                     .handle(request)
                     .await
@@ -98,7 +98,7 @@ impl CreateFlowProcedure {
             });
         }
 
-        join_all(create_flow_task)
+        join_all(create_flow)
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
@@ -117,7 +117,7 @@ impl CreateFlowProcedure {
         // TODO(weny): Support `or_replace`.
         self.context
             .flow_metadata_manager
-            .create_flow_task_metadata(flow_id, (&self.data).into())
+            .create_flow_metadata(flow_id, (&self.data).into())
             .await?;
         info!("Created flow metadata for flow {flow_id}");
         Ok(Status::done_with_output(flow_id))
@@ -133,7 +133,7 @@ impl Procedure for CreateFlowProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
 
-        let _timer = metrics::METRIC_META_PROCEDURE_CREATE_FLOW_TASK
+        let _timer = metrics::METRIC_META_PROCEDURE_CREATE_FLOW
             .with_label_values(&[state.as_ref()])
             .start_timer();
 
