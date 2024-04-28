@@ -109,6 +109,11 @@ impl PartitionContext {
         &self.read_format
     }
 
+    /// Returns the reader builder.
+    pub(crate) fn reader_builder(&self) -> &RowGroupReaderBuilder {
+        &self.reader_builder
+    }
+
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     ///
@@ -119,11 +124,11 @@ impl PartitionContext {
     pub(crate) fn precise_filter(&self, mut input: Batch) -> Result<Option<Batch>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
-        // FIXME(yingwen): We should use expected metadata to get the column id.
         // Run filter one by one and combine them result
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter in &self.filters {
             let column_name = filter.column_name();
+            // FIXME(yingwen): We should use expected metadata to get the column id.
             let Some(column_metadata) = self.read_format.metadata().column_by_name(column_name)
             else {
                 // column not found, skip
