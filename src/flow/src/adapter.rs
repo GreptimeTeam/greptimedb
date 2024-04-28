@@ -41,8 +41,10 @@ use crate::repr::{self, ColumnType, DiffRow, RelationType, Row, BOARDCAST_CAP};
 use crate::transform::sql_to_flow_plan;
 
 pub(crate) mod error;
+mod server;
 #[cfg(test)]
 mod tests;
+mod worker;
 
 use error::Error;
 
@@ -54,7 +56,7 @@ pub type TableName = Vec<String>;
 ///
 /// The choice of timestamp is just using current system timestamp for now
 ///
-/// TODO(discord9): refactor flow worker into a separate !Send struct?
+/// TODO(discord9): refactor flow worker into a separate !Send struct? Flow Workers and Flow Node exists on same machine
 pub struct FlowNodeManager<'subgraph> {
     /// The state of all tasks in the flow node
     /// This is also the only field that's not `Send` in the struct
@@ -67,14 +69,20 @@ pub struct FlowNodeManager<'subgraph> {
     tick_manager: FlowTickManager,
 }
 
+/// This is non-SEND struct, so we can't run it in a separate thread
+pub struct FlowWorkerManager<'subgraph> {
+    pub task_states: BTreeMap<TaskId, ActiveDataflowState<'subgraph>>,
+}
+
 /// Just check if NodeManager's other fields are `Send` so later we can refactor so A Flow Node Manager
 /// can manage multiple flow worker(thread) then we can run multiple flow worker in a single flow node manager
 #[test]
 fn check_is_send() {
-    fn is_send<T: Send>() {}
+    fn is_send<T: Send + Sync>() {}
     is_send::<TableInfoSource>();
     is_send::<FlowNodeContext>();
     is_send::<FlowTickManager>();
+    is_send::<broadcast::Sender<DiffRow>>();
 }
 
 /// mapping of table name <-> table id should be query from tableinfo manager
@@ -241,8 +249,8 @@ impl<'s> FlowNodeManager<'s> {
                 let sink_buf = self
                     .node_context
                     .sink_buffer
-                    .get_mut(sink_table_name)
-                    .unwrap();
+                    .entry(sink_table_name.clone())
+                    .or_default();
                 let sink_recv = self
                     .node_context
                     .sink_receiver
@@ -271,7 +279,8 @@ impl<'s> FlowNodeManager<'s> {
         rows: Vec<DiffRow>,
     ) -> Result<(), Error> {
         let table_id = region_id.table_id();
-        self.node_context.send(table_id, rows)
+        self.node_context.send(table_id, rows)?;
+        Ok(())
     }
 
     /// Return task id if a new task is created, otherwise return None
@@ -385,6 +394,8 @@ pub struct FlowNodeContext {
         BTreeMap<TableName, (broadcast::Sender<DiffRow>, broadcast::Receiver<DiffRow>)>,
     /// store sink buffer for each sink table, used for sending data back to the frontend
     pub sink_buffer: BTreeMap<TableName, VecDeque<DiffRow>>,
+    /// store source in buffer for each source table, in case broadcast channel is full
+    pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
     /// the schema of the table
     pub schema: HashMap<GlobalId, RelationType>,
     /// All the tables that have been registered in the worker
@@ -392,14 +403,23 @@ pub struct FlowNodeContext {
 }
 
 impl FlowNodeContext {
-    pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<(), Error> {
+    // TODO(discord9): add send_buf in case the broadcast channel is full
+    // return number of rows it actuall send(including what's in the buffer)
+    pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
         let sender = self
             .source_sender
             .get(&table_id)
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
-        for row in rows {
+        let send_buffer = self.send_buffer.entry(table_id).or_default();
+        send_buffer.extend(rows);
+        let mut row_cnt = 0;
+        while let Some(row) = send_buffer.pop_front() {
+            if sender.len() >= BOARDCAST_CAP {
+                break;
+            }
+            row_cnt += 1;
             sender
                 .send(row)
                 .map_err(|err| {
@@ -414,7 +434,7 @@ impl FlowNodeContext {
                 .with_context(|_| EvalSnafu)?;
         }
 
-        Ok(())
+        Ok(row_cnt)
     }
 }
 
@@ -584,6 +604,7 @@ impl TriMap {
 }
 
 /// FlowTickManager is a manager for flow tick
+#[derive(Clone)]
 pub struct FlowTickManager {
     anchor: Anchor,
 }

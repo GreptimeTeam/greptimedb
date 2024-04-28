@@ -3519,6 +3519,7 @@ dependencies = [
  "datafusion-substrait",
  "datatypes",
  "enum_dispatch",
+ "greptime-proto",
  "hydroflow",
  "itertools 0.10.5",
  "minstant",
