@@ -44,7 +44,6 @@ pub mod query_handler;
 mod repeated_field;
 mod row_writer;
 pub mod server;
-mod shutdown;
 pub mod tls;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

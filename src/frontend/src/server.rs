@@ -24,7 +24,6 @@ use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
-use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
@@ -256,24 +255,6 @@ where
             )) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr)).await;
-        }
-
-        if opts.opentsdb.enable {
-            // Init OpenTSDB server
-            let opts = &opts.opentsdb;
-            let addr = parse_addr(&opts.addr)?;
-
-            let io_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("opentsdb-io-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
-            );
-
-            let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
-
-            handlers.insert((server, addr)).await;
         }
 
         Ok(handlers)
