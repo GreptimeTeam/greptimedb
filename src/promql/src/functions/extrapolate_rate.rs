@@ -37,6 +37,7 @@ use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
@@ -62,19 +63,23 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         Self { range_length }
     }
 
-    fn input_type() -> Vec<DataType> {
-        vec![
+    fn scalar_udf_with_name(name: &str, range_length: i64) -> ScalarUDF {
+        let input_types = vec![
             // timestamp range vector
             RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
             // value range vector
             RangeArray::convert_data_type(DataType::Float64),
             // timestamp vector
             DataType::Timestamp(TimeUnit::Millisecond, None),
-        ]
-    }
+        ];
 
-    fn return_type() -> DataType {
-        DataType::Float64
+        create_udf(
+            name,
+            input_types,
+            Arc::new(DataType::Float64),
+            Volatility::Immutable,
+            Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _,
+        )
     }
 
     fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
@@ -204,17 +209,7 @@ impl ExtrapolatedRate<false, false> {
     }
 
     pub fn scalar_udf(range_length: i64) -> ScalarUDF {
-        // TODO(LFC): Use the new Datafusion UDF impl.
-        #[allow(deprecated)]
-        ScalarUDF::new(
-            Self::name(),
-            &Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
-            &(Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _),
-        )
+        Self::scalar_udf_with_name(Self::name(), range_length)
     }
 }
 
@@ -225,17 +220,7 @@ impl ExtrapolatedRate<true, true> {
     }
 
     pub fn scalar_udf(range_length: i64) -> ScalarUDF {
-        // TODO(LFC): Use the new Datafusion UDF impl.
-        #[allow(deprecated)]
-        ScalarUDF::new(
-            Self::name(),
-            &Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
-            &(Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _),
-        )
+        Self::scalar_udf_with_name(Self::name(), range_length)
     }
 }
 
@@ -246,17 +231,7 @@ impl ExtrapolatedRate<true, false> {
     }
 
     pub fn scalar_udf(range_length: i64) -> ScalarUDF {
-        // TODO(LFC): Use the new Datafusion UDF impl.
-        #[allow(deprecated)]
-        ScalarUDF::new(
-            Self::name(),
-            &Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            &(Arc::new(|_: &_| Ok(Arc::new(Self::return_type()))) as _),
-            &(Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _),
-        )
+        Self::scalar_udf_with_name(Self::name(), range_length)
     }
 }
 

@@ -84,7 +84,6 @@ impl Debug for DfUdfAdapter {
         f.debug_struct("DfUdfAdapter")
             .field("name", &self.name)
             .field("signature", &self.signature)
-            .field("fun", &"<FUNC>")
             .finish()
     }
 }

@@ -29,6 +29,7 @@ pub use self::udf::ScalarUdf;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
 use crate::logical_plan::accumulator::*;
 use crate::signature::{Signature, Volatility};
+
 /// Creates a new UDF with a specific signature and specific return type.
 /// This is a helper function to create a new UDF.
 /// The function `create_udf` returns a subset of all possible `ScalarFunction`:
