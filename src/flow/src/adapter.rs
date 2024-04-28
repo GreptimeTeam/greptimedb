@@ -14,26 +14,33 @@
 
 //! for getting data from source and sending results to sink
 //! and communicating with other parts of the database
+use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
+use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
+use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
-use common_meta::key::table_name::TableNameManager;
+use common_meta::key::table_name::{TableNameKey, TableNameManager};
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use greptime_proto::v1;
 use hydroflow::scheduled::graph::Hydroflow;
 use itertools::Itertools;
 use minstant::Anchor;
 use prost::bytes::buf;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContext;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::LocalSet;
 
-use crate::adapter::error::{EvalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu};
+use crate::adapter::error::{EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu};
+use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::error::InternalSnafu;
@@ -46,6 +53,7 @@ pub(crate) mod error;
 mod server;
 #[cfg(test)]
 mod tests;
+mod util;
 mod worker;
 
 use error::Error;
@@ -62,14 +70,14 @@ pub type TableName = Vec<String>;
 pub struct FlowNodeManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
-    pub worker_handles: Vec<WorkerHandle>,
+    pub worker_handles: Vec<Mutex<WorkerHandle>>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
-    srv_map: TableInfoSource,
+    table_info_source: TableInfoSource,
     frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
     /// contains mapping from table name to global id, and table schema
-    node_context: FlowNodeContext,
+    node_context: Mutex<FlowNodeContext>,
     tick_manager: FlowTickManager,
 }
 
@@ -77,33 +85,36 @@ impl FlowNodeManager {
     pub fn new(
         frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
-        table_info: TableInfoManager,
+        table_meta: TableMetadataManagerRef,
     ) -> Self {
-        let srv_map = TableInfoSource::new(table_info);
+        let srv_map = TableInfoSource::new(
+            table_meta.table_info_manager().clone(),
+            table_meta.table_name_manager().clone(),
+        );
         let node_context = FlowNodeContext::default();
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
         FlowNodeManager {
             worker_handles,
             query_engine,
-            srv_map,
+            table_info_source: srv_map,
             frontend_invoker,
-            node_context,
+            node_context: Mutex::new(node_context),
             tick_manager,
         }
     }
     pub fn new_with_worker<'s>(
         frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
-        table_info: TableInfoManager,
+        table_meta: TableMetadataManagerRef,
     ) -> (Self, Worker<'s>) {
-        let mut zelf = Self::new(frontend_invoker, query_engine, table_info);
+        let mut zelf = Self::new(frontend_invoker, query_engine, table_meta);
         let (handle, worker) = create_worker(zelf.tick_manager.clone());
         zelf.add_worker_handle(handle);
         (zelf, worker)
     }
     pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
-        self.worker_handles.push(handle);
+        self.worker_handles.push(Mutex::new(handle));
     }
 }
 
@@ -119,12 +130,44 @@ fn check_is_send() {
 pub struct TableInfoSource {
     /// for query `TableId -> TableName` mapping
     table_info_manager: TableInfoManager,
+    table_name_manager: TableNameManager,
 }
 
 impl TableInfoSource {
-    pub fn new(table_info_manager: TableInfoManager) -> Self {
-        TableInfoSource { table_info_manager }
+    pub fn new(table_info_manager: TableInfoManager, table_name_manager: TableNameManager) -> Self {
+        TableInfoSource {
+            table_info_manager,
+            table_name_manager,
+        }
     }
+
+    pub async fn get_table_id_from_proto_name(
+        &self,
+        name: &greptime_proto::v1::TableName,
+    ) -> Result<TableId, Error> {
+        self.table_name_manager
+            .get(TableNameKey::new(
+                &name.catalog_name,
+                &name.schema_name,
+                &name.table_name,
+            ))
+            .await
+            .with_context(|_| TableNotFoundMetaSnafu {
+                msg: format!("Table name = {:?}, couldn't found table id", name),
+            })
+            .map(|id| id.unwrap().table_id())
+    }
+
+    pub async fn get_table_id_from_name(&self, name: &TableName) -> Result<TableId, Error> {
+        self.table_name_manager
+            .get(TableNameKey::new(&name[0], &name[1], &name[2]))
+            .await
+            .with_context(|_| TableNotFoundMetaSnafu {
+                msg: format!("Table name = {:?}, couldn't found table id", name),
+            })
+            .map(|id| id.unwrap().table_id())
+    }
+
     /// query metasrv about the table name and table id
     pub async fn get_table_name(&self, table_id: &TableId) -> Result<TableName, Error> {
         self.table_info_manager
@@ -253,29 +296,114 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 impl FlowNodeManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
+    ///
+    /// However this is not blocking and can sometimes return while actual computation is still running in worker thread
     /// TODO(discord9): add flag for subgraph that have input since last run
-    pub fn run_available(&mut self) {
-        self.worker_handles.iter_mut().for_each(|worker| {
-            worker.run_available();
-        });
+    pub async fn run_available(&self) {
+        for worker in self.worker_handles.iter() {
+            worker.lock().await.run_available();
+        }
     }
 
     /// send write request to related source sender
     pub async fn handle_write_request(
-        &mut self,
+        &self,
         region_id: RegionId,
         rows: Vec<DiffRow>,
     ) -> Result<(), Error> {
         let table_id = region_id.table_id();
-        self.node_context.send(table_id, rows)?;
+        self.node_context.lock().await.send(table_id, rows)?;
         Ok(())
     }
 
+    /// TODO(discord9): merge all same type of diff row into one requests
+    ///
+    /// Return the number of requests it made
+    pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
+        let all_reqs = self.generate_writeback_request().await;
+        let mut req_cnt = 0;
+        for (table_name, reqs) in all_reqs {
+            let table_id = self
+                .table_info_source
+                .get_table_id_from_name(&table_name)
+                .await?;
+            let table_info = self
+                .table_info_source
+                .get_table_info_value(&table_id)
+                .await?
+                .unwrap();
+            let (catalog, schema) = (
+                table_info.table_info.catalog_name,
+                table_info.table_info.schema_name,
+            );
+            let ctx = QueryContext::with(&catalog, &schema);
+            let primary_keys = table_info
+                .table_info
+                .meta
+                .primary_key_indices
+                .into_iter()
+                .map(|i| {
+                    table_info.table_info.meta.schema.column_schemas[i]
+                        .name
+                        .clone()
+                })
+                .collect_vec();
+
+            let schema = table_info.table_info.meta.schema.column_schemas;
+            let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
+
+            for req in reqs {
+                match req {
+                    DiffRequest::Insert(insert) => {
+                        let rows_proto: Vec<v1::Row> =
+                            insert.into_iter().map(|row| row.into()).collect::<Vec<_>>();
+                        let table_name = table_name.last().unwrap().clone();
+                        let req = RowInsertRequest {
+                            table_name,
+                            rows: Some(v1::Rows {
+                                schema: proto_schema.clone(),
+                                rows: rows_proto,
+                            }),
+                        };
+                        req_cnt += 1;
+                        self.frontend_invoker
+                            .row_inserts(RowInsertRequests { inserts: vec![req] }, ctx.clone())
+                            .await
+                            .map_err(BoxedError::new)
+                            .with_context(|_| ExternalSnafu {})?;
+                    }
+                    DiffRequest::Delete(remove) => {
+                        let rows_proto: Vec<v1::Row> =
+                            remove.into_iter().map(|row| row.into()).collect::<Vec<_>>();
+                        let table_name = table_name.last().unwrap().clone();
+                        let req = RowDeleteRequest {
+                            table_name,
+                            rows: Some(v1::Rows {
+                                schema: proto_schema.clone(),
+                                rows: rows_proto,
+                            }),
+                        };
+
+                        req_cnt += 1;
+                        self.frontend_invoker
+                            .row_deletes(RowDeleteRequests { deletes: vec![req] }, ctx.clone())
+                            .await
+                            .map_err(BoxedError::new)
+                            .with_context(|_| ExternalSnafu {})?;
+                    }
+                }
+            }
+        }
+        Ok(req_cnt)
+    }
+
     /// Generate writeback request for all sink table
-    pub async fn generate_writeback_request(&mut self) -> BTreeMap<TableName, Vec<DiffRequest>> {
+    pub async fn generate_writeback_request(&self) -> BTreeMap<TableName, Vec<DiffRequest>> {
         let mut output = BTreeMap::new();
         for (name, sink_recv) in self
             .node_context
+            .lock()
+            .await
             .sink_receiver
             .iter_mut()
             .map(|(n, (_s, r))| (n, r))
@@ -288,8 +416,9 @@ impl FlowNodeManager {
         output
     }
 
-    pub async fn remove_task(&mut self, task_id: TaskId) -> Result<(), Error> {
-        for handle in self.worker_handles.iter_mut() {
+    pub async fn remove_task(&self, task_id: TaskId) -> Result<(), Error> {
+        for handle in self.worker_handles.iter() {
+            let handle = handle.lock().await;
             if handle.contains_task(task_id)? {
                 handle.remove_task(task_id)?;
                 break;
@@ -307,7 +436,7 @@ impl FlowNodeManager {
     /// TODO(discord9): use greptime-proto type to create task instead
     #[allow(clippy::too_many_arguments)]
     pub async fn create_task(
-        &mut self,
+        &self,
         task_id: TaskId,
         sink_table_id: TableId,
         source_table_ids: &[TableId],
@@ -320,25 +449,26 @@ impl FlowNodeManager {
         if create_if_not_exist {
             // check if the task already exists
             for handle in self.worker_handles.iter() {
-                if handle.contains_task(task_id)? {
+                if handle.lock().await.contains_task(task_id)? {
                     return Ok(None);
                 }
             }
         }
+
+        let mut node_ctx = self.node_context.lock().await;
         // assign global id to source and sink table
         for source in source_table_ids
             .iter()
             .chain(std::iter::once(&sink_table_id))
         {
-            self.node_context
-                .assign_global_id_to_table(&self.srv_map, *source)
+            node_ctx
+                .assign_global_id_to_table(&self.table_info_source, *source)
                 .await;
         }
-        self.node_context
-            .register_task_src_sink(task_id, source_table_ids, sink_table_id);
+        node_ctx.register_task_src_sink(task_id, source_table_ids, sink_table_id);
 
         // construct a active dataflow state with it
-        let flow_plan = sql_to_flow_plan(&mut self.node_context, &self.query_engine, &sql).await?;
+        let flow_plan = sql_to_flow_plan(node_ctx.borrow_mut(), &self.query_engine, &sql).await?;
 
         // TODO(discord9): parse `expire_when`
         let _ = expire_when;
@@ -346,28 +476,23 @@ impl FlowNodeManager {
         let _ = task_options;
 
         // TODO(discord9): add more than one handles
-        let sink_id = self
-            .node_context
+        let sink_id = node_ctx
             .table_repr
             .get_by_table_id(&sink_table_id)
             .unwrap()
             .1;
-        let sink_sender = self.node_context.get_sink_by_global_id(&sink_id)?;
+        let sink_sender = node_ctx.get_sink_by_global_id(&sink_id)?;
 
         let source_ids = source_table_ids
             .iter()
-            .map(|id| self.node_context.table_repr.get_by_table_id(id).unwrap().1)
+            .map(|id| node_ctx.table_repr.get_by_table_id(id).unwrap().1)
             .collect_vec();
         let source_senders = source_ids
             .iter()
-            .map(|id| {
-                self.node_context
-                    .get_source_by_global_id(id)
-                    .map(|s| s.subscribe())
-            })
+            .map(|id| node_ctx.get_source_by_global_id(id).map(|s| s.subscribe()))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let handle = &self.worker_handles[0];
+        let handle = &self.worker_handles[0].lock().await;
         handle.create_task(
             task_id,
             flow_plan,
@@ -467,6 +592,7 @@ impl FlowNodeContext {
         }
 
         let sink_table_name = self.table_repr.get_by_table_id(&sink_table_id).unwrap().0;
+        self.add_sink_receiver(sink_table_name.clone());
         self.task_to_sink.insert(task_id, sink_table_name);
     }
 
