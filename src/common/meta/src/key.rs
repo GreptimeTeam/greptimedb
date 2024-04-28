@@ -123,7 +123,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
-use self::flow::flow_task_info::FlowTaskInfoValue;
+use self::flow::flow_info::FlowTaskValue;
 use self::flow::flow_task_name::FlowTaskNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
@@ -1054,7 +1054,7 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     DatanodeTableValue,
-    FlowTaskInfoValue,
+    FlowTaskValue,
     FlowTaskNameValue
 }
 

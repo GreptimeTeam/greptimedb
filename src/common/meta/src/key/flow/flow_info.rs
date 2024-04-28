@@ -42,25 +42,25 @@ lazy_static! {
 /// The key stores the metadata of the task.
 ///
 /// The layout: `__flow_task/{catalog}/info/{flow_task_id}`.
-pub struct FlowTaskInfoKey(FlowTaskScoped<CatalogScoped<FlowTaskInfoKeyInner>>);
+pub struct FlowTaskKey(FlowTaskScoped<CatalogScoped<FlowTaskKeyInner>>);
 
-impl MetaKey<FlowTaskInfoKey> for FlowTaskInfoKey {
+impl MetaKey<FlowTaskKey> for FlowTaskKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskInfoKey> {
-        Ok(FlowTaskInfoKey(FlowTaskScoped::<
-            CatalogScoped<FlowTaskInfoKeyInner>,
+    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKey> {
+        Ok(FlowTaskKey(FlowTaskScoped::<
+            CatalogScoped<FlowTaskKeyInner>,
         >::from_bytes(bytes)?))
     }
 }
 
-impl FlowTaskInfoKey {
-    /// Returns the [FlowTaskInfoKey].
-    pub fn new(catalog: String, flow_task_id: FlowTaskId) -> FlowTaskInfoKey {
-        let inner = FlowTaskInfoKeyInner::new(flow_task_id);
-        FlowTaskInfoKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+impl FlowTaskKey {
+    /// Returns the [FlowTaskKey].
+    pub fn new(catalog: String, flow_task_id: FlowTaskId) -> FlowTaskKey {
+        let inner = FlowTaskKeyInner::new(flow_task_id);
+        FlowTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
     /// Returns the catalog.
@@ -76,27 +76,27 @@ impl FlowTaskInfoKey {
 
 /// The key of flow task metadata.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct FlowTaskInfoKeyInner {
+struct FlowTaskKeyInner {
     flow_task_id: FlowTaskId,
 }
 
-impl FlowTaskInfoKeyInner {
-    /// Returns a [FlowTaskInfoKey] with the specified `flow_task_id`.
-    pub fn new(flow_task_id: FlowTaskId) -> FlowTaskInfoKeyInner {
-        FlowTaskInfoKeyInner { flow_task_id }
+impl FlowTaskKeyInner {
+    /// Returns a [FlowTaskKey] with the specified `flow_task_id`.
+    pub fn new(flow_task_id: FlowTaskId) -> FlowTaskKeyInner {
+        FlowTaskKeyInner { flow_task_id }
     }
 }
 
-impl MetaKey<FlowTaskInfoKeyInner> for FlowTaskInfoKeyInner {
+impl MetaKey<FlowTaskKeyInner> for FlowTaskKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!("{FLOW_TASK_INFO_KEY_PREFIX}/{}", self.flow_task_id).into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskInfoKeyInner> {
+    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
-                    "FlowTaskInfoKeyInner '{}' is not a valid UTF8 string: {e}",
+                    "FlowTaskKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
                 ),
             }
@@ -106,17 +106,17 @@ impl MetaKey<FlowTaskInfoKeyInner> for FlowTaskInfoKeyInner {
             FLOW_TASK_INFO_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid FlowTaskInfoKeyInner '{key}'"),
+                    err_msg: format!("Invalid FlowTaskKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
         let flow_task_id = captures[1].parse::<FlowTaskId>().unwrap();
-        Ok(FlowTaskInfoKeyInner { flow_task_id })
+        Ok(FlowTaskKeyInner { flow_task_id })
     }
 }
 
 // The metadata of the flow task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FlowTaskInfoValue {
+pub struct FlowTaskValue {
     /// The source tables used by the task.
     pub(crate) source_table_ids: Vec<TableId>,
     /// The sink table used by the task.
@@ -126,7 +126,7 @@ pub struct FlowTaskInfoValue {
     /// The catalog name.
     pub(crate) catalog_name: String,
     /// The task name.
-    pub(crate) task_name: String,
+    pub(crate) flow_name: String,
     /// The raw sql.
     pub(crate) raw_sql: String,
     /// The expr of expire.
@@ -137,7 +137,7 @@ pub struct FlowTaskInfoValue {
     pub(crate) options: HashMap<String, String>,
 }
 
-impl FlowTaskInfoValue {
+impl FlowTaskValue {
     /// Returns the `flownode_id`.
     pub fn flownode_ids(&self) -> &BTreeMap<FlowTaskPartitionId, FlownodeId> {
         &self.flownode_ids
@@ -149,28 +149,28 @@ impl FlowTaskInfoValue {
     }
 }
 
-/// The manager of [FlowTaskInfoKey].
-pub struct FlowTaskInfoManager {
+/// The manager of [FlowTaskKey].
+pub struct FlowTaskManager {
     kv_backend: KvBackendRef,
 }
 
-impl FlowTaskInfoManager {
-    /// Returns a new [FlowTaskInfoManager].
+impl FlowTaskManager {
+    /// Returns a new [FlowTaskManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
 
-    /// Returns the [FlowTaskInfoValue] of specified `flow_task_id`.
+    /// Returns the [FlowTaskValue] of specified `flow_task_id`.
     pub async fn get(
         &self,
         catalog: &str,
         flow_task_id: FlowTaskId,
-    ) -> Result<Option<FlowTaskInfoValue>> {
-        let key = FlowTaskInfoKey::new(catalog.to_string(), flow_task_id).to_bytes();
+    ) -> Result<Option<FlowTaskValue>> {
+        let key = FlowTaskKey::new(catalog.to_string(), flow_task_id).to_bytes();
         self.kv_backend
             .get(&key)
             .await?
-            .map(|x| FlowTaskInfoValue::try_from_raw_value(&x.value))
+            .map(|x| FlowTaskValue::try_from_raw_value(&x.value))
             .transpose()
     }
 
@@ -181,14 +181,14 @@ impl FlowTaskInfoManager {
         &self,
         catalog: &str,
         flow_task_id: FlowTaskId,
-        flow_task_value: &FlowTaskInfoValue,
+        flow_task_value: &FlowTaskValue,
     ) -> Result<(
         Txn,
         impl FnOnce(
             &mut TxnOpGetResponseSet,
-        ) -> Result<Option<DeserializedValueWithBytes<FlowTaskInfoValue>>>,
+        ) -> Result<Option<DeserializedValueWithBytes<FlowTaskValue>>>,
     )> {
-        let key = FlowTaskInfoKey::new(catalog.to_string(), flow_task_id).to_bytes();
+        let key = FlowTaskKey::new(catalog.to_string(), flow_task_id).to_bytes();
         let txn =
             txn_helper::build_put_if_absent_txn(key.clone(), flow_task_value.try_as_raw_value()?);
 
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let flow_task = FlowTaskInfoKey::new("my_catalog".to_string(), 2);
+        let flow_task = FlowTaskKey::new("my_catalog".to_string(), 2);
         assert_eq!(
             b"__flow_task/my_catalog/info/2".to_vec(),
             flow_task.to_bytes()
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn test_key_deserialization() {
         let bytes = b"__flow_task/my_catalog/info/2".to_vec();
-        let key = FlowTaskInfoKey::from_bytes(&bytes).unwrap();
+        let key = FlowTaskKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flow_task_id(), 2);
     }
