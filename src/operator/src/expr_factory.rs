@@ -539,7 +539,7 @@ pub fn to_create_flow_task_expr(
 
     Ok(CreateFlowTaskExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
-        task_name: create_flow.task_name.to_string(),
+        task_name: create_flow.flow_name.to_string(),
         source_table_names,
         sink_table_name: Some(sink_table_name),
         create_if_not_exists: create_flow.if_not_exists,

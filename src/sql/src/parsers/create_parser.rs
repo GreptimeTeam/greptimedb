@@ -219,7 +219,7 @@ impl<'a> ParserContext<'a> {
         let query = Box::new(self.parser.parse_query().context(error::SyntaxSnafu)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
-            task_name,
+            flow_name: task_name,
             sink_table_name: output_table_name,
             or_replace,
             if_not_exists,
@@ -1055,7 +1055,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
 
         let expected = CreateFlow {
-            task_name: ObjectName(vec![Ident {
+            flow_name: ObjectName(vec![Ident {
                 value: "task_1".to_string(),
                 quote_style: None,
             }]),

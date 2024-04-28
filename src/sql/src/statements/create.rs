@@ -239,8 +239,8 @@ impl Display for CreateTableLike {
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateFlow {
-    /// Task name
-    pub task_name: ObjectName,
+    /// Flow name
+    pub flow_name: ObjectName,
     /// Output (sink) table name
     pub sink_table_name: ObjectName,
     /// Whether to replace existing task
@@ -265,7 +265,7 @@ impl Display for CreateFlow {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{} ", &self.task_name)?;
+        write!(f, "{} ", &self.flow_name)?;
         write!(f, "OUTPUT AS {} ", &self.sink_table_name)?;
         if let Some(expire_when) = &self.expire_when {
             write!(f, "EXPIRE WHEN {} ", expire_when)?;
