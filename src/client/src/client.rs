@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::region::region_client::RegionClient as PbRegionClient;
@@ -27,10 +26,6 @@ use tonic::transport::Channel;
 
 use crate::load_balance::{LoadBalance, Loadbalancer};
 use crate::{error, Result};
-
-pub struct DatabaseClient {
-    pub inner: GreptimeDatabaseClient<Channel>,
-}
 
 pub struct FlightClient {
     addr: String,
@@ -138,7 +133,7 @@ impl Client {
         Ok((addr, channel))
     }
 
-    fn max_grpc_recv_message_size(&self) -> usize {
+    pub fn max_grpc_recv_message_size(&self) -> usize {
         self.inner
             .channel_manager
             .config()
@@ -146,7 +141,7 @@ impl Client {
             .as_bytes() as usize
     }
 
-    fn max_grpc_send_message_size(&self) -> usize {
+    pub fn max_grpc_send_message_size(&self) -> usize {
         self.inner
             .channel_manager
             .config()
@@ -159,15 +154,6 @@ impl Client {
         Ok(FlightClient {
             addr,
             client: FlightServiceClient::new(channel)
-                .max_decoding_message_size(self.max_grpc_recv_message_size())
-                .max_encoding_message_size(self.max_grpc_send_message_size()),
-        })
-    }
-
-    pub fn make_database_client(&self) -> Result<DatabaseClient> {
-        let (_, channel) = self.find_channel()?;
-        Ok(DatabaseClient {
-            inner: GreptimeDatabaseClient::new(channel)
                 .max_decoding_message_size(self.max_grpc_recv_message_size())
                 .max_encoding_message_size(self.max_grpc_send_message_size()),
         })

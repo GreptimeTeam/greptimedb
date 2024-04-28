@@ -14,6 +14,7 @@
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
@@ -35,6 +36,7 @@ use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
+use tonic::transport::Channel;
 
 use crate::stream_insert::StreamInserter;
 
@@ -56,6 +58,19 @@ pub struct Database {
 
     client: Client,
     ctx: FlightContext,
+}
+
+pub struct DatabaseClient {
+    pub inner: GreptimeDatabaseClient<Channel>,
+}
+
+fn make_database_client(client: &Client) -> Result<DatabaseClient> {
+    let (_, channel) = client.find_channel()?;
+    Ok(DatabaseClient {
+        inner: GreptimeDatabaseClient::new(channel)
+            .max_decoding_message_size(client.max_grpc_recv_message_size())
+            .max_encoding_message_size(client.max_grpc_send_message_size()),
+    })
 }
 
 impl Database {
@@ -143,7 +158,7 @@ impl Database {
         &self,
         channel_size: usize,
     ) -> Result<StreamInserter> {
-        let client = self.client.make_database_client()?.inner;
+        let client = make_database_client(&self.client)?.inner;
 
         let stream_inserter = StreamInserter::new(
             client,
@@ -160,7 +175,7 @@ impl Database {
     }
 
     async fn handle(&self, request: Request) -> Result<u32> {
-        let mut client = self.client.make_database_client()?.inner;
+        let mut client = make_database_client(&self.client)?.inner;
         let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
