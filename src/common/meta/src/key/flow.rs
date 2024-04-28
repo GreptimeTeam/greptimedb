@@ -93,7 +93,7 @@ pub struct FlowMetadataManager {
     flow_task_info_manager: FlowTaskManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
-    flow_task_name_manager: FlowNameManager,
+    flow_flow_name_manager: FlowNameManager,
     kv_backend: KvBackendRef,
 }
 
@@ -102,7 +102,7 @@ impl FlowMetadataManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             flow_task_info_manager: FlowTaskManager::new(kv_backend.clone()),
-            flow_task_name_manager: FlowNameManager::new(kv_backend.clone()),
+            flow_flow_name_manager: FlowNameManager::new(kv_backend.clone()),
             flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
             table_task_manager: TableTaskManager::new(kv_backend.clone()),
             kv_backend,
@@ -110,8 +110,8 @@ impl FlowMetadataManager {
     }
 
     /// Returns the [FlowNameManager].
-    pub fn flow_task_name_manager(&self) -> &FlowNameManager {
-        &self.flow_task_name_manager
+    pub fn flow_name_manager(&self) -> &FlowNameManager {
+        &self.flow_flow_name_manager
     }
 
     /// Returns the [FlowTaskManager].
@@ -135,8 +135,8 @@ impl FlowMetadataManager {
         flow_id: FlowTaskId,
         flow_task_value: FlowTaskValue,
     ) -> Result<()> {
-        let (create_flow_task_name_txn, on_create_flow_task_name_failure) =
-            self.flow_task_name_manager.build_create_txn(
+        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) =
+            self.flow_flow_name_manager.build_create_txn(
                 &flow_task_value.catalog_name,
                 &flow_task_value.flow_name,
                 flow_id,
@@ -160,7 +160,7 @@ impl FlowMetadataManager {
         );
 
         let txn = Txn::merge_all(vec![
-            create_flow_task_name_txn,
+            create_flow_flow_name_txn,
             create_flow_task_txn,
             create_flownode_task_txn,
             create_table_task_txn,
@@ -176,24 +176,24 @@ impl FlowMetadataManager {
         let mut resp = self.kv_backend.txn(txn).await?;
         if !resp.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
-            let remote_flow_task_name = on_create_flow_task_name_failure(&mut set)?
+            let remote_flow_flow_name = on_create_flow_flow_name_failure(&mut set)?
                 .with_context(||error::UnexpectedSnafu {
                     err_msg: format!(
                     "Reads the empty flow task name during the creating flow task, flow_id: {flow_id}"
                 ),
                 })?;
 
-            if remote_flow_task_name.flow_id() != flow_id {
+            if remote_flow_flow_name.flow_id() != flow_id {
                 info!(
                     "Trying to create flow task {}.{}({}), but flow task({}) already exists",
                     flow_task_value.catalog_name,
                     flow_task_value.flow_name,
                     flow_id,
-                    remote_flow_task_name.flow_id()
+                    remote_flow_flow_name.flow_id()
                 );
 
                 return error::TaskAlreadyExistsSnafu {
-                    task_name: format!(
+                    flow_name: format!(
                         "{}.{}",
                         flow_task_value.catalog_name, flow_task_value.flow_name
                     ),

@@ -34,15 +34,15 @@ lazy_static! {
         Regex::new(&format!("^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
 }
 
-/// The key of mapping {task_name} to [FlowTaskId].
+/// The key of mapping {flow_name} to [FlowTaskId].
 ///
-/// The layout: `__flow/{catalog}/name/{task_name}`.
+/// The layout: `__flow/{catalog}/name/{flow_name}`.
 pub struct FlowNameKey(FlowTaskScoped<CatalogScoped<FlowNameKeyInner>>);
 
 impl FlowNameKey {
     /// Returns the [FlowNameKey]
-    pub fn new(catalog: String, task_name: String) -> FlowNameKey {
-        let inner = FlowNameKeyInner::new(task_name);
+    pub fn new(catalog: String, flow_name: String) -> FlowNameKey {
+        let inner = FlowNameKeyInner::new(flow_name);
         FlowNameKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
@@ -51,9 +51,9 @@ impl FlowNameKey {
         self.0.catalog()
     }
 
-    /// Return the `task_name`
-    pub fn task_name(&self) -> &str {
-        &self.0.task_name
+    /// Return the `flow_name`
+    pub fn flow_name(&self) -> &str {
+        &self.0.flow_name
     }
 }
 
@@ -72,12 +72,12 @@ impl MetaKey<FlowNameKey> for FlowNameKey {
 /// The key of mapping name to [FlowTaskId]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowNameKeyInner {
-    pub task_name: String,
+    pub flow_name: String,
 }
 
 impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
-        format!("{FLOW_NAME_KEY_PREFIX}/{}", self.task_name).into_bytes()
+        format!("{FLOW_NAME_KEY_PREFIX}/{}", self.flow_name).into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlowNameKeyInner> {
@@ -98,14 +98,14 @@ impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
                 })?;
         // Safety: pass the regex check above
         let task = captures[1].to_string();
-        Ok(FlowNameKeyInner { task_name: task })
+        Ok(FlowNameKeyInner { flow_name: task })
     }
 }
 
 impl FlowNameKeyInner {
     /// Returns a [FlowNameKeyInner].
     pub fn new(task: String) -> Self {
-        Self { task_name: task }
+        Self { flow_name: task }
     }
 }
 
@@ -157,7 +157,7 @@ impl FlowNameManager {
     }
 
     /// Builds a create flow task name transaction.
-    /// It's expected that the `__flow/{catalog}/name/{task_name}` wasn't occupied.
+    /// It's expected that the `__flow/{catalog}/name/{flow_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub fn build_create_txn(
         &self,
@@ -172,10 +172,10 @@ impl FlowNameManager {
     )> {
         let key = FlowNameKey::new(catalog.to_string(), name.to_string());
         let raw_key = key.to_bytes();
-        let flow_task_name_value = FlowNameValue::new(flow_id);
+        let flow_flow_name_value = FlowNameValue::new(flow_id);
         let txn = txn_helper::build_put_if_absent_txn(
             raw_key.clone(),
-            flow_task_name_value.try_as_raw_value()?,
+            flow_flow_name_value.try_as_raw_value()?,
         );
 
         Ok((
@@ -203,6 +203,6 @@ mod tests {
         let bytes = b"__flow/my_catalog/name/my_task".to_vec();
         let key = FlowNameKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
-        assert_eq!(key.task_name(), "my_task");
+        assert_eq!(key.flow_name(), "my_task");
     }
 }

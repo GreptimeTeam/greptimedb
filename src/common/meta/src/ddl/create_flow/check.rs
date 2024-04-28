@@ -31,13 +31,13 @@ impl CreateFlowProcedure {
         let exists = self
             .context
             .flow_task_metadata_manager
-            .flow_task_name_manager()
+            .flow_name_manager()
             .exists(catalog_name, task_name)
             .await?;
         ensure!(
             !exists,
             error::TaskAlreadyExistsSnafu {
-                task_name: format!("{}.{}", catalog_name, task_name),
+                flow_name: format!("{}.{}", catalog_name, task_name),
             }
         );
 
