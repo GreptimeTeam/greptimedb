@@ -357,6 +357,7 @@ impl GreptimeDbClusterBuilder {
             cached_meta_backend.clone(),
         ]));
         let catalog_manager = KvBackendCatalogManager::new(
+            Mode::Distributed,
             cached_meta_backend.clone(),
             multi_cache_invalidator.clone(),
         )

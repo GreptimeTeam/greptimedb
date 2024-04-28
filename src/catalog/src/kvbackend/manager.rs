@@ -22,6 +22,7 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
 };
 use common_catalog::format_full_table_name;
+use common_config::Mode;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context, MultiCacheInvalidator};
 use common_meta::instruction::CacheIdent;
@@ -56,6 +57,7 @@ use crate::CatalogManager;
 /// comes from `SystemCatalog`, which is static and read-only.
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
+    mode: Mode,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
@@ -101,6 +103,7 @@ const TABLE_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
 impl KvBackendCatalogManager {
     pub async fn new(
+        mode: Mode,
         backend: KvBackendRef,
         multi_cache_invalidator: Arc<MultiCacheInvalidator>,
     ) -> Arc<Self> {
@@ -113,6 +116,7 @@ impl KvBackendCatalogManager {
             .await;
 
         Arc::new_cyclic(|me| Self {
+            mode,
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             system_catalog: SystemCatalog {
@@ -125,6 +129,11 @@ impl KvBackendCatalogManager {
             },
             table_cache,
         })
+    }
+
+    /// Returns the server running mode.
+    pub fn running_mode(&self) -> &Mode {
+        &self.mode
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {

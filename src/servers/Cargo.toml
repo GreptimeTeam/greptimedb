@@ -30,6 +30,7 @@ catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
+common-config.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true

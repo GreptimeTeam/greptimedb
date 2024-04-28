@@ -21,6 +21,7 @@ use catalog::kvbackend::{
 };
 use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
+use common_config::Mode;
 use common_error::ext::ErrorExt;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_query::Output;
@@ -256,8 +257,12 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
     let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
         cached_meta_backend.clone(),
     ]));
-    let catalog_list =
-        KvBackendCatalogManager::new(cached_meta_backend.clone(), multi_cache_invalidator).await;
+    let catalog_list = KvBackendCatalogManager::new(
+        Mode::Standalone,
+        cached_meta_backend.clone(),
+        multi_cache_invalidator,
+    )
+    .await;
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
