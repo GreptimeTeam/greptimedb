@@ -53,14 +53,6 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
-
-    fn location_opt(&self) -> Option<common_error::snafu::Location> {
-        match self {
-            Error::Overflow { location, .. } => Some(*location),
-            Error::Underflow { location, .. } => Some(*location),
-            Error::Eof { location, .. } => Some(*location),
-        }
-    }
 }
 
 macro_rules! impl_read_le {

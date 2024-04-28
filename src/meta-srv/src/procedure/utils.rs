@@ -105,11 +105,11 @@ pub mod test_data {
 
     use chrono::DateTime;
     use common_catalog::consts::MITO2_ENGINE;
-    use common_meta::datanode_manager::DatanodeManagerRef;
     use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::DdlContext;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::node_manager::NodeManagerRef;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::RegionRoute;
@@ -188,7 +188,7 @@ pub mod test_data {
         }
     }
 
-    pub(crate) fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
+    pub(crate) fn new_ddl_context(node_manager: NodeManagerRef) -> DdlContext {
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
         let mailbox_sequence =
@@ -197,7 +197,7 @@ pub mod test_data {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         DdlContext {
-            datanode_manager,
+            node_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,
                 MetasrvInfo {

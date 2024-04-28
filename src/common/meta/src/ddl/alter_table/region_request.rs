@@ -105,6 +105,7 @@ fn create_proto_alter_kind(
             })))
         }
         Kind::RenameTable(_) => Ok(None),
+        Kind::ChangeColumnTypes(_) => unimplemented!(),
     }
 }
 
@@ -137,8 +138,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_make_alter_region_request() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(node_manager);
         let cluster_id = 1;
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);

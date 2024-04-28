@@ -23,7 +23,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::TableId;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
-use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
@@ -43,6 +42,7 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
     AlterLogicalTables, AlterTable, CreateDatabase, CreateLogicalTables, CreateTable, DropDatabase,
@@ -64,7 +64,7 @@ pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoade
 /// The [DdlManager] provides the ability to execute Ddl.
 pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    node_manager: NodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     table_metadata_allocator: TableMetadataAllocatorRef,
@@ -75,7 +75,7 @@ pub struct DdlManager {
 impl DdlManager {
     pub fn try_new(
         procedure_manager: ProcedureManagerRef,
-        datanode_clients: DatanodeManagerRef,
+        datanode_clients: NodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
         table_metadata_allocator: TableMetadataAllocatorRef,
@@ -84,7 +84,7 @@ impl DdlManager {
     ) -> Result<Self> {
         let manager = Self {
             procedure_manager,
-            datanode_manager: datanode_clients,
+            node_manager: datanode_clients,
             cache_invalidator,
             table_metadata_manager,
             table_metadata_allocator,
@@ -104,7 +104,7 @@ impl DdlManager {
     /// Returns the [DdlContext]
     pub fn create_context(&self) -> DdlContext {
         DdlContext {
-            datanode_manager: self.datanode_manager.clone(),
+            node_manager: self.node_manager.clone(),
             cache_invalidator: self.cache_invalidator.clone(),
             table_metadata_manager: self.table_metadata_manager.clone(),
             memory_region_keeper: self.memory_region_keeper.clone(),
@@ -716,7 +716,6 @@ mod tests {
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
-    use crate::datanode_manager::{DatanodeManager, DatanodeRef};
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
@@ -724,6 +723,7 @@ mod tests {
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::sequence::SequenceBuilder;
@@ -734,8 +734,12 @@ mod tests {
     pub struct DummyDatanodeManager;
 
     #[async_trait::async_trait]
-    impl DatanodeManager for DummyDatanodeManager {
+    impl NodeManager for DummyDatanodeManager {
         async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
+            unimplemented!()
+        }
+
+        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
             unimplemented!()
         }
     }

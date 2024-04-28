@@ -20,13 +20,13 @@ use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
-use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
@@ -79,7 +79,7 @@ pub struct MetasrvBuilder {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
-    datanode_manager: Option<DatanodeManagerRef>,
+    node_manager: Option<NodeManagerRef>,
     plugins: Option<Plugins>,
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
@@ -95,7 +95,7 @@ impl MetasrvBuilder {
             election: None,
             options: None,
             lock: None,
-            datanode_manager: None,
+            node_manager: None,
             plugins: None,
             table_metadata_allocator: None,
         }
@@ -141,8 +141,8 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn datanode_manager(mut self, datanode_manager: DatanodeManagerRef) -> Self {
-        self.datanode_manager = Some(datanode_manager);
+    pub fn node_manager(mut self, node_manager: NodeManagerRef) -> Self {
+        self.node_manager = Some(node_manager);
         self
     }
 
@@ -171,7 +171,7 @@ impl MetasrvBuilder {
             selector,
             handler_group,
             lock,
-            datanode_manager,
+            node_manager,
             plugins,
             table_metadata_allocator,
         } = self;
@@ -236,7 +236,7 @@ impl MetasrvBuilder {
 
         let ddl_manager = build_ddl_manager(
             &options,
-            datanode_manager,
+            node_manager,
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
@@ -392,7 +392,7 @@ fn build_procedure_manager(
 
 fn build_ddl_manager(
     options: &MetasrvOptions,
-    datanode_clients: Option<DatanodeManagerRef>,
+    datanode_clients: Option<NodeManagerRef>,
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,

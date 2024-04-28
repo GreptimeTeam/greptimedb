@@ -56,14 +56,6 @@ impl ErrorExt for Error {
         }
     }
 
-    fn location_opt(&self) -> Option<common_error::snafu::Location> {
-        match self {
-            Error::BigDecimalOutOfRange { location, .. } => Some(*location),
-            Error::InvalidPrecisionOrScale { location, .. } => Some(*location),
-            Error::ParseRustDecimalStr { .. } | Error::ParseBigDecimalStr { .. } => None,
-        }
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

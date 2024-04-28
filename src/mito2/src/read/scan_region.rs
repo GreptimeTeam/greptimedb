@@ -509,6 +509,7 @@ impl ScanInput {
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())
                 .index_applier(self.index_applier.clone())
+                .expected_metadata(Some(self.mapper.metadata().clone()))
                 .build()
                 .await;
             let reader = match maybe_reader {

@@ -16,10 +16,7 @@ mod health;
 mod heartbeat;
 mod leader;
 mod maintenance;
-mod meta;
 mod node_lease;
-mod region_migration;
-mod route;
 mod util;
 
 use std::collections::HashMap;
@@ -51,52 +48,11 @@ pub fn make_admin_service(metasrv: Metasrv) -> Admin {
         .route("/heartbeat/help", handler);
 
     let router = router.route(
-        "/catalogs",
-        meta::CatalogsHandler {
-            table_metadata_manager: metasrv.table_metadata_manager().clone(),
-        },
-    );
-
-    let handler = meta::SchemasHandler {
-        table_metadata_manager: metasrv.table_metadata_manager().clone(),
-    };
-    let router = router
-        .route("/schemas", handler.clone())
-        .route("/schemas/help", handler);
-
-    let handler = meta::TablesHandler {
-        table_metadata_manager: metasrv.table_metadata_manager().clone(),
-    };
-    let router = router
-        .route("/tables", handler.clone())
-        .route("/tables/help", handler);
-
-    let handler = meta::TableHandler {
-        table_metadata_manager: metasrv.table_metadata_manager().clone(),
-    };
-    let router = router
-        .route("/table", handler.clone())
-        .route("/table/help", handler);
-
-    let router = router.route(
         "/leader",
         leader::LeaderHandler {
             election: metasrv.election().cloned(),
         },
     );
-
-    let handler = route::RouteHandler {
-        table_metadata_manager: metasrv.table_metadata_manager().clone(),
-    };
-    let router = router
-        .route("/route", handler.clone())
-        .route("/route/help", handler);
-
-    let handler = region_migration::SubmitRegionMigrationTaskHandler {
-        region_migration_manager: metasrv.region_migration_manager().clone(),
-        meta_peer_client: metasrv.meta_peer_client().clone(),
-    };
-    let router = router.route("/region-migration", handler);
 
     let router = router.route(
         "/maintenance",

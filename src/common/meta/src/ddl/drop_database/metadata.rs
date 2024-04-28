@@ -108,8 +108,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_next() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(node_manager);
         ddl_context
             .table_metadata_manager
             .schema_manager()

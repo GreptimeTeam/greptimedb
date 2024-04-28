@@ -1759,6 +1759,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-frontend"
+version = "0.7.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-base",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "session",
+ "snafu",
+ "sql",
+]
+
+[[package]]
 name = "common-function"
 version = "0.7.2"
 dependencies = [
@@ -3556,6 +3571,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-meta",
@@ -3867,7 +3883,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=783682fabc38c57b5b9d46bdcfeebe2496e85bbb#783682fabc38c57b5b9d46bdcfeebe2496e85bbb"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2c14c6e22dfe957f40bb88dd01fb8530656de89b#2c14c6e22dfe957f40bb88dd01fb8530656de89b"
 dependencies = [
  "prost 0.12.4",
  "serde",

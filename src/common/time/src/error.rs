@@ -98,21 +98,6 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
-
-    fn location_opt(&self) -> Option<common_error::snafu::Location> {
-        match self {
-            Error::ParseTimestamp { location, .. }
-            | Error::Format { location, .. }
-            | Error::TimestampOverflow { location, .. }
-            | Error::ArithmeticOverflow { location, .. } => Some(*location),
-            Error::ParseDateStr { .. }
-            | Error::InvalidTimezoneOffset { .. }
-            | Error::ParseOffsetStr { .. }
-            | Error::ParseTimezoneName { .. } => None,
-            Error::InvalidDateStr { location, .. } => Some(*location),
-            Error::ParseInterval { location, .. } => Some(*location),
-        }
-    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

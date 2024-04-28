@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
+use api::v1::flow::{FlowRequest, FlowResponse, InsertRequest};
 use api::v1::region::{QueryRequest, RegionRequest};
 pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
@@ -34,11 +35,24 @@ pub trait Datanode: Send + Sync {
 
 pub type DatanodeRef = Arc<dyn Datanode>;
 
-/// Datanode manager
+/// The trait for handling requests to flownode
 #[async_trait::async_trait]
-pub trait DatanodeManager: Send + Sync {
-    /// Retrieves a target `datanode`.
-    async fn datanode(&self, datanode: &Peer) -> DatanodeRef;
+pub trait Flownode: Send + Sync {
+    async fn handle(&self, request: FlowRequest) -> Result<FlowResponse>;
+
+    async fn handle_insert(&self, request: InsertRequest) -> Result<FlowResponse>;
 }
 
-pub type DatanodeManagerRef = Arc<dyn DatanodeManager>;
+pub type FlownodeRef = Arc<dyn Flownode>;
+
+/// Datanode manager
+#[async_trait::async_trait]
+pub trait NodeManager: Send + Sync {
+    /// Retrieves a target `datanode`.
+    async fn datanode(&self, node: &Peer) -> DatanodeRef;
+
+    /// Retrieves a target `flownode`.
+    async fn flownode(&self, node: &Peer) -> FlownodeRef;
+}
+
+pub type NodeManagerRef = Arc<dyn NodeManager>;

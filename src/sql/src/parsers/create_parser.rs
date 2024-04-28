@@ -28,7 +28,7 @@ use table::requests::validate_table_option;
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu,
-    MissingTimeIndexSnafu, Result, SyntaxSnafu,
+    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
@@ -97,9 +97,7 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_keyword(Keyword::TABLE)
             .context(SyntaxSnafu)?;
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+        let if_not_exists = self.parse_if_not_exist()?;
         let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
         if !columns.is_empty() {
@@ -120,11 +118,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_create_database(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-
+        let if_not_exists = self.parse_if_not_exist()?;
         let database_name = self.parse_object_name().context(error::UnexpectedSnafu {
             sql: self.sql,
             expected: "a database name",
@@ -139,9 +133,8 @@ impl<'a> ParserContext<'a> {
 
     fn parse_create_table(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+
+        let if_not_exists = self.parse_if_not_exist()?;
 
         let table_name = self.intern_parse_table_name()?;
 
@@ -180,9 +173,7 @@ impl<'a> ParserContext<'a> {
 
     /// "CREATE FLOW TASK" clause
     fn parse_create_flow_task(&mut self, or_replace: bool) -> Result<Statement> {
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+        let if_not_exists = self.parse_if_not_exist()?;
 
         let task_name = self.intern_parse_table_name()?;
 
@@ -236,6 +227,35 @@ impl<'a> ParserContext<'a> {
             comment,
             query,
         }))
+    }
+
+    fn parse_if_not_exist(&mut self) -> Result<bool> {
+        match self.parser.peek_token().token {
+            Token::Word(w) if Keyword::IF != w.keyword => return Ok(false),
+            _ => {}
+        }
+
+        if self.parser.parse_keywords(&[Keyword::IF, Keyword::NOT]) {
+            return self
+                .parser
+                .expect_keyword(Keyword::EXISTS)
+                .map(|_| true)
+                .context(UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "EXISTS",
+                    actual: self.peek_token_as_string(),
+                });
+        }
+
+        if self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]) {
+            return UnsupportedSnafu {
+                sql: self.sql,
+                keyword: "EXISTS",
+            }
+            .fail();
+        }
+
+        Ok(false)
     }
 
     fn parse_create_table_options(&mut self) -> Result<OptionMap> {

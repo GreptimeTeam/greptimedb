@@ -248,18 +248,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to get metadata from engine {} for region_id {}",
-        engine,
-        region_id,
-    ))]
-    GetRegionMetadata {
-        engine: String,
-        region_id: RegionId,
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to build region requests"))]
     BuildRegionRequests {
         location: Location,
@@ -337,8 +325,7 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownInstance { .. }
             | RegionEngineNotFound { .. }
-            | UnsupportedOutput { .. }
-            | GetRegionMetadata { .. } => StatusCode::Internal,
+            | UnsupportedOutput { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,

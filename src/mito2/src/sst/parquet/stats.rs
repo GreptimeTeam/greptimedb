@@ -21,6 +21,7 @@ use datafusion::physical_optimizer::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow::array::{ArrayRef, BooleanArray};
 use parquet::file::metadata::RowGroupMetaData;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::sst::parquet::format::ReadFormat;
@@ -31,11 +32,11 @@ pub(crate) struct RowGroupPruningStats<'a, T> {
     row_groups: &'a [T],
     /// Helper to read the SST.
     read_format: &'a ReadFormat,
-    /// Projected column ids to read.
-    ///
-    /// We need column ids to distinguish different columns with the same name.
-    /// e.g. Drops and then adds a column again.
-    column_ids: HashSet<ColumnId>,
+    /// The metadata of the region.
+    /// It contains the schema a query expects to read. If it is not None, we use it instead
+    /// of the metadata in the SST to get the column id of a column as the SST may have
+    /// different columns.
+    expected_metadata: Option<RegionMetadataRef>,
 }
 
 impl<'a, T> RowGroupPruningStats<'a, T> {
@@ -43,22 +44,23 @@ impl<'a, T> RowGroupPruningStats<'a, T> {
     pub(crate) fn new(
         row_groups: &'a [T],
         read_format: &'a ReadFormat,
-        column_ids: HashSet<ColumnId>,
+        expected_metadata: Option<RegionMetadataRef>,
     ) -> Self {
         Self {
             row_groups,
             read_format,
-            column_ids,
+            expected_metadata,
         }
     }
 
     /// Returns the column id of specific column name if we need to read it.
     fn column_id_to_prune(&self, name: &str) -> Option<ColumnId> {
+        let metadata = self
+            .expected_metadata
+            .as_ref()
+            .unwrap_or_else(|| self.read_format.metadata());
         // Only use stats when the column to read has the same id as the column in the SST.
-        self.read_format
-            .metadata()
-            .column_by_name(name)
-            .and_then(|col| self.column_ids.get(&col.column_id).copied())
+        metadata.column_by_name(name).map(|col| col.column_id)
     }
 }
 
