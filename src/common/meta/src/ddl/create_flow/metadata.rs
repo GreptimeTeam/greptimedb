@@ -25,7 +25,7 @@ impl CreateFlowProcedure {
         let partitions = 1;
         let (flow_id, peers) = self
             .context
-            .flow_task_metadata_allocator
+            .flow_metadata_allocator
             .create(partitions)
             .await?;
         self.data.flow_id = Some(flow_id);

@@ -436,9 +436,9 @@ impl StartCommand {
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_task_meta_allocator = Arc::new(
-            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_id_sequence),
-        );
+        let flow_meta_allocator = Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
+            flow_id_sequence,
+        ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
@@ -447,7 +447,7 @@ impl StartCommand {
             table_metadata_manager,
             table_meta_allocator,
             flow_metadata_manager,
-            flow_task_meta_allocator,
+            flow_meta_allocator,
         )
         .await?;
 
@@ -481,7 +481,7 @@ impl StartCommand {
         table_metadata_manager: TableMetadataManagerRef,
         table_metadata_allocator: TableMetadataAllocatorRef,
         flow_metadata_manager: FlowTaskMetadataManagerRef,
-        flow_task_metadata_allocator: FlowTaskMetadataAllocatorRef,
+        flow_metadata_allocator: FlowTaskMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
@@ -492,7 +492,7 @@ impl StartCommand {
                     table_metadata_manager,
                     table_metadata_allocator,
                     flow_metadata_manager,
-                    flow_task_metadata_allocator,
+                    flow_metadata_allocator,
                 },
                 procedure_manager,
                 true,

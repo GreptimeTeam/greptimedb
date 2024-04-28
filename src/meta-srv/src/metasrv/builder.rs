@@ -239,7 +239,7 @@ impl MetasrvBuilder {
             ))
         });
         // TODO(weny): use the real allocator.
-        let flow_task_metadata_allocator = Arc::new(
+        let flow_metadata_allocator = Arc::new(
             FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_FLOW_ID as u64)
@@ -274,7 +274,7 @@ impl MetasrvBuilder {
                     table_metadata_manager: table_metadata_manager.clone(),
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
-                    flow_task_metadata_allocator: flow_task_metadata_allocator.clone(),
+                    flow_metadata_allocator: flow_metadata_allocator.clone(),
                 },
                 procedure_manager.clone(),
                 true,

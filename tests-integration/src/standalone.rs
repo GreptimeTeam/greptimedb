@@ -156,7 +156,7 @@ impl GreptimeDbStandaloneBuilder {
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_task_metadata_allocator = Arc::new(
+        let flow_metadata_allocator = Arc::new(
             FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_id_sequence),
         );
 
@@ -169,7 +169,7 @@ impl GreptimeDbStandaloneBuilder {
                     table_metadata_manager,
                     table_metadata_allocator,
                     flow_metadata_manager,
-                    flow_task_metadata_allocator,
+                    flow_metadata_allocator,
                 },
                 procedure_manager.clone(),
                 register_procedure_loaders,

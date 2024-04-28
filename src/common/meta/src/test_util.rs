@@ -110,20 +110,20 @@ pub fn new_ddl_context_with_kv_backend(
         Arc::new(WalOptionsAllocator::default()),
     ));
     let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-    let flow_task_metadata_allocator = Arc::new(
-        FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
+    let flow_metadata_allocator = Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
+        Arc::new(
             SequenceBuilder::new("flow-test", kv_backend)
                 .initial(1024)
                 .build(),
-        )),
-    );
+        ),
+    ));
     DdlContext {
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),
         memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
         table_metadata_allocator,
         table_metadata_manager,
-        flow_task_metadata_allocator,
+        flow_metadata_allocator,
         flow_metadata_manager,
     }
 }
