@@ -3506,10 +3506,12 @@ name = "flow"
 version = "0.7.2"
 dependencies = [
  "api",
+ "async-trait",
  "catalog",
  "common-catalog",
  "common-decimal",
  "common-error",
+ "common-frontend",
  "common-macro",
  "common-meta",
  "common-telemetry",
