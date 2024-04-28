@@ -26,6 +26,7 @@ enum_dispatch = "0.3"
 # This fork is simply for keeping our dependency in our org, and pin the version
 # it is the same with upstream repo
 common-meta.workspace = true
+greptime-proto.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true
 minstant = "0.1.7"

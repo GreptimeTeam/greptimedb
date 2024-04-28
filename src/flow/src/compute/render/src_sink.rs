@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, VecDeque};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
@@ -77,7 +77,34 @@ impl<'referred, 'df> Context<'referred, 'df> {
         })
     }
 
-    /// Render a sink which send updates to broadcast channel
+    pub fn render_unbounded_sink(
+        &mut self,
+        bundle: CollectionBundle,
+        sender: mpsc::UnboundedSender<DiffRow>,
+    ) {
+        let CollectionBundle {
+            collection,
+            arranged: _,
+        } = bundle;
+
+        let _sink = self.df.add_subgraph_sink(
+            "UnboundedSink",
+            collection.into_inner(),
+            move |_ctx, recv| {
+                let data = recv.take_inner();
+                for row in data.into_iter().flat_map(|i| i.into_iter()) {
+                    // if the sender is closed, stop sending
+                    if sender.is_closed() {
+                        break;
+                    }
+                    // TODO(discord9): handling tokio broadcast error
+                    let _ = sender.send(row);
+                }
+            },
+        );
+    }
+
+    /// Render a sink which send updates to broadcast channel, have internal buffer in case broadcast channel is full
     pub fn render_sink(&mut self, bundle: CollectionBundle, sender: broadcast::Sender<DiffRow>) {
         let CollectionBundle {
             collection,
