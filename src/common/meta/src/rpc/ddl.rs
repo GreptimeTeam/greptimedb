@@ -726,7 +726,7 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
 /// Create flow task
 pub struct CreateFlowTask {
     pub catalog_name: String,
-    pub task_name: String,
+    pub flow_name: String,
     pub source_table_names: Vec<TableName>,
     pub sink_table_name: TableName,
     pub or_replace: bool,
@@ -758,7 +758,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
 
         Ok(CreateFlowTask {
             catalog_name,
-            task_name,
+            flow_name: task_name,
             source_table_names: source_table_names.into_iter().map(Into::into).collect(),
             sink_table_name: sink_table_name
                 .context(error::InvalidProtoMsgSnafu {
@@ -779,7 +779,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
     fn from(
         CreateFlowTask {
             catalog_name,
-            task_name,
+            flow_name: task_name,
             source_table_names,
             sink_table_name,
             or_replace,

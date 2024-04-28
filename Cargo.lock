@@ -1915,6 +1915,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-wal",
+ "datafusion-common",
  "datatypes",
  "derive_builder 0.12.0",
  "etcd-client",
