@@ -1762,8 +1762,15 @@ dependencies = [
 name = "common-frontend"
 version = "0.7.2"
 dependencies = [
+ "api",
+ "async-trait",
  "common-base",
  "common-error",
+ "common-macro",
+ "common-query",
+ "session",
+ "snafu",
+ "sql",
 ]
 
 [[package]]
