@@ -55,7 +55,7 @@ pub enum Statement {
     CreateExternalTable(CreateExternalTable),
     // CREATE TABLE ... LIKE
     CreateTableLike(CreateTableLike),
-    // CREATE TASK
+    // CREATE FLOW
     CreateFlow(CreateFlow),
     // DROP TABLE
     DropTable(DropTable),
