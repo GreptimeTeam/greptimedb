@@ -684,6 +684,9 @@ impl HttpServer {
             .with_state(api_state)
     }
 
+    /// Route Prometheus [HTTP API].
+    ///
+    /// [HTTP API]: https://prometheus.io/docs/prometheus/latest/querying/api/
     fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
             .route(
@@ -702,6 +705,11 @@ impl HttpServer {
             .with_state(prometheus_handler)
     }
 
+    /// Route Prometheus remote [read] and [write] API. In other places the related modules are
+    /// called `prom_store`.
+    ///
+    /// [read]: https://prometheus.io/docs/prometheus/latest/querying/remote_read_api/
+    /// [write]: https://prometheus.io/docs/concepts/remote_write_spec/
     fn route_prom<S>(
         prom_handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,

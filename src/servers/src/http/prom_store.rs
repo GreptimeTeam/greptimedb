@@ -208,7 +208,7 @@ pub async fn remote_write_without_strict_mode(
         query_ctx = Arc::new(new_query_ctx);
     }
 
-    let output = handler.write(request, query_ctx, false).await?;
+    let output = handler.write(request, query_ctx, true).await?;
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
     Ok((
         StatusCode::NO_CONTENT,
