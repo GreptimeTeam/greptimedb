@@ -1759,6 +1759,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-frontend"
+version = "0.7.2"
+dependencies = [
+ "common-base",
+ "common-error",
+]
+
+[[package]]
 name = "common-function"
 version = "0.7.2"
 dependencies = [
