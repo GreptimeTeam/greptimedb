@@ -58,7 +58,7 @@ pub enum AlterTableOperation {
         column_def: ColumnDef,
         location: Option<AddColumnLocation>,
     },
-    /// `ALTER COLUMN <column_name> TYPE [target_type]`
+    /// `MODIFY <column_name> [target_type]`
     ChangeColumnType {
         column_name: Ident,
         target_type: DataType,
@@ -91,7 +91,7 @@ impl Display for AlterTableOperation {
                 column_name,
                 target_type,
             } => {
-                write!(f, r#"ALTER COLUMN {column_name} TYPE {target_type}"#)
+                write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
             }
         }
     }
@@ -128,7 +128,7 @@ ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
             }
         }
 
-        let sql = r"alter table monitor alter column load_15 type string;";
+        let sql = r"alter table monitor modify column load_15 string;";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -140,7 +140,7 @@ ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ALTER COLUMN load_15 TYPE STRING"#,
+ALTER TABLE monitor MODIFY COLUMN load_15 STRING"#,
                     &new_sql
                 );
             }

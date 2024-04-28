@@ -73,25 +73,14 @@ impl<'a> ParserContext<'a> {
                     parser.peek_token()
                 )));
             }
-        } else if parser
-            .expect_keywords(&[Keyword::ALTER, Keyword::COLUMN])
-            .is_ok()
-        {
+        } else if ParserContext::inner_consume_token(parser, "MODIFY") {
+            let _ = parser.parse_keyword(Keyword::COLUMN);
             let column_name = Self::canonicalize_identifier(parser.parse_identifier(false)?);
+            let target_type = parser.parse_data_type()?;
 
-            if parser.parse_keyword(Keyword::TYPE) {
-                let target_type = parser.parse_data_type()?;
-
-                AlterTableOperation::ChangeColumnType {
-                    column_name,
-                    target_type,
-                }
-            } else {
-                return Err(ParserError::ParserError(format!(
-                    "expect keyword TYPE or TO after ALTER TABLE ALTER COLUMN {}, found {}",
-                    column_name,
-                    parser.peek_token()
-                )));
+            AlterTableOperation::ChangeColumnType {
+                column_name,
+                target_type,
             }
         } else if parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj_raw = self.parse_object_name()?;
@@ -107,7 +96,7 @@ impl<'a> ParserContext<'a> {
             AlterTableOperation::RenameTable { new_table_name }
         } else {
             return Err(ParserError::ParserError(format!(
-                "expect keyword ADD or DROP or ALERT COLUMN or RENAME after ALTER TABLE, found {}",
+                "expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE, found {}",
                 parser.peek_token()
             )));
         };
@@ -275,22 +264,25 @@ mod tests {
 
     #[test]
     fn test_parse_alter_change_column_type() {
-        let sql = "ALTER TABLE my_metric_1 ALTER COLUMN a STRING";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap_err();
+        let sql_1 = "ALTER TABLE my_metric_1 MODIFY COLUMN a STRING";
+        let result_1 = ParserContext::create_with_dialect(
+            sql_1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
 
-        let err = result.output_msg();
-        assert!(err
-            .contains("expect keyword TYPE or TO after ALTER TABLE ALTER COLUMN a, found STRING"));
+        let sql_2 = "ALTER TABLE my_metric_1 MODIFY a STRING";
+        let mut result_2 = ParserContext::create_with_dialect(
+            sql_2,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result_1, result_2);
+        assert_eq!(1, result_2.len());
 
-        let sql = "ALTER TABLE my_metric_1 ALTER COLUMN a TYPE STRING";
-        let mut result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, result.len());
-
-        let statement = result.remove(0);
+        let statement = result_2.remove(0);
         assert_matches!(statement, Statement::Alter { .. });
         match statement {
             Statement::Alter(alter_table) => {
@@ -323,9 +315,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert!(
-            err.contains("expect keyword ADD or DROP or ALERT COLUMN or RENAME after ALTER TABLE")
-        );
+        assert!(err.contains("expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =
