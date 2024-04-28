@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::ddl::create_flow_task::CreateFlowTaskProcedure;
+use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
 
-impl CreateFlowTaskProcedure {
+impl CreateFlowProcedure {
     /// Allocates the [FlowTaskId].
     pub(crate) async fn allocate_flow_task_id(&mut self) -> Result<()> {
         //TODO(weny, ruihang): We doesn't support the partitions. It's always be 1, now.

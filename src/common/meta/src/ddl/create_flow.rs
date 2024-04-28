@@ -44,15 +44,15 @@ use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};
 
 /// The procedure of flow task creation.
-pub struct CreateFlowTaskProcedure {
+pub struct CreateFlowProcedure {
     pub context: DdlContext,
     pub data: CreateFlowTaskData,
 }
 
-impl CreateFlowTaskProcedure {
+impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlowTask";
 
-    /// Returns a new [CreateFlowTaskProcedure].
+    /// Returns a new [CreateFlowProcedure].
     pub fn new(cluster_id: ClusterId, task: CreateFlowTask, context: DdlContext) -> Self {
         Self {
             context,
@@ -70,7 +70,7 @@ impl CreateFlowTaskProcedure {
     /// Deserializes from `json`.
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
-        Ok(CreateFlowTaskProcedure { context, data })
+        Ok(CreateFlowProcedure { context, data })
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
@@ -87,7 +87,7 @@ impl CreateFlowTaskProcedure {
         // Safety: must be allocated.
         let mut create_flow_task = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
-            let requester = self.context.datanode_manager.flownode(peer).await;
+            let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
                 body: Some(PbFlowRequest::Create(self.data.to_create_flow_request())),
             };
@@ -126,7 +126,7 @@ impl CreateFlowTaskProcedure {
 }
 
 #[async_trait]
-impl Procedure for CreateFlowTaskProcedure {
+impl Procedure for CreateFlowProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
     }

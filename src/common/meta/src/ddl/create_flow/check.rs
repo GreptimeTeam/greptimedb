@@ -14,10 +14,10 @@
 
 use snafu::ensure;
 
-use crate::ddl::create_flow_task::CreateFlowTaskProcedure;
+use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::error::{self, Result};
 
-impl CreateFlowTaskProcedure {
+impl CreateFlowProcedure {
     /// Checks:
     /// - The new task name doesn't exist.
     /// - The source tables exist.
