@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::datanode_manager::{DatanodeRef, FlownodeRef, NodeManager};
+use common_meta::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 

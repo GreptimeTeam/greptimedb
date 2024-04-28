@@ -45,8 +45,8 @@ use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDat
 
 #[tokio::test]
 async fn test_on_prepare_table_not_exists_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
@@ -70,8 +70,8 @@ async fn test_on_prepare_table_not_exists_err() {
 
 #[tokio::test]
 async fn test_on_prepare_table() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
@@ -102,8 +102,8 @@ async fn test_on_prepare_table() {
 async fn test_on_datanode_drop_regions() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher(tx);
-    let datanode_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let table_id = 1024;
     let table_name = "foo";
@@ -175,9 +175,9 @@ async fn test_on_datanode_drop_regions() {
 
 #[tokio::test]
 async fn test_on_rollback() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    let ddl_context = new_ddl_context_with_kv_backend(datanode_manager, kv_backend.clone());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
     let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -258,9 +258,9 @@ fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool
 async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     let cluster_id = 1;
 
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    let ddl_context = new_ddl_context_with_kv_backend(datanode_manager, kv_backend);
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
     let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
     let logical_table_id =

@@ -85,8 +85,8 @@ fn test_create_table_task(name: &str) -> CreateTableTask {
 
 #[tokio::test]
 async fn test_on_prepare_table_exists_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -108,8 +108,8 @@ async fn test_on_prepare_table_exists_err() {
 
 #[tokio::test]
 async fn test_on_prepare_with_create_if_table_exists() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let mut task = test_create_table_task("foo");
     task.create_table.create_if_not_exists = true;
@@ -133,8 +133,8 @@ async fn test_on_prepare_with_create_if_table_exists() {
 
 #[tokio::test]
 async fn test_on_prepare_without_create_if_table_exists() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let mut task = test_create_table_task("foo");
     task.create_table.create_if_not_exists = true;
@@ -146,8 +146,8 @@ async fn test_on_prepare_without_create_if_table_exists() {
 
 #[tokio::test]
 async fn test_on_prepare_with_no_partition_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let mut task = test_create_table_task("foo");
     task.partitions = vec![];
@@ -163,8 +163,8 @@ async fn test_on_prepare_with_no_partition_err() {
 #[tokio::test]
 async fn test_on_datanode_create_regions_should_retry() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -181,8 +181,8 @@ async fn test_on_datanode_create_regions_should_retry() {
 #[tokio::test]
 async fn test_on_datanode_create_regions_should_not_retry() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -199,8 +199,8 @@ async fn test_on_datanode_create_regions_should_not_retry() {
 #[tokio::test]
 async fn test_on_create_metadata_error() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -231,8 +231,8 @@ async fn test_on_create_metadata_error() {
 #[tokio::test]
 async fn test_on_create_metadata() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -253,9 +253,9 @@ async fn test_on_create_metadata() {
 async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     let cluster_id = 1;
 
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    let ddl_context = new_ddl_context_with_kv_backend(datanode_manager, kv_backend);
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
     let task = test_create_table_task("foo");
     let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context.clone());

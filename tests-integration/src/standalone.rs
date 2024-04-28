@@ -130,7 +130,7 @@ impl GreptimeDbStandaloneBuilder {
         let catalog_manager =
             KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
 
-        let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+        let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
         let table_id_sequence = Arc::new(
             SequenceBuilder::new("table_id", kv_backend.clone())
@@ -150,7 +150,7 @@ impl GreptimeDbStandaloneBuilder {
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(
                 procedure_manager.clone(),
-                datanode_manager.clone(),
+                node_manager.clone(),
                 multi_cache_invalidator,
                 table_metadata_manager,
                 table_meta_allocator,
@@ -163,7 +163,7 @@ impl GreptimeDbStandaloneBuilder {
         let instance = FrontendBuilder::new(
             kv_backend.clone(),
             catalog_manager,
-            datanode_manager,
+            node_manager,
             ddl_task_executor,
         )
         .with_plugin(plugins)
