@@ -161,17 +161,25 @@ impl ParquetReaderBuilder {
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         let region_meta = Self::get_region_metadata(&file_path, key_value_meta)?;
-        let read_format = ReadFormat::new(Arc::new(region_meta));
+        // Always list all column ids to read.
+        let column_ids = self.projection.clone().unwrap_or_else(|| {
+            let metadata = self
+                .expected_metadata
+                .as_deref()
+                .unwrap_or_else(|| &region_meta);
+            metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect()
+        });
+        let read_format = ReadFormat::new(Arc::new(region_meta), &column_ids);
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let projection_mask = if let Some(column_ids) = self.projection.as_ref() {
-            let indices = read_format.projection_indices(column_ids.iter().copied());
-            // Now we assumes we don't have nested schemas.
-            ProjectionMask::roots(parquet_schema_desc, indices)
-        } else {
-            ProjectionMask::all()
-        };
+        let indices = read_format.projection_indices();
+        // Now we assumes we don't have nested schemas.
+        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
 
         // Computes the field levels.
         let hint = Some(read_format.arrow_schema().fields());
@@ -422,20 +430,6 @@ impl ParquetReaderBuilder {
 
         Some(row_groups)
     }
-}
-
-/// Simple filter with additional information for evaluating.
-struct SimpleFilterContext {
-    /// The filter.
-    filter: SimpleFilterEvaluator,
-    /// The column id in the expected region metadata.
-    column_id: ColumnId,
-    /// The semantic type of the column.
-    semantic_type: SemanticType,
-    /// The index of the column in [Batch].
-    /// If the semantic type is a tag, this is the index in the primary key.
-    /// If the semantic type is a field, this is the index in fields.
-    index_in_batch: usize,
 }
 
 /// Parquet reader metrics.
