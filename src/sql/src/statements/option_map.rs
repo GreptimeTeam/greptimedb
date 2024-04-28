@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 
 use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
-use itertools::Itertools;
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
 
 const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
@@ -24,8 +23,8 @@ const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 /// Options hashmap.
 #[derive(Clone, Debug, Default)]
 pub struct OptionMap {
-    options: HashMap<String, String>,
-    secrets: HashMap<String, SecretString>,
+    options: BTreeMap<String, String>,
+    secrets: BTreeMap<String, SecretString>,
 }
 
 impl OptionMap {
@@ -79,12 +78,12 @@ impl OptionMap {
 
     pub fn kv_pairs(&self) -> Vec<String> {
         let mut result = Vec::with_capacity(self.options.len() + self.secrets.len());
-        for key in self.options.keys().sorted() {
+        for key in self.options.keys() {
             if let Some(val) = self.options.get(key) {
                 result.push(format!("{key} = '{}'", val.escape_default()));
             }
         }
-        for key in self.secrets.keys().sorted() {
+        for key in self.secrets.keys() {
             if self.secrets.contains_key(key) {
                 result.push(format!("{key} = '******'"));
             }
@@ -95,10 +94,7 @@ impl OptionMap {
 
 impl From<HashMap<String, String>> for OptionMap {
     fn from(value: HashMap<String, String>) -> Self {
-        let mut result = OptionMap {
-            options: Default::default(),
-            secrets: Default::default(),
-        };
+        let mut result = OptionMap::default();
         for (k, v) in value.into_iter() {
             result.insert(k, v);
         }
