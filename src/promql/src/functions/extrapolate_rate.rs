@@ -35,7 +35,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
+use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
 use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
