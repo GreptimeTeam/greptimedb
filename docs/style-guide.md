@@ -12,7 +12,7 @@ It's mainly an complement to the [Rust Style Guide](https://pingcap.github.io/st
 
 ## Formatting
 
-- Place all `mod` declaration before any `use` (except the test mod).
+- Place all `mod` declaration before any `use`.
 - Use `unimplemented!()` instead of `todo!()` for things that aren't likely to be implemented.
 - Add an empty line before and after declaration blocks.
 - Place comment before attributes (`#[]`) and derive (`#[derive]`).
