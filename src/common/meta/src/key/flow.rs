@@ -14,7 +14,7 @@
 
 pub(crate) mod flow_info;
 pub(crate) mod flow_name;
-pub(crate) mod flownode_task;
+pub(crate) mod flownode_flow;
 pub(crate) mod table_task;
 
 use std::ops::Deref;
@@ -28,7 +28,7 @@ use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowTaskManager;
 use crate::key::flow::flow_name::FlowNameManager;
-use crate::key::flow::flownode_task::FlownodeTaskManager;
+use crate::key::flow::flownode_flow::FlownodeTaskManager;
 use crate::key::flow::table_task::TableTaskManager;
 use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;

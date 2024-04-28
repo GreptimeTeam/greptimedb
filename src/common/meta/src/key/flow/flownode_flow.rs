@@ -43,37 +43,37 @@ const FLOWNODE_TASK_KEY_PREFIX: &str = "flownode";
 /// The key of mapping [FlownodeId] to [FlowTaskId].
 ///
 /// The layout `__flow_task/{catalog}/flownode/{flownode_id}/{flow_task_id}/{partition_id}`
-pub struct FlownodeTaskKey(FlowTaskScoped<CatalogScoped<FlownodeTaskKeyInner>>);
+pub struct FlownodeFlowKey(FlowTaskScoped<CatalogScoped<FlownodeFlowKeyInner>>);
 
-impl MetaKey<FlownodeTaskKey> for FlownodeTaskKey {
+impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlownodeTaskKey> {
-        Ok(FlownodeTaskKey(FlowTaskScoped::<
-            CatalogScoped<FlownodeTaskKeyInner>,
+    fn from_bytes(bytes: &[u8]) -> Result<FlownodeFlowKey> {
+        Ok(FlownodeFlowKey(FlowTaskScoped::<
+            CatalogScoped<FlownodeFlowKeyInner>,
         >::from_bytes(bytes)?))
     }
 }
 
-impl FlownodeTaskKey {
-    /// Returns a new [FlownodeTaskKey].
+impl FlownodeFlowKey {
+    /// Returns a new [FlownodeFlowKey].
     pub fn new(
         catalog: String,
         flownode_id: FlownodeId,
         flow_task_id: FlowTaskId,
         partition_id: FlowTaskPartitionId,
-    ) -> FlownodeTaskKey {
-        let inner = FlownodeTaskKeyInner::new(flownode_id, flow_task_id, partition_id);
-        FlownodeTaskKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+    ) -> FlownodeFlowKey {
+        let inner = FlownodeFlowKeyInner::new(flownode_id, flow_task_id, partition_id);
+        FlownodeFlowKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
-    /// The prefix used to retrieve all [FlownodeTaskKey]s with the specified `flownode_id`.
+    /// The prefix used to retrieve all [FlownodeFlowKey]s with the specified `flownode_id`.
     pub fn range_start_key(catalog: String, flownode_id: FlownodeId) -> Vec<u8> {
         let catalog_scoped_key = CatalogScoped::new(
             catalog,
-            BytesAdapter::from(FlownodeTaskKeyInner::range_start_key(flownode_id).into_bytes()),
+            BytesAdapter::from(FlownodeFlowKeyInner::range_start_key(flownode_id).into_bytes()),
         );
 
         FlowTaskScoped::new(catalog_scoped_key).to_bytes()
@@ -101,14 +101,14 @@ impl FlownodeTaskKey {
 }
 
 /// The key of mapping [FlownodeId] to [FlowTaskId].
-pub struct FlownodeTaskKeyInner {
+pub struct FlownodeFlowKeyInner {
     flownode_id: FlownodeId,
     flow_task_id: FlowTaskId,
     partition_id: FlowTaskPartitionId,
 }
 
-impl FlownodeTaskKeyInner {
-    /// Returns a [FlownodeTaskKey] with the specified `flownode_id`, `flow_task_id` and `partition_id`.
+impl FlownodeFlowKeyInner {
+    /// Returns a [FlownodeFlowKey] with the specified `flownode_id`, `flow_task_id` and `partition_id`.
     pub fn new(
         flownode_id: FlownodeId,
         flow_task_id: FlowTaskId,
@@ -125,13 +125,13 @@ impl FlownodeTaskKeyInner {
         format!("{}/{flownode_id}", FLOWNODE_TASK_KEY_PREFIX)
     }
 
-    /// The prefix used to retrieve all [FlownodeTaskKey]s with the specified `flownode_id`.
+    /// The prefix used to retrieve all [FlownodeFlowKey]s with the specified `flownode_id`.
     fn range_start_key(flownode_id: FlownodeId) -> String {
         format!("{}/", Self::prefix(flownode_id))
     }
 }
 
-impl MetaKey<FlownodeTaskKeyInner> for FlownodeTaskKeyInner {
+impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{FLOWNODE_TASK_KEY_PREFIX}/{}/{}/{}",
@@ -140,11 +140,11 @@ impl MetaKey<FlownodeTaskKeyInner> for FlownodeTaskKeyInner {
         .into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlownodeTaskKeyInner> {
+    fn from_bytes(bytes: &[u8]) -> Result<FlownodeFlowKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
-                    "FlownodeTaskKeyInner '{}' is not a valid UTF8 string: {e}",
+                    "FlownodeFlowKeyInner '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
                 ),
             }
@@ -154,14 +154,14 @@ impl MetaKey<FlownodeTaskKeyInner> for FlownodeTaskKeyInner {
             FLOWNODE_TASK_KEY_PATTERN
                 .captures(key)
                 .context(error::InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid FlownodeTaskKeyInner '{key}'"),
+                    err_msg: format!("Invalid FlownodeFlowKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
         let flownode_id = captures[1].parse::<FlownodeId>().unwrap();
         let flow_task_id = captures[2].parse::<FlowTaskId>().unwrap();
         let partition_id = captures[3].parse::<FlowTaskPartitionId>().unwrap();
 
-        Ok(FlownodeTaskKeyInner {
+        Ok(FlownodeFlowKeyInner {
             flownode_id,
             flow_task_id,
             partition_id,
@@ -169,14 +169,14 @@ impl MetaKey<FlownodeTaskKeyInner> for FlownodeTaskKeyInner {
     }
 }
 
-/// The manager of [FlownodeTaskKey].
+/// The manager of [FlownodeFlowKey].
 pub struct FlownodeTaskManager {
     kv_backend: KvBackendRef,
 }
 
-/// Decodes `KeyValue` to [FlownodeTaskKey].
-pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<FlownodeTaskKey> {
-    FlownodeTaskKey::from_bytes(&kv.key)
+/// Decodes `KeyValue` to [FlownodeFlowKey].
+pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<FlownodeFlowKey> {
+    FlownodeFlowKey::from_bytes(&kv.key)
 }
 
 impl FlownodeTaskManager {
@@ -191,7 +191,7 @@ impl FlownodeTaskManager {
         catalog: &str,
         flownode_id: FlownodeId,
     ) -> BoxStream<'static, Result<(FlowTaskId, FlowTaskPartitionId)>> {
-        let start_key = FlownodeTaskKey::range_start_key(catalog.to_string(), flownode_id);
+        let start_key = FlownodeFlowKey::range_start_key(catalog.to_string(), flownode_id);
         let req = RangeRequest::new().with_prefix(start_key);
 
         let stream = PaginationStream::new(
@@ -216,7 +216,7 @@ impl FlownodeTaskManager {
         let txns = flownode_ids
             .into_iter()
             .map(|(partition_id, flownode_id)| {
-                let key = FlownodeTaskKey::new(
+                let key = FlownodeFlowKey::new(
                     catalog.to_string(),
                     flownode_id,
                     flow_task_id,
@@ -233,24 +233,24 @@ impl FlownodeTaskManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::key::flow::flownode_task::FlownodeTaskKey;
+    use crate::key::flow::flownode_flow::FlownodeFlowKey;
     use crate::key::scope::MetaKey;
 
     #[test]
     fn test_key_serialization() {
-        let flownode_task = FlownodeTaskKey::new("my_catalog".to_string(), 1, 2, 0);
+        let flownode_task = FlownodeFlowKey::new("my_catalog".to_string(), 1, 2, 0);
         assert_eq!(
             b"__flow_task/my_catalog/flownode/1/2/0".to_vec(),
             flownode_task.to_bytes()
         );
-        let prefix = FlownodeTaskKey::range_start_key("my_catalog".to_string(), 1);
+        let prefix = FlownodeFlowKey::range_start_key("my_catalog".to_string(), 1);
         assert_eq!(b"__flow_task/my_catalog/flownode/1/".to_vec(), prefix);
     }
 
     #[test]
     fn test_key_deserialization() {
         let bytes = b"__flow_task/my_catalog/flownode/1/2/0".to_vec();
-        let key = FlownodeTaskKey::from_bytes(&bytes).unwrap();
+        let key = FlownodeFlowKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flownode_id(), 1);
         assert_eq!(key.flow_task_id(), 2);
