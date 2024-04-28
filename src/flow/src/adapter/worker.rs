@@ -76,7 +76,10 @@ impl WorkerHandle {
         };
 
         let ret = self.itc_client.blocking_lock().call_blocking(req)?;
-        if let Response::Create { task_create_result } = ret {
+        if let Response::Create {
+            result: task_create_result,
+        } = ret
+        {
             task_create_result
         } else {
             InternalSnafu {
@@ -90,11 +93,11 @@ impl WorkerHandle {
     }
 
     /// remove task, return task id
-    pub fn remove_task(&self, task_id: TaskId) -> Result<TaskId, Error> {
+    pub fn remove_task(&self, task_id: TaskId) -> Result<bool, Error> {
         let req = Request::Remove { task_id };
         let ret = self.itc_client.blocking_lock().call_blocking(req)?;
-        if let Response::Remove { task_remove_result } = ret {
-            task_remove_result
+        if let Response::Remove { result } = ret {
+            Ok(result)
         } else {
             InternalSnafu {
                 reason: format!(
@@ -107,10 +110,29 @@ impl WorkerHandle {
     }
 
     // trigger running the worker
-    pub fn trigger_run(&self) {
+    pub fn run_available(&self) {
         self.itc_client
             .blocking_lock()
-            .call_non_resp(Request::TriggerRun);
+            .call_non_blocking(Request::RunAvail);
+    }
+
+    pub fn contains_task(&self, task_id: TaskId) -> Result<bool, Error> {
+        let req = Request::ContainTask { task_id };
+        let ret = self.itc_client.blocking_lock().call_blocking(req).unwrap();
+        if let Response::ContainTask {
+            result: task_contain_result,
+        } = ret
+        {
+            Ok(task_contain_result)
+        } else {
+            InternalSnafu {
+                reason: format!(
+                    "Flow Node/Worker itc failed, expect Response::ContainTask, found {ret:?}"
+                ),
+            }
+            .fail()
+            .with_context(|_| EvalSnafu {})
+        }
     }
 }
 
@@ -156,9 +178,9 @@ impl<'s> Worker<'s> {
         Ok(Some(task_id))
     }
 
-    pub fn remove_task(&mut self, task_id: TaskId) -> Result<(), Error> {
-        self.task_states.remove(&task_id);
-        Ok(())
+    /// remove task, return true if a task is removed
+    pub fn remove_task(&mut self, task_id: TaskId) -> bool {
+        self.task_states.remove(&task_id).is_some()
     }
 
     /// run the worker until it is dropped
@@ -185,21 +207,28 @@ impl<'s> Worker<'s> {
                     src_recvs,
                     create_if_not_exist,
                 );
+                self.itc_server.lock().await.resp(
+                    req_id,
+                    Response::Create {
+                        result: task_create_result,
+                    },
+                );
+            }
+            Request::Remove { task_id } => {
+                let ret = self.remove_task(task_id);
                 self.itc_server
                     .lock()
                     .await
-                    .resp(req_id, Response::Create { task_create_result });
+                    .resp(req_id, Response::Remove { result: ret })
             }
-            Request::Remove { task_id } => {
-                let ret = self.remove_task(task_id).map(|_| task_id);
-                self.itc_server.lock().await.resp(
-                    req_id,
-                    Response::Remove {
-                        task_remove_result: ret,
-                    },
-                )
+            Request::RunAvail => self.run_tick(),
+            Request::ContainTask { task_id } => {
+                let ret = self.task_states.contains_key(&task_id);
+                self.itc_server
+                    .lock()
+                    .await
+                    .resp(req_id, Response::ContainTask { result: ret })
             }
-            Request::TriggerRun => self.run_tick(),
         }
     }
 
@@ -228,16 +257,22 @@ enum Request {
         task_id: TaskId,
     },
     /// Trigger the worker to run, useful after input buffer is full
-    TriggerRun,
+    RunAvail,
+    ContainTask {
+        task_id: TaskId,
+    },
 }
 
 #[derive(Debug)]
 enum Response {
     Create {
-        task_create_result: Result<Option<TaskId>, Error>,
+        result: Result<Option<TaskId>, Error>,
     },
     Remove {
-        task_remove_result: Result<TaskId, Error>,
+        result: bool,
+    },
+    ContainTask {
+        result: bool,
     },
 }
 
@@ -263,8 +298,8 @@ struct InterThreadCallClient {
 }
 
 impl InterThreadCallClient {
-    /// call without expecting responses
-    fn call_non_resp(&mut self, req: Request) {
+    /// call without expecting responses or blocking
+    fn call_non_blocking(&mut self, req: Request) {
         let call_id = {
             let mut call_id = self.call_id.blocking_lock();
             *call_id += 1;

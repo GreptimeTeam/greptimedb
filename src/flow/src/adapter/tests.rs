@@ -68,7 +68,7 @@ fn mock_harness_flow_node_manager() {
     {
         let table_id: TableId = 451;
         let key = TableInfoKey::new(table_id);
-        let val = todo!();
+        let val = new_test_table_info_with_name(table_id, "table1", vec![1, 2, 3]);
     }
     let kv = Arc::new(kvb) as KvBackendRef;
     let info_manager = TableInfoManager::new(kv);

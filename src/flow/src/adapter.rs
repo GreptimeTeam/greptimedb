@@ -29,10 +29,11 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::LocalSet;
 
 use crate::adapter::error::{EvalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu};
+use crate::adapter::worker::WorkerHandle;
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
@@ -57,21 +58,17 @@ pub type TableName = Vec<String>;
 /// The choice of timestamp is just using current system timestamp for now
 ///
 /// TODO(discord9): refactor flow worker into a separate !Send struct? Flow Workers and Flow Node exists on same machine
-pub struct FlowNodeManager<'subgraph> {
-    /// The state of all tasks in the flow node
-    /// This is also the only field that's not `Send` in the struct
-    pub task_states: BTreeMap<TaskId, ActiveDataflowState<'subgraph>>,
+pub struct FlowNodeManager {
+    /// The handler to the worker that will run the dataflow
+    /// which is `!Send` so a handle is used
+    pub worker_handles: Vec<WorkerHandle>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     query_engine: Arc<dyn QueryEngine>,
+    /// Getting table name and table schema from table info manager
     srv_map: TableInfoSource,
     /// contains mapping from table name to global id, and table schema
     node_context: FlowNodeContext,
     tick_manager: FlowTickManager,
-}
-
-/// This is non-SEND struct, so we can't run it in a separate thread
-pub struct FlowWorkerManager<'subgraph> {
-    pub task_states: BTreeMap<TaskId, ActiveDataflowState<'subgraph>>,
 }
 
 /// Just check if NodeManager's other fields are `Send` so later we can refactor so A Flow Node Manager
@@ -79,10 +76,7 @@ pub struct FlowWorkerManager<'subgraph> {
 #[test]
 fn check_is_send() {
     fn is_send<T: Send + Sync>() {}
-    is_send::<TableInfoSource>();
-    is_send::<FlowNodeContext>();
-    is_send::<FlowTickManager>();
-    is_send::<broadcast::Sender<DiffRow>>();
+    is_send::<FlowNodeManager>();
 }
 
 /// mapping of table name <-> table id should be query from tableinfo manager
@@ -220,56 +214,14 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
     reqs
 }
 
-impl<'s> FlowNodeManager<'s> {
-    /// blocking run the dataflow's grpc service & execution in a `LocalSet`
-    ///
-    /// the idomic way to run the dataflow
-    /// is spawn a new thread, then create a flow node manager, and run the dataflow
-    /// using this method
-    pub fn run_dataflow(self, rt: tokio::runtime::Runtime, local_set: LocalSet) {
-        local_set.block_on(&rt, async move {
-            // TODO(discord9): might place grpc service on another thread?
-            let zelf = self;
-            todo!("main loop");
-        });
-    }
-
+impl FlowNodeManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub fn run_available(&mut self) {
-        let now = self.tick_manager.tick();
-        for (task_id, task_state) in self.task_states.iter_mut() {
-            task_state.set_current_ts(now);
-            task_state.run_available();
-
-            // if there is work done, check for new data in the sink
-            while task_state.run_available() {
-                let sink_table_name = self.node_context.task_to_sink.get(task_id).unwrap();
-                let sink_buf = self
-                    .node_context
-                    .sink_buffer
-                    .entry(sink_table_name.clone())
-                    .or_default();
-                let sink_recv = self
-                    .node_context
-                    .sink_receiver
-                    .get_mut(sink_table_name)
-                    .unwrap();
-                // TODO(discord9): handle lagging eror
-                while let Ok(row) = sink_recv.1.try_recv() {
-                    sink_buf.push_back(row);
-                }
-            }
-        }
-    }
-
-    /// Take everything in sink buffer and construct write request which should be send to the frontend
-    pub fn take_sink_request_per_table(&mut self) -> Vec<(TableName, Vec<DiffRow>)> {
-        std::mem::take(&mut self.node_context.sink_buffer)
-            .into_iter()
-            .map(|(name, buf)| (name, buf.into_iter().collect()))
-            .collect()
+        self.worker_handles.iter_mut().for_each(|worker| {
+            worker.run_available();
+        });
     }
 
     /// send write request to related source sender
@@ -280,6 +232,16 @@ impl<'s> FlowNodeManager<'s> {
     ) -> Result<(), Error> {
         let table_id = region_id.table_id();
         self.node_context.send(table_id, rows)?;
+        Ok(())
+    }
+
+    pub async fn remove_task(&mut self, task_id: TaskId) -> Result<(), Error> {
+        for handle in self.worker_handles.iter_mut() {
+            if handle.contains_task(task_id)? {
+                handle.remove_task(task_id)?;
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -304,8 +266,10 @@ impl<'s> FlowNodeManager<'s> {
     ) -> Result<Option<TaskId>, Error> {
         if create_if_not_exist {
             // check if the task already exists
-            if self.task_states.contains_key(&task_id) {
-                return Ok(None);
+            for handle in self.worker_handles.iter() {
+                if handle.contains_task(task_id)? {
+                    return Ok(None);
+                }
             }
         }
         // assign global id to source and sink table
@@ -317,61 +281,51 @@ impl<'s> FlowNodeManager<'s> {
                 .assign_global_id_to_table(&self.srv_map, *source)
                 .await;
         }
+        self.node_context
+            .register_task_src_sink(task_id, source_table_ids, sink_table_id);
 
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut self.node_context, &self.query_engine, &sql).await?;
 
         // TODO(discord9): parse `expire_when`
+        let _ = expire_when;
+        let _ = comment;
+        let _ = task_options;
 
-        self.create_ctx_and_render(task_id, flow_plan, sink_table_id, source_table_ids)?;
+        // TODO(discord9): add more than one handles
+        let sink_id = self
+            .node_context
+            .table_repr
+            .get_by_table_id(&sink_table_id)
+            .unwrap()
+            .1;
+        let sink_sender = self.node_context.get_sink_by_global_id(&sink_id)?;
+
+        let source_ids = source_table_ids
+            .iter()
+            .map(|id| self.node_context.table_repr.get_by_table_id(id).unwrap().1)
+            .collect_vec();
+        let source_senders = source_ids
+            .iter()
+            .map(|id| {
+                self.node_context
+                    .get_source_by_global_id(id)
+                    .map(|s| s.subscribe())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let handle = &self.worker_handles[0];
+        handle.create_task(
+            task_id,
+            flow_plan,
+            sink_id,
+            sink_sender,
+            &source_ids,
+            source_senders,
+            create_if_not_exist,
+        )?;
+
         Ok(Some(task_id))
-    }
-
-    /// create a render context, render the plan, and connect source/sink to the rendered dataflow
-    ///
-    /// return the output table's assigned global id
-    fn create_ctx_and_render(
-        &mut self,
-        task_id: TaskId,
-        plan: TypedPlan,
-        sink_table_id: TableId,
-        source_table_ids: &[TableId],
-    ) -> Result<(), Error> {
-        let mut cur_task_state = ActiveDataflowState::<'s>::default();
-
-        {
-            let sink_global_id = self
-                .node_context
-                .table_repr
-                .get_by_table_id(&sink_table_id)
-                .with_context(|| TableNotFoundSnafu {
-                    name: sink_table_id.to_string(),
-                })?
-                .1;
-            let mut ctx = cur_task_state.new_ctx(sink_global_id);
-            // rendering source now that we have the context
-            for source in source_table_ids {
-                let source = self
-                    .node_context
-                    .table_repr
-                    .get_by_table_id(source)
-                    .with_context(|| TableNotFoundSnafu {
-                        name: source.to_string(),
-                    })?
-                    .1;
-                let source_sender = self.node_context.get_source_by_global_id(&source)?;
-                let recv = source_sender.subscribe();
-                let bundle = ctx.render_source(recv)?;
-                ctx.insert_global(source, bundle);
-            }
-
-            let rendered_dataflow = ctx.render_plan(plan.plan)?;
-            let sink_sender = self.node_context.get_sink_by_global_id(&sink_global_id)?;
-            ctx.render_sink(rendered_dataflow, sink_sender);
-        }
-
-        self.task_states.insert(task_id, cur_task_state);
-        Ok(())
     }
 }
 
@@ -390,10 +344,13 @@ pub struct FlowNodeContext {
     ///
     /// and send it back to the client, since we are mocking the sink table as a client, we should use table name as the key
     /// note that the sink receiver should only have one, and we are using broadcast as mpsc channel here
-    pub sink_receiver:
-        BTreeMap<TableName, (broadcast::Sender<DiffRow>, broadcast::Receiver<DiffRow>)>,
-    /// store sink buffer for each sink table, used for sending data back to the frontend
-    pub sink_buffer: BTreeMap<TableName, VecDeque<DiffRow>>,
+    pub sink_receiver: BTreeMap<
+        TableName,
+        (
+            mpsc::UnboundedSender<DiffRow>,
+            mpsc::UnboundedReceiver<DiffRow>,
+        ),
+    >,
     /// store source in buffer for each source table, in case broadcast channel is full
     pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
     /// the schema of the table
@@ -469,7 +426,7 @@ impl FlowNodeContext {
     pub fn add_sink_receiver(&mut self, table_name: TableName) {
         self.sink_receiver
             .entry(table_name)
-            .or_insert_with(|| broadcast::channel(BOARDCAST_CAP));
+            .or_insert_with(|| mpsc::unbounded_channel::<DiffRow>());
     }
 
     pub fn get_source_by_global_id(
@@ -493,7 +450,7 @@ impl FlowNodeContext {
     pub fn get_sink_by_global_id(
         &self,
         id: &GlobalId,
-    ) -> Result<broadcast::Sender<DiffRow>, Error> {
+    ) -> Result<mpsc::UnboundedSender<DiffRow>, Error> {
         let table_name = self
             .table_repr
             .get_by_global_id(id)
