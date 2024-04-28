@@ -84,15 +84,25 @@ impl Clone for QueryContext {
 
 impl From<&RegionRequestHeader> for QueryContext {
     fn from(value: &RegionRequestHeader) -> Self {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&value.dbname);
-        QueryContext {
-            current_catalog: catalog.to_string(),
-            current_schema: schema.to_string(),
-            current_user: Default::default(),
-            timezone: ArcSwap::new(Arc::new(parse_timezone(Some(&value.timezone)))),
-            sql_dialect: Arc::new(GreptimeDbDialect {}),
-            extension: Default::default(),
-            configuration_parameter: Default::default(),
+        match &value.query_context {
+            Some(ctx) => QueryContext {
+                current_catalog: ctx.current_catalog.clone(),
+                current_schema: ctx.current_schema.clone(),
+                current_user: Default::default(),
+                timezone: ArcSwap::new(Arc::new(parse_timezone(Some(&ctx.timezone)))),
+                sql_dialect: Arc::new(GreptimeDbDialect {}),
+                extension: ctx.extension.clone(),
+                configuration_parameter: Default::default(),
+            },
+            None => QueryContext {
+                current_catalog: DEFAULT_CATALOG_NAME.to_string(),
+                current_schema: DEFAULT_SCHEMA_NAME.to_string(),
+                current_user: ArcSwap::new(Arc::new(None)),
+                timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
+                sql_dialect: Arc::new(GreptimeDbDialect {}),
+                extension: HashMap::new(),
+                configuration_parameter: Default::default(),
+            },
         }
     }
 }
@@ -167,6 +177,10 @@ impl QueryContext {
 
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
         self.extension.get(key.as_ref()).map(|v| v.as_str())
+    }
+
+    pub fn to_extension(&self) -> HashMap<String, String> {
+        self.extension.clone()
     }
 
     /// SQL like `set variable` may change timezone or other info in `QueryContext`.
