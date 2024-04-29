@@ -22,18 +22,11 @@ DESC TABLE CLUSTER_INFO;
 -- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
 -- SQLNESS REPLACE (\s+uptime\s+) uptime
--- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+) Uptime
+-- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s\s*)+) Uptime
+-- SQLNESS REPLACE [\s\-]+
 SELECT * FROM CLUSTER_INFO ORDER BY peer_type;
 
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
-| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              |uptime|
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
-| 1       | DATANODE  | 127.0.0.1:4101 |Version  |Hash   |Start_time|Uptime|
-| 2       | DATANODE  | 127.0.0.1:4102 |Version  |Hash   |Start_time|Uptime|
-| 3       | DATANODE  | 127.0.0.1:4103 |Version  |Hash   |Start_time|Uptime|
-| 0       | FRONTEND  | 127.0.0.1:4001 |Version  |Hash   |Start_time|Uptime   |
-| 0       | METASRV   | 127.0.0.1:3002 | UNKNOWN | UNKNOWN    |                         |          |
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
+++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|++++++++|1|DATANODE|127.0.0.1:4101|Version|Hash|Start_time|Uptime||2|DATANODE|127.0.0.1:4102|Version|Hash|Start_time|Uptime||3|DATANODE|127.0.0.1:4103|Version|Hash|Start_time|Uptime||0|FRONTEND|127.0.0.1:4001|Version|Hash|Start_time|Uptime||0|METASRV|127.0.0.1:3002|UNKNOWN|UNKNOWN|||++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE unknown UNKNOWN
@@ -41,14 +34,11 @@ SELECT * FROM CLUSTER_INFO ORDER BY peer_type;
 -- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
 -- SQLNESS REPLACE (\s+uptime\s+) uptime
--- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+) Uptime
+-- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+\s*) Uptime
+-- SQLNESS REPLACE [\s\-]+
 SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV' ORDER BY peer_type;
 
-+---------+-----------+----------------+---------+------------+------------+--------+
-| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time |uptime|
-+---------+-----------+----------------+---------+------------+------------+--------+
-| 0       | METASRV   | 127.0.0.1:3002 | UNKNOWN | UNKNOWN    |            |        |
-+---------+-----------+----------------+---------+------------+------------+--------+
+++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|++++++++|0|METASRV|127.0.0.1:3002|UNKNOWN|UNKNOWN|||++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE unknown UNKNOWN
@@ -56,14 +46,11 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV' ORDER BY peer_type;
 -- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
 -- SQLNESS REPLACE (\s+uptime\s+) uptime
--- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+) Uptime
+-- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+\s*) Uptime
+-- SQLNESS REPLACE [\s\-]+
 SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND' ORDER BY peer_type;
 
-+---------+-----------+----------------+---------+------------+-------------------------+--------+
-| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              |uptime|
-+---------+-----------+----------------+---------+------------+-------------------------+--------+
-| 0       | FRONTEND  | 127.0.0.1:4001 |Version  |Hash   |Start_time|Uptime |
-+---------+-----------+----------------+---------+------------+-------------------------+--------+
+++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|++++++++|0|FRONTEND|127.0.0.1:4001|Version|Hash|Start_time|Uptime|++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE unknown UNKNOWN
@@ -71,17 +58,11 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND' ORDER BY peer_type;
 -- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
 -- SQLNESS REPLACE (\s+uptime\s+) uptime
--- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+) Uptime
+-- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+\s*) Uptime
+-- SQLNESS REPLACE [\s\-]+
 SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND' ORDER BY peer_type;
 
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
-| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              |uptime|
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
-| 1       | DATANODE  | 127.0.0.1:4101 |Version  |Hash   |Start_time|Uptime|
-| 2       | DATANODE  | 127.0.0.1:4102 |Version  |Hash   |Start_time|Uptime|
-| 3       | DATANODE  | 127.0.0.1:4103 |Version  |Hash   |Start_time|Uptime|
-| 0       | METASRV   | 127.0.0.1:3002 | UNKNOWN | UNKNOWN    |                         |          |
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
+++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|++++++++|1|DATANODE|127.0.0.1:4101|Version|Hash|Start_time|Uptime||2|DATANODE|127.0.0.1:4102|Version|Hash|Start_time|Uptime||3|DATANODE|127.0.0.1:4103|Version|Hash|Start_time|Uptime||0|METASRV|127.0.0.1:3002|UNKNOWN|UNKNOWN|||++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE unknown UNKNOWN
@@ -89,15 +70,11 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND' ORDER BY peer_type;
 -- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
 -- SQLNESS REPLACE (\s+uptime\s+) uptime
--- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+) Uptime
+-- SQLNESS REPLACE (\s+(\d+(s|ms|m)\s)+\s*) Uptime
+-- SQLNESS REPLACE [\s\-]+
 SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 1 ORDER BY peer_type;
 
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
-| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              |uptime|
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
-| 2       | DATANODE  | 127.0.0.1:4102 |Version  |Hash   |Start_time|Uptime|
-| 3       | DATANODE  | 127.0.0.1:4103 |Version  |Hash   |Start_time|Uptime|
-+---------+-----------+----------------+---------+------------+-------------------------+----------+
+++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|++++++++|2|DATANODE|127.0.0.1:4102|Version|Hash|Start_time|Uptime||3|DATANODE|127.0.0.1:4103|Version|Hash|Start_time|Uptime|++++++++
 
 USE PUBLIC;
 
