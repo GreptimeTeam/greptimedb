@@ -119,6 +119,7 @@ impl OutputMeta {
 }
 
 pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;
+pub type DfPhysicalPlanRef = Arc<dyn DfPhysicalPlan>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 pub enum AddColumnLocation {
