@@ -77,7 +77,7 @@ impl CreateFlowProcedure {
         self.check_creation().await?;
         self.collect_source_tables().await?;
         self.allocate_flow_task_id().await?;
-        self.data.state = CreateFlowTaskState::FlownodeCreateFlows;
+        self.data.state = CreateFlowTaskState::CreateFlows;
 
         Ok(Status::executing(true))
     }
@@ -119,7 +119,7 @@ impl CreateFlowProcedure {
             .flow_task_metadata_manager
             .create_flow_task_metadata(flow_task_id, self.data.to_flow_task_info_value())
             .await?;
-        info!("Created flow task metadata for flow task {flow_task_id}");
+        info!("Created flow task metadata for flow {flow_task_id}");
         Ok(Status::done_with_output(flow_task_id))
     }
 }
@@ -139,7 +139,7 @@ impl Procedure for CreateFlowProcedure {
 
         match state {
             CreateFlowTaskState::Prepare => self.on_prepare().await,
-            CreateFlowTaskState::FlownodeCreateFlows => self.on_flownode_create_flow().await,
+            CreateFlowTaskState::CreateFlows => self.on_flownode_create_flow().await,
             CreateFlowTaskState::CreateMetadata => self.on_create_metadata().await,
         }
         .map_err(handle_retry_error)
@@ -166,7 +166,7 @@ pub enum CreateFlowTaskState {
     /// Prepares to create the flow.
     Prepare,
     /// Creates flows on the flownode.
-    FlownodeCreateFlows,
+    CreateFlows,
     /// Create metadata.
     CreateMetadata,
 }
