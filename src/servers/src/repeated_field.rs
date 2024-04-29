@@ -18,8 +18,9 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
 // OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The [Clear] trait and [RepeatedField] are taken from [rust-protobuf](https://github.com/stepancheg/rust-protobuf/tree/master/protobuf-examples/vs-prost)
-// to leverage the pooling mechanism to avoid frequent heap allocation/deallocation when decoding deeply nested structs.
+// The Clear trait is copied from https://github.com/stepancheg/rust-protobuf/blob/v2.28.0/protobuf/src/clear.rs
+// The RepeatedField struct is copied from https://github.com/stepancheg/rust-protobuf/blob/v2.28.0/protobuf/src/repeated.rs
+// This code is to leverage the pooling mechanism to avoid frequent heap allocation/de-allocation when decoding deeply nested structs.
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -121,13 +122,13 @@ impl<T> RepeatedField<T> {
 
     /// View data as slice.
     #[inline]
-    pub fn as_slice<'a>(&'a self) -> &'a [T] {
+    pub fn as_slice(&self) -> &[T] {
         &self.vec[..self.len]
     }
 
     /// View data as mutable slice.
     #[inline]
-    pub fn as_mut_slice<'a>(&'a mut self) -> &'a mut [T] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.vec[..self.len]
     }
 
@@ -169,13 +170,13 @@ impl<T> RepeatedField<T> {
 
     /// View this container as two slices split at given index.
     #[inline]
-    pub fn split_at<'a>(&'a self, mid: usize) -> (&'a [T], &'a [T]) {
+    pub fn split_at(&self, mid: usize) -> (&[T], &[T]) {
         self.as_ref().split_at(mid)
     }
 
     /// View this container as two mutable slices split at given index.
     #[inline]
-    pub fn split_at_mut<'a>(&'a mut self, mid: usize) -> (&'a mut [T], &'a mut [T]) {
+    pub fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
         self.as_mut_slice().split_at_mut(mid)
     }
 
@@ -193,13 +194,13 @@ impl<T> RepeatedField<T> {
 
     /// Mutable last element of this container.
     #[inline]
-    pub fn last_mut<'a>(&'a mut self) -> Option<&'a mut T> {
+    pub fn last_mut(&mut self) -> Option<&mut T> {
         self.as_mut_slice().last_mut()
     }
 
     /// View all but last elements of this container.
     #[inline]
-    pub fn init<'a>(&'a self) -> &'a [T] {
+    pub fn init(&self) -> &[T] {
         let s = self.as_ref();
         &s[0..s.len() - 1]
     }
@@ -252,7 +253,7 @@ impl<T> RepeatedField<T> {
     /// # Examples
     ///
     /// ```
-    /// # use protobuf::RepeatedField;
+    /// use servers::repeated_field::RepeatedField;
     ///
     /// let mut vec = RepeatedField::from(vec![1, 2, 3, 4]);
     /// vec.retain(|&x| x % 2 == 0);
@@ -291,13 +292,13 @@ impl<T> RepeatedField<T> {
 
     /// Immutable data iterator.
     #[inline]
-    pub fn iter<'a>(&'a self) -> slice::Iter<'a, T> {
+    pub fn iter(&self) -> slice::Iter<T> {
         self.as_ref().iter()
     }
 
     /// Mutable data iterator.
     #[inline]
-    pub fn iter_mut<'a>(&'a mut self) -> slice::IterMut<'a, T> {
+    pub fn iter_mut(&mut self) -> slice::IterMut<T> {
         self.as_mut_slice().iter_mut()
     }
 
@@ -327,7 +328,7 @@ impl<T: Default + Clear> RepeatedField<T> {
     /// Push default value.
     /// This operation could be faster than `rf.push(Default::default())`,
     /// because it may reuse previously allocated and cleared element.
-    pub fn push_default<'a>(&'a mut self) -> &'a mut T {
+    pub fn push_default(&mut self) -> &mut T {
         if self.len == self.vec.len() {
             self.vec.push(Default::default());
         } else {
@@ -460,7 +461,7 @@ impl<T: Hash> Hash for RepeatedField<T> {
 
 impl<T> AsRef<[T]> for RepeatedField<T> {
     #[inline]
-    fn as_ref<'a>(&'a self) -> &'a [T] {
+    fn as_ref(&self) -> &[T] {
         &self.vec[..self.len]
     }
 }
@@ -491,14 +492,14 @@ impl<T> Index<usize> for RepeatedField<T> {
     type Output = T;
 
     #[inline]
-    fn index<'a>(&'a self, index: usize) -> &'a T {
+    fn index(&self, index: usize) -> &T {
         &self.as_ref()[index]
     }
 }
 
 impl<T> IndexMut<usize> for RepeatedField<T> {
     #[inline]
-    fn index_mut<'a>(&'a mut self, index: usize) -> &'a mut T {
+    fn index_mut(&mut self, index: usize) -> &mut T {
         &mut self.as_mut_slice()[index]
     }
 }
