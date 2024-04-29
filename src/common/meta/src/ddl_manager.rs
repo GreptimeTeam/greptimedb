@@ -19,18 +19,18 @@ use common_procedure::{
 };
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
+use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::TableId;
 
-use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
+use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
-use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
 use crate::error::{
@@ -42,15 +42,13 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use crate::node_manager::NodeManagerRef;
-use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{
-    AlterLogicalTables, AlterTable, CreateDatabase, CreateLogicalTables, CreateTable, DropDatabase,
-    DropLogicalTables, DropTable, TruncateTable,
+    AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
+    DropDatabase, DropLogicalTables, DropTable, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateDatabaseTask, CreateTableTask, DropDatabaseTask, DropTableTask,
-    SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
+    DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -62,33 +60,22 @@ pub type DdlManagerRef = Arc<DdlManager>;
 pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoader;
 
 /// The [DdlManager] provides the ability to execute Ddl.
+#[derive(Builder)]
 pub struct DdlManager {
+    ddl_context: DdlContext,
     procedure_manager: ProcedureManagerRef,
-    node_manager: NodeManagerRef,
-    cache_invalidator: CacheInvalidatorRef,
-    table_metadata_manager: TableMetadataManagerRef,
-    table_metadata_allocator: TableMetadataAllocatorRef,
-    memory_region_keeper: MemoryRegionKeeperRef,
 }
 
-/// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
 impl DdlManager {
+    /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
+        ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
-        datanode_clients: NodeManagerRef,
-        cache_invalidator: CacheInvalidatorRef,
-        table_metadata_manager: TableMetadataManagerRef,
-        table_metadata_allocator: TableMetadataAllocatorRef,
-        memory_region_keeper: MemoryRegionKeeperRef,
         register_loaders: bool,
     ) -> Result<Self> {
         let manager = Self {
+            ddl_context,
             procedure_manager,
-            node_manager: datanode_clients,
-            cache_invalidator,
-            table_metadata_manager,
-            table_metadata_allocator,
-            memory_region_keeper,
         };
         if register_loaders {
             manager.register_loaders()?;
@@ -98,21 +85,16 @@ impl DdlManager {
 
     /// Returns the [TableMetadataManagerRef].
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
-        &self.table_metadata_manager
+        &self.ddl_context.table_metadata_manager
     }
 
     /// Returns the [DdlContext]
     pub fn create_context(&self) -> DdlContext {
-        DdlContext {
-            node_manager: self.node_manager.clone(),
-            cache_invalidator: self.cache_invalidator.clone(),
-            table_metadata_manager: self.table_metadata_manager.clone(),
-            memory_region_keeper: self.memory_region_keeper.clone(),
-            table_metadata_allocator: self.table_metadata_allocator.clone(),
-        }
+        self.ddl_context.clone()
     }
 
-    fn register_loaders(&self) -> Result<()> {
+    /// Registers all Ddl loaders.
+    pub fn register_loaders(&self) -> Result<()> {
         let loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> = vec![
             (
                 CreateTableProcedure::TYPE_NAME,
@@ -130,6 +112,15 @@ impl DdlManager {
                         let context = context.clone();
                         CreateLogicalTablesProcedure::from_json(json, context)
                             .map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                CreateFlowProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateFlowProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                     })
                 },
             ),
@@ -332,6 +323,20 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a create flow task.
+    pub async fn submit_create_flow_task(
+        &self,
+        cluster_id: ClusterId,
+        create_flow: CreateFlowTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = CreateFlowProcedure::new(cluster_id, create_flow, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
     /// Submits and executes a truncate table task.
     pub async fn submit_truncate_table_task(
         &self,
@@ -419,7 +424,7 @@ async fn handle_alter_table_task(
     let table_ref = alter_table_task.table_ref();
 
     let table_id = ddl_manager
-        .table_metadata_manager
+        .table_metadata_manager()
         .table_name_manager()
         .get(TableNameKey::new(
             table_ref.catalog,
@@ -517,7 +522,7 @@ async fn handle_create_logical_table_tasks(
         }
     );
     let physical_table_id = utils::check_and_get_physical_table_id(
-        &ddl_manager.table_metadata_manager,
+        ddl_manager.table_metadata_manager(),
         &create_table_tasks,
     )
     .await?;
@@ -591,6 +596,35 @@ async fn handle_drop_database_task(
     })
 }
 
+async fn handle_create_flow_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    create_flow_task: CreateFlowTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, output) = ddl_manager
+        .submit_create_flow_task(cluster_id, create_flow_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let flow_id = *(output.downcast_ref::<u32>().context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "downcast to `u32`",
+    })?);
+    info!(
+        "Flow {}.{}({flow_id}) is created via procedure_id {id:?}",
+        create_flow_task.catalog_name, create_flow_task.task_name,
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
+    })
+}
+
 async fn handle_alter_logical_table_tasks(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
@@ -610,7 +644,7 @@ async fn handle_alter_logical_table_tasks(
         table: &alter_table_tasks[0].alter_table.table_name,
     };
     let physical_table_id =
-        utils::get_physical_table_id(&ddl_manager.table_metadata_manager, first_table).await?;
+        utils::get_physical_table_id(ddl_manager.table_metadata_manager(), first_table).await?;
     let num_logical_tables = alter_table_tasks.len();
 
     let (id, _) = ddl_manager
@@ -670,6 +704,9 @@ impl ProcedureExecutor for DdlManager {
                 DropDatabase(drop_database_task) => {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
                 }
+                CreateFlow(create_flow_task) => {
+                    handle_create_flow_task(self, cluster_id, create_flow_task).await
+                }
             }
         }
         .trace(span)
@@ -720,7 +757,10 @@ mod tests {
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::table_meta::TableMetadataAllocator;
+    use crate::ddl::task_meta::FlowTaskMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
+    use crate::ddl::DdlContext;
+    use crate::key::flow_task::FlowTaskMetadataManager;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
@@ -730,7 +770,7 @@ mod tests {
     use crate::state_store::KvStateStore;
     use crate::wal_options_allocator::WalOptionsAllocator;
 
-    /// A dummy implemented [DatanodeManager].
+    /// A dummy implemented [NodeManager].
     pub struct DummyDatanodeManager;
 
     #[async_trait::async_trait]
@@ -748,20 +788,30 @@ mod tests {
     fn test_try_new() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
+            Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
+            Arc::new(WalOptionsAllocator::default()),
+        ));
+        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+        let flow_task_metadata_allocator =
+            Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
+                Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
+            ));
 
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
         let procedure_manager = Arc::new(LocalManager::new(Default::default(), state_store));
 
         let _ = DdlManager::try_new(
+            DdlContext {
+                node_manager: Arc::new(DummyDatanodeManager),
+                cache_invalidator: Arc::new(DummyCacheInvalidator),
+                table_metadata_manager,
+                table_metadata_allocator,
+                flow_task_metadata_manager,
+                flow_task_metadata_allocator,
+                memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+            },
             procedure_manager.clone(),
-            Arc::new(DummyDatanodeManager),
-            Arc::new(DummyCacheInvalidator),
-            table_metadata_manager.clone(),
-            Arc::new(TableMetadataAllocator::new(
-                Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
-                Arc::new(WalOptionsAllocator::default()),
-            )),
-            Arc::new(MemoryRegionKeeper::default()),
             true,
         );
 

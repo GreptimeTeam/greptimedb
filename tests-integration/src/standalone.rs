@@ -17,11 +17,14 @@ use std::sync::Arc;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::options::MixOptions;
 use common_base::Plugins;
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
+use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
+use common_meta::key::flow_task::FlowTaskMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
@@ -35,6 +38,7 @@ use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use meta_srv::metasrv::{FLOW_TASK_ID_SEQ, TABLE_ID_SEQ};
 use servers::Mode;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -125,7 +129,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
-
+        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager =
             KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
@@ -133,8 +137,14 @@ impl GreptimeDbStandaloneBuilder {
         let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
         let table_id_sequence = Arc::new(
-            SequenceBuilder::new("table_id", kv_backend.clone())
+            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
+        let flow_task_id_sequence = Arc::new(
+            SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_FLOW_TASK_ID as u64)
                 .step(10)
                 .build(),
         );
@@ -142,19 +152,26 @@ impl GreptimeDbStandaloneBuilder {
             mix_options.wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
+        let flow_task_metadata_allocator = Arc::new(
+            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_task_id_sequence),
+        );
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(
+                DdlContext {
+                    node_manager: node_manager.clone(),
+                    cache_invalidator: multi_cache_invalidator,
+                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                    table_metadata_manager,
+                    table_metadata_allocator,
+                    flow_task_metadata_manager,
+                    flow_task_metadata_allocator,
+                },
                 procedure_manager.clone(),
-                node_manager.clone(),
-                multi_cache_invalidator,
-                table_metadata_manager,
-                table_meta_allocator,
-                Arc::new(MemoryRegionKeeper::default()),
                 register_procedure_loaders,
             )
             .unwrap(),

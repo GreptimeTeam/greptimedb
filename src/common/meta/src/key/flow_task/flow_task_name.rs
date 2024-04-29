@@ -149,6 +149,13 @@ impl FlowTaskNameManager {
             .transpose()
     }
 
+    /// Returns true if the `task` exists.
+    pub async fn exists(&self, catalog: &str, task: &str) -> Result<bool> {
+        let key = FlowTaskNameKey::new(catalog.to_string(), task.to_string());
+        let raw_key = key.to_bytes();
+        self.kv_backend.exists(&raw_key).await
+    }
+
     /// Builds a create flow task name transaction.
     /// It's expected that the `__flow_task/{catalog}/name/{task_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.

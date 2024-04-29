@@ -18,6 +18,7 @@ pub(crate) mod flownode_task;
 pub(crate) mod table_task;
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use common_telemetry::info;
 use snafu::{ensure, OptionExt};
@@ -82,12 +83,14 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
     }
 }
 
+pub type FlowTaskMetadataManagerRef = Arc<FlowTaskMetadataManager>;
+
 /// The manager of metadata, provides ability to:
 /// - Create metadata of the task.
 /// - Retrieve metadata of the task.
 /// - Delete metadata of the task.
 pub struct FlowTaskMetadataManager {
-    flow_task_manager: FlowTaskInfoManager,
+    flow_task_info_manager: FlowTaskInfoManager,
     flownode_task_manager: FlownodeTaskManager,
     table_task_manager: TableTaskManager,
     flow_task_name_manager: FlowTaskNameManager,
@@ -98,7 +101,7 @@ impl FlowTaskMetadataManager {
     /// Returns a new [FlowTaskMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            flow_task_manager: FlowTaskInfoManager::new(kv_backend.clone()),
+            flow_task_info_manager: FlowTaskInfoManager::new(kv_backend.clone()),
             flow_task_name_manager: FlowTaskNameManager::new(kv_backend.clone()),
             flownode_task_manager: FlownodeTaskManager::new(kv_backend.clone()),
             table_task_manager: TableTaskManager::new(kv_backend.clone()),
@@ -106,9 +109,14 @@ impl FlowTaskMetadataManager {
         }
     }
 
-    /// Returns the [FlowTaskManager].
-    pub fn flow_task_manager(&self) -> &FlowTaskInfoManager {
-        &self.flow_task_manager
+    /// Returns the [FlowTaskNameManager].
+    pub fn flow_task_name_manager(&self) -> &FlowTaskNameManager {
+        &self.flow_task_name_manager
+    }
+
+    /// Returns the [FlowTaskInfoManager].
+    pub fn flow_task_info_manager(&self) -> &FlowTaskInfoManager {
+        &self.flow_task_info_manager
     }
 
     /// Returns the [FlownodeTaskManager].
@@ -135,7 +143,7 @@ impl FlowTaskMetadataManager {
             )?;
 
         let (create_flow_task_txn, on_create_flow_task_failure) =
-            self.flow_task_manager.build_create_txn(
+            self.flow_task_info_manager.build_create_txn(
                 &flow_task_value.catalog_name,
                 flow_task_id,
                 &flow_task_value,
@@ -192,7 +200,6 @@ impl FlowTaskMetadataManager {
                         "{}.{}",
                         flow_task_value.catalog_name, flow_task_value.task_name
                     ),
-                    flow_task_id,
                 }
                 .fail();
             }
@@ -223,6 +230,7 @@ mod tests {
     use crate::key::flow_task::table_task::TableTaskKey;
     use crate::key::scope::CatalogScoped;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::table_name::TableName;
 
     #[derive(Debug)]
     struct MockKey {
@@ -273,11 +281,16 @@ mod tests {
         let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv.clone());
         let task_id = 10;
         let catalog_name = "greptime";
+        let sink_table_name = TableName {
+            catalog_name: catalog_name.to_string(),
+            schema_name: "my_schema".to_string(),
+            table_name: "sink_table".to_string(),
+        };
         let flow_task_value = FlowTaskInfoValue {
             catalog_name: catalog_name.to_string(),
             task_name: "task".to_string(),
-            source_tables: vec![1024, 1025, 1026],
-            sink_table: 2049,
+            source_table_ids: vec![1024, 1025, 1026],
+            sink_table_name,
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
             expire_when: "expr".to_string(),
@@ -294,7 +307,7 @@ mod tests {
             .await
             .unwrap();
         let got = flow_metadata_manager
-            .flow_task_manager()
+            .flow_task_info_manager()
             .get(catalog_name, task_id)
             .await
             .unwrap()
@@ -332,11 +345,17 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv);
         let task_id = 10;
+        let catalog_name = "greptime";
+        let sink_table_name = TableName {
+            catalog_name: catalog_name.to_string(),
+            schema_name: "my_schema".to_string(),
+            table_name: "sink_table".to_string(),
+        };
         let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
-            source_tables: vec![1024, 1025, 1026],
-            sink_table: 2049,
+            source_table_ids: vec![1024, 1025, 1026],
+            sink_table_name: sink_table_name.clone(),
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
             expire_when: "expr".to_string(),
@@ -349,10 +368,10 @@ mod tests {
             .unwrap();
         // Creates again.
         let flow_task_value = FlowTaskInfoValue {
-            catalog_name: "greptime".to_string(),
+            catalog_name: catalog_name.to_string(),
             task_name: "task".to_string(),
-            source_tables: vec![1024, 1025, 1026],
-            sink_table: 2049,
+            source_table_ids: vec![1024, 1025, 1026],
+            sink_table_name,
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
             expire_when: "expr".to_string(),
@@ -371,11 +390,17 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowTaskMetadataManager::new(mem_kv);
         let task_id = 10;
+        let catalog_name = "greptime";
+        let sink_table_name = TableName {
+            catalog_name: catalog_name.to_string(),
+            schema_name: "my_schema".to_string(),
+            table_name: "sink_table".to_string(),
+        };
         let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
-            source_tables: vec![1024, 1025, 1026],
-            sink_table: 2049,
+            source_table_ids: vec![1024, 1025, 1026],
+            sink_table_name: sink_table_name.clone(),
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
             expire_when: "expr".to_string(),
@@ -387,11 +412,16 @@ mod tests {
             .await
             .unwrap();
         // Creates again.
+        let another_sink_table_name = TableName {
+            catalog_name: catalog_name.to_string(),
+            schema_name: "my_schema".to_string(),
+            table_name: "another_sink_table".to_string(),
+        };
         let flow_task_value = FlowTaskInfoValue {
             catalog_name: "greptime".to_string(),
             task_name: "task".to_string(),
-            source_tables: vec![1024, 1025, 1026],
-            sink_table: 2048,
+            source_table_ids: vec![1024, 1025, 1026],
+            sink_table_name: another_sink_table_name,
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
             expire_when: "expr".to_string(),

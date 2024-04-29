@@ -19,6 +19,9 @@ pub const DEFAULT_CATALOG_NAME: &str = "greptime";
 pub const DEFAULT_SCHEMA_NAME: &str = "public";
 pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str = "greptime_private";
 
+/// Reserves [0,MIN_USER_FLOW_TASK_ID) for internal usage.
+/// User defined table id starts from this value.
+pub const MIN_USER_FLOW_TASK_ID: u32 = 1024;
 /// Reserves [0,MIN_USER_TABLE_ID) for internal usage.
 /// User defined table id starts from this value.
 pub const MIN_USER_TABLE_ID: u32 = 1024;
