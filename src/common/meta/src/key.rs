@@ -42,10 +42,10 @@
 //! 7. Flow name key: `__flow/{catalog}/name/{flow_name}`
 //!     - Mapping {catalog}/{flow_name} to {flow_id}
 //!
-//! 8. Flownode task key: `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
+//! 8. Flownode flow key: `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping {flownode_id} to {flow_id}
 //!
-//! 9. Table task key: `__table_task/{catalog}/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
+//! 9. Table flow key: `__table_flow/{catalog}/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping source table's {table_id} to {flownode_id}
 //!     - Used in `Flownode` booting.
 //!
@@ -69,13 +69,13 @@
 //!
 //!    flownode/
 //!      {flownode_id}/
-//!        {task_id}/
+//!        {flow_id}/
 //!          {partition_id}
 //!
 //!    source_table/
 //!      {table_id}/
 //!        {flownode_id}/
-//!          {task_id}/
+//!          {flow_id}/
 //!            {partition_id}
 
 pub mod catalog_name;
