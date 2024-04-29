@@ -433,7 +433,7 @@ mod tests {
             "cli",
             "export",
             "--addr",
-            "127.0.0.1:4001",
+            "127.0.0.1:4000",
             "--output-dir",
             &*output_dir.path().to_string_lossy(),
             "--target",
