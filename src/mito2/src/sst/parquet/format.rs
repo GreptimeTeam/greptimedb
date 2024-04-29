@@ -140,7 +140,7 @@ impl ReadFormat {
 
         // Maps column id of a projected field to its index in SST.
         let mut projected_field_id_index: Vec<_> = column_ids
-            .into_iter()
+            .iter()
             .filter_map(|column_id| {
                 // Only apply projection to fields.
                 field_id_to_index

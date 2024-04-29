@@ -162,10 +162,7 @@ impl ParquetReaderBuilder {
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
         // Lists all column ids to read, we always use the expected metadata if possible.
         let column_ids = self.projection.clone().unwrap_or_else(|| {
-            let expected_meta = self
-                .expected_metadata
-                .as_ref()
-                .unwrap_or_else(|| &region_meta);
+            let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
             expected_meta
                 .column_metadatas
                 .iter()
@@ -531,7 +528,7 @@ impl ReaderState {
     fn metrics(&self) -> &Metrics {
         match self {
             ReaderState::Readable(reader) => &reader.metrics,
-            ReaderState::Exhausted(m) => &m,
+            ReaderState::Exhausted(m) => m,
         }
     }
 }
