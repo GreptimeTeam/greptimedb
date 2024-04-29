@@ -151,7 +151,7 @@ impl Procedure for CreateFlowProcedure {
 
     fn lock_key(&self) -> LockKey {
         let catalog_name = &self.data.task.catalog_name;
-        let task_name = &self.data.task.task_name;
+        let task_name = &self.data.task.flow_name;
         let sink_table_name = &self.data.task.sink_table_name;
 
         LockKey::new(vec![
@@ -195,7 +195,7 @@ impl From<&CreateFlowTaskData> for CreateRequest {
         let source_table_ids = &value.source_table_ids;
 
         CreateRequest {
-            task_id: Some(api::v1::flow::TaskId { id: flow_id }),
+            flow_id: Some(api::v1::flow::TaskId { id: flow_id }),
             source_table_ids: source_table_ids
                 .iter()
                 .map(|table_id| api::v1::TableId { id: *table_id })
@@ -206,7 +206,7 @@ impl From<&CreateFlowTaskData> for CreateRequest {
             expire_when: value.task.expire_when.clone(),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
-            task_options: value.task.options.clone(),
+            flow_options: value.task.flow_options.clone(),
         }
     }
 }
@@ -215,12 +215,12 @@ impl From<&CreateFlowTaskData> for FlowInfoValue {
     fn from(value: &CreateFlowTaskData) -> Self {
         let CreateFlowTask {
             catalog_name,
-            task_name,
+            flow_name: task_name,
             sink_table_name,
             expire_when,
             comment,
             sql,
-            options,
+            flow_options: options,
             ..
         } = value.task.clone();
 

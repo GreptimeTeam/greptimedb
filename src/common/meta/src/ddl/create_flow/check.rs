@@ -24,7 +24,7 @@ impl CreateFlowProcedure {
     /// - The sink table doesn't exist.
     pub(crate) async fn check_creation(&self) -> Result<()> {
         let catalog_name = &self.data.task.catalog_name;
-        let task_name = &self.data.task.task_name;
+        let task_name = &self.data.task.flow_name;
         let sink_table_name = &self.data.task.sink_table_name;
 
         // Ensures the task name doesn't exist.

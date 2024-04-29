@@ -137,10 +137,10 @@ impl GrpcQueryHandler for Instance {
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.statement_executor.truncate_table(table_name).await?
                     }
-                    DdlExpr::CreateFlowTask(_) => {
+                    DdlExpr::CreateFlow(_) => {
                         unimplemented!()
                     }
-                    DdlExpr::DropFlowTask(_) => {
+                    DdlExpr::DropFlow(_) => {
                         unimplemented!()
                     }
                 }
@@ -181,12 +181,12 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
         Expr::TruncateTable(expr) => {
             check_and_fill!(expr);
         }
-        Expr::CreateFlowTask(expr) => {
+        Expr::CreateFlow(expr) => {
             if expr.catalog_name.is_empty() {
                 expr.catalog_name = catalog.to_string();
             }
         }
-        Expr::DropFlowTask(expr) => {
+        Expr::DropFlow(expr) => {
             if expr.catalog_name.is_empty() {
                 expr.catalog_name = catalog.to_string();
             }

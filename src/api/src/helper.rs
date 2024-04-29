@@ -478,8 +478,8 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
         Some(Expr::Alter(_)) => "ddl.alter",
         Some(Expr::DropTable(_)) => "ddl.drop_table",
         Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
-        Some(Expr::CreateFlowTask(_)) => "ddl.create_flow",
-        Some(Expr::DropFlowTask(_)) => "ddl.drop_flow",
+        Some(Expr::CreateFlow(_)) => "ddl.create_flow",
+        Some(Expr::DropFlow(_)) => "ddl.drop_flow",
         None => "ddl.empty",
     }
 }

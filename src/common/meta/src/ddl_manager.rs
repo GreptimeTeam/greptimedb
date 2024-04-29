@@ -616,7 +616,7 @@ async fn handle_create_flow_task(
     })?);
     info!(
         "Flow {}.{}({flow_id}) is created via procedure_id {id:?}",
-        create_flow_task.catalog_name, create_flow_task.task_name,
+        create_flow_task.catalog_name, create_flow_task.flow_name,
     );
 
     Ok(SubmitDdlTaskResponse {

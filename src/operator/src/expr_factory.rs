@@ -541,7 +541,7 @@ pub fn to_create_flow_task_expr(
 
     Ok(CreateFlowTask {
         catalog_name: query_ctx.current_catalog().to_string(),
-        task_name: create_flow.flow_name.to_string(),
+        flow_name: create_flow.flow_name.to_string(),
         source_table_names,
         sink_table_name,
         or_replace: create_flow.or_replace,
@@ -552,7 +552,7 @@ pub fn to_create_flow_task_expr(
             .unwrap_or_default(),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        options: HashMap::new(),
+        flow_options: HashMap::new(),
     })
 }
 
