@@ -19,7 +19,7 @@ use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
 
 impl CreateFlowProcedure {
-    /// Allocates the [FlowTaskId].
+    /// Allocates the [FlowId].
     pub(crate) async fn allocate_flow_id(&mut self) -> Result<()> {
         //TODO(weny, ruihang): We doesn't support the partitions. It's always be 1, now.
         let partitions = 1;

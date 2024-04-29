@@ -193,7 +193,7 @@ impl FlowMetadataManager {
                     remote_flow_flow_name.flow_id()
                 );
 
-                return error::TaskAlreadyExistsSnafu {
+                return error::FlowAlreadyExistsSnafu {
                     flow_name: format!("{}.{}", flow_value.catalog_name, flow_value.flow_name),
                 }
                 .fail();
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(got, flow_value);
         let tasks = flow_metadata_manager
             .flownode_flow_manager()
-            .tasks(catalog_name, 1)
+            .flows(catalog_name, 1)
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -376,7 +376,7 @@ mod tests {
             .create_flow_metadata(task_id + 1, flow_value)
             .await
             .unwrap_err();
-        assert_matches!(err, error::Error::TaskAlreadyExists { .. });
+        assert_matches!(err, error::Error::FlowAlreadyExists { .. });
     }
 
     #[tokio::test]

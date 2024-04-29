@@ -40,7 +40,7 @@ lazy_static! {
     .unwrap();
 }
 
-/// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
+/// The key of mapping [TableId] to [FlownodeId] and [FlowId].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TableFlowKeyInner {
     table_id: TableId,
@@ -49,7 +49,7 @@ struct TableFlowKeyInner {
     partition_id: FlowPartitionId,
 }
 
-/// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
+/// The key of mapping [TableId] to [FlownodeId] and [FlowId].
 ///
 /// The layout: `__flow/{catalog}/table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
@@ -100,7 +100,7 @@ impl TableFlowKey {
         self.0.table_id
     }
 
-    /// Returns the [FlowTaskId].
+    /// Returns the [FlowId].
     pub fn flow_id(&self) -> FlowId {
         self.0.flow_id
     }
@@ -182,7 +182,7 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
 }
 
 /// Decodes `KeyValue` to [TableFlowKey].
-pub fn table_task_decoder(kv: KeyValue) -> Result<TableFlowKey> {
+pub fn table_flow_decoder(kv: KeyValue) -> Result<TableFlowKey> {
     TableFlowKey::from_bytes(&kv.key)
 }
 
@@ -192,7 +192,7 @@ pub struct TableFlowManager {
 }
 
 impl TableFlowManager {
-    /// Returns a new [TableTaskManager].
+    /// Returns a new [TableFlowManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
@@ -209,15 +209,15 @@ impl TableFlowManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(table_task_decoder),
+            Arc::new(table_flow_decoder),
         );
 
         Box::pin(stream)
     }
 
-    /// Builds a create table task transaction.
+    /// Builds a create table flow transaction.
     ///
-    /// Puts `__table_task/{table_id}/{node_id}/{partition_id}` keys.
+    /// Puts `__table_flow/{table_id}/{node_id}/{partition_id}` keys.
     pub fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
@@ -254,10 +254,10 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let table_task_key = TableFlowKey::new("my_catalog".to_string(), 1024, 1, 2, 0);
+        let table_flow_key = TableFlowKey::new("my_catalog".to_string(), 1024, 1, 2, 0);
         assert_eq!(
             b"__flow/my_catalog/source_table/1024/1/2/0".to_vec(),
-            table_task_key.to_bytes(),
+            table_flow_key.to_bytes(),
         );
         let prefix = TableFlowKey::range_start_key("my_catalog".to_string(), 1024);
         assert_eq!(b"__flow/my_catalog/source_table/1024/".to_vec(), prefix);

@@ -25,7 +25,7 @@ use crate::sequence::SequenceRef;
 pub type FlowMetadataAllocatorRef = Arc<FlowMetadataAllocator>;
 
 /// [FlowMetadataAllocator] provides the ability of:
-/// - [FlowTaskId] Allocation.
+/// - [FlowId] Allocation.
 /// - [FlownodeId] Selection.
 #[derive(Clone)]
 pub struct FlowMetadataAllocator {
@@ -42,13 +42,13 @@ impl FlowMetadataAllocator {
         }
     }
 
-    /// Allocates a the [FlowTaskId].
+    /// Allocates a the [FlowId].
     pub(crate) async fn allocate_flow_id(&self) -> Result<FlowId> {
         let flow_id = self.flow_id_sequence.next().await? as FlowId;
         Ok(flow_id)
     }
 
-    /// Allocates the [FlowTaskId] and [Peer]s.
+    /// Allocates the [FlowId] and [Peer]s.
     pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
         let flow_id = self.allocate_flow_id().await?;
         let peers = self.partition_peer_allocator.alloc(partitions).await?;

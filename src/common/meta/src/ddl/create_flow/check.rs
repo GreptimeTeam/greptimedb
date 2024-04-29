@@ -36,7 +36,7 @@ impl CreateFlowProcedure {
             .await?;
         ensure!(
             !exists,
-            error::TaskAlreadyExistsSnafu {
+            error::FlowAlreadyExistsSnafu {
                 flow_name: format!("{}.{}", catalog_name, task_name),
             }
         );

@@ -40,7 +40,7 @@ lazy_static! {
 
 const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 
-/// The key of mapping [FlownodeId] to [FlowTaskId].
+/// The key of mapping [FlownodeId] to [FlowId].
 ///
 /// The layout `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
 pub struct FlownodeFlowKey(FlowScoped<CatalogScoped<FlownodeFlowKeyInner>>);
@@ -84,7 +84,7 @@ impl FlownodeFlowKey {
         self.0.catalog()
     }
 
-    /// Returns the [FlowTaskId].
+    /// Returns the [FlowId].
     pub fn flow_id(&self) -> FlowId {
         self.0.flow_id
     }
@@ -100,7 +100,7 @@ impl FlownodeFlowKey {
     }
 }
 
-/// The key of mapping [FlownodeId] to [FlowTaskId].
+/// The key of mapping [FlownodeId] to [FlowId].
 pub struct FlownodeFlowKeyInner {
     flownode_id: FlownodeId,
     flow_id: FlowId,
@@ -171,18 +171,18 @@ pub struct FlownodeFlowManager {
 }
 
 /// Decodes `KeyValue` to [FlownodeFlowKey].
-pub fn flownode_task_key_decoder(kv: KeyValue) -> Result<FlownodeFlowKey> {
+pub fn flownode_flow_key_decoder(kv: KeyValue) -> Result<FlownodeFlowKey> {
     FlownodeFlowKey::from_bytes(&kv.key)
 }
 
 impl FlownodeFlowManager {
-    /// Returns a new [FlownodeTaskManager].
+    /// Returns a new [FlownodeFlowManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
 
-    /// Retrieves all [FlowTaskId] and [PartitionId]s of the specified `flownode_id`.
-    pub fn tasks(
+    /// Retrieves all [FlowId] and [FlowPartitionId]s of the specified `flownode_id`.
+    pub fn flows(
         &self,
         catalog: &str,
         flownode_id: FlownodeId,
@@ -194,15 +194,15 @@ impl FlownodeFlowManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(flownode_task_key_decoder),
+            Arc::new(flownode_flow_key_decoder),
         );
 
         Box::pin(stream.map_ok(|key| (key.flow_id(), key.partition_id())))
     }
 
-    /// Builds a create flownode task transaction.
+    /// Builds a create flownode flow transaction.
     ///
-    /// Puts `__flownode_task/{flownode_id}/{flow_id}/{partition_id}` keys.
+    /// Puts `__flownode_flow/{flownode_id}/{flow_id}/{partition_id}` keys.
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
@@ -230,10 +230,10 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let flownode_task = FlownodeFlowKey::new("my_catalog".to_string(), 1, 2, 0);
+        let flownode_flow = FlownodeFlowKey::new("my_catalog".to_string(), 1, 2, 0);
         assert_eq!(
             b"__flow/my_catalog/flownode/1/2/0".to_vec(),
-            flownode_task.to_bytes()
+            flownode_flow.to_bytes()
         );
         let prefix = FlownodeFlowKey::range_start_key("my_catalog".to_string(), 1);
         assert_eq!(b"__flow/my_catalog/flownode/1/".to_vec(), prefix);

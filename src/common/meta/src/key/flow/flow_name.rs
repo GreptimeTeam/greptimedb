@@ -32,7 +32,7 @@ lazy_static! {
         Regex::new(&format!("^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
 }
 
-/// The key of mapping {flow_name} to [FlowTaskId].
+/// The key of mapping {flow_name} to [FlowId].
 ///
 /// The layout: `__flow/{catalog}/name/{flow_name}`.
 pub struct FlowNameKey(FlowScoped<CatalogScoped<FlowNameKeyInner>>);
@@ -67,7 +67,7 @@ impl MetaKey<FlowNameKey> for FlowNameKey {
     }
 }
 
-/// The key of mapping name to [FlowTaskId]
+/// The key of mapping name to [FlowId]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowNameKeyInner {
     pub flow_name: String,
@@ -95,15 +95,15 @@ impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
                     err_msg: format!("Invalid FlowNameKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
-        let task = captures[1].to_string();
-        Ok(FlowNameKeyInner { flow_name: task })
+        let flow_name = captures[1].to_string();
+        Ok(FlowNameKeyInner { flow_name })
     }
 }
 
 impl FlowNameKeyInner {
     /// Returns a [FlowNameKeyInner].
-    pub fn new(task: String) -> Self {
-        Self { flow_name: task }
+    pub fn new(flow_name: String) -> Self {
+        Self { flow_name }
     }
 }
 
@@ -114,12 +114,12 @@ pub struct FlowNameValue {
 }
 
 impl FlowNameValue {
-    /// Returns a [FlowNameValue] with specified [FlowTaskId].
+    /// Returns a [FlowNameValue] with specified [FlowId].
     pub fn new(flow_id: FlowId) -> Self {
         Self { flow_id }
     }
 
-    /// Returns the [FlowTaskId]
+    /// Returns the [FlowId]
     pub fn flow_id(&self) -> FlowId {
         self.flow_id
     }
@@ -136,9 +136,9 @@ impl FlowNameManager {
         Self { kv_backend }
     }
 
-    /// Returns the [FlowNameValue] of specified `catalog.task`.
-    pub async fn get(&self, catalog: &str, task: &str) -> Result<Option<FlowNameValue>> {
-        let key = FlowNameKey::new(catalog.to_string(), task.to_string());
+    /// Returns the [FlowNameValue] of specified `catalog.flow`.
+    pub async fn get(&self, catalog: &str, flow: &str) -> Result<Option<FlowNameValue>> {
+        let key = FlowNameKey::new(catalog.to_string(), flow.to_string());
         let raw_key = key.to_bytes();
         self.kv_backend
             .get(&raw_key)
@@ -147,9 +147,9 @@ impl FlowNameManager {
             .transpose()
     }
 
-    /// Returns true if the `task` exists.
-    pub async fn exists(&self, catalog: &str, task: &str) -> Result<bool> {
-        let key = FlowNameKey::new(catalog.to_string(), task.to_string());
+    /// Returns true if the `flow` exists.
+    pub async fn exists(&self, catalog: &str, flow: &str) -> Result<bool> {
+        let key = FlowNameKey::new(catalog.to_string(), flow.to_string());
         let raw_key = key.to_bytes();
         self.kv_backend.exists(&raw_key).await
     }
@@ -189,11 +189,8 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let table_task_key = FlowNameKey::new("my_catalog".to_string(), "my_task".to_string());
-        assert_eq!(
-            b"__flow/my_catalog/name/my_task".to_vec(),
-            table_task_key.to_bytes(),
-        );
+        let key = FlowNameKey::new("my_catalog".to_string(), "my_task".to_string());
+        assert_eq!(b"__flow/my_catalog/name/my_task".to_vec(), key.to_bytes(),);
     }
 
     #[test]

@@ -37,7 +37,7 @@ lazy_static! {
         Regex::new(&format!("^{FLOW_INFO_KEY_PREFIX}/([0-9]+)$")).unwrap();
 }
 
-/// The key stores the metadata of the task.
+/// The key stores the metadata of the flow.
 ///
 /// The layout: `__flow/{catalog}/info/{flow_id}`.
 pub struct FlowInfoKey(FlowScoped<CatalogScoped<FlowInfoKeyInner>>);
@@ -66,7 +66,7 @@ impl FlowInfoKey {
         self.0.catalog()
     }
 
-    /// Returns the [FlowTaskId].
+    /// Returns the [FlowId].
     pub fn flow_id(&self) -> FlowId {
         self.0.flow_id
     }
@@ -115,15 +115,15 @@ impl MetaKey<FlowInfoKeyInner> for FlowInfoKeyInner {
 // The metadata of the flow.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowInfoValue {
-    /// The source tables used by the task.
+    /// The source tables used by the flow.
     pub(crate) source_table_ids: Vec<TableId>,
-    /// The sink table used by the task.
+    /// The sink table used by the flow.
     pub(crate) sink_table_name: TableName,
-    /// Which flow nodes this task is running on.
+    /// Which flow nodes this flow is running on.
     pub(crate) flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
     /// The catalog name.
     pub(crate) catalog_name: String,
-    /// The task name.
+    /// The flow name.
     pub(crate) flow_name: String,
     /// The raw sql.
     pub(crate) raw_sql: String,
@@ -158,7 +158,7 @@ impl FlowInfoManager {
         Self { kv_backend }
     }
 
-    /// Returns the [FlowTaskValue] of specified `flow_id`.
+    /// Returns the [FlowInfoValue] of specified `flow_id`.
     pub async fn get(&self, catalog: &str, flow_id: FlowId) -> Result<Option<FlowInfoValue>> {
         let key = FlowInfoKey::new(catalog.to_string(), flow_id).to_bytes();
         self.kv_backend
