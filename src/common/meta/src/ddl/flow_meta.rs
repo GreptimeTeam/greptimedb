@@ -34,7 +34,7 @@ pub struct FlowMetadataAllocator {
 }
 
 impl FlowMetadataAllocator {
-    /// Returns the [FlowTaskMetadataAllocator] with [NoopPartitionPeerAllocator].
+    /// Returns the [FlowMetadataAllocator] with [NoopPartitionPeerAllocator].
     pub fn with_noop_peer_allocator(flow_id_sequence: SequenceRef) -> Self {
         Self {
             flow_id_sequence,

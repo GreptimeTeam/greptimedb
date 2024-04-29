@@ -53,7 +53,7 @@ impl<T> Deref for FlowScoped<T> {
 impl<T> FlowScoped<T> {
     const PREFIX: &'static str = "__flow/";
 
-    /// Returns a new [FlowTaskScoped] key.
+    /// Returns a new [FlowScoped] key.
     pub fn new(inner: T) -> FlowScoped<T> {
         Self { inner }
     }
@@ -98,7 +98,7 @@ pub struct FlowMetadataManager {
 }
 
 impl FlowMetadataManager {
-    /// Returns a new [FlowTaskMetadataManager].
+    /// Returns a new [FlowMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             flow_info_manager: FlowInfoManager::new(kv_backend.clone()),
@@ -114,7 +114,7 @@ impl FlowMetadataManager {
         &self.flow_name_manager
     }
 
-    /// Returns the [FlowTaskManager].
+    /// Returns the [FlowManager].
     pub fn flow_info_manager(&self) -> &FlowInfoManager {
         &self.flow_info_manager
     }

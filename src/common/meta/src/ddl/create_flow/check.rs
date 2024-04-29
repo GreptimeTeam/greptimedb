@@ -24,7 +24,7 @@ impl CreateFlowProcedure {
     /// - The sink table doesn't exist.
     pub(crate) async fn check_creation(&self) -> Result<()> {
         let catalog_name = &self.data.task.catalog_name;
-        let task_name = &self.data.task.flow_name;
+        let flow_name = &self.data.task.flow_name;
         let sink_table_name = &self.data.task.sink_table_name;
 
         // Ensures the task name doesn't exist.
@@ -32,12 +32,12 @@ impl CreateFlowProcedure {
             .context
             .flow_metadata_manager
             .flow_name_manager()
-            .exists(catalog_name, task_name)
+            .exists(catalog_name, flow_name)
             .await?;
         ensure!(
             !exists,
             error::FlowAlreadyExistsSnafu {
-                flow_name: format!("{}.{}", catalog_name, task_name),
+                flow_name: format!("{}.{}", catalog_name, flow_name),
             }
         );
 

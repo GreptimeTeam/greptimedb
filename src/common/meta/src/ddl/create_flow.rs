@@ -46,7 +46,7 @@ use crate::{metrics, ClusterId};
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
     pub context: DdlContext,
-    pub data: CreateFlowTaskData,
+    pub data: CreateFlowData,
 }
 
 impl CreateFlowProcedure {
@@ -56,13 +56,13 @@ impl CreateFlowProcedure {
     pub fn new(cluster_id: ClusterId, task: CreateFlowTask, context: DdlContext) -> Self {
         Self {
             context,
-            data: CreateFlowTaskData {
+            data: CreateFlowData {
                 cluster_id,
                 task,
                 flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
-                state: CreateFlowTaskState::CreateMetadata,
+                state: CreateFlowState::CreateMetadata,
             },
         }
     }
@@ -77,7 +77,7 @@ impl CreateFlowProcedure {
         self.check_creation().await?;
         self.collect_source_tables().await?;
         self.allocate_flow_id().await?;
-        self.data.state = CreateFlowTaskState::CreateFlows;
+        self.data.state = CreateFlowState::CreateFlows;
 
         Ok(Status::executing(true))
     }
@@ -103,7 +103,7 @@ impl CreateFlowProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        self.data.state = CreateFlowTaskState::CreateMetadata;
+        self.data.state = CreateFlowState::CreateMetadata;
         Ok(Status::executing(true))
     }
 
@@ -138,9 +138,9 @@ impl Procedure for CreateFlowProcedure {
             .start_timer();
 
         match state {
-            CreateFlowTaskState::Prepare => self.on_prepare().await,
-            CreateFlowTaskState::CreateFlows => self.on_flownode_create_flows().await,
-            CreateFlowTaskState::CreateMetadata => self.on_create_metadata().await,
+            CreateFlowState::Prepare => self.on_prepare().await,
+            CreateFlowState::CreateFlows => self.on_flownode_create_flows().await,
+            CreateFlowState::CreateMetadata => self.on_create_metadata().await,
         }
         .map_err(handle_retry_error)
     }
@@ -151,7 +151,7 @@ impl Procedure for CreateFlowProcedure {
 
     fn lock_key(&self) -> LockKey {
         let catalog_name = &self.data.task.catalog_name;
-        let task_name = &self.data.task.flow_name;
+        let flow_name = &self.data.task.flow_name;
         let sink_table_name = &self.data.task.sink_table_name;
 
         LockKey::new(vec![
@@ -162,14 +162,14 @@ impl Procedure for CreateFlowProcedure {
                 &sink_table_name.catalog_name,
             )
             .into(),
-            FlowNameLock::new(catalog_name, task_name).into(),
+            FlowNameLock::new(catalog_name, flow_name).into(),
         ])
     }
 }
 
-/// The state of [CreateFlowTaskProcedure].
+/// The state of [CreateFlowProcedure].
 #[derive(Debug, Clone, Serialize, Deserialize, AsRefStr, PartialEq)]
-pub enum CreateFlowTaskState {
+pub enum CreateFlowState {
     /// Prepares to create the flow.
     Prepare,
     /// Creates flows on the flownode.
@@ -180,17 +180,17 @@ pub enum CreateFlowTaskState {
 
 /// The serializable data.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CreateFlowTaskData {
+pub struct CreateFlowData {
     pub(crate) cluster_id: ClusterId,
-    pub(crate) state: CreateFlowTaskState,
+    pub(crate) state: CreateFlowState,
     pub(crate) task: CreateFlowTask,
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
 }
 
-impl From<&CreateFlowTaskData> for CreateRequest {
-    fn from(value: &CreateFlowTaskData) -> Self {
+impl From<&CreateFlowData> for CreateRequest {
+    fn from(value: &CreateFlowData) -> Self {
         let flow_id = value.flow_id.unwrap();
         let source_table_ids = &value.source_table_ids;
 
@@ -211,11 +211,11 @@ impl From<&CreateFlowTaskData> for CreateRequest {
     }
 }
 
-impl From<&CreateFlowTaskData> for FlowInfoValue {
-    fn from(value: &CreateFlowTaskData) -> Self {
+impl From<&CreateFlowData> for FlowInfoValue {
+    fn from(value: &CreateFlowData) -> Self {
         let CreateFlowTask {
             catalog_name,
-            flow_name: task_name,
+            flow_name,
             sink_table_name,
             expire_when,
             comment,
@@ -236,7 +236,7 @@ impl From<&CreateFlowTaskData> for FlowInfoValue {
             sink_table_name,
             flownode_ids,
             catalog_name,
-            flow_name: task_name,
+            flow_name,
             raw_sql: sql,
             expire_when,
             comment,

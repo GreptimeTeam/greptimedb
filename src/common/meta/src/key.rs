@@ -39,8 +39,8 @@
 //! 6. Flow info key: `__flow/{catalog}/info/{flow_id}`
 //!     - Stores metadata of the flow.
 //!
-//! 7. Flow name key: `__flow/{catalog}/name/{task_name}`
-//!     - Mapping {catalog}/{task_name} to {flow_id}
+//! 7. Flow name key: `__flow/{catalog}/name/{flow_name}`
+//!     - Mapping {catalog}/{flow_name} to {flow_id}
 //!
 //! 8. Flownode task key: `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping {flownode_id} to {flow_id}
@@ -54,7 +54,7 @@
 //!
 //! To simplify the managers used in struct fields and function parameters, we define "unify"
 //! table metadata manager: [TableMetadataManager]
-//! and flow metadata manager: [FlowTaskMetadataManager](crate::key::flow::FlowMetadataManager).
+//! and flow metadata manager: [FlowMetadataManager](crate::key::flow::FlowMetadataManager).
 //! It contains all the managers defined above. It's recommended to just use this manager only.
 //!
 //! The whole picture of flow keys will be like this:
@@ -65,7 +65,7 @@
 //!      {tsak_id}
 //!
 //!    name/
-//!      {task_name}
+//!      {flow_name}
 //!
 //!    flownode/
 //!      {flownode_id}/
