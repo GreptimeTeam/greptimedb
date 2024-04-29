@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose;
-use base64::Engine as _;
+use base64::Engine;
 use clap::{Parser, ValueEnum};
 use client::DEFAULT_SCHEMA_NAME;
 use common_telemetry::{debug, error, info, warn};
@@ -121,29 +121,31 @@ impl Export {
             sql
         );
 
-        let client = reqwest::Client::new();
-        let mut request = client
+        let mut request = reqwest::Client::new()
             .get(&url)
             .header("Content-Type", "application/x-www-form-urlencoded");
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
         }
 
-        let response = request
-            .send()
-            .await
-            .with_context(|_| HttpQuerySqlSnafu { reason: url })?;
-        snafu::ensure!(response.status() == 200, EmptyResultSnafu);
+        let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
+            reason: format!("bad url: {}", url),
+        })?;
+        let response = response
+            .error_for_status()
+            .with_context(|_| HttpQuerySqlSnafu {
+                reason: format!("query failed: {}", sql),
+            })?;
 
         let text = response.text().await.with_context(|_| HttpQuerySqlSnafu {
             reason: "cannot get response text".to_string(),
         })?;
 
         let body = serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)?;
-        match &body.output()[0] {
-            GreptimeQueryOutput::Records(records) => Ok(Some(records.rows().clone())),
-            GreptimeQueryOutput::AffectedRows(_) => Ok(None),
-        }
+        Ok(body.output().first().and_then(|output| match output {
+            GreptimeQueryOutput::Records(records) => Some(records.rows().clone()),
+            GreptimeQueryOutput::AffectedRows(_) => None,
+        }))
     }
 
     /// Iterate over all db names.

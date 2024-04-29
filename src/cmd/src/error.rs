@@ -291,7 +291,9 @@ impl ErrorExt for Error {
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
-            Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
+            Error::ReplCreation { .. } | Error::Readline { .. } | Error::HttpQuerySql { .. } => {
+                StatusCode::Internal
+            }
             Error::CollectRecordBatches { source, .. }
             | Error::PrettyPrintRecordBatches { source, .. } => source.status_code(),
             Error::StartMetaClient { source, .. } => source.status_code(),
@@ -301,9 +303,7 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::HttpQuerySql { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
 
