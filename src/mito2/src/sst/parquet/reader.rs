@@ -18,11 +18,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
+use datafusion_expr::Expr;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
@@ -155,20 +158,21 @@ impl ParquetReaderBuilder {
         let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
-        let region_meta = Self::get_region_metadata(&file_path, key_value_meta)?;
-        // Always list all column ids to read.
+        // Gets the metadata stored in the SST.
+        let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
+        // Lists all column ids to read, we always use the expected metadata if possible.
         let column_ids = self.projection.clone().unwrap_or_else(|| {
-            let metadata = self
+            let expected_meta = self
                 .expected_metadata
-                .as_deref()
+                .as_ref()
                 .unwrap_or_else(|| &region_meta);
-            metadata
+            expected_meta
                 .column_metadatas
                 .iter()
                 .map(|col| col.column_id)
                 .collect()
         });
-        let read_format = ReadFormat::new(Arc::new(region_meta), &column_ids);
+        let read_format = ReadFormat::new(region_meta.clone(), &column_ids);
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
@@ -204,7 +208,13 @@ impl ParquetReaderBuilder {
             predicate
                 .exprs()
                 .iter()
-                .filter_map(|expr| SimpleFilterEvaluator::try_new(expr.df_expr()))
+                .filter_map(|expr| {
+                    SimpleFilterContext::new_opt(
+                        &region_meta,
+                        self.expected_metadata.as_deref(),
+                        expr.df_expr(),
+                    )
+                })
                 .collect::<Vec<_>>()
         } else {
             vec![]
@@ -523,6 +533,72 @@ impl ReaderState {
             ReaderState::Readable(reader) => &reader.metrics,
             ReaderState::Exhausted(m) => &m,
         }
+    }
+}
+
+/// Context to evaluate the column filter.
+pub(crate) struct SimpleFilterContext {
+    /// Filter to evaluate.
+    filter: SimpleFilterEvaluator,
+    /// Id of the column to evaluate.
+    column_id: ColumnId,
+    /// Semantic type of the column.
+    semantic_type: SemanticType,
+    /// The data type of the column.
+    data_type: ConcreteDataType,
+}
+
+impl SimpleFilterContext {
+    /// Creates a context for the `expr`.
+    ///
+    /// Returns None if the column to filter doesn't exist in the SST metadata or the
+    /// expected metadata.
+    fn new_opt(
+        sst_meta: &RegionMetadataRef,
+        expected_meta: Option<&RegionMetadata>,
+        expr: &Expr,
+    ) -> Option<Self> {
+        let filter = SimpleFilterEvaluator::try_new(expr)?;
+        let column_metadata = match expected_meta {
+            Some(meta) => {
+                // Gets the column metadata from the expected metadata.
+                let column = meta.column_by_name(filter.column_name())?;
+                // Checks if the column is present in the SST metadata. We still uses the
+                // column from the expected metadata.
+                let sst_column = sst_meta.column_by_id(column.column_id)?;
+                debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
+
+                column
+            }
+            None => sst_meta.column_by_name(filter.column_name())?,
+        };
+
+        Some(Self {
+            filter,
+            column_id: column_metadata.column_id,
+            semantic_type: column_metadata.semantic_type,
+            data_type: column_metadata.column_schema.data_type.clone(),
+        })
+    }
+
+    /// Returns the filter to evaluate.
+    pub(crate) fn filter(&self) -> &SimpleFilterEvaluator {
+        &self.filter
+    }
+
+    /// Returns the column id.
+    pub(crate) fn column_id(&self) -> ColumnId {
+        self.column_id
+    }
+
+    /// Returns the semantic type of the column.
+    pub(crate) fn semantic_type(&self) -> SemanticType {
+        self.semantic_type
+    }
+
+    /// Returns the data type of the column.
+    pub(crate) fn data_type(&self) -> &ConcreteDataType {
+        &self.data_type
     }
 }
 

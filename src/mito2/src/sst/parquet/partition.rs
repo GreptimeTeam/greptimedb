@@ -29,7 +29,7 @@ use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::RowGroupReaderBuilder;
+use crate::sst::parquet::reader::{RowGroupReaderBuilder, SimpleFilterContext};
 
 /// A partition of a parquet SST. Now it is a row group.
 pub(crate) struct Partition {
@@ -69,7 +69,7 @@ pub(crate) struct PartitionContext {
     // Row group reader builder for the file.
     reader_builder: RowGroupReaderBuilder,
     /// Filters pushed down.
-    filters: Vec<SimpleFilterEvaluator>,
+    filters: Vec<SimpleFilterContext>,
     /// Helper to read the SST.
     read_format: ReadFormat,
     /// Decoder for primary keys
@@ -82,7 +82,7 @@ impl PartitionContext {
     /// Creates a new partition context.
     pub(crate) fn new(
         reader_builder: RowGroupReaderBuilder,
-        filters: Vec<SimpleFilterEvaluator>,
+        filters: Vec<SimpleFilterContext>,
         read_format: ReadFormat,
         codec: McmpRowCodec,
     ) -> Self {
@@ -100,7 +100,7 @@ impl PartitionContext {
     }
 
     /// Returns filters pushed down.
-    pub(crate) fn filters(&self) -> &[SimpleFilterEvaluator] {
+    pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.filters
     }
 
@@ -127,15 +127,7 @@ impl PartitionContext {
         // Run filter one by one and combine them result
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter in &self.filters {
-            let column_name = filter.column_name();
-            // FIXME(yingwen): We should use expected metadata to get the column id.
-            let Some(column_metadata) = self.read_format.metadata().column_by_name(column_name)
-            else {
-                // column not found, skip
-                // in situation like an column is added later
-                continue;
-            };
-            let result = match column_metadata.semantic_type {
+            let result = match filter.semantic_type() {
                 SemanticType::Tag => {
                     let pk_values = if let Some(pk_values) = input.pk_values() {
                         pk_values
@@ -147,12 +139,13 @@ impl PartitionContext {
                     let pk_index = self
                         .read_format
                         .metadata()
-                        .primary_key_index(column_metadata.column_id)
+                        .primary_key_index(filter.column_id())
                         .unwrap();
                     let pk_value = pk_values[pk_index]
-                        .try_to_scalar_value(&column_metadata.column_schema.data_type)
+                        .try_to_scalar_value(filter.data_type())
                         .context(FieldTypeMismatchSnafu)?;
                     if filter
+                        .filter()
                         .evaluate_scalar(&pk_value)
                         .context(FilterRecordBatchSnafu)?
                     {
@@ -163,18 +156,18 @@ impl PartitionContext {
                     }
                 }
                 SemanticType::Field => {
-                    let Some(field_index) = self
-                        .read_format
-                        .field_index_by_id(column_metadata.column_id)
+                    let Some(field_index) = self.read_format.field_index_by_id(filter.column_id())
                     else {
                         continue;
                     };
                     let field_col = &input.fields()[field_index].data;
                     filter
+                        .filter()
                         .evaluate_vector(field_col)
                         .context(FilterRecordBatchSnafu)?
                 }
                 SemanticType::Timestamp => filter
+                    .filter()
                     .evaluate_vector(input.timestamps())
                     .context(FilterRecordBatchSnafu)?,
             };
