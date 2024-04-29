@@ -121,7 +121,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
-use self::flow::flow_info::FlowTaskValue;
+use self::flow::flow_info::FlowInfoValue;
 use self::flow::flow_name::FlowNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
@@ -160,7 +160,7 @@ pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 /// The id of flow.
 pub type FlowTaskId = u32;
 /// The partition of flow.
-pub type FlowTaskPartitionId = u32;
+pub type FlowPartitionId = u32;
 
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
@@ -1052,7 +1052,7 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     DatanodeTableValue,
-    FlowTaskValue,
+    FlowInfoValue,
     FlowNameValue
 }
 

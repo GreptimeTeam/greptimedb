@@ -23,7 +23,7 @@ use table::metadata::TableId;
 use crate::error::{self, Result};
 use crate::key::flow::FlowTaskScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
-use crate::key::{FlowTaskId, FlowTaskPartitionId};
+use crate::key::{FlowPartitionId, FlowTaskId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -46,7 +46,7 @@ struct TableFlowKeyInner {
     table_id: TableId,
     flownode_id: FlownodeId,
     flow_id: FlowTaskId,
-    partition_id: FlowTaskPartitionId,
+    partition_id: FlowPartitionId,
 }
 
 /// The key of mapping [TableId] to [FlownodeId] and [FlowTaskId].
@@ -74,7 +74,7 @@ impl TableFlowKey {
         table_id: TableId,
         flownode_id: FlownodeId,
         flow_id: FlowTaskId,
-        partition_id: FlowTaskPartitionId,
+        partition_id: FlowPartitionId,
     ) -> TableFlowKey {
         let inner = TableFlowKeyInner::new(table_id, flownode_id, flow_id, partition_id);
         TableFlowKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
@@ -111,7 +111,7 @@ impl TableFlowKey {
     }
 
     /// Returns the [PartitionId].
-    pub fn partition_id(&self) -> FlowTaskPartitionId {
+    pub fn partition_id(&self) -> FlowPartitionId {
         self.0.partition_id
     }
 }
@@ -122,7 +122,7 @@ impl TableFlowKeyInner {
         table_id: TableId,
         flownode_id: FlownodeId,
         flow_id: FlowTaskId,
-        partition_id: FlowTaskPartitionId,
+        partition_id: FlowPartitionId,
     ) -> TableFlowKeyInner {
         Self {
             table_id,
@@ -171,7 +171,7 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
         let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
         let flow_id = captures[3].parse::<FlowTaskId>().unwrap();
-        let partition_id = captures[4].parse::<FlowTaskPartitionId>().unwrap();
+        let partition_id = captures[4].parse::<FlowPartitionId>().unwrap();
         Ok(TableFlowKeyInner::new(
             table_id,
             flownode_id,
@@ -218,7 +218,7 @@ impl TableFlowManager {
     /// Builds a create table task transaction.
     ///
     /// Puts `__table_task/{table_id}/{node_id}/{partition_id}` keys.
-    pub fn build_create_txn<I: IntoIterator<Item = (FlowTaskPartitionId, FlownodeId)>>(
+    pub fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
         flow_id: FlowTaskId,

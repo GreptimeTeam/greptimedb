@@ -23,10 +23,10 @@ use std::sync::Arc;
 use common_telemetry::info;
 use snafu::{ensure, OptionExt};
 
-use self::flow_info::FlowTaskValue;
+use self::flow_info::FlowInfoValue;
 use crate::ensure_values;
 use crate::error::{self, Result};
-use crate::key::flow::flow_info::FlowTaskManager;
+use crate::key::flow::flow_info::FlowInfoManager;
 use crate::key::flow::flow_name::FlowNameManager;
 use crate::key::flow::flownode_flow::FlownodeFlowManager;
 use crate::key::flow::table_flow::TableFlowManager;
@@ -90,7 +90,7 @@ pub type FlowMetadataManagerRef = Arc<FlowMetadataManager>;
 /// - Retrieve metadata of the task.
 /// - Delete metadata of the task.
 pub struct FlowMetadataManager {
-    flow_info_manager: FlowTaskManager,
+    flow_info_manager: FlowInfoManager,
     flownode_flow_manager: FlownodeFlowManager,
     table_flow_manager: TableFlowManager,
     flow_name_manager: FlowNameManager,
@@ -101,7 +101,7 @@ impl FlowMetadataManager {
     /// Returns a new [FlowTaskMetadataManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            flow_info_manager: FlowTaskManager::new(kv_backend.clone()),
+            flow_info_manager: FlowInfoManager::new(kv_backend.clone()),
             flow_name_manager: FlowNameManager::new(kv_backend.clone()),
             flownode_flow_manager: FlownodeFlowManager::new(kv_backend.clone()),
             table_flow_manager: TableFlowManager::new(kv_backend.clone()),
@@ -115,7 +115,7 @@ impl FlowMetadataManager {
     }
 
     /// Returns the [FlowTaskManager].
-    pub fn flow_info_manager(&self) -> &FlowTaskManager {
+    pub fn flow_info_manager(&self) -> &FlowInfoManager {
         &self.flow_info_manager
     }
 
@@ -133,7 +133,7 @@ impl FlowMetadataManager {
     pub async fn create_flow_metadata(
         &self,
         flow_id: FlowTaskId,
-        flow_value: FlowTaskValue,
+        flow_value: FlowInfoValue,
     ) -> Result<()> {
         let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self
             .flow_name_manager
@@ -280,7 +280,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_value = FlowTaskValue {
+        let flow_value = FlowInfoValue {
             catalog_name: catalog_name.to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -345,7 +345,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_value = FlowTaskValue {
+        let flow_value = FlowInfoValue {
             catalog_name: "greptime".to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -361,7 +361,7 @@ mod tests {
             .await
             .unwrap();
         // Creates again.
-        let flow_value = FlowTaskValue {
+        let flow_value = FlowInfoValue {
             catalog_name: catalog_name.to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -390,7 +390,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_value = FlowTaskValue {
+        let flow_value = FlowInfoValue {
             catalog_name: "greptime".to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
@@ -411,7 +411,7 @@ mod tests {
             schema_name: "my_schema".to_string(),
             table_name: "another_sink_table".to_string(),
         };
-        let flow_value = FlowTaskValue {
+        let flow_value = FlowInfoValue {
             catalog_name: "greptime".to_string(),
             flow_name: "task".to_string(),
             source_table_ids: vec![1024, 1025, 1026],

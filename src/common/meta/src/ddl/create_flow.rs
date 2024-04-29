@@ -36,7 +36,7 @@ use super::utils::add_peer_context_if_needed;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::Result;
-use crate::key::flow::flow_info::FlowTaskValue;
+use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::FlowTaskId;
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
@@ -211,7 +211,7 @@ impl From<&CreateFlowTaskData> for CreateRequest {
     }
 }
 
-impl From<&CreateFlowTaskData> for FlowTaskValue {
+impl From<&CreateFlowTaskData> for FlowInfoValue {
     fn from(value: &CreateFlowTaskData) -> Self {
         let CreateFlowTask {
             catalog_name,
@@ -231,7 +231,7 @@ impl From<&CreateFlowTaskData> for FlowTaskValue {
             .map(|(idx, peer)| (idx as u32, peer.id))
             .collect::<BTreeMap<_, _>>();
 
-        FlowTaskValue {
+        FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
             sink_table_name,
             flownode_ids,
