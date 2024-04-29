@@ -60,9 +60,8 @@
 //! The whole picture of flow keys will be like this:
 //!
 //! __flow/
-//!  {catalog}/
-//!    info/
-//!      {tsak_id}
+//!   info/
+//!     {flow_id}
 //!
 //!    name/
 //!      {flow_name}
