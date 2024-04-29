@@ -34,6 +34,7 @@ use crate::table_name::TableName;
 /// The key stores the metadata of the table.
 ///
 /// The layout: `__table_info/{table_id}`.
+#[derive(Debug, PartialEq)]
 pub struct TableInfoKey {
     table_id: TableId,
 }
@@ -281,14 +282,21 @@ mod tests {
     }
 
     #[test]
-    fn test_key_serde() {
+    fn test_key_serialization() {
         let key = TableInfoKey::new(42);
         let raw_key = key.to_bytes();
         assert_eq!(raw_key, b"__table_info/42");
     }
 
     #[test]
-    fn test_value_serde() {
+    fn test_key_deserialization() {
+        let expected = TableInfoKey::new(42);
+        let key = TableInfoKey::from_bytes(b"__table_info/42").unwrap();
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn test_value_serialization() {
         let value = TableInfoValue {
             table_info: new_table_info(42),
             version: 1,

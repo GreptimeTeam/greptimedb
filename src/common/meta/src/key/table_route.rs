@@ -37,6 +37,7 @@ use crate::rpc::store::BatchGetRequest;
 /// The key stores table routes
 ///
 /// The layout: `__table_route/{table_id}`.
+#[derive(Debug, PartialEq)]
 pub struct TableRouteKey {
     pub table_id: TableId,
 }
@@ -626,6 +627,20 @@ mod tests {
             new_raw_v,
             r#"Physical(PhysicalTableRouteValue { region_routes: [RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }, RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }], version: 0 })"#
         );
+    }
+
+    #[test]
+    fn test_key_serialization() {
+        let key = TableRouteKey::new(42);
+        let raw_key = key.to_bytes();
+        assert_eq!(raw_key, b"__table_route/42");
+    }
+
+    #[test]
+    fn test_key_deserialization() {
+        let expected = TableRouteKey::new(42);
+        let key = TableRouteKey::from_bytes(b"__table_route/42").unwrap();
+        assert_eq!(key, expected);
     }
 
     #[tokio::test]

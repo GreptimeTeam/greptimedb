@@ -238,7 +238,8 @@ mod tests {
         let key = SchemaNameKey::new("my-catalog", "my-schema");
         assert_eq!(key.to_string(), "__schema_name/my-catalog/my-schema");
 
-        let parsed: SchemaNameKey<'_> = "__schema_name/my-catalog/my-schema".try_into().unwrap();
+        let parsed = SchemaNameKey::from_bytes(b"__schema_name/my-catalog/my-schema").unwrap();
+
         assert_eq!(key, parsed);
 
         let value = SchemaNameValue {

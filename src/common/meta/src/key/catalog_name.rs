@@ -164,7 +164,7 @@ mod tests {
 
         assert_eq!(key.to_string(), "__catalog_name/my-catalog");
 
-        let parsed: CatalogNameKey = "__catalog_name/my-catalog".try_into().unwrap();
+        let parsed = CatalogNameKey::from_bytes(b"__catalog_name/my-catalog").unwrap();
 
         assert_eq!(key, parsed);
     }

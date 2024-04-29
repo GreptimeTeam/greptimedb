@@ -32,6 +32,7 @@ pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
     since = "0.4.0",
     note = "Please use the TableRouteManager's get_region_distribution method instead"
 )]
+#[derive(Debug, PartialEq)]
 pub struct TableRegionKey {
     table_id: TableId,
 }
@@ -107,10 +108,12 @@ mod tests {
     use crate::key::TableMetaValue;
 
     #[test]
-    fn test_serde() {
-        let key = TableRegionKey::new(1);
+    fn test_serialization() {
+        let key = TableRegionKey::new(24);
         let raw_key = key.to_bytes();
-        assert_eq!(raw_key, b"__table_region/1");
+        assert_eq!(raw_key, b"__table_region/24");
+        let deserialized = TableRegionKey::from_bytes(b"__table_region/24").unwrap();
+        assert_eq!(key, deserialized);
 
         let value = TableRegionValue {
             region_distribution: RegionDistribution::from([(1, vec![1, 2, 3]), (2, vec![4, 5, 6])]),

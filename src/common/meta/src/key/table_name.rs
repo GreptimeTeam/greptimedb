@@ -50,26 +50,6 @@ impl<'a> TableNameKey<'a> {
     pub fn prefix_to_table(catalog: &str, schema: &str) -> String {
         format!("{}/{}/{}", TABLE_NAME_KEY_PREFIX, catalog, schema)
     }
-
-    fn strip_table_name(raw_key: &[u8]) -> Result<String> {
-        let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
-            InvalidTableMetadataSnafu {
-                err_msg: format!(
-                    "TableNameKey '{}' is not a valid UTF8 string: {e}",
-                    String::from_utf8_lossy(raw_key)
-                ),
-            }
-            .build()
-        })?;
-        let captures =
-            TABLE_NAME_KEY_PATTERN
-                .captures(&key)
-                .context(InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid TableNameKey '{key}'"),
-                })?;
-        // Safety: pass the regex check above
-        Ok(captures[3].to_string())
-    }
 }
 
 impl Display for TableNameKey<'_> {
@@ -116,10 +96,10 @@ impl<'a> MetaKey<'a, TableNameKey<'a>> for TableNameKey<'_> {
 
 /// Decodes `KeyValue` to ({table_name}, TableNameValue)
 pub fn table_decoder(kv: KeyValue) -> Result<(String, TableNameValue)> {
-    let table_name = TableNameKey::strip_table_name(kv.key())?;
+    let table_name_key = TableNameKey::from_bytes(&kv.key)?;
     let table_name_value = TableNameValue::try_from_raw_value(&kv.value)?;
 
-    Ok((table_name, table_name_value))
+    Ok((table_name_key.table.to_string(), table_name_value))
 }
 
 impl<'a> From<&'a TableName> for TableNameKey<'a> {
@@ -290,8 +270,8 @@ mod tests {
 
     #[test]
     fn test_strip_table_name() {
-        fn test_err(raw_key: &[u8]) {
-            assert!(TableNameKey::strip_table_name(raw_key).is_err());
+        fn test_err(bytes: &[u8]) {
+            assert!(TableNameKey::from_bytes(bytes).is_err());
         }
 
         test_err(b"");
@@ -308,10 +288,11 @@ mod tests {
         fn test_ok(table_name: &str) {
             assert_eq!(
                 table_name,
-                TableNameKey::strip_table_name(
+                TableNameKey::from_bytes(
                     format!("__table_name/my_catalog/my_schema/{}", table_name).as_bytes()
                 )
                 .unwrap()
+                .table
             );
         }
         test_ok("my_table");
