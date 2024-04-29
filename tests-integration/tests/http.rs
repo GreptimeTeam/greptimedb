@@ -770,8 +770,6 @@ watch = false
 
 [frontend.opentsdb]
 enable = true
-addr = "127.0.0.1:4242"
-runtime_size = 2
 
 [frontend.influxdb]
 enable = true
