@@ -44,10 +44,13 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             return Ok(HandleControl::Continue);
         };
 
+        let build_info = common_version::build_info();
         let value = NodeInfo {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
             status: NodeStatus::Frontend(FrontendStatus {}),
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit.to_string(),
         };
 
         save_to_mem_store(key, value, ctx).await?;
@@ -86,6 +89,8 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             .count();
         let follower_regions = stat.region_stats.len() - leader_regions;
 
+        let build_info = common_version::build_info();
+
         let value = NodeInfo {
             peer,
             last_activity_ts: stat.timestamp_millis,
@@ -95,6 +100,8 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
                 leader_regions,
                 follower_regions,
             }),
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit.to_string(),
         };
 
         save_to_mem_store(key, value, ctx).await?;

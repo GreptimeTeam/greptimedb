@@ -1,0 +1,54 @@
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+DESC TABLE CLUSTER_INFO;
+
++------------+--------+-----+------+---------+---------------+
+| Column     | Type   | Key | Null | Default | Semantic Type |
++------------+--------+-----+------+---------+---------------+
+| peer_id    | UInt64 |     | NO   |         | FIELD         |
+| peer_type  | String |     | NO   |         | FIELD         |
+| peer_addr  | String |     | YES  |         | FIELD         |
+| version    | String |     | NO   |         | FIELD         |
+| git_commit | String |     | NO   |         | FIELD         |
++------------+--------+-----+------+---------+---------------+
+
+SELECT * FROM CLUSTER_INFO;
+
++---------+------------+-----------+---------+------------------------------------------+
+| peer_id | peer_type  | peer_addr | version | git_commit                               |
++---------+------------+-----------+---------+------------------------------------------+
+| 0       | STANDALONE |           | 0.7.2   | c67f97aed07d2938b41ca9559af5bff48ff3f864 |
++---------+------------+-----------+---------+------------------------------------------+
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'STANDALONE';
+
++---------+------------+-----------+---------+------------------------------------------+
+| peer_id | peer_type  | peer_addr | version | git_commit                               |
++---------+------------+-----------+---------+------------------------------------------+
+| 0       | STANDALONE |           | 0.7.2   | c67f97aed07d2938b41ca9559af5bff48ff3f864 |
++---------+------------+-----------+---------+------------------------------------------+
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
+
+++
+++
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_ID = 0;
+
++---------+------------+-----------+---------+------------------------------------------+
+| peer_id | peer_type  | peer_addr | version | git_commit                               |
++---------+------------+-----------+---------+------------------------------------------+
+| 0       | STANDALONE |           | 0.7.2   | c67f97aed07d2938b41ca9559af5bff48ff3f864 |
++---------+------------+-----------+---------+------------------------------------------+
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 0;
+
+++
+++
+
+USE PUBLIC;
+
+Affected Rows: 0
+

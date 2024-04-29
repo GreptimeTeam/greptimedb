@@ -1,0 +1,35 @@
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+DESC TABLE CLUSTER_INFO;
+
++------------+--------+-----+------+---------+---------------+
+| Column     | Type   | Key | Null | Default | Semantic Type |
++------------+--------+-----+------+---------+---------------+
+| peer_id    | UInt64 |     | NO   |         | FIELD         |
+| peer_type  | String |     | NO   |         | FIELD         |
+| peer_addr  | String |     | YES  |         | FIELD         |
+| version    | String |     | NO   |         | FIELD         |
+| git_commit | String |     | NO   |         | FIELD         |
++------------+--------+-----+------+---------+---------------+
+
+SELECT * FROM CLUSTER_INFO;
+
+Error: 3001(EngineExecuteQuery), Internal error: Failed to list nodes in cluster: Retry exceeded max times(3), message: Failed to get_metasrv_peers, last error: Some("127.0.0.1:3002 is not a leader").
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV';
+
+Error: 3001(EngineExecuteQuery), Internal error: Failed to list nodes in cluster: Retry exceeded max times(3), message: Failed to get_metasrv_peers, last error: Some("127.0.0.1:3002 is not a leader").
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 1;
+
+Error: 3001(EngineExecuteQuery), Internal error: Failed to list nodes in cluster: Retry exceeded max times(3), message: Failed to get_metasrv_peers, last error: Some("127.0.0.1:3002 is not a leader").
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+
+USE PUBLIC;
+
+Affected Rows: 0
+

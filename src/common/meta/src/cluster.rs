@@ -86,6 +86,10 @@ pub struct NodeInfo {
     pub last_activity_ts: i64,
     /// The status of the node. Different roles have different node status.
     pub status: NodeStatus,
+    // The node build version
+    pub version: String,
+    // The node build git commit hash
+    pub git_commit: String,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -100,6 +104,19 @@ pub enum NodeStatus {
     Datanode(DatanodeStatus),
     Frontend(FrontendStatus),
     Metasrv(MetasrvStatus),
+    Standalone,
+}
+
+impl NodeStatus {
+    // Get the role name of the node status
+    pub fn role_name(&self) -> &str {
+        match self {
+            NodeStatus::Datanode(_) => "DATANODE",
+            NodeStatus::Frontend(_) => "FRONTEND",
+            NodeStatus::Metasrv(_) => "METASRV",
+            NodeStatus::Standalone => "STANDALONE",
+        }
+    }
 }
 
 /// The status of a datanode.
@@ -271,6 +288,8 @@ mod tests {
                 leader_regions: 3,
                 follower_regions: 4,
             }),
+            version: "".to_string(),
+            git_commit: "".to_string(),
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
@@ -287,6 +306,7 @@ mod tests {
                     leader_regions: 3,
                     follower_regions: 4,
                 }),
+                ..
             }
         );
     }

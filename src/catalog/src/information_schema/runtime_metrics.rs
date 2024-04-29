@@ -45,8 +45,8 @@ pub(super) struct InformationSchemaMetrics {
 const METRIC_NAME: &str = "metric_name";
 const METRIC_VALUE: &str = "value";
 const METRIC_LABELS: &str = "labels";
-const NODE: &str = "node";
-const NODE_TYPE: &str = "node_type";
+const PEER_ADDR: &str = "peer_addr";
+const PEER_TYPE: &str = "peer_type";
 const TIMESTAMP: &str = "timestamp";
 
 /// The `information_schema.runtime_metrics` virtual table.
@@ -63,8 +63,8 @@ impl InformationSchemaMetrics {
             ColumnSchema::new(METRIC_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(METRIC_VALUE, ConcreteDataType::float64_datatype(), false),
             ColumnSchema::new(METRIC_LABELS, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(NODE, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(NODE_TYPE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(PEER_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 TIMESTAMP,
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -119,8 +119,8 @@ struct InformationSchemaMetricsBuilder {
     metric_names: StringVectorBuilder,
     metric_values: Float64VectorBuilder,
     metric_labels: StringVectorBuilder,
-    nodes: StringVectorBuilder,
-    node_types: StringVectorBuilder,
+    peer_addrs: StringVectorBuilder,
+    peer_types: StringVectorBuilder,
 }
 
 impl InformationSchemaMetricsBuilder {
@@ -130,8 +130,8 @@ impl InformationSchemaMetricsBuilder {
             metric_names: StringVectorBuilder::with_capacity(42),
             metric_values: Float64VectorBuilder::with_capacity(42),
             metric_labels: StringVectorBuilder::with_capacity(42),
-            nodes: StringVectorBuilder::with_capacity(42),
-            node_types: StringVectorBuilder::with_capacity(42),
+            peer_addrs: StringVectorBuilder::with_capacity(42),
+            peer_types: StringVectorBuilder::with_capacity(42),
         }
     }
 
@@ -140,14 +140,14 @@ impl InformationSchemaMetricsBuilder {
         metric_name: &str,
         labels: String,
         metric_value: f64,
-        node: Option<&str>,
-        node_type: &str,
+        peer: Option<&str>,
+        peer_type: &str,
     ) {
         self.metric_names.push(Some(metric_name));
         self.metric_values.push(Some(metric_value));
         self.metric_labels.push(Some(&labels));
-        self.nodes.push(node);
-        self.node_types.push(Some(node_type));
+        self.peer_addrs.push(peer);
+        self.peer_types.push(Some(peer_type));
     }
 
     async fn make_metrics(&mut self, _request: Option<ScanRequest>) -> Result<RecordBatch> {
@@ -184,9 +184,9 @@ impl InformationSchemaMetricsBuilder {
                     .join(", "),
                 // Safety: always has a sample
                 ts.samples[0].value,
-                // TODO(dennis): fetching other nodes metrics
+                // TODO(dennis): fetching other peers metrics
 
-                // The node column is always `None` for standalone
+                // The peer column is always `None` for standalone
                 None,
                 "standalone",
             );
@@ -209,8 +209,8 @@ impl InformationSchemaMetricsBuilder {
             Arc::new(self.metric_names.finish()),
             Arc::new(self.metric_values.finish()),
             Arc::new(self.metric_labels.finish()),
-            Arc::new(self.nodes.finish()),
-            Arc::new(self.node_types.finish()),
+            Arc::new(self.peer_addrs.finish()),
+            Arc::new(self.peer_types.finish()),
             timestamps,
         ];
 
@@ -247,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_make_metrics() {
-        let metrics = InformationSchemaMetrics::new(Mode::Standalone, None);
+        let metrics = InformationSchemaMetrics::new();
 
         let stream = metrics.to_stream(ScanRequest::default()).unwrap();
 
@@ -258,8 +258,8 @@ mod tests {
         assert!(result_literal.contains(METRIC_NAME));
         assert!(result_literal.contains(METRIC_VALUE));
         assert!(result_literal.contains(METRIC_LABELS));
-        assert!(result_literal.contains(NODE));
-        assert!(result_literal.contains(NODE_TYPE));
+        assert!(result_literal.contains(PEER_ADDR));
+        assert!(result_literal.contains(PEER_TYPE));
         assert!(result_literal.contains(TIMESTAMP));
     }
 }

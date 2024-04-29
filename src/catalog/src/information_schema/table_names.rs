@@ -42,3 +42,4 @@ pub const RUNTIME_METRICS: &str = "runtime_metrics";
 pub const PARTITIONS: &str = "partitions";
 pub const REGION_PEERS: &str = "greptime_region_peers";
 pub const TABLE_CONSTRAINTS: &str = "table_constraints";
+pub const CLUSTER_INFO: &str = "cluster_info";
