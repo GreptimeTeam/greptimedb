@@ -32,7 +32,7 @@ use crate::key::flow::flownode_flow::FlownodeFlowManager;
 use crate::key::flow::table_flow::TableFlowManager;
 use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::FlowTaskId;
+use crate::key::FlowId;
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
@@ -132,7 +132,7 @@ impl FlowMetadataManager {
     /// Creates metadata for flow and returns an error if different metadata exists.
     pub async fn create_flow_metadata(
         &self,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         flow_value: FlowInfoValue,
     ) -> Result<()> {
         let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self

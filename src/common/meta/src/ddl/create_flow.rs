@@ -37,7 +37,7 @@ use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::flow::flow_info::FlowInfoValue;
-use crate::key::FlowTaskId;
+use crate::key::FlowId;
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateFlowTask;
@@ -184,7 +184,7 @@ pub struct CreateFlowTaskData {
     pub(crate) cluster_id: ClusterId,
     pub(crate) state: CreateFlowTaskState,
     pub(crate) task: CreateFlowTask,
-    pub(crate) flow_id: Option<FlowTaskId>,
+    pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
 }

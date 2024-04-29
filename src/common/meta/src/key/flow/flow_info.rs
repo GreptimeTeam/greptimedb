@@ -24,9 +24,7 @@ use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{
-    txn_helper, DeserializedValueWithBytes, FlowPartitionId, FlowTaskId, TableMetaValue,
-};
+use crate::key::{txn_helper, DeserializedValueWithBytes, FlowId, FlowPartitionId, TableMetaValue};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::table_name::TableName;
@@ -58,7 +56,7 @@ impl MetaKey<FlowInfoKey> for FlowInfoKey {
 
 impl FlowInfoKey {
     /// Returns the [FlowInfoKey].
-    pub fn new(catalog: String, flow_id: FlowTaskId) -> FlowInfoKey {
+    pub fn new(catalog: String, flow_id: FlowId) -> FlowInfoKey {
         let inner = FlowInfoKeyInner::new(flow_id);
         FlowInfoKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
     }
@@ -69,7 +67,7 @@ impl FlowInfoKey {
     }
 
     /// Returns the [FlowTaskId].
-    pub fn flow_id(&self) -> FlowTaskId {
+    pub fn flow_id(&self) -> FlowId {
         self.0.flow_id
     }
 }
@@ -77,12 +75,12 @@ impl FlowInfoKey {
 /// The key of flow metadata.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FlowInfoKeyInner {
-    flow_id: FlowTaskId,
+    flow_id: FlowId,
 }
 
 impl FlowInfoKeyInner {
     /// Returns a [FlowInfoKey] with the specified `flow_id`.
-    pub fn new(flow_id: FlowTaskId) -> FlowInfoKeyInner {
+    pub fn new(flow_id: FlowId) -> FlowInfoKeyInner {
         FlowInfoKeyInner { flow_id }
     }
 }
@@ -109,7 +107,7 @@ impl MetaKey<FlowInfoKeyInner> for FlowInfoKeyInner {
                     err_msg: format!("Invalid FlowInfoKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
-        let flow_id = captures[1].parse::<FlowTaskId>().unwrap();
+        let flow_id = captures[1].parse::<FlowId>().unwrap();
         Ok(FlowInfoKeyInner { flow_id })
     }
 }
@@ -161,7 +159,7 @@ impl FlowInfoManager {
     }
 
     /// Returns the [FlowTaskValue] of specified `flow_id`.
-    pub async fn get(&self, catalog: &str, flow_id: FlowTaskId) -> Result<Option<FlowInfoValue>> {
+    pub async fn get(&self, catalog: &str, flow_id: FlowId) -> Result<Option<FlowInfoValue>> {
         let key = FlowInfoKey::new(catalog.to_string(), flow_id).to_bytes();
         self.kv_backend
             .get(&key)
@@ -176,7 +174,7 @@ impl FlowInfoManager {
     pub(crate) fn build_create_txn(
         &self,
         catalog: &str,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         flow_value: &FlowInfoValue,
     ) -> Result<(
         Txn,

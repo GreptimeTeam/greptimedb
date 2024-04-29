@@ -21,9 +21,7 @@ use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{
-    txn_helper, DeserializedValueWithBytes, FlowTaskId, TableMetaValue, NAME_PATTERN,
-};
+use crate::key::{txn_helper, DeserializedValueWithBytes, FlowId, TableMetaValue, NAME_PATTERN};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
@@ -112,17 +110,17 @@ impl FlowNameKeyInner {
 /// The value of [FlowNameKey].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlowNameValue {
-    flow_id: FlowTaskId,
+    flow_id: FlowId,
 }
 
 impl FlowNameValue {
     /// Returns a [FlowNameValue] with specified [FlowTaskId].
-    pub fn new(flow_id: FlowTaskId) -> Self {
+    pub fn new(flow_id: FlowId) -> Self {
         Self { flow_id }
     }
 
     /// Returns the [FlowTaskId]
-    pub fn flow_id(&self) -> FlowTaskId {
+    pub fn flow_id(&self) -> FlowId {
         self.flow_id
     }
 }
@@ -163,7 +161,7 @@ impl FlowNameManager {
         &self,
         catalog: &str,
         name: &str,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
     ) -> Result<(
         Txn,
         impl FnOnce(

@@ -23,7 +23,7 @@ use snafu::OptionExt;
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
-use crate::key::{FlowPartitionId, FlowTaskId};
+use crate::key::{FlowId, FlowPartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -62,7 +62,7 @@ impl FlownodeFlowKey {
     pub fn new(
         catalog: String,
         flownode_id: FlownodeId,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         partition_id: FlowPartitionId,
     ) -> FlownodeFlowKey {
         let inner = FlownodeFlowKeyInner::new(flownode_id, flow_id, partition_id);
@@ -85,7 +85,7 @@ impl FlownodeFlowKey {
     }
 
     /// Returns the [FlowTaskId].
-    pub fn flow_id(&self) -> FlowTaskId {
+    pub fn flow_id(&self) -> FlowId {
         self.0.flow_id
     }
 
@@ -103,17 +103,13 @@ impl FlownodeFlowKey {
 /// The key of mapping [FlownodeId] to [FlowTaskId].
 pub struct FlownodeFlowKeyInner {
     flownode_id: FlownodeId,
-    flow_id: FlowTaskId,
+    flow_id: FlowId,
     partition_id: FlowPartitionId,
 }
 
 impl FlownodeFlowKeyInner {
     /// Returns a [FlownodeFlowKey] with the specified `flownode_id`, `flow_id` and `partition_id`.
-    pub fn new(
-        flownode_id: FlownodeId,
-        flow_id: FlowTaskId,
-        partition_id: FlowPartitionId,
-    ) -> Self {
+    pub fn new(flownode_id: FlownodeId, flow_id: FlowId, partition_id: FlowPartitionId) -> Self {
         Self {
             flownode_id,
             flow_id,
@@ -158,7 +154,7 @@ impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
                 })?;
         // Safety: pass the regex check above
         let flownode_id = captures[1].parse::<FlownodeId>().unwrap();
-        let flow_id = captures[2].parse::<FlowTaskId>().unwrap();
+        let flow_id = captures[2].parse::<FlowId>().unwrap();
         let partition_id = captures[3].parse::<FlowPartitionId>().unwrap();
 
         Ok(FlownodeFlowKeyInner {
@@ -190,7 +186,7 @@ impl FlownodeFlowManager {
         &self,
         catalog: &str,
         flownode_id: FlownodeId,
-    ) -> BoxStream<'static, Result<(FlowTaskId, FlowPartitionId)>> {
+    ) -> BoxStream<'static, Result<(FlowId, FlowPartitionId)>> {
         let start_key = FlownodeFlowKey::range_start_key(catalog.to_string(), flownode_id);
         let req = RangeRequest::new().with_prefix(start_key);
 
@@ -210,7 +206,7 @@ impl FlownodeFlowManager {
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         flownode_ids: I,
     ) -> Txn {
         let txns = flownode_ids

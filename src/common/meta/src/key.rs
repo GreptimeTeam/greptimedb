@@ -158,7 +158,7 @@ pub const CACHE_KEY_PREFIXES: [&str; 4] = [
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
 /// The id of flow.
-pub type FlowTaskId = u32;
+pub type FlowId = u32;
 /// The partition of flow.
 pub type FlowPartitionId = u32;
 

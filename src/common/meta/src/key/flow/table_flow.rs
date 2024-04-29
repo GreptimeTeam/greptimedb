@@ -23,7 +23,7 @@ use table::metadata::TableId;
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
-use crate::key::{FlowPartitionId, FlowTaskId};
+use crate::key::{FlowId, FlowPartitionId};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -45,7 +45,7 @@ lazy_static! {
 struct TableFlowKeyInner {
     table_id: TableId,
     flownode_id: FlownodeId,
-    flow_id: FlowTaskId,
+    flow_id: FlowId,
     partition_id: FlowPartitionId,
 }
 
@@ -73,7 +73,7 @@ impl TableFlowKey {
         catalog: String,
         table_id: TableId,
         flownode_id: FlownodeId,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         partition_id: FlowPartitionId,
     ) -> TableFlowKey {
         let inner = TableFlowKeyInner::new(table_id, flownode_id, flow_id, partition_id);
@@ -101,7 +101,7 @@ impl TableFlowKey {
     }
 
     /// Returns the [FlowTaskId].
-    pub fn flow_id(&self) -> FlowTaskId {
+    pub fn flow_id(&self) -> FlowId {
         self.0.flow_id
     }
 
@@ -121,7 +121,7 @@ impl TableFlowKeyInner {
     fn new(
         table_id: TableId,
         flownode_id: FlownodeId,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         partition_id: FlowPartitionId,
     ) -> TableFlowKeyInner {
         Self {
@@ -170,7 +170,7 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
         // Safety: pass the regex check above
         let table_id = captures[1].parse::<TableId>().unwrap();
         let flownode_id = captures[2].parse::<FlownodeId>().unwrap();
-        let flow_id = captures[3].parse::<FlowTaskId>().unwrap();
+        let flow_id = captures[3].parse::<FlowId>().unwrap();
         let partition_id = captures[4].parse::<FlowPartitionId>().unwrap();
         Ok(TableFlowKeyInner::new(
             table_id,
@@ -221,7 +221,7 @@ impl TableFlowManager {
     pub fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
         catalog: &str,
-        flow_id: FlowTaskId,
+        flow_id: FlowId,
         flownode_ids: I,
         source_table_ids: &[TableId],
     ) -> Txn {

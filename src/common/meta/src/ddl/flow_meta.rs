@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tonic::async_trait;
 
 use crate::error::Result;
-use crate::key::FlowTaskId;
+use crate::key::FlowId;
 use crate::peer::Peer;
 use crate::sequence::SequenceRef;
 
@@ -43,13 +43,13 @@ impl FlowMetadataAllocator {
     }
 
     /// Allocates a the [FlowTaskId].
-    pub(crate) async fn allocate_flow_id(&self) -> Result<FlowTaskId> {
-        let flow_id = self.flow_id_sequence.next().await? as FlowTaskId;
+    pub(crate) async fn allocate_flow_id(&self) -> Result<FlowId> {
+        let flow_id = self.flow_id_sequence.next().await? as FlowId;
         Ok(flow_id)
     }
 
     /// Allocates the [FlowTaskId] and [Peer]s.
-    pub async fn create(&self, partitions: usize) -> Result<(FlowTaskId, Vec<Peer>)> {
+    pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
         let flow_id = self.allocate_flow_id().await?;
         let peers = self.partition_peer_allocator.alloc(partitions).await?;
 
