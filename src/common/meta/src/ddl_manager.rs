@@ -116,6 +116,15 @@ impl DdlManager {
                 },
             ),
             (
+                CreateFlowProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        CreateFlowProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
                 AlterTableProcedure::TYPE_NAME,
                 &|context: DdlContext| -> BoxedProcedureLoader {
                     Box::new(move |json: &str| {
