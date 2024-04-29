@@ -223,6 +223,7 @@ sql = { path = "src/sql" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
+# TODO some code depends on this
 tests-integration = { path = "tests-integration" }
 
 [workspace.dependencies.meter-macros]
