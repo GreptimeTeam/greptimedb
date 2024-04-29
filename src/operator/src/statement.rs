@@ -317,8 +317,8 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         schema_name,
         table_name,
         location,
-        with: with.map,
-        connection: connection.map,
+        with: with.into_map(),
+        connection: connection.into_map(),
         pattern,
         direction,
         timestamp_range,
@@ -340,8 +340,8 @@ fn to_copy_database_request(
         catalog_name,
         schema_name: database_name,
         location: arg.location,
-        with: arg.with.map,
-        connection: arg.connection.map,
+        with: arg.with.into_map(),
+        connection: arg.connection.into_map(),
         time_range,
     })
 }

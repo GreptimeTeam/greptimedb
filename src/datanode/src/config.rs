@@ -15,6 +15,7 @@
 //! Datanode configurations
 
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
@@ -24,7 +25,6 @@ use common_wal::config::DatanodeWalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
@@ -285,7 +285,7 @@ pub enum RegionEngineConfig {
 
 #[cfg(test)]
 mod tests {
-    use secrecy::ExposeSecret;
+    use common_base::secrets::ExposeSecret;
 
     use super::*;
 
@@ -308,7 +308,7 @@ mod tests {
         match &opts.storage.store {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
-                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    "SecretBox<alloc::string::String>([REDACTED])".to_string(),
                     format!("{:?}", cfg.access_key_id)
                 );
                 assert_eq!("access_key_id", cfg.access_key_id.expose_secret());

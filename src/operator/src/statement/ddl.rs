@@ -830,7 +830,7 @@ fn create_table_info(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let table_options = TableOptions::try_from(&create_table.table_options)
+    let table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
     let table_options = merge_options(table_options, schema_opts);
 

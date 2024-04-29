@@ -1638,10 +1638,11 @@ ENGINE=mito";
                         ..
                     }
                 );
-                let options = &c.options;
-                assert_eq!(1, options.map.len());
-                let (k, v) = options.map.iter().next().unwrap();
-                assert_eq!(("ttl", "10s"), (k.as_str(), v.as_str()));
+                assert_eq!(1, c.options.len());
+                assert_eq!(
+                    [("ttl", "10s")].into_iter().collect::<HashMap<_, _>>(),
+                    c.options.to_str_map()
+                );
             }
             _ => unreachable!(),
         }
