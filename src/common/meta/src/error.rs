@@ -241,7 +241,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Task already exists, task: {}", task_name,))]
+    #[snafu(display("Task already exists: {}", task_name))]
     TaskAlreadyExists {
         task_name: String,
         location: Location,

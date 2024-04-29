@@ -20,7 +20,6 @@ use crate::error::{self, Result};
 impl CreateFlowProcedure {
     /// Checks:
     /// - The new task name doesn't exist.
-    /// - The source tables exist.
     pub(crate) async fn check_creation(&self) -> Result<()> {
         let catalog_name = &self.data.task.catalog_name;
         let task_name = &self.data.task.task_name;

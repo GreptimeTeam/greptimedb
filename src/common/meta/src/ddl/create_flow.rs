@@ -82,13 +82,13 @@ impl CreateFlowProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn on_flownode_create_flow(&mut self) -> Result<Status> {
+    async fn on_flownode_create_flows(&mut self) -> Result<Status> {
         // Safety: must be allocated.
         let mut create_flow_task = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
             let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
-                body: Some(PbFlowRequest::Create(self.data.to_create_flow_request())),
+                body: Some(PbFlowRequest::Create((&self.data).into())),
             };
             create_flow_task.push(async move {
                 requester
@@ -117,7 +117,7 @@ impl CreateFlowProcedure {
         // TODO(weny): Support `or_replace`.
         self.context
             .flow_task_metadata_manager
-            .create_flow_task_metadata(flow_task_id, self.data.to_flow_task_info_value())
+            .create_flow_task_metadata(flow_task_id, (&self.data).into())
             .await?;
         info!("Created flow task metadata for flow {flow_task_id}");
         Ok(Status::done_with_output(flow_task_id))
@@ -139,7 +139,7 @@ impl Procedure for CreateFlowProcedure {
 
         match state {
             CreateFlowTaskState::Prepare => self.on_prepare().await,
-            CreateFlowTaskState::CreateFlows => self.on_flownode_create_flow().await,
+            CreateFlowTaskState::CreateFlows => self.on_flownode_create_flows().await,
             CreateFlowTaskState::CreateMetadata => self.on_create_metadata().await,
         }
         .map_err(handle_retry_error)
@@ -182,13 +182,10 @@ pub struct CreateFlowTaskData {
     pub(crate) source_table_ids: Vec<TableId>,
 }
 
-impl CreateFlowTaskData {
-    /// Converts to [CreateRequest]
-    /// # Panic
-    /// Panic if the `flow_task_id` is None.
-    fn to_create_flow_request(&self) -> CreateRequest {
-        let flow_task_id = self.flow_task_id.unwrap();
-        let source_table_ids = &self.source_table_ids;
+impl From<&CreateFlowTaskData> for CreateRequest {
+    fn from(value: &CreateFlowTaskData) -> Self {
+        let flow_task_id = value.flow_task_id.unwrap();
+        let source_table_ids = &value.source_table_ids;
 
         CreateRequest {
             task_id: Some(api::v1::flow::TaskId { id: flow_task_id }),
@@ -196,18 +193,19 @@ impl CreateFlowTaskData {
                 .iter()
                 .map(|table_id| api::v1::TableId { id: *table_id })
                 .collect_vec(),
-            sink_table_name: Some(self.task.sink_table_name.clone().into()),
+            sink_table_name: Some(value.task.sink_table_name.clone().into()),
             // Always be true
             create_if_not_exists: true,
-            expire_when: self.task.expire_when.clone(),
-            comment: self.task.comment.clone(),
-            sql: self.task.sql.clone(),
-            task_options: self.task.options.clone(),
+            expire_when: value.task.expire_when.clone(),
+            comment: value.task.comment.clone(),
+            sql: value.task.sql.clone(),
+            task_options: value.task.options.clone(),
         }
     }
+}
 
-    /// Converts to [FlowTaskInfoValue].
-    fn to_flow_task_info_value(&self) -> FlowTaskInfoValue {
+impl From<&CreateFlowTaskData> for FlowTaskInfoValue {
+    fn from(value: &CreateFlowTaskData) -> Self {
         let CreateFlowTask {
             catalog_name,
             task_name,
@@ -217,9 +215,9 @@ impl CreateFlowTaskData {
             sql,
             options,
             ..
-        } = self.task.clone();
+        } = value.task.clone();
 
-        let flownode_ids = self
+        let flownode_ids = value
             .peers
             .iter()
             .enumerate()
@@ -227,7 +225,7 @@ impl CreateFlowTaskData {
             .collect::<BTreeMap<_, _>>();
 
         FlowTaskInfoValue {
-            source_table_ids: self.source_table_ids.clone(),
+            source_table_ids: value.source_table_ids.clone(),
             sink_table_name,
             flownode_ids,
             catalog_name,

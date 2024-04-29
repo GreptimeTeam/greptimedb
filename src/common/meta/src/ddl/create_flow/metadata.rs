@@ -21,7 +21,7 @@ use crate::key::table_name::TableNameKey;
 impl CreateFlowProcedure {
     /// Allocates the [FlowTaskId].
     pub(crate) async fn allocate_flow_task_id(&mut self) -> Result<()> {
-        //TODO(weny, ruihang): We doesn't support the partitions. It's always be 1, now.
+        // TODO(weny, ruihang): We don't support the partitions. It's always be 1, now.
         let partitions = 1;
         let (flow_task_id, peers) = self
             .context
@@ -34,10 +34,9 @@ impl CreateFlowProcedure {
         Ok(())
     }
 
-    /// Collects source table ids
+    /// Ensures all source tables exist and collects source table ids
     pub(crate) async fn collect_source_tables(&mut self) -> Result<()> {
         // Ensures all source tables exist.
-
         let keys = self
             .data
             .task
