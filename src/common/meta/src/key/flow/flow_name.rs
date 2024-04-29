@@ -20,9 +20,10 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{txn_helper, DeserializedValueWithBytes, FlowId, TableMetaValue, NAME_PATTERN};
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 

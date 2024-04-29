@@ -22,8 +22,7 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::{BytesAdapter, MetaKey};
-use crate::key::{FlowId, FlowPartitionId};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -214,7 +213,7 @@ impl FlownodeFlowManager {
 #[cfg(test)]
 mod tests {
     use crate::key::flow::flownode_flow::FlownodeFlowKey;
-    use crate::key::scope::MetaKey;
+    use crate::key::MetaKey;
 
     #[test]
     fn test_key_serialization() {

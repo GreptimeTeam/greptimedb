@@ -22,8 +22,7 @@ use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::{BytesAdapter, MetaKey};
-use crate::key::{FlowId, FlowPartitionId};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};

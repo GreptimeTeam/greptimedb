@@ -30,9 +30,8 @@ use crate::key::flow::flow_info::FlowInfoManager;
 use crate::key::flow::flow_name::FlowNameManager;
 use crate::key::flow::flownode_flow::FlownodeFlowManager;
 use crate::key::flow::table_flow::TableFlowManager;
-use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::FlowId;
+use crate::key::{FlowId, MetaKey};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 

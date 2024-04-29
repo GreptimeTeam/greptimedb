@@ -83,7 +83,6 @@ pub mod datanode_table;
 #[allow(unused)]
 pub mod flow;
 pub mod schema_name;
-pub mod scope;
 pub mod table_info;
 pub mod table_name;
 // TODO(weny): removes it.
@@ -191,6 +190,32 @@ lazy_static! {
 
 pub trait TableMetaKey {
     fn as_raw_key(&self) -> Vec<u8>;
+}
+
+/// The key of metadata.
+pub trait MetaKey<T> {
+    fn to_bytes(&self) -> Vec<u8>;
+
+    fn from_bytes(bytes: &[u8]) -> Result<T>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BytesAdapter(Vec<u8>);
+
+impl From<Vec<u8>> for BytesAdapter {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl MetaKey<BytesAdapter> for BytesAdapter {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<BytesAdapter> {
+        Ok(BytesAdapter(bytes.to_vec()))
+    }
 }
 
 pub(crate) trait TableMetaKeyGetTxnOp {
