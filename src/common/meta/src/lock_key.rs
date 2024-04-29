@@ -22,6 +22,7 @@ const CATALOG_LOCK_PREFIX: &str = "__catalog_lock";
 const SCHEMA_LOCK_PREFIX: &str = "__schema_lock";
 const TABLE_LOCK_PREFIX: &str = "__table_lock";
 const TABLE_NAME_LOCK_PREFIX: &str = "__table_name_lock";
+const FLOW_NAME_LOCK_PREFIX: &str = "__flow_name_lock";
 const REGION_LOCK_PREFIX: &str = "__region_lock";
 
 /// [CatalogLock] acquires the lock on the tenant level.
@@ -106,6 +107,32 @@ impl From<TableNameLock> for StringKey {
     fn from(value: TableNameLock) -> Self {
         match value {
             TableNameLock::Write(_) => StringKey::Exclusive(value.to_string()),
+        }
+    }
+}
+
+/// [FlowNameLock] prevents any procedures trying to create a flow named it.
+pub enum FlowNameLock {
+    Write(String),
+}
+
+impl FlowNameLock {
+    pub fn new(catalog: &str, table: &str) -> Self {
+        Self::Write(format!("{catalog}.{table}"))
+    }
+}
+
+impl Display for FlowNameLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let FlowNameLock::Write(name) = self;
+        write!(f, "{}/{}", FLOW_NAME_LOCK_PREFIX, name)
+    }
+}
+
+impl From<FlowNameLock> for StringKey {
+    fn from(value: FlowNameLock) -> Self {
+        match value {
+            FlowNameLock::Write(_) => StringKey::Exclusive(value.to_string()),
         }
     }
 }

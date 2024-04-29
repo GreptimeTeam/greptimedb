@@ -20,7 +20,6 @@
 
 pub mod cache_invalidator;
 pub mod cluster;
-pub mod datanode_manager;
 pub mod ddl;
 pub mod ddl_manager;
 pub mod distributed_time_constants;
@@ -31,6 +30,7 @@ pub mod key;
 pub mod kv_backend;
 pub mod lock_key;
 pub mod metrics;
+pub mod node_manager;
 pub mod peer;
 pub mod range_stream;
 pub mod region_keeper;
@@ -43,7 +43,11 @@ pub mod test_util;
 pub mod util;
 pub mod wal_options_allocator;
 
+// The id of the cluster.
 pub type ClusterId = u64;
+// The id of the datanode.
 pub type DatanodeId = u64;
+// The id of the flownode.
+pub type FlownodeId = u64;
 
 pub use instruction::RegionIdent;

@@ -163,8 +163,8 @@ mod tests {
         );
 
         let column_defs = create_expr.column_defs;
-        assert_eq!(column_defs[6].name, create_expr.time_index);
-        assert_eq!(8, column_defs.len());
+        assert_eq!(column_defs[5].name, create_expr.time_index);
+        assert_eq!(7, column_defs.len());
 
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -242,21 +242,6 @@ mod tests {
         );
 
         assert_eq!(
-            ConcreteDataType::duration_millisecond_datatype(),
-            ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(
-                    column_defs
-                        .iter()
-                        .find(|c| c.name == "duration")
-                        .unwrap()
-                        .data_type,
-                    None
-                )
-                .unwrap()
-            )
-        );
-
-        assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
@@ -302,7 +287,7 @@ mod tests {
 
         let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
-        assert_eq!(6, add_columns.add_columns.len());
+        assert_eq!(5, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -351,20 +336,7 @@ mod tests {
             )
         );
 
-        let duration_column = &add_columns.add_columns[4];
-
-        assert_eq!(
-            ConcreteDataType::duration_millisecond_datatype(),
-            ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(
-                    duration_column.column_def.as_ref().unwrap().data_type,
-                    None
-                )
-                .unwrap()
-            )
-        );
-
-        let decimal_column = &add_columns.add_columns[5];
+        let decimal_column = &add_columns.add_columns[4];
         assert_eq!(
             ConcreteDataType::decimal128_datatype(38, 10),
             ConcreteDataType::from(
@@ -474,19 +446,6 @@ mod tests {
             ..Default::default()
         };
 
-        let duration_vals = Values {
-            duration_millisecond_values: vec![100, 101],
-            ..Default::default()
-        };
-        let duration_column = Column {
-            column_name: "duration".to_string(),
-            semantic_type: SemanticType::Field as i32,
-            values: Some(duration_vals),
-            null_mask: vec![0],
-            datatype: ColumnDataType::DurationMillisecond as i32,
-            ..Default::default()
-        };
-
         let ts_vals = Values {
             timestamp_millisecond_values: vec![100, 101],
             ..Default::default()
@@ -524,7 +483,6 @@ mod tests {
                 mem_column,
                 time_column,
                 interval_column,
-                duration_column,
                 ts_column,
                 decimal_column,
             ],

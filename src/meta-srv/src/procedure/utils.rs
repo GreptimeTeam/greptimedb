@@ -105,11 +105,13 @@ pub mod test_data {
 
     use chrono::DateTime;
     use common_catalog::consts::MITO2_ENGINE;
-    use common_meta::datanode_manager::DatanodeManagerRef;
+    use common_meta::ddl::flow_meta::FlowMetadataAllocator;
     use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::DdlContext;
+    use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::node_manager::NodeManagerRef;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::RegionRoute;
@@ -188,28 +190,34 @@ pub mod test_data {
         }
     }
 
-    pub(crate) fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
+    pub(crate) fn new_ddl_context(node_manager: NodeManagerRef) -> DdlContext {
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
         let mailbox_sequence =
             SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
-
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
+            Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
+            Arc::new(WalOptionsAllocator::default()),
+        ));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            Arc::new(SequenceBuilder::new("test", kv_backend).build()),
+        ));
         DdlContext {
-            datanode_manager,
+            node_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,
                 MetasrvInfo {
                     server_addr: "127.0.0.1:4321".to_string(),
                 },
             )),
-            table_metadata_manager: table_metadata_manager.clone(),
+            table_metadata_manager,
+            table_metadata_allocator,
+            flow_metadata_manager,
+            flow_metadata_allocator,
             memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
-            table_metadata_allocator: Arc::new(TableMetadataAllocator::new(
-                Arc::new(SequenceBuilder::new("test", kv_backend).build()),
-                Arc::new(WalOptionsAllocator::default()),
-            )),
         }
     }
 }

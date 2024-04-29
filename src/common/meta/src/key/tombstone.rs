@@ -31,12 +31,6 @@ pub(crate) struct TombstoneManager {
 
 const TOMBSTONE_PREFIX: &str = "__tombstone/";
 
-pub(crate) struct TombstoneKeyValue {
-    pub(crate) origin_key: Vec<u8>,
-    pub(crate) tombstone_key: Vec<u8>,
-    pub(crate) value: Vec<u8>,
-}
-
 fn to_tombstone(key: &[u8]) -> Vec<u8> {
     [TOMBSTONE_PREFIX.as_bytes(), key].concat()
 }

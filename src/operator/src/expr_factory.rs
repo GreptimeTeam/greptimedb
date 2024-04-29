@@ -22,7 +22,10 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
+use common_meta::rpc::ddl::CreateFlowTask;
+use common_meta::table_name::TableName;
 use common_time::Timezone;
+use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
@@ -34,17 +37,17 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
+use sql::statements::create::{CreateExternalTable, CreateFlow, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
-use sql::util::to_lowercase_options_map;
+use sql::util::extract_tables_from_query;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu,
-    InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
-    SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
+    ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
+    InferFileTableSchemaSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -127,13 +130,13 @@ pub(crate) async fn create_external_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let mut table_options = create.options;
+    let mut table_options = create.options.into_map();
 
-    let (object_store, files) = prepare_file_table_files(&table_options.map)
+    let (object_store, files) = prepare_file_table_files(&table_options)
         .await
         .context(PrepareFileTableSnafu)?;
 
-    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options.map)
+    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
         .await
         .context(InferFileTableSchemaSnafu)?
         .column_schemas;
@@ -174,7 +177,7 @@ pub(crate) async fn create_external_expr(
         time_index,
         primary_keys,
         create_if_not_exists: create.if_not_exists,
-        table_options: table_options.map,
+        table_options,
         table_id: None,
         engine: create.engine.to_string(),
     };
@@ -190,7 +193,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
 
     let time_index = find_time_index(&create.constraints)?;
     let table_options = HashMap::from(
-        &TableOptions::try_from(&to_lowercase_options_map(&create.options))
+        &TableOptions::try_from_iter(create.options.to_str_map())
             .context(UnrecognizedTableOptionSnafu)?,
     );
 
@@ -489,6 +492,70 @@ pub(crate) fn to_alter_expr(
     })
 }
 
+pub fn to_create_flow_task_expr(
+    create_flow: CreateFlow,
+    query_ctx: QueryContextRef,
+) -> Result<CreateFlowTask> {
+    // retrieve sink table name
+    let sink_table_ref =
+        object_name_to_table_reference(create_flow.sink_table_name.clone().into(), true)
+            .with_context(|_| ConvertIdentifierSnafu {
+                ident: create_flow.sink_table_name.to_string(),
+            })?;
+    let catalog = sink_table_ref
+        .catalog()
+        .unwrap_or(query_ctx.current_catalog())
+        .to_string();
+    let schema = sink_table_ref
+        .schema()
+        .unwrap_or(query_ctx.current_schema())
+        .to_string();
+    let sink_table_name = TableName {
+        catalog_name: catalog,
+        schema_name: schema,
+        table_name: sink_table_ref.table().to_string(),
+    };
+
+    let source_table_names = extract_tables_from_query(&create_flow.query)
+        .map(|name| {
+            let reference = object_name_to_table_reference(name.clone().into(), true)
+                .with_context(|_| ConvertIdentifierSnafu {
+                    ident: name.to_string(),
+                })?;
+            let catalog = reference
+                .catalog()
+                .unwrap_or(query_ctx.current_catalog())
+                .to_string();
+            let schema = reference
+                .schema()
+                .unwrap_or(query_ctx.current_schema())
+                .to_string();
+            let table_name = TableName {
+                catalog_name: catalog,
+                schema_name: schema,
+                table_name: reference.table().to_string(),
+            };
+            Ok(table_name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(CreateFlowTask {
+        catalog_name: query_ctx.current_catalog().to_string(),
+        flow_name: create_flow.flow_name.to_string(),
+        source_table_names,
+        sink_table_name,
+        or_replace: create_flow.or_replace,
+        create_if_not_exists: create_flow.if_not_exists,
+        expire_when: create_flow
+            .expire_when
+            .map(|e| e.to_string())
+            .unwrap_or_default(),
+        comment: create_flow.comment.unwrap_or_default(),
+        sql: create_flow.query.to_string(),
+        flow_options: HashMap::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use datatypes::value::Value;
@@ -502,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_create_to_expr() {
-        let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(regions=1, ttl='3days', write_buffer_size='1024KB');";
+        let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(ttl='3days', write_buffer_size='1024KB');";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()

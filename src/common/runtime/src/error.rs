@@ -48,12 +48,4 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
-
-    fn location_opt(&self) -> Option<common_error::snafu::Location> {
-        match self {
-            Error::BuildRuntime { location, .. }
-            | Error::IllegalState { location, .. }
-            | Error::WaitGcTaskStop { location, .. } => Some(*location),
-        }
-    }
 }

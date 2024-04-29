@@ -12,19 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
-use std::sync::LazyLock;
 
-use regex::Regex;
-use sqlparser::ast::{Expr, ObjectName, SqlOption, Value};
+use sqlparser::ast::{Expr, ObjectName, Query, SetExpr, SqlOption, TableFactor, Value};
 
-static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        Regex::new(r#"(?i)access_key_id=["']([^"']*)["'].*"#).unwrap(),
-        Regex::new(r#"(?i)secret_access_key=["']([^"']*)["'].*"#).unwrap(),
-    ]
-});
+use crate::error::{InvalidTableOptionValueSnafu, Result};
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -47,61 +40,56 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
     format!("{}", Inner { name })
 }
 
-pub fn parse_option_string(value: Expr) -> Option<String> {
-    match value {
-        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => {
-            Some(v)
-        }
-        _ => None,
-    }
+pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
+    let (key, value) = (option.name, option.value);
+    let v = match value {
+        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
+        Expr::Identifier(v) => v.value,
+        Expr::Value(Value::Number(v, _)) => v.to_string(),
+        value => return InvalidTableOptionValueSnafu { key, value }.fail(),
+    };
+    let k = key.value.to_lowercase();
+    Ok((k, v))
 }
 
-/// Converts options to HashMap<String, String>.
-/// All keys are lowercase.
-pub fn to_lowercase_options_map(opts: &[SqlOption]) -> HashMap<String, String> {
-    let mut map = HashMap::with_capacity(opts.len());
-    for SqlOption { name, value } in opts {
-        let value_str = match value {
-            Expr::Value(Value::SingleQuotedString(s))
-            | Expr::Value(Value::DoubleQuotedString(s)) => s.clone(),
-            Expr::Identifier(i) => i.value.clone(),
-            _ => value.to_string(),
-        };
-        let _ = map.insert(name.value.to_lowercase().clone(), value_str);
-    }
-    map
+/// Walk through a [Query] and extract all the tables referenced in it.
+pub fn extract_tables_from_query(query: &Query) -> impl Iterator<Item = ObjectName> {
+    let mut names = HashSet::new();
+
+    extract_tables_from_set_expr(&query.body, &mut names);
+
+    names.into_iter()
 }
 
-/// Use regex to match and replace common seen secret values in SQL.
-pub fn redact_sql_secrets(sql: &str) -> String {
-    let mut s = sql.to_string();
-    for p in SQL_SECRET_PATTERNS.iter() {
-        if let Some(captures) = p.captures(&s) {
-            if let Some(m) = captures.get(1) {
-                s = s.replace(m.as_str(), "******");
+/// Helper function for [extract_tables_from_query].
+///
+/// Handle [SetExpr].
+fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectName>) {
+    match set_expr {
+        SetExpr::Select(select) => {
+            for from in &select.from {
+                table_factor_to_object_name(&from.relation, names);
+                for join in &from.joins {
+                    table_factor_to_object_name(&join.relation, names);
+                }
             }
         }
-    }
-    s
+        SetExpr::Query(query) => {
+            extract_tables_from_set_expr(&query.body, names);
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            extract_tables_from_set_expr(left, names);
+            extract_tables_from_set_expr(right, names);
+        }
+        SetExpr::Values(_) | SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Table(_) => {}
+    };
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_redact_sql_secrets() {
-        assert_eq!(
-            redact_sql_secrets(
-                r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='my_key_id', SECRET_ACCESS_KEY="my_access_key");"#
-            ),
-            r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='******', SECRET_ACCESS_KEY="******");"#
-        );
-        assert_eq!(
-            redact_sql_secrets(
-                r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='@scoped/key_id', SECRET_ACCESS_KEY="@scoped/access_key");"#
-            ),
-            r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='******', SECRET_ACCESS_KEY="******");"#
-        );
+/// Helper function for [extract_tables_from_query].
+///
+/// Handle [TableFactor].
+fn table_factor_to_object_name(table_factor: &TableFactor, names: &mut HashSet<ObjectName>) {
+    if let TableFactor::Table { name, .. } = table_factor {
+        names.insert(name.to_owned());
     }
 }

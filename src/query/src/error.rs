@@ -22,6 +22,7 @@ use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -244,6 +245,18 @@ pub enum Error {
 
     #[snafu(display("Range Query: {}", msg))]
     RangeQuery { msg: String, location: Location },
+
+    #[snafu(display(
+        "Failed to get metadata from engine {} for region_id {}",
+        engine,
+        region_id,
+    ))]
+    GetRegionMetadata {
+        engine: String,
+        region_id: RegionId,
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 impl ErrorExt for Error {
@@ -296,6 +309,7 @@ impl ErrorExt for Error {
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
+            GetRegionMetadata { .. } => StatusCode::Internal,
         }
     }
 

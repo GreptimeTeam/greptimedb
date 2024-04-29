@@ -357,7 +357,7 @@ mod tests {
                             disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
+                        ) engine=mito;"#;
         let output = SqlQueryHandler::do_query(&*instance, sql, QueryContext::arc())
             .await
             .remove(0)
@@ -419,7 +419,7 @@ mod tests {
                             disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
+                        ) engine=mito;"#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .remove(0)

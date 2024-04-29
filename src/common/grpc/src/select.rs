@@ -15,16 +15,14 @@
 use api::helper::{convert_i128_to_interval, convert_to_pb_decimal128};
 use api::v1::column::Values;
 use common_base::BitVec;
-use datatypes::types::{DurationType, IntervalType, TimeType, TimestampType, WrapperType};
+use datatypes::types::{IntervalType, TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector,
-    DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
-    DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
-    Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-    StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
-    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-    TimestampNanosecondVector, TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector,
-    UInt8Vector, VectorRef,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, Float32Vector,
+    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector,
+    IntervalMonthDayNanoVector, IntervalYearMonthVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
+    UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
 };
 use snafu::OptionExt;
 
@@ -72,7 +70,7 @@ macro_rules! convert_arrow_array_to_grpc_vals {
                     return Ok(vals);
                 },
             )+
-            ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => unreachable!("Should not send {:?} in gRPC", $data_type),
+            ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) | ConcreteDataType::Duration(_) => unreachable!("Should not send {:?} in gRPC", $data_type),
         }
     }};
 }
@@ -216,30 +214,6 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             |x| { convert_i128_to_interval(x.into_native()) }
         ),
         (
-            ConcreteDataType::Duration(DurationType::Second(_)),
-            DurationSecondVector,
-            duration_second_values,
-            |x| { x.into_native() }
-        ),
-        (
-            ConcreteDataType::Duration(DurationType::Millisecond(_)),
-            DurationMillisecondVector,
-            duration_millisecond_values,
-            |x| { x.into_native() }
-        ),
-        (
-            ConcreteDataType::Duration(DurationType::Microsecond(_)),
-            DurationMicrosecondVector,
-            duration_microsecond_values,
-            |x| { x.into_native() }
-        ),
-        (
-            ConcreteDataType::Duration(DurationType::Nanosecond(_)),
-            DurationNanosecondVector,
-            duration_nanosecond_values,
-            |x| { x.into_native() }
-        ),
-        (
             ConcreteDataType::Decimal128(_),
             Decimal128Vector,
             decimal128_values,
@@ -309,16 +283,6 @@ mod tests {
                 i as i64 + 1
             );
         })
-    }
-
-    #[test]
-    fn test_convert_arrow_array_duration_second() {
-        let array = DurationSecondVector::from(vec![Some(1), Some(2), None, Some(3)]);
-        let array: VectorRef = Arc::new(array);
-
-        let values = values(&[array]).unwrap();
-
-        assert_eq!(vec![1, 2, 3], values.duration_second_values);
     }
 
     #[test]

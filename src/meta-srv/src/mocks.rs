@@ -70,7 +70,7 @@ pub async fn mock(
     };
 
     let builder = match datanode_clients {
-        Some(clients) => builder.datanode_manager(clients),
+        Some(clients) => builder.node_manager(clients),
         None => builder,
     };
 

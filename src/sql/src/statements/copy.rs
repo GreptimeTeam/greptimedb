@@ -17,7 +17,7 @@ use std::fmt::Display;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::statements::{redact_and_sort_options, OptionMap};
+use crate::statements::OptionMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Copy {
@@ -53,12 +53,12 @@ impl Display for CopyTable {
                 (&args.with, &args.connection)
             }
         };
-        if !with.map.is_empty() {
-            let options = redact_and_sort_options(with);
+        if !with.is_empty() {
+            let options = with.kv_pairs();
             write!(f, " WITH ({})", options.join(", "))?;
         }
-        if !connection.map.is_empty() {
-            let options = redact_and_sort_options(connection);
+        if !connection.is_empty() {
+            let options = connection.kv_pairs();
             write!(f, " CONNECTION ({})", options.join(", "))?;
         }
         Ok(())
@@ -84,12 +84,12 @@ impl Display for CopyDatabase {
                 (&args.with, &args.connection)
             }
         };
-        if !with.map.is_empty() {
-            let options = redact_and_sort_options(with);
+        if !with.is_empty() {
+            let options = with.kv_pairs();
             write!(f, " WITH ({})", options.join(", "))?;
         }
-        if !connection.map.is_empty() {
-            let options = redact_and_sort_options(connection);
+        if !connection.is_empty() {
+            let options = connection.kv_pairs();
             write!(f, " CONNECTION ({})", options.join(", "))?;
         }
         Ok(())

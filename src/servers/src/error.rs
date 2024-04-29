@@ -97,9 +97,8 @@ pub enum Error {
         error: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[snafu(display("Failed to execute query, query: {}", query))]
+    #[snafu(display("Failed to execute query"))]
     ExecuteQuery {
-        query: String,
         location: Location,
         source: BoxedError,
     },
@@ -161,8 +160,8 @@ pub enum Error {
         error: influxdb_line_protocol::Error,
     },
 
-    #[snafu(display("Failed to write InfluxDB line protocol"))]
-    InfluxdbLinesWrite {
+    #[snafu(display("Failed to write row"))]
+    RowWriter {
         location: Location,
         source: common_grpc::error::Error,
     },
@@ -462,6 +461,9 @@ pub enum Error {
         #[snafu(source)]
         error: notify::Error,
     },
+
+    #[snafu(display("Timestamp overflow: {}", error))]
+    TimestampOverflow { error: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -524,9 +526,10 @@ impl ErrorExt for Error {
             | IncompatibleSchema { .. }
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
-            | UnexpectedPhysicalTable { .. } => StatusCode::InvalidArguments,
+            | UnexpectedPhysicalTable { .. }
+            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. }
+            RowWriter { source, .. }
             | PromSeriesWrite { source, .. }
             | OtlpMetricsWrite { source, .. } => source.status_code(),
 
@@ -659,7 +662,7 @@ impl IntoResponse for Error {
         let error_msg = self.output_msg();
         let status = match self {
             Error::InfluxdbLineProtocol { .. }
-            | Error::InfluxdbLinesWrite { .. }
+            | Error::RowWriter { .. }
             | Error::PromSeriesWrite { .. }
             | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }

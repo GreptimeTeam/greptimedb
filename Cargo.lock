@@ -700,13 +700,13 @@ version = "0.7.2"
 dependencies = [
  "api",
  "async-trait",
+ "common-base",
  "common-error",
  "common-macro",
  "common-telemetry",
  "common-test-util",
  "digest",
  "notify",
- "secrecy",
  "sha1",
  "snafu",
  "sql",
@@ -1682,6 +1682,7 @@ dependencies = [
  "serde",
  "snafu",
  "toml 0.8.12",
+ "zeroize",
 ]
 
 [[package]]
@@ -1756,6 +1757,21 @@ version = "0.7.2"
 dependencies = [
  "snafu",
  "strum 0.25.0",
+]
+
+[[package]]
+name = "common-frontend"
+version = "0.7.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "common-base",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "session",
+ "snafu",
+ "sql",
 ]
 
 [[package]]
@@ -1900,6 +1916,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-wal",
+ "datafusion-common",
  "datatypes",
  "derive_builder 0.12.0",
  "etcd-client",
@@ -2861,7 +2878,6 @@ dependencies = [
  "prost 0.12.4",
  "query",
  "reqwest",
- "secrecy",
  "serde",
  "servers",
  "session",
@@ -3555,6 +3571,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-meta",
@@ -3866,7 +3883,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=73ac0207ab71dfea48f30259ffdb611501b5ecb8#73ac0207ab71dfea48f30259ffdb611501b5ecb8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b5412f72257c18410fdccbb893fa5d245b846141#b5412f72257c18410fdccbb893fa5d245b846141"
 dependencies = [
  "prost 0.12.4",
  "serde",
@@ -8926,16 +8943,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "secrecy"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bd1c54ea06cfd2f6b63219704de0b9b4f72dcc2b8fdef820be6cd799780e91e"
-dependencies = [
- "serde",
- "zeroize",
-]
-
-[[package]]
 name = "security-framework"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9188,7 +9195,6 @@ dependencies = [
  "rustls-pki-types",
  "schemars",
  "script",
- "secrecy",
  "serde",
  "serde_json",
  "session",
@@ -10286,7 +10292,6 @@ dependencies = [
  "rstest",
  "rstest_reuse",
  "script",
- "secrecy",
  "serde_json",
  "servers",
  "session",

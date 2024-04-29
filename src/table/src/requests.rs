@@ -29,8 +29,7 @@ use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
 
-use crate::error;
-use crate::error::ParseTableOptionSnafu;
+use crate::error::{ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
 use crate::table_reference::TableReference;
 
@@ -53,7 +52,6 @@ pub fn validate_table_option(key: &str) -> bool {
         // common keys:
         WRITE_BUFFER_SIZE_KEY,
         TTL_KEY,
-        REGIONS_KEY,
         STORAGE_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
@@ -80,15 +78,20 @@ pub struct TableOptions {
 
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
-pub const REGIONS_KEY: &str = "regions";
 pub const STORAGE_KEY: &str = "storage";
 
-impl TryFrom<&HashMap<String, String>> for TableOptions {
-    type Error = error::Error;
-
-    fn try_from(value: &HashMap<String, String>) -> Result<Self, Self::Error> {
+impl TableOptions {
+    pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
+        iter: U,
+    ) -> Result<TableOptions> {
         let mut options = TableOptions::default();
-        if let Some(write_buffer_size) = value.get(WRITE_BUFFER_SIZE_KEY) {
+
+        let kvs: HashMap<String, String> = iter
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        if let Some(write_buffer_size) = kvs.get(WRITE_BUFFER_SIZE_KEY) {
             let size = ReadableSize::from_str(write_buffer_size).map_err(|_| {
                 ParseTableOptionSnafu {
                     key: WRITE_BUFFER_SIZE_KEY,
@@ -99,7 +102,7 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
             options.write_buffer_size = Some(size)
         }
 
-        if let Some(ttl) = value.get(TTL_KEY) {
+        if let Some(ttl) = kvs.get(TTL_KEY) {
             let ttl_value = ttl
                 .parse::<humantime::Duration>()
                 .map_err(|_| {
@@ -112,13 +115,12 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
                 .into();
             options.ttl = Some(ttl_value);
         }
-        options.extra_options = HashMap::from_iter(value.iter().filter_map(|(k, v)| {
-            if k != WRITE_BUFFER_SIZE_KEY && k != REGIONS_KEY && k != TTL_KEY {
-                Some((k.clone(), v.clone()))
-            } else {
-                None
-            }
-        }));
+
+        options.extra_options = HashMap::from_iter(
+            kvs.into_iter()
+                .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY),
+        );
+
         Ok(options)
     }
 }
@@ -281,7 +283,6 @@ mod tests {
         assert!(validate_table_option(FILE_TABLE_FORMAT_KEY));
         assert!(validate_table_option(FILE_TABLE_PATTERN_KEY));
         assert!(validate_table_option(TTL_KEY));
-        assert!(validate_table_option(REGIONS_KEY));
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
         assert!(!validate_table_option("foo"));
@@ -307,7 +308,7 @@ mod tests {
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
-        let serialized = TableOptions::try_from(&serialized_map).unwrap();
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
 
         let options = TableOptions {
@@ -316,7 +317,7 @@ mod tests {
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
-        let serialized = TableOptions::try_from(&serialized_map).unwrap();
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
 
         let options = TableOptions {
@@ -325,7 +326,7 @@ mod tests {
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
         };
         let serialized_map = HashMap::from(&options);
-        let serialized = TableOptions::try_from(&serialized_map).unwrap();
+        let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
     }
 }

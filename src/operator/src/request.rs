@@ -18,7 +18,7 @@ use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{CompactRequest, FlushRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
-use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_telemetry::logging::{error, info};
 use common_telemetry::tracing_context::TracingContext;
@@ -39,7 +39,7 @@ use crate::region_req_factory::RegionRequestFactory;
 pub struct Requester {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    node_manager: NodeManagerRef,
 }
 
 pub type RequesterRef = Arc<Requester>;
@@ -48,12 +48,12 @@ impl Requester {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        node_manager: NodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
-            datanode_manager,
+            node_manager,
         }
     }
 
@@ -168,11 +168,11 @@ impl Requester {
         let tasks = requests.into_iter().map(|req_body| {
             let request = request_factory.build_request(req_body.clone());
             let partition_manager = self.partition_manager.clone();
-            let datanode_manager = self.datanode_manager.clone();
+            let node_manager = self.node_manager.clone();
             common_runtime::spawn_write(async move {
                 let peer =
                     Self::find_region_leader_by_request(partition_manager, &req_body).await?;
-                datanode_manager
+                node_manager
                     .datanode(&peer)
                     .await
                     .handle(request)

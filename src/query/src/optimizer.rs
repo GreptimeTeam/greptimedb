@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod order_hint;
+pub mod string_normalization;
+#[cfg(test)]
+mod test_util;
+pub mod type_conversion;
+
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::Result;
 use datafusion_expr::LogicalPlan;
@@ -30,7 +36,3 @@ pub trait ExtensionAnalyzerRule {
         config: &ConfigOptions,
     ) -> Result<LogicalPlan>;
 }
-
-pub mod order_hint;
-pub mod string_normalization;
-pub mod type_conversion;

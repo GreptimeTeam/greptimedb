@@ -461,6 +461,9 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
+            alter_request::Kind::ChangeColumnTypes(_) => {
+                unimplemented!()
+            }
         };
 
         Ok(alter_kind)

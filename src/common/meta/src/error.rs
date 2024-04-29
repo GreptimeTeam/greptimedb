@@ -241,6 +241,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Flow already exists: {}", flow_name))]
+    FlowAlreadyExists {
+        flow_name: String,
+        location: Location,
+    },
+
     #[snafu(display("Catalog already exists, catalog: {}", catalog))]
     CatalogAlreadyExists { catalog: String, location: Location },
 
@@ -421,6 +427,16 @@ pub enum Error {
     #[snafu(display("Invalid role: {}", role))]
     InvalidRole { role: i32, location: Location },
 
+    #[snafu(display("Delimiter not found, key: {}", key))]
+    DelimiterNotFound { key: String, location: Location },
+
+    #[snafu(display("Invalid prefix: {}, key: {}", prefix, key))]
+    MismatchPrefix {
+        prefix: String,
+        key: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to move values: {err_msg}"))]
     MoveValues { err_msg: String, location: Location },
 
@@ -494,7 +510,10 @@ impl ErrorExt for Error {
             | EmptyKey { .. }
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
-            | CreateLogicalTablesInvalidArguments { .. } => StatusCode::InvalidArguments,
+            | CreateLogicalTablesInvalidArguments { .. }
+            | FlowAlreadyExists { .. }
+            | MismatchPrefix { .. }
+            | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

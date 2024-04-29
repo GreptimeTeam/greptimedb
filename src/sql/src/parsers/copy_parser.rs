@@ -129,10 +129,8 @@ impl<'a> ParserContext<'a> {
 
         let with = options
             .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect();
+            .map(parse_option_string)
+            .collect::<Result<With>>()?;
 
         let connection_options = self
             .parser
@@ -141,10 +139,8 @@ impl<'a> ParserContext<'a> {
 
         let connection = connection_options
             .into_iter()
-            .filter_map(|option| {
-                parse_option_string(option.value).map(|v| (option.name.value.to_lowercase(), v))
-            })
-            .collect();
+            .map(parse_option_string)
+            .collect::<Result<Connection>>()?;
 
         Ok((with, connection, location))
     }
@@ -382,20 +378,17 @@ mod tests {
             stmt.database_name
         );
         assert_eq!(
-            [("format".to_string(), "parquet".to_string())]
+            [("format", "parquet")]
                 .into_iter()
                 .collect::<HashMap<_, _>>(),
-            stmt.with.map
+            stmt.with.to_str_map()
         );
 
         assert_eq!(
-            [
-                ("foo".to_string(), "Bar".to_string()),
-                ("one".to_string(), "two".to_string())
-            ]
-            .into_iter()
-            .collect::<HashMap<_, _>>(),
-            stmt.connection.map
+            [("foo", "Bar"), ("one", "two")]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+            stmt.connection.to_str_map()
         );
     }
 
@@ -421,20 +414,17 @@ mod tests {
             stmt.database_name
         );
         assert_eq!(
-            [("format".to_string(), "parquet".to_string())]
+            [("format", "parquet")]
                 .into_iter()
                 .collect::<HashMap<_, _>>(),
-            stmt.with.map
+            stmt.with.to_str_map()
         );
 
         assert_eq!(
-            [
-                ("foo".to_string(), "Bar".to_string()),
-                ("one".to_string(), "two".to_string())
-            ]
-            .into_iter()
-            .collect::<HashMap<_, _>>(),
-            stmt.connection.map
+            [("foo", "Bar"), ("one", "two")]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+            stmt.connection.to_str_map()
         );
     }
 }

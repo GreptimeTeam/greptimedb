@@ -20,6 +20,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::DatanodeId;
+use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{RegionId, TableId};
@@ -80,6 +81,10 @@ fn renew_region_lease_via_region_route(
         return Some((region_id, RegionRole::Follower));
     }
 
+    warn!(
+        "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, region_routes: {:?}",
+        region_route
+    );
     // The region doesn't belong to this datanode.
     None
 }
@@ -140,7 +145,10 @@ impl RegionLeaseKeeper {
                 return renew_region_lease_via_region_route(&region_route, datanode_id, region_id);
             }
         }
-
+        warn!(
+            "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, table({}) is not found",
+            region_id.table_id()
+        );
         None
     }
 
