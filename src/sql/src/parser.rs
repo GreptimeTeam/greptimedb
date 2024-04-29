@@ -187,13 +187,8 @@ impl<'a> ParserContext<'a> {
     }
 
     pub fn consume_token(&mut self, expected: &str) -> bool {
-        Self::inner_consume_token(&mut self.parser, expected)
-    }
-
-    #[inline]
-    pub(crate) fn inner_consume_token(parser: &mut Parser<'a>, expected: &str) -> bool {
-        if Self::inner_peek_token_as_string(parser).to_uppercase() == *expected.to_uppercase() {
-            let _ = parser.next_token();
+        if self.peek_token_as_string().to_uppercase() == *expected.to_uppercase() {
+            let _ = self.parser.next_token();
             true
         } else {
             false
@@ -202,12 +197,7 @@ impl<'a> ParserContext<'a> {
 
     #[inline]
     pub(crate) fn peek_token_as_string(&self) -> String {
-        Self::inner_peek_token_as_string(&self.parser)
-    }
-
-    #[inline]
-    pub(crate) fn inner_peek_token_as_string(parser: &Parser<'a>) -> String {
-        parser.peek_token().to_string()
+        self.parser.peek_token().to_string()
     }
 
     /// Canonicalize the identifier to lowercase if it's not quoted.

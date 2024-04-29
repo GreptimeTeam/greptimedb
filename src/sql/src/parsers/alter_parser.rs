@@ -30,24 +30,24 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_alter_table(&mut self) -> std::result::Result<AlterTable, ParserError> {
-        let parser = &mut self.parser;
-        parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
+        self.parser
+            .expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
 
-        let raw_table_name = parser.parse_object_name(false)?;
+        let raw_table_name = self.parser.parse_object_name(false)?;
         let table_name = Self::canonicalize_object_name(raw_table_name);
 
-        let alter_operation = if parser.parse_keyword(Keyword::ADD) {
-            if let Some(constraint) = parser.parse_optional_table_constraint()? {
+        let alter_operation = if self.parser.parse_keyword(Keyword::ADD) {
+            if let Some(constraint) = self.parser.parse_optional_table_constraint()? {
                 AlterTableOperation::AddConstraint(constraint)
             } else {
-                let _ = parser.parse_keyword(Keyword::COLUMN);
-                let mut column_def = parser.parse_column_def()?;
+                let _ = self.parser.parse_keyword(Keyword::COLUMN);
+                let mut column_def = self.parser.parse_column_def()?;
                 column_def.name = Self::canonicalize_identifier(column_def.name);
-                let location = if parser.parse_keyword(Keyword::FIRST) {
+                let location = if self.parser.parse_keyword(Keyword::FIRST) {
                     Some(AddColumnLocation::First)
-                } else if let Token::Word(word) = parser.peek_token().token {
+                } else if let Token::Word(word) = self.parser.peek_token().token {
                     if word.value.to_ascii_uppercase() == "AFTER" {
-                        let _ = parser.next_token();
+                        let _ = self.parser.next_token();
                         let name = Self::canonicalize_identifier(self.parse_identifier()?);
                         Some(AddColumnLocation::After {
                             column_name: name.value,
@@ -63,26 +63,26 @@ impl<'a> ParserContext<'a> {
                     location,
                 }
             }
-        } else if parser.parse_keyword(Keyword::DROP) {
-            if parser.parse_keyword(Keyword::COLUMN) {
+        } else if self.parser.parse_keyword(Keyword::DROP) {
+            if self.parser.parse_keyword(Keyword::COLUMN) {
                 let name = Self::canonicalize_identifier(self.parse_identifier()?);
                 AlterTableOperation::DropColumn { name }
             } else {
                 return Err(ParserError::ParserError(format!(
                     "expect keyword COLUMN after ALTER TABLE DROP, found {}",
-                    parser.peek_token()
+                    self.parser.peek_token()
                 )));
             }
-        } else if ParserContext::inner_consume_token(parser, "MODIFY") {
-            let _ = parser.parse_keyword(Keyword::COLUMN);
-            let column_name = Self::canonicalize_identifier(parser.parse_identifier(false)?);
-            let target_type = parser.parse_data_type()?;
+        } else if self.consume_token("MODIFY") {
+            let _ = self.parser.parse_keyword(Keyword::COLUMN);
+            let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
+            let target_type = self.parser.parse_data_type()?;
 
             AlterTableOperation::ChangeColumnType {
                 column_name,
                 target_type,
             }
-        } else if parser.parse_keyword(Keyword::RENAME) {
+        } else if self.parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj_raw = self.parse_object_name()?;
             let new_table_name_obj = Self::canonicalize_object_name(new_table_name_obj_raw);
             let new_table_name = match &new_table_name_obj.0[..] {
@@ -97,7 +97,7 @@ impl<'a> ParserContext<'a> {
         } else {
             return Err(ParserError::ParserError(format!(
                 "expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE, found {}",
-                parser.peek_token()
+                self.parser.peek_token()
             )));
         };
         Ok(AlterTable::new(table_name, alter_operation))
