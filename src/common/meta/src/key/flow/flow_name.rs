@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowTaskScoped;
+use crate::key::flow::FlowScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
@@ -37,13 +37,13 @@ lazy_static! {
 /// The key of mapping {flow_name} to [FlowTaskId].
 ///
 /// The layout: `__flow/{catalog}/name/{flow_name}`.
-pub struct FlowNameKey(FlowTaskScoped<CatalogScoped<FlowNameKeyInner>>);
+pub struct FlowNameKey(FlowScoped<CatalogScoped<FlowNameKeyInner>>);
 
 impl FlowNameKey {
     /// Returns the [FlowNameKey]
     pub fn new(catalog: String, flow_name: String) -> FlowNameKey {
         let inner = FlowNameKeyInner::new(flow_name);
-        FlowNameKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+        FlowNameKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
     /// Returns the catalog.
@@ -63,9 +63,9 @@ impl MetaKey<FlowNameKey> for FlowNameKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlowNameKey> {
-        Ok(FlowNameKey(FlowTaskScoped::<
-            CatalogScoped<FlowNameKeyInner>,
-        >::from_bytes(bytes)?))
+        Ok(FlowNameKey(
+            FlowScoped::<CatalogScoped<FlowNameKeyInner>>::from_bytes(bytes)?,
+        ))
     }
 }
 

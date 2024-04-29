@@ -21,7 +21,7 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowTaskScoped;
+use crate::key::flow::FlowScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
 use crate::key::{FlowPartitionId, FlowTaskId};
 use crate::kv_backend::txn::{Txn, TxnOp};
@@ -53,7 +53,7 @@ struct TableFlowKeyInner {
 ///
 /// The layout: `__flow/{catalog}/table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
-pub struct TableFlowKey(FlowTaskScoped<CatalogScoped<TableFlowKeyInner>>);
+pub struct TableFlowKey(FlowScoped<CatalogScoped<TableFlowKeyInner>>);
 
 impl MetaKey<TableFlowKey> for TableFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
@@ -61,9 +61,9 @@ impl MetaKey<TableFlowKey> for TableFlowKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<TableFlowKey> {
-        Ok(TableFlowKey(FlowTaskScoped::<
-            CatalogScoped<TableFlowKeyInner>,
-        >::from_bytes(bytes)?))
+        Ok(TableFlowKey(
+            FlowScoped::<CatalogScoped<TableFlowKeyInner>>::from_bytes(bytes)?,
+        ))
     }
 }
 
@@ -77,7 +77,7 @@ impl TableFlowKey {
         partition_id: FlowPartitionId,
     ) -> TableFlowKey {
         let inner = TableFlowKeyInner::new(table_id, flownode_id, flow_id, partition_id);
-        TableFlowKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+        TableFlowKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
     /// The prefix used to retrieve all [TableFlowKey]s with the specified `table_id`.
@@ -87,7 +87,7 @@ impl TableFlowKey {
             BytesAdapter::from(TableFlowKeyInner::range_start_key(table_id).into_bytes()),
         );
 
-        FlowTaskScoped::new(catalog_scoped_key).to_bytes()
+        FlowScoped::new(catalog_scoped_key).to_bytes()
     }
 
     /// Returns the catalog.

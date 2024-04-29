@@ -38,11 +38,11 @@ use crate::kv_backend::KvBackendRef;
 
 /// The key of `__flow/` scope.
 #[derive(Debug, PartialEq)]
-pub struct FlowTaskScoped<T> {
+pub struct FlowScoped<T> {
     inner: T,
 }
 
-impl<T> Deref for FlowTaskScoped<T> {
+impl<T> Deref for FlowScoped<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -50,18 +50,18 @@ impl<T> Deref for FlowTaskScoped<T> {
     }
 }
 
-impl<T> FlowTaskScoped<T> {
+impl<T> FlowScoped<T> {
     const PREFIX: &'static str = "__flow/";
 
     /// Returns a new [FlowTaskScoped] key.
-    pub fn new(inner: T) -> FlowTaskScoped<T> {
+    pub fn new(inner: T) -> FlowScoped<T> {
         Self { inner }
     }
 }
 
-impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
+impl<T: MetaKey<T>> MetaKey<FlowScoped<T>> for FlowScoped<T> {
     fn to_bytes(&self) -> Vec<u8> {
-        let prefix = FlowTaskScoped::<T>::PREFIX.as_bytes();
+        let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         let inner = self.inner.to_bytes();
         let mut bytes = Vec::with_capacity(prefix.len() + inner.len());
         bytes.extend(prefix);
@@ -69,8 +69,8 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
         bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowTaskScoped<T>> {
-        let prefix = FlowTaskScoped::<T>::PREFIX.as_bytes();
+    fn from_bytes(bytes: &[u8]) -> Result<FlowScoped<T>> {
+        let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         ensure!(
             bytes.starts_with(prefix),
             error::MismatchPrefixSnafu {
@@ -79,7 +79,7 @@ impl<T: MetaKey<T>> MetaKey<FlowTaskScoped<T>> for FlowTaskScoped<T> {
             }
         );
         let inner = T::from_bytes(&bytes[prefix.len()..])?;
-        Ok(FlowTaskScoped { inner })
+        Ok(FlowScoped { inner })
     }
 }
 
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_flow_scoped_to_bytes() {
-        let key = FlowTaskScoped::new(CatalogScoped::new(
+        let key = FlowScoped::new(CatalogScoped::new(
             "my_catalog".to_string(),
             MockKey {
                 inner: b"hi".to_vec(),
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_flow_scoped_from_bytes() {
         let bytes = b"__flow/my_catalog/hi";
-        let key = FlowTaskScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap();
+        let key = FlowScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.inner.inner, b"hi".to_vec());
     }
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn test_flow_scoped_from_bytes_mismatch() {
         let bytes = b"__table/my_catalog/hi";
-        let err = FlowTaskScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap_err();
+        let err = FlowScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap_err();
         assert_matches!(err, error::Error::MismatchPrefix { .. });
     }
 

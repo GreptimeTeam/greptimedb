@@ -21,7 +21,7 @@ use regex::Regex;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowTaskScoped;
+use crate::key::flow::FlowScoped;
 use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
 use crate::key::{FlowPartitionId, FlowTaskId};
 use crate::kv_backend::txn::{Txn, TxnOp};
@@ -43,7 +43,7 @@ const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 /// The key of mapping [FlownodeId] to [FlowTaskId].
 ///
 /// The layout `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
-pub struct FlownodeFlowKey(FlowTaskScoped<CatalogScoped<FlownodeFlowKeyInner>>);
+pub struct FlownodeFlowKey(FlowScoped<CatalogScoped<FlownodeFlowKeyInner>>);
 
 impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
@@ -51,7 +51,7 @@ impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlownodeFlowKey> {
-        Ok(FlownodeFlowKey(FlowTaskScoped::<
+        Ok(FlownodeFlowKey(FlowScoped::<
             CatalogScoped<FlownodeFlowKeyInner>,
         >::from_bytes(bytes)?))
     }
@@ -66,7 +66,7 @@ impl FlownodeFlowKey {
         partition_id: FlowPartitionId,
     ) -> FlownodeFlowKey {
         let inner = FlownodeFlowKeyInner::new(flownode_id, flow_id, partition_id);
-        FlownodeFlowKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+        FlownodeFlowKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
     /// The prefix used to retrieve all [FlownodeFlowKey]s with the specified `flownode_id`.
@@ -76,7 +76,7 @@ impl FlownodeFlowKey {
             BytesAdapter::from(FlownodeFlowKeyInner::range_start_key(flownode_id).into_bytes()),
         );
 
-        FlowTaskScoped::new(catalog_scoped_key).to_bytes()
+        FlowScoped::new(catalog_scoped_key).to_bytes()
     }
 
     /// Returns the catalog.

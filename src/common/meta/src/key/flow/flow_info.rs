@@ -21,7 +21,7 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowTaskScoped;
+use crate::key::flow::FlowScoped;
 use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
@@ -42,7 +42,7 @@ lazy_static! {
 /// The key stores the metadata of the task.
 ///
 /// The layout: `__flow/{catalog}/info/{flow_id}`.
-pub struct FlowInfoKey(FlowTaskScoped<CatalogScoped<FlowInfoKeyInner>>);
+pub struct FlowInfoKey(FlowScoped<CatalogScoped<FlowInfoKeyInner>>);
 
 impl MetaKey<FlowInfoKey> for FlowInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
@@ -50,9 +50,9 @@ impl MetaKey<FlowInfoKey> for FlowInfoKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlowInfoKey> {
-        Ok(FlowInfoKey(FlowTaskScoped::<
-            CatalogScoped<FlowInfoKeyInner>,
-        >::from_bytes(bytes)?))
+        Ok(FlowInfoKey(
+            FlowScoped::<CatalogScoped<FlowInfoKeyInner>>::from_bytes(bytes)?,
+        ))
     }
 }
 
@@ -60,7 +60,7 @@ impl FlowInfoKey {
     /// Returns the [FlowInfoKey].
     pub fn new(catalog: String, flow_id: FlowTaskId) -> FlowInfoKey {
         let inner = FlowInfoKeyInner::new(flow_id);
-        FlowInfoKey(FlowTaskScoped::new(CatalogScoped::new(catalog, inner)))
+        FlowInfoKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
     }
 
     /// Returns the catalog.
