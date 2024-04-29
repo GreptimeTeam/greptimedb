@@ -25,6 +25,7 @@ pub mod standalone;
 use std::sync::Arc;
 
 use api::v1::meta::Role;
+use api::v1::{RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
@@ -32,6 +33,7 @@ use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_frontend::handler::FrontendInvoker;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
@@ -230,6 +232,33 @@ impl Instance {
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+}
+
+#[async_trait]
+impl FrontendInvoker for Instance {
+    async fn row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> common_frontend::error::Result<Output> {
+        self.inserter
+            .handle_row_inserts(requests, ctx, &self.statement_executor)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_frontend::error::ExternalSnafu)
+    }
+
+    async fn row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> common_frontend::error::Result<Output> {
+        self.deleter
+            .handle_row_deletes(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_frontend::error::ExternalSnafu)
     }
 }
 
@@ -493,6 +522,10 @@ pub fn check_permission(
         }
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
+        }
+        Statement::CreateFlow(stmt) => {
+            // TODO: should also validate source table name here?
+            validate_param(&stmt.sink_table_name, query_ctx)?;
         }
         Statement::Alter(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;

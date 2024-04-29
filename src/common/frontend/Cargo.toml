@@ -1,15 +1,8 @@
 [package]
-name = "auth"
+name = "common-frontend"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[features]
-default = []
-testing = []
-
-[lints]
-workspace = true
 
 [dependencies]
 api.workspace = true
@@ -17,13 +10,7 @@ async-trait.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
-common-telemetry.workspace = true
-digest = "0.10"
-notify.workspace = true
-sha1 = "0.10"
+common-query.workspace = true
+session.workspace = true
 snafu.workspace = true
 sql.workspace = true
-tokio.workspace = true
-
-[dev-dependencies]
-common-test-util.workspace = true

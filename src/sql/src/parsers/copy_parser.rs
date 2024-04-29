@@ -378,20 +378,17 @@ mod tests {
             stmt.database_name
         );
         assert_eq!(
-            [("format".to_string(), "parquet".to_string())]
+            [("format", "parquet")]
                 .into_iter()
                 .collect::<HashMap<_, _>>(),
-            stmt.with.map
+            stmt.with.to_str_map()
         );
 
         assert_eq!(
-            [
-                ("foo".to_string(), "Bar".to_string()),
-                ("one".to_string(), "two".to_string())
-            ]
-            .into_iter()
-            .collect::<HashMap<_, _>>(),
-            stmt.connection.map
+            [("foo", "Bar"), ("one", "two")]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+            stmt.connection.to_str_map()
         );
     }
 
@@ -417,20 +414,17 @@ mod tests {
             stmt.database_name
         );
         assert_eq!(
-            [("format".to_string(), "parquet".to_string())]
+            [("format", "parquet")]
                 .into_iter()
                 .collect::<HashMap<_, _>>(),
-            stmt.with.map
+            stmt.with.to_str_map()
         );
 
         assert_eq!(
-            [
-                ("foo".to_string(), "Bar".to_string()),
-                ("one".to_string(), "two".to_string())
-            ]
-            .into_iter()
-            .collect::<HashMap<_, _>>(),
-            stmt.connection.map
+            [("foo", "Bar"), ("one", "two")]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+            stmt.connection.to_str_map()
         );
     }
 }

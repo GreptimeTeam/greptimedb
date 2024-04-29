@@ -82,6 +82,14 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Failed to convert identifier: {}", ident))]
+    ConvertIdentifier {
+        ident: String,
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to convert value to sql value: {}", value))]
     ConvertSqlValue {
         value: Value,
@@ -568,7 +576,8 @@ impl ErrorExt for Error {
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. }
             | Error::UnsupportedRegionRequest { .. }
-            | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidTableName { .. }
+            | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 

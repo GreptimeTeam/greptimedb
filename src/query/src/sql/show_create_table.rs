@@ -14,8 +14,6 @@
 
 //! Implementation of `SHOW CREATE TABLE` statement.
 
-use std::collections::HashMap;
-
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef, COMMENT_KEY};
 use humantime::format_duration;
 use snafu::ResultExt;
@@ -33,8 +31,7 @@ use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
 fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
     let table_opts = &table_meta.options;
-    let mut options = HashMap::with_capacity(4 + table_opts.extra_options.len());
-
+    let mut options = OptionMap::default();
     if let Some(write_buffer_size) = table_opts.write_buffer_size {
         options.insert(
             WRITE_BUFFER_SIZE_KEY.to_string(),
@@ -44,7 +41,6 @@ fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
     if let Some(ttl) = table_opts.ttl {
         options.insert(TTL_KEY.to_string(), format_duration(ttl).to_string());
     }
-
     for (k, v) in table_opts
         .extra_options
         .iter()
@@ -52,8 +48,7 @@ fn create_sql_options(table_meta: &TableMeta) -> OptionMap {
     {
         options.insert(k.to_string(), v.to_string());
     }
-
-    OptionMap { map: options }
+    options
 }
 
 #[inline]

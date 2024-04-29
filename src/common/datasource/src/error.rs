@@ -213,34 +213,4 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
-
-    fn location_opt(&self) -> Option<common_error::snafu::Location> {
-        use Error::*;
-        match self {
-            OrcReader { location, .. } => Some(*location),
-            BuildBackend { location, .. } => Some(*location),
-            ReadObject { location, .. } => Some(*location),
-            ListObjects { location, .. } => Some(*location),
-            InferSchema { location, .. } => Some(*location),
-            ReadParquetSnafu { location, .. } => Some(*location),
-            ParquetToSchema { location, .. } => Some(*location),
-            JoinHandle { location, .. } => Some(*location),
-            ParseFormat { location, .. } => Some(*location),
-            MergeSchema { location, .. } => Some(*location),
-            WriteObject { location, .. } => Some(*location),
-            ReadRecordBatch { location, .. } => Some(*location),
-            WriteRecordBatch { location, .. } => Some(*location),
-            AsyncWrite { location, .. } => Some(*location),
-            EncodeRecordBatch { location, .. } => Some(*location),
-            BufferedWriterClosed { location, .. } => Some(*location),
-
-            UnsupportedBackendProtocol { location, .. } => Some(*location),
-            EmptyHostPath { location, .. } => Some(*location),
-            InvalidUrl { location, .. } => Some(*location),
-            InvalidConnection { location, .. } => Some(*location),
-            UnsupportedCompressionType { location, .. } => Some(*location),
-            UnsupportedFormat { location, .. } => Some(*location),
-            WriteParquet { location, .. } => Some(*location),
-        }
-    }
 }

@@ -15,7 +15,6 @@
 #![feature(error_iter)]
 
 pub mod ext;
-pub mod format;
 pub mod mock;
 pub mod status_code;
 

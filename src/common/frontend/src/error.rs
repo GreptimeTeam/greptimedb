@@ -12,40 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
-use tokio::task::JoinError;
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Snafu)]
-#[snafu(visibility(pub(crate)))]
+#[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to build runtime"))]
-    BuildRuntime {
-        #[snafu(source)]
-        error: std::io::Error,
+    #[snafu(display("External error"))]
+    External {
         location: Location,
-    },
-
-    #[snafu(display("Repeated task {} is already started", name))]
-    IllegalState { name: String, location: Location },
-
-    #[snafu(display("Failed to wait for repeated task {} to stop", name))]
-    WaitGcTaskStop {
-        name: String,
-        #[snafu(source)]
-        error: JoinError,
-        location: Location,
+        source: BoxedError,
     },
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 impl ErrorExt for Error {
-    fn as_any(&self) -> &dyn Any {
+    fn status_code(&self) -> StatusCode {
+        use Error::*;
+        match self {
+            External { source, .. } => source.status_code(),
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }

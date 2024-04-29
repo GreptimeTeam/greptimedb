@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
+use common_base::secrets::SecretString;
 use digest::Digest;
-use secrecy::SecretString;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt};
 
