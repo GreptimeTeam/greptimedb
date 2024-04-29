@@ -15,22 +15,15 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request;
-use api::v1::query_request::Query;
-use arrow_flight::Ticket;
 use async_trait::async_trait;
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use clap::{Parser, ValueEnum};
-use client::api::v1::auth_header::AuthScheme;
-use client::api::v1::{AuthHeader, Basic, GreptimeRequest, QueryRequest, RequestHeader};
-use client::region::RegionRequester;
-use client::{Client, OutputData, DEFAULT_SCHEMA_NAME};
-use common_query::Output;
-use common_recordbatch::util::collect;
-use common_telemetry::tracing_context::W3cTrace;
+use client::{Client, DEFAULT_SCHEMA_NAME};
 use common_telemetry::{debug, error, info, warn};
-use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{StringVector, Vector};
-use prost::Message;
+use serde_json::Value;
+use servers::http::greptime_result_v1::GreptimedbV1Response;
+use servers::http::GreptimeQueryOutput;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -38,9 +31,8 @@ use tokio::sync::Semaphore;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
-    CollectRecordBatchesSnafu, ConnectServerSnafu, EmptyResultSnafu, Error, FileIoSnafu,
-    IllegalConfigSnafu, InvalidDatabaseNameSnafu, NotDataFromOutputSnafu, RequestDatabaseSnafu,
-    Result,
+    ConnectServerSnafu, EmptyResultSnafu, Error, FileIoSnafu, InvalidDatabaseNameSnafu,
+    QuerySqlSnafu, Result, SerdeJsonSnafu,
 };
 
 type TableReference = (String, String, String);
@@ -96,16 +88,9 @@ impl ExportCommand {
             })?;
         let (catalog, schema) = split_database(&self.database)?;
 
-        let auth_header = if let Some(auth_basic) = &self.auth_basic {
-            let (username, password) = auth_basic.split_once(':').context(IllegalConfigSnafu {
-                msg: "auth_basic cannot be split by ':'".to_string(),
-            })?;
-            Some(AuthHeader {
-                auth_scheme: Some(AuthScheme::Basic(Basic {
-                    username: username.to_string(),
-                    password: password.to_string(),
-                })),
-            })
+        let auth_header = if let Some(basic) = &self.auth_basic {
+            let encoded = general_purpose::STANDARD.encode(basic);
+            Some(format!("basic {}", encoded))
         } else {
             None
         };
@@ -117,7 +102,6 @@ impl ExportCommand {
             parallelism: self.export_jobs,
             target: self.target.clone(),
             auth_header,
-            region_requester: RegionRequester::new(client),
         })))
     }
 }
@@ -128,35 +112,36 @@ pub struct Export {
     output_dir: String,
     parallelism: usize,
     target: ExportTarget,
-    auth_header: Option<AuthHeader>,
-    region_requester: RegionRequester,
+    auth_header: Option<String>,
 }
 
 impl Export {
-    /// Execute a sql query.
-    async fn sql(&self, sql: &str, catalog: String, schema: String) -> Result<Output> {
-        let request = Request::Query(QueryRequest {
-            query: Some(Query::Sql(sql.to_string())),
-        });
-        let rpc_request = GreptimeRequest {
-            header: Some(RequestHeader {
-                catalog,
-                schema,
-                authorization: self.auth_header.clone(),
-                dbname: String::default(),
-                timezone: String::default(),
-                tracing_context: W3cTrace::new(),
-            }),
-            request: Some(request),
-        };
-        let ticket = Ticket {
-            ticket: rpc_request.encode_to_vec().into(),
-        };
+    /// Execute one single sql query.
+    async fn sql(&self, sql: &str) -> Result<Option<Vec<Vec<Value>>>> {
+        let client = reqwest::Client::new();
+        let mut request = client
+            .get(format!(
+                "http://localhost:4000/v1/sql?db={}-{}&sql={}",
+                self.catalog,
+                self.schema.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
+                sql
+            ))
+            .header("Content-Type", "application/x-www-form-urlencoded");
+        if let Some(ref auth) = self.auth_header {
+            request = request.header("Authorization", auth);
+        }
 
-        self.region_requester
-            .do_get_output(ticket)
-            .await
-            .with_context(|_| RequestDatabaseSnafu { sql })
+        let response = request.send().await.context(QuerySqlSnafu)?;
+        snafu::ensure!(response.status() == 200, EmptyResultSnafu);
+
+        let text = response.text().await.context(QuerySqlSnafu)?;
+        // .with_context(|_| RequestDatabaseSnafu { sql })?;
+
+        let body = serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)?;
+        match &body.output()[0] {
+            GreptimeQueryOutput::Records(records) => Ok(Some(records.rows().clone())),
+            GreptimeQueryOutput::AffectedRows(_) => Ok(None),
+        }
     }
 
     /// Iterate over all db names.
@@ -166,33 +151,19 @@ impl Export {
         if let Some(schema) = &self.schema {
             Ok(vec![(self.catalog.clone(), schema.clone())])
         } else {
-            let result = self
-                .sql(
-                    "show databases",
-                    self.catalog.clone(),
-                    DEFAULT_SCHEMA_NAME.to_string(),
-                )
-                .await?;
-            let OutputData::Stream(stream) = result.data else {
-                NotDataFromOutputSnafu.fail()?
+            let result = self.sql("show databases").await?;
+            let Some(records) = result else {
+                EmptyResultSnafu.fail()?
             };
-            let record_batch = collect(stream)
-                .await
-                .context(CollectRecordBatchesSnafu)?
-                .pop()
-                .context(EmptyResultSnafu)?;
-            let schemas = record_batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringVector>()
-                .unwrap();
-            let mut result = Vec::with_capacity(schemas.len());
-            for i in 0..schemas.len() {
-                let schema = schemas.get_data(i).unwrap().to_owned();
+            let mut result = Vec::with_capacity(records.len());
+            for value in records {
+                let serde_json::Value::String(schema) = &value[0] else {
+                    unreachable!()
+                };
                 if schema == common_catalog::consts::INFORMATION_SCHEMA_NAME {
                     continue;
                 }
-                result.push((self.catalog.clone(), schema));
+                result.push((self.catalog.clone(), schema.clone()));
             }
             Ok(result)
         }
@@ -207,47 +178,27 @@ impl Export {
             information_schema.tables where table_type = \'BASE TABLE\'\
             and table_catalog = \'{catalog}\' and table_schema = \'{schema}\'",
         );
-        let result = self
-            .sql(&sql, catalog.to_string(), schema.to_string())
-            .await?;
-        let OutputData::Stream(stream) = result.data else {
-            NotDataFromOutputSnafu.fail()?
-        };
-        let Some(record_batch) = collect(stream)
-            .await
-            .context(CollectRecordBatchesSnafu)?
-            .pop()
-        else {
-            return Ok(vec![]);
+        let result = self.sql(&sql).await?;
+        let Some(records) = result else {
+            EmptyResultSnafu.fail()?
         };
 
-        debug!("Fetched table list: {}", record_batch.pretty_print());
+        debug!("Fetched table list: {:?}", records);
 
-        if record_batch.num_rows() == 0 {
+        if records.is_empty() {
             return Ok(vec![]);
         }
 
-        let mut result = Vec::with_capacity(record_batch.num_rows());
-        let catalog_column = record_batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
-        let schema_column = record_batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
-        let table_column = record_batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
-        for i in 0..record_batch.num_rows() {
-            let catalog = catalog_column.get_data(i).unwrap().to_owned();
-            let schema = schema_column.get_data(i).unwrap().to_owned();
-            let table = table_column.get_data(i).unwrap().to_owned();
-            result.push((catalog, schema, table));
+        let mut result = Vec::with_capacity(records.len());
+        for value in records {
+            let mut t = Vec::with_capacity(3);
+            for v in &value {
+                let serde_json::Value::String(value) = v else {
+                    unreachable!()
+                };
+                t.push(value);
+            }
+            result.push((t[0].clone(), t[1].clone(), t[2].clone()));
         }
 
         Ok(result)
@@ -258,26 +209,15 @@ impl Export {
             r#"show create table "{}"."{}"."{}""#,
             catalog, schema, table
         );
-        let result = self
-            .sql(&sql, catalog.to_string(), schema.to_string())
-            .await?;
-        let OutputData::Stream(stream) = result.data else {
-            NotDataFromOutputSnafu.fail()?
+        let result = self.sql(&sql).await?;
+        let Some(records) = result else {
+            EmptyResultSnafu.fail()?
         };
-        let record_batch = collect(stream)
-            .await
-            .context(CollectRecordBatchesSnafu)?
-            .pop()
-            .context(EmptyResultSnafu)?;
-        let create_table = record_batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap()
-            .get_data(0)
-            .unwrap();
+        let serde_json::Value::String(create_table) = &records[0][1] else {
+            unreachable!()
+        };
 
-        Ok(format!("{create_table};\n"))
+        Ok(format!("{};\n", create_table))
     }
 
     async fn export_create_table(&self) -> Result<()> {
@@ -351,7 +291,7 @@ impl Export {
                     schema,
                     output_dir.to_str().unwrap()
                 );
-                self.sql(&sql, catalog.clone(), schema.clone()).await?;
+                self.sql(&sql).await?;
                 info!("finished exporting {catalog}.{schema} data");
 
                 // export copy from sql

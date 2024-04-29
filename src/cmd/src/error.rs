@@ -218,6 +218,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to finish http request"))]
+    QuerySql {
+        #[snafu(source)]
+        error: reqwest::Error,
+        location: Location,
+    },
+
     #[snafu(display("Expect data from output, but got another thing"))]
     NotDataFromOutput { location: Location },
 
@@ -301,7 +308,9 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
+            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::QuerySql { .. } => {
+                StatusCode::Unexpected
+            }
 
             Error::Other { source, .. } => source.status_code(),
 
