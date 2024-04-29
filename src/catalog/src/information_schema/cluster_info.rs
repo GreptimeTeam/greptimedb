@@ -57,7 +57,7 @@ const INIT_CAPACITY: usize = 42;
 /// The `CLUSTER_INFO` table provides information about the current topology of the cluster.
 ///
 /// - `peer_id`: the peer server id.
-/// - `peer_type`: the peer type, such as `datanode`, `frontend`, `metasrv` etc.
+/// - `peer_type`: the peer type, such as `DATANODE`, `FRONTEND`, `METASRV` etc.
 /// - `peer_addr`: the peer gRPC address.
 /// - `version`: the build package version of the peer.
 /// - `git_commit`: the build git commit hash of the peer.

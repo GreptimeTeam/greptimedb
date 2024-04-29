@@ -20,6 +20,7 @@ show tables;
 | build_info                            |
 | character_sets                        |
 | check_constraints                     |
+| cluster_info                          |
 | collation_character_set_applicability |
 | collations                            |
 | column_privileges                     |
@@ -29,13 +30,13 @@ show tables;
 | events                                |
 | files                                 |
 | global_status                         |
-| greptime_region_peers                 |
 | key_column_usage                      |
 | optimizer_trace                       |
 | parameters                            |
 | partitions                            |
 | profiling                             |
 | referential_constraints               |
+| region_peers                          |
 | routines                              |
 | runtime_metrics                       |
 | schema_privileges                     |
