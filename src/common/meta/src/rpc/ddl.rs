@@ -51,9 +51,14 @@ pub enum DdlTask {
     AlterLogicalTables(Vec<AlterTableTask>),
     CreateDatabase(CreateDatabaseTask),
     DropDatabase(DropDatabaseTask),
+    CreateFlow(CreateFlowTask),
 }
 
 impl DdlTask {
+    pub fn new_create_flow(expr: CreateFlowTask) -> Self {
+        DdlTask::CreateFlow(expr)
+    }
+
     pub fn new_create_table(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
@@ -182,7 +187,7 @@ impl TryFrom<Task> for DdlTask {
             Task::DropDatabaseTask(drop_database) => {
                 Ok(DdlTask::DropDatabase(drop_database.try_into()?))
             }
-            Task::CreateFlowTask(_) => unimplemented!(),
+            Task::CreateFlowTask(create_flow) => Ok(DdlTask::CreateFlow(create_flow.try_into()?)),
             Task::DropFlowTask(_) => unimplemented!(),
         }
     }
@@ -228,6 +233,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             }
             DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(task.try_into()?),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
+            DdlTask::CreateFlow(task) => Task::CreateFlowTask(task.into()),
         };
 
         Ok(Self {
@@ -727,7 +733,7 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlowTask {
     pub catalog_name: String,
-    pub flow_name: String,
+    pub task_name: String,
     pub source_table_names: Vec<TableName>,
     pub sink_table_name: TableName,
     pub or_replace: bool,
@@ -759,7 +765,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
 
         Ok(CreateFlowTask {
             catalog_name,
-            flow_name: task_name,
+            task_name,
             source_table_names: source_table_names.into_iter().map(Into::into).collect(),
             sink_table_name: sink_table_name
                 .context(error::InvalidProtoMsgSnafu {
@@ -780,7 +786,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
     fn from(
         CreateFlowTask {
             catalog_name,
-            flow_name: task_name,
+            task_name,
             source_table_names,
             sink_table_name,
             or_replace,

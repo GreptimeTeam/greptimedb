@@ -26,6 +26,7 @@ use store_api::storage::TableId;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
+use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
@@ -42,12 +43,12 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
-    AlterLogicalTables, AlterTable, CreateDatabase, CreateLogicalTables, CreateTable, DropDatabase,
-    DropLogicalTables, DropTable, TruncateTable,
+    AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
+    DropDatabase, DropLogicalTables, DropTable, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateDatabaseTask, CreateTableTask, DropDatabaseTask, DropTableTask,
-    SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
+    DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -313,6 +314,20 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a create flow task.
+    pub async fn submit_create_flow_task(
+        &self,
+        cluster_id: ClusterId,
+        create_flow: CreateFlowTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = CreateFlowProcedure::new(cluster_id, create_flow, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
     /// Submits and executes a truncate table task.
     pub async fn submit_truncate_table_task(
         &self,
@@ -572,6 +587,35 @@ async fn handle_drop_database_task(
     })
 }
 
+async fn handle_create_flow_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    create_flow_task: CreateFlowTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, output) = ddl_manager
+        .submit_create_flow_task(cluster_id, create_flow_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let flow_id = *(output.downcast_ref::<u32>().context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "downcast to `u32`",
+    })?);
+    info!(
+        "Flow {}.{}({flow_id}) is created via procedure_id {id:?}",
+        create_flow_task.catalog_name, create_flow_task.task_name,
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
+    })
+}
+
 async fn handle_alter_logical_table_tasks(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
@@ -650,6 +694,9 @@ impl ProcedureExecutor for DdlManager {
                 }
                 DropDatabase(drop_database_task) => {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
+                }
+                CreateFlow(create_flow_task) => {
+                    handle_create_flow_task(self, cluster_id, create_flow_task).await
                 }
             }
         }
