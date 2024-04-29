@@ -19,18 +19,12 @@ use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DfResult;
-/// This is [PhysicalOptimizerRule] to eliminate unneeded [SeriesDivideExec] nodes.
+
+/// This is [PhysicalOptimizerRule] to remove duplicate physical plans such as two
+/// adjoining [CoalesceBatchesExec] or [RepartitionExec]. They won't have any effect
+/// if one runs right after another.
 ///
-/// A [SeriesDivideExec] can be eliminated when one of the following conditions is met:
-/// - No upper plan will depend on the time series distribution.
-/// - No child plan will change the time series distribution.
-///
-/// "Time Series Distribution" means the data batch in [RecordBatchStream] is divided by
-/// time series. One batch only contains data of one time series and all data of one time
-/// series is in one batch.
-///
-/// **Pre-requirement**: storage engine returns data in time series distribution. This is
-/// the current behavior of mito engine.
+/// This rule is expected to be run in the final stage of the optimization process.
 pub struct RemoveDuplicate;
 
 impl PhysicalOptimizerRule for RemoveDuplicate {
