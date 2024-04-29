@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Error, InvalidTableMetadataSnafu, ParseOptionSnafu, Result};
-use crate::key::{TableMetaKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
+use crate::key::{MetaKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
@@ -32,6 +32,9 @@ use crate::rpc::KeyValue;
 
 const OPT_KEY_TTL: &str = "ttl";
 
+/// The schema name key, indices all schema names belong to the {catalog_name}
+///
+/// The layout:  `__schema_name/{catalog_name}/{schema_name}`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SchemaNameKey<'a> {
     pub catalog: &'a str,
@@ -95,13 +98,26 @@ impl Display for SchemaNameKey<'_> {
     }
 }
 
-impl TableMetaKey for SchemaNameKey<'_> {
-    fn as_raw_key(&self) -> Vec<u8> {
+impl<'a> MetaKey<'a, SchemaNameKey<'a>> for SchemaNameKey<'_> {
+    fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<SchemaNameKey<'a>> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidTableMetadataSnafu {
+                err_msg: format!(
+                    "SchemaNameKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        SchemaNameKey::try_from(key)
     }
 }
 
-/// Decodes `KeyValue` to ({schema},())
+/// Decodes `KeyValue` to {schema}
 pub fn schema_decoder(kv: KeyValue) -> Result<String> {
     let str = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
     let schema_name = SchemaNameKey::try_from(str)?;
@@ -145,7 +161,7 @@ impl SchemaManager {
     ) -> Result<()> {
         let _timer = crate::metrics::METRIC_META_CREATE_SCHEMA.start_timer();
 
-        let raw_key = schema.as_raw_key();
+        let raw_key = schema.to_bytes();
         let raw_value = value.unwrap_or_default().try_as_raw_value()?;
         if self
             .kv_backend
@@ -159,13 +175,13 @@ impl SchemaManager {
     }
 
     pub async fn exists(&self, schema: SchemaNameKey<'_>) -> Result<bool> {
-        let raw_key = schema.as_raw_key();
+        let raw_key = schema.to_bytes();
 
         self.kv_backend.exists(&raw_key).await
     }
 
     pub async fn get(&self, schema: SchemaNameKey<'_>) -> Result<Option<SchemaNameValue>> {
-        let raw_key = schema.as_raw_key();
+        let raw_key = schema.to_bytes();
         let value = self.kv_backend.get(&raw_key).await?;
         value
             .and_then(|v| SchemaNameValue::try_from_raw_value(v.value.as_ref()).transpose())
@@ -174,7 +190,7 @@ impl SchemaManager {
 
     /// Deletes a [SchemaNameKey].
     pub async fn delete(&self, schema: SchemaNameKey<'_>) -> Result<()> {
-        let raw_key = schema.as_raw_key();
+        let raw_key = schema.to_bytes();
         self.kv_backend.delete(&raw_key, false).await?;
 
         Ok(())

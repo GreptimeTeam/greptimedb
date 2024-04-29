@@ -59,12 +59,12 @@ impl FlowNameKey {
     }
 }
 
-impl MetaKey<FlowNameKey> for FlowNameKey {
+impl<'a> MetaKey<'a, FlowNameKey> for FlowNameKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowNameKey> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKey> {
         Ok(FlowNameKey(FlowScoped::<FlowNameKeyInner>::from_bytes(
             bytes,
         )?))
@@ -78,7 +78,7 @@ pub struct FlowNameKeyInner {
     pub flow_name: String,
 }
 
-impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
+impl<'a> MetaKey<'a, FlowNameKeyInner> for FlowNameKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{FLOW_NAME_KEY_PREFIX}/{}/{}",
@@ -87,7 +87,7 @@ impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
         .into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowNameKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(

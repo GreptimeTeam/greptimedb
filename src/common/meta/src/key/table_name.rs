@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
 
 use futures_util::stream::BoxStream;
@@ -20,9 +21,8 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
 
-use super::{TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
+use super::{MetaKey, TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidTableMetadataSnafu, Result};
-use crate::key::TableMetaKey;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -72,14 +72,45 @@ impl<'a> TableNameKey<'a> {
     }
 }
 
-impl TableMetaKey for TableNameKey<'_> {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!(
+impl Display for TableNameKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "{}/{}",
             Self::prefix_to_table(self.catalog, self.schema),
             self.table
         )
-        .into_bytes()
+    }
+}
+
+impl<'a> MetaKey<'a, TableNameKey<'a>> for TableNameKey<'_> {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<TableNameKey<'a>> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidTableMetadataSnafu {
+                err_msg: format!(
+                    "TableNameKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        let captures = TABLE_NAME_KEY_PATTERN
+            .captures(key)
+            .context(InvalidTableMetadataSnafu {
+                err_msg: format!("Invalid TableNameKey '{key}'"),
+            })?;
+        let catalog = captures.get(1).unwrap().as_str();
+        let schema = captures.get(2).unwrap().as_str();
+        let table = captures.get(3).unwrap().as_str();
+        Ok(TableNameKey {
+            catalog,
+            schema,
+            table,
+        })
     }
 }
 
@@ -166,7 +197,7 @@ impl TableNameManager {
         key: &TableNameKey<'_>,
         table_id: TableId,
     ) -> Result<Txn> {
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
 
@@ -182,8 +213,8 @@ impl TableNameManager {
         new_key: &TableNameKey<'_>,
         table_id: TableId,
     ) -> Result<Txn> {
-        let raw_key = key.as_raw_key();
-        let new_raw_key = new_key.as_raw_key();
+        let raw_key = key.to_bytes();
+        let new_raw_key = new_key.to_bytes();
         let value = TableNameValue::new(table_id);
         let raw_value = value.try_as_raw_value()?;
 
@@ -195,7 +226,7 @@ impl TableNameManager {
     }
 
     pub async fn get(&self, key: TableNameKey<'_>) -> Result<Option<TableNameValue>> {
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         self.kv_backend
             .get(&raw_key)
             .await?
@@ -209,7 +240,7 @@ impl TableNameManager {
     ) -> Result<Vec<Option<TableNameValue>>> {
         let raw_keys = keys
             .into_iter()
-            .map(|key| key.as_raw_key())
+            .map(|key| key.to_bytes())
             .collect::<Vec<_>>();
         let req = BatchGetRequest::new().with_keys(raw_keys.clone());
         let res = self.kv_backend.batch_get(req).await?;
@@ -229,7 +260,7 @@ impl TableNameManager {
     }
 
     pub async fn exists(&self, key: TableNameKey<'_>) -> Result<bool> {
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         self.kv_backend.exists(&raw_key).await
     }
 
@@ -293,7 +324,7 @@ mod tests {
     #[test]
     fn test_serde() {
         let key = TableNameKey::new("my_catalog", "my_schema", "my_table");
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         assert_eq!(
             b"__table_name/my_catalog/my_schema/my_table",
             raw_key.as_slice()

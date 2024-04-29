@@ -13,16 +13,18 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::fmt::Display;
 
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
-use super::TABLE_REGION_KEY_PREFIX;
-use crate::error::{Result, SerdeJsonSnafu};
-use crate::key::TableMetaKey;
-use crate::{impl_table_meta_key, impl_table_meta_value, DatanodeId};
+use super::{MetaKey, TABLE_REGION_KEY_PREFIX};
+use crate::error::{InvalidTableMetadataSnafu, Result, SerdeJsonSnafu};
+use crate::{impl_table_meta_value, DatanodeId};
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
@@ -34,19 +36,49 @@ pub struct TableRegionKey {
     table_id: TableId,
 }
 
+lazy_static! {
+    static ref TABLE_REGION_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{TABLE_REGION_KEY_PREFIX}/([0-9]+)$")).unwrap();
+}
+
 impl TableRegionKey {
     pub fn new(table_id: TableId) -> Self {
         Self { table_id }
     }
 }
 
-impl TableMetaKey for TableRegionKey {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!("{}/{}", TABLE_REGION_KEY_PREFIX, self.table_id).into_bytes()
+impl Display for TableRegionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", TABLE_REGION_KEY_PREFIX, self.table_id)
     }
 }
 
-impl_table_meta_key! {TableRegionKey}
+impl<'a> MetaKey<'a, TableRegionKey> for TableRegionKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<TableRegionKey> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidTableMetadataSnafu {
+                err_msg: format!(
+                    "TableRegionKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        let captures =
+            TABLE_REGION_KEY_PATTERN
+                .captures(key)
+                .context(InvalidTableMetadataSnafu {
+                    err_msg: format!("Invalid TableRegionKey '{key}'"),
+                })?;
+        // Safety: pass the regex check above
+        let table_id = captures[1].parse::<TableId>().unwrap();
+        Ok(TableRegionKey { table_id })
+    }
+}
 
 #[deprecated(
     since = "0.4.0",
@@ -77,7 +109,7 @@ mod tests {
     #[test]
     fn test_serde() {
         let key = TableRegionKey::new(1);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         assert_eq!(raw_key, b"__table_region/1");
 
         let value = TableRegionValue {

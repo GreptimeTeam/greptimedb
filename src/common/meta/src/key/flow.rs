@@ -58,7 +58,7 @@ impl<T> FlowScoped<T> {
     }
 }
 
-impl<T: MetaKey<T>> MetaKey<FlowScoped<T>> for FlowScoped<T> {
+impl<'a, T: MetaKey<'a, T>> MetaKey<'a, FlowScoped<T>> for FlowScoped<T> {
     fn to_bytes(&self) -> Vec<u8> {
         let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         let inner = self.inner.to_bytes();
@@ -68,7 +68,7 @@ impl<T: MetaKey<T>> MetaKey<FlowScoped<T>> for FlowScoped<T> {
         bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowScoped<T>> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowScoped<T>> {
         let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         ensure!(
             bytes.starts_with(prefix),
@@ -224,12 +224,12 @@ mod tests {
         inner: Vec<u8>,
     }
 
-    impl MetaKey<MockKey> for MockKey {
+    impl<'a> MetaKey<'a, MockKey> for MockKey {
         fn to_bytes(&self) -> Vec<u8> {
             self.inner.clone()
         }
 
-        fn from_bytes(bytes: &[u8]) -> Result<MockKey> {
+        fn from_bytes(bytes: &'a [u8]) -> Result<MockKey> {
             Ok(MockKey {
                 inner: bytes.to_vec(),
             })

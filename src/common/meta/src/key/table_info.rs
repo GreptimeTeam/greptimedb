@@ -13,34 +13,67 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
-use super::txn_helper::TxnOpGetResponseSet;
-use crate::error::Result;
+use super::TABLE_INFO_KEY_PATTERN;
+use crate::error::{InvalidTableMetadataSnafu, Result};
+use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    txn_helper, DeserializedValueWithBytes, TableMetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX,
+    txn_helper, DeserializedValueWithBytes, MetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX,
 };
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
 use crate::table_name::TableName;
 
+/// The key stores the metadata of the table.
+///
+/// The layout: `__table_info/{table_id}`.
 pub struct TableInfoKey {
     table_id: TableId,
 }
 
 impl TableInfoKey {
+    /// Returns a new [TableInfoKey].
     pub fn new(table_id: TableId) -> Self {
         Self { table_id }
     }
 }
 
-impl TableMetaKey for TableInfoKey {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!("{}/{}", TABLE_INFO_KEY_PREFIX, self.table_id).into_bytes()
+impl Display for TableInfoKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", TABLE_INFO_KEY_PREFIX, self.table_id)
+    }
+}
+
+impl<'a> MetaKey<'a, TableInfoKey> for TableInfoKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<TableInfoKey> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidTableMetadataSnafu {
+                err_msg: format!(
+                    "TableInfoKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        let captures = TABLE_INFO_KEY_PATTERN
+            .captures(key)
+            .context(InvalidTableMetadataSnafu {
+                err_msg: format!("Invalid TableInfoKey '{key}'"),
+            })?;
+        // Safety: pass the regex check above
+        let table_id = captures[1].parse::<TableId>().unwrap();
+        Ok(TableInfoKey { table_id })
     }
 }
 
@@ -115,7 +148,7 @@ impl TableInfoManager {
         ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
     )> {
         let key = TableInfoKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
 
         let txn = txn_helper::build_put_if_absent_txn(
             raw_key.clone(),
@@ -142,7 +175,7 @@ impl TableInfoManager {
         ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>>,
     )> {
         let key = TableInfoKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         let raw_value = current_table_info_value.get_raw_bytes();
         let new_raw_value: Vec<u8> = new_table_info_value.try_as_raw_value()?;
 
@@ -159,7 +192,7 @@ impl TableInfoManager {
         table_id: TableId,
     ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>> {
         let key = TableInfoKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         self.kv_backend
             .get(&raw_key)
             .await?
@@ -173,7 +206,7 @@ impl TableInfoManager {
     ) -> Result<HashMap<TableId, TableInfoValue>> {
         let lookup_table = table_ids
             .iter()
-            .map(|id| (TableInfoKey::new(*id).as_raw_key(), id))
+            .map(|id| (TableInfoKey::new(*id).to_bytes(), id))
             .collect::<HashMap<_, _>>();
 
         let resp = self
@@ -205,7 +238,7 @@ impl TableInfoManager {
     ) -> Result<HashMap<TableId, DeserializedValueWithBytes<TableInfoValue>>> {
         let lookup_table = table_ids
             .iter()
-            .map(|id| (TableInfoKey::new(*id).as_raw_key(), id))
+            .map(|id| (TableInfoKey::new(*id).to_bytes(), id))
             .collect::<HashMap<_, _>>();
 
         let resp = self
@@ -250,7 +283,7 @@ mod tests {
     #[test]
     fn test_key_serde() {
         let key = TableInfoKey::new(42);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         assert_eq!(raw_key, b"__table_info/42");
     }
 
