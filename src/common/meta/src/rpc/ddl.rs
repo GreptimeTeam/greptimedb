@@ -26,8 +26,8 @@ use api::v1::meta::{
     TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateFlowTaskExpr, CreateTableExpr, DropDatabaseExpr,
-    DropFlowTaskExpr, DropTableExpr, TruncateTableExpr,
+    AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, DropDatabaseExpr, DropFlowExpr,
+    DropTableExpr, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -729,11 +729,11 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
     }
 }
 
-/// Create flow task
+/// Create flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlowTask {
     pub catalog_name: String,
-    pub task_name: String,
+    pub flow_name: String,
     pub source_table_names: Vec<TableName>,
     pub sink_table_name: TableName,
     pub or_replace: bool,
@@ -741,16 +741,16 @@ pub struct CreateFlowTask {
     pub expire_when: String,
     pub comment: String,
     pub sql: String,
-    pub options: HashMap<String, String>,
+    pub flow_options: HashMap<String, String>,
 }
 
 impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
     type Error = error::Error;
 
     fn try_from(pb: PbCreateFlowTask) -> Result<Self> {
-        let CreateFlowTaskExpr {
+        let CreateFlowExpr {
             catalog_name,
-            task_name,
+            flow_name,
             source_table_names,
             sink_table_name,
             or_replace,
@@ -758,14 +758,14 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             expire_when,
             comment,
             sql,
-            task_options,
-        } = pb.create_flow_task.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected create_flow_task",
+            flow_options,
+        } = pb.create_flow.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create_flow",
         })?;
 
         Ok(CreateFlowTask {
             catalog_name,
-            task_name,
+            flow_name,
             source_table_names: source_table_names.into_iter().map(Into::into).collect(),
             sink_table_name: sink_table_name
                 .context(error::InvalidProtoMsgSnafu {
@@ -777,7 +777,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             expire_when,
             comment,
             sql,
-            options: task_options,
+            flow_options,
         })
     }
 }
@@ -786,7 +786,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
     fn from(
         CreateFlowTask {
             catalog_name,
-            task_name,
+            flow_name,
             source_table_names,
             sink_table_name,
             or_replace,
@@ -794,13 +794,13 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             expire_when,
             comment,
             sql,
-            options,
+            flow_options,
         }: CreateFlowTask,
     ) -> Self {
         PbCreateFlowTask {
-            create_flow_task: Some(CreateFlowTaskExpr {
+            create_flow: Some(CreateFlowExpr {
                 catalog_name,
-                task_name,
+                flow_name,
                 source_table_names: source_table_names.into_iter().map(Into::into).collect(),
                 sink_table_name: Some(sink_table_name.into()),
                 or_replace,
@@ -808,31 +808,31 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
                 expire_when,
                 comment,
                 sql,
-                task_options: options,
+                flow_options,
             }),
         }
     }
 }
 
-/// Drop flow task
+/// Drop flow
 pub struct DropFlowTask {
     pub catalog_name: String,
-    pub task_name: String,
+    pub flow_name: String,
 }
 
 impl TryFrom<PbDropFlowTask> for DropFlowTask {
     type Error = error::Error;
 
     fn try_from(pb: PbDropFlowTask) -> Result<Self> {
-        let DropFlowTaskExpr {
+        let DropFlowExpr {
             catalog_name,
-            task_name,
-        } = pb.drop_flow_task.context(error::InvalidProtoMsgSnafu {
+            flow_name,
+        } = pb.drop_flow.context(error::InvalidProtoMsgSnafu {
             err_msg: "expected sink_table_name",
         })?;
         Ok(DropFlowTask {
             catalog_name,
-            task_name,
+            flow_name,
         })
     }
 }
@@ -841,13 +841,13 @@ impl From<DropFlowTask> for PbDropFlowTask {
     fn from(
         DropFlowTask {
             catalog_name,
-            task_name,
+            flow_name,
         }: DropFlowTask,
     ) -> Self {
         PbDropFlowTask {
-            drop_flow_task: Some(DropFlowTaskExpr {
+            drop_flow: Some(DropFlowExpr {
                 catalog_name,
-                task_name,
+                flow_name,
             }),
         }
     }

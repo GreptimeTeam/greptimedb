@@ -18,14 +18,14 @@ use std::{fs, path};
 use async_trait::async_trait;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
-use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
+use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::task_meta::{FlowTaskMetadataAllocator, FlowTaskMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow_task::{FlowTaskMetadataManager, FlowTaskMetadataManagerRef};
+use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -47,7 +47,7 @@ use frontend::server::Services;
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
-use meta_srv::metasrv::{FLOW_TASK_ID_SEQ, TABLE_ID_SEQ};
+use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -419,9 +419,9 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let flow_task_id_sequence = Arc::new(
-            SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_FLOW_TASK_ID as u64)
+        let flow_id_sequence = Arc::new(
+            SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_FLOW_ID as u64)
                 .step(10)
                 .build(),
         );
@@ -431,14 +431,14 @@ impl StartCommand {
         ));
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_task_meta_allocator = Arc::new(
-            FlowTaskMetadataAllocator::with_noop_peer_allocator(flow_task_id_sequence),
-        );
+        let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            flow_id_sequence,
+        ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
@@ -446,8 +446,8 @@ impl StartCommand {
             multi_cache_invalidator,
             table_metadata_manager,
             table_meta_allocator,
-            flow_task_metadata_manager,
-            flow_task_meta_allocator,
+            flow_metadata_manager,
+            flow_meta_allocator,
         )
         .await?;
 
@@ -480,8 +480,8 @@ impl StartCommand {
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
         table_metadata_allocator: TableMetadataAllocatorRef,
-        flow_task_metadata_manager: FlowTaskMetadataManagerRef,
-        flow_task_metadata_allocator: FlowTaskMetadataAllocatorRef,
+        flow_metadata_manager: FlowMetadataManagerRef,
+        flow_metadata_allocator: FlowMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
@@ -491,8 +491,8 @@ impl StartCommand {
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
-                    flow_task_metadata_manager,
-                    flow_task_metadata_allocator,
+                    flow_metadata_manager,
+                    flow_metadata_allocator,
                 },
                 procedure_manager,
                 true,

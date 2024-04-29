@@ -18,14 +18,14 @@ use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
-use common_catalog::consts::{MIN_USER_FLOW_TASK_ID, MIN_USER_TABLE_ID};
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::task_meta::FlowTaskMetadataAllocator;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
-use common_meta::key::flow_task::FlowTaskMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -38,7 +38,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
-use super::FLOW_TASK_ID_SEQ;
+use super::FLOW_ID_SEQ;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
@@ -205,7 +205,7 @@ impl MetasrvBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
@@ -239,14 +239,13 @@ impl MetasrvBuilder {
             ))
         });
         // TODO(weny): use the real allocator.
-        let flow_task_metadata_allocator = Arc::new(
-            FlowTaskMetadataAllocator::with_noop_peer_allocator(Arc::new(
-                SequenceBuilder::new(FLOW_TASK_ID_SEQ, kv_backend.clone())
-                    .initial(MIN_USER_FLOW_TASK_ID as u64)
+        let flow_metadata_allocator =
+            Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
+                SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
+                    .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
-            )),
-        );
+            )));
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
@@ -273,8 +272,8 @@ impl MetasrvBuilder {
                     memory_region_keeper: memory_region_keeper.clone(),
                     table_metadata_manager: table_metadata_manager.clone(),
                     table_metadata_allocator: table_metadata_allocator.clone(),
-                    flow_task_metadata_manager: flow_task_metadata_manager.clone(),
-                    flow_task_metadata_allocator: flow_task_metadata_allocator.clone(),
+                    flow_metadata_manager: flow_metadata_manager.clone(),
+                    flow_metadata_allocator: flow_metadata_allocator.clone(),
                 },
                 procedure_manager.clone(),
                 true,

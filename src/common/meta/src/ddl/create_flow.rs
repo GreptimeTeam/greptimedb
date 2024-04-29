@@ -36,17 +36,17 @@ use super::utils::add_peer_context_if_needed;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::Result;
-use crate::key::flow_task::flow_task_info::FlowTaskInfoValue;
-use crate::key::FlowTaskId;
-use crate::lock_key::{CatalogLock, FlowTaskNameLock, TableNameLock};
+use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::FlowId;
+use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};
 
-/// The procedure of flow task creation.
+/// The procedure of flow creation.
 pub struct CreateFlowProcedure {
     pub context: DdlContext,
-    pub data: CreateFlowTaskData,
+    pub data: CreateFlowData,
 }
 
 impl CreateFlowProcedure {
@@ -56,13 +56,13 @@ impl CreateFlowProcedure {
     pub fn new(cluster_id: ClusterId, task: CreateFlowTask, context: DdlContext) -> Self {
         Self {
             context,
-            data: CreateFlowTaskData {
+            data: CreateFlowData {
                 cluster_id,
                 task,
-                flow_task_id: None,
+                flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
-                state: CreateFlowTaskState::CreateMetadata,
+                state: CreateFlowState::CreateMetadata,
             },
         }
     }
@@ -76,21 +76,21 @@ impl CreateFlowProcedure {
     async fn on_prepare(&mut self) -> Result<Status> {
         self.check_creation().await?;
         self.collect_source_tables().await?;
-        self.allocate_flow_task_id().await?;
-        self.data.state = CreateFlowTaskState::CreateFlows;
+        self.allocate_flow_id().await?;
+        self.data.state = CreateFlowState::CreateFlows;
 
         Ok(Status::executing(true))
     }
 
     async fn on_flownode_create_flows(&mut self) -> Result<Status> {
         // Safety: must be allocated.
-        let mut create_flow_task = Vec::with_capacity(self.data.peers.len());
+        let mut create_flow = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
             let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
-            create_flow_task.push(async move {
+            create_flow.push(async move {
                 requester
                     .handle(request)
                     .await
@@ -98,29 +98,29 @@ impl CreateFlowProcedure {
             });
         }
 
-        join_all(create_flow_task)
+        join_all(create_flow)
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        self.data.state = CreateFlowTaskState::CreateMetadata;
+        self.data.state = CreateFlowState::CreateMetadata;
         Ok(Status::executing(true))
     }
 
-    /// Creates flow task metadata.
+    /// Creates flow metadata.
     ///
     /// Abort(not-retry):
     /// - Failed to create table metadata.
     async fn on_create_metadata(&mut self) -> Result<Status> {
-        // Safety: The flow task id must be allocated.
-        let flow_task_id = self.data.flow_task_id.unwrap();
+        // Safety: The flow id must be allocated.
+        let flow_id = self.data.flow_id.unwrap();
         // TODO(weny): Support `or_replace`.
         self.context
-            .flow_task_metadata_manager
-            .create_flow_task_metadata(flow_task_id, (&self.data).into())
+            .flow_metadata_manager
+            .create_flow_metadata(flow_id, (&self.data).into())
             .await?;
-        info!("Created flow task metadata for flow {flow_task_id}");
-        Ok(Status::done_with_output(flow_task_id))
+        info!("Created flow metadata for flow {flow_id}");
+        Ok(Status::done_with_output(flow_id))
     }
 }
 
@@ -133,14 +133,14 @@ impl Procedure for CreateFlowProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
 
-        let _timer = metrics::METRIC_META_PROCEDURE_CREATE_FLOW_TASK
+        let _timer = metrics::METRIC_META_PROCEDURE_CREATE_FLOW
             .with_label_values(&[state.as_ref()])
             .start_timer();
 
         match state {
-            CreateFlowTaskState::Prepare => self.on_prepare().await,
-            CreateFlowTaskState::CreateFlows => self.on_flownode_create_flows().await,
-            CreateFlowTaskState::CreateMetadata => self.on_create_metadata().await,
+            CreateFlowState::Prepare => self.on_prepare().await,
+            CreateFlowState::CreateFlows => self.on_flownode_create_flows().await,
+            CreateFlowState::CreateMetadata => self.on_create_metadata().await,
         }
         .map_err(handle_retry_error)
     }
@@ -151,7 +151,7 @@ impl Procedure for CreateFlowProcedure {
 
     fn lock_key(&self) -> LockKey {
         let catalog_name = &self.data.task.catalog_name;
-        let task_name = &self.data.task.task_name;
+        let flow_name = &self.data.task.flow_name;
         let sink_table_name = &self.data.task.sink_table_name;
 
         LockKey::new(vec![
@@ -162,14 +162,14 @@ impl Procedure for CreateFlowProcedure {
                 &sink_table_name.catalog_name,
             )
             .into(),
-            FlowTaskNameLock::new(catalog_name, task_name).into(),
+            FlowNameLock::new(catalog_name, flow_name).into(),
         ])
     }
 }
 
-/// The state of [CreateFlowTaskProcedure].
+/// The state of [CreateFlowProcedure].
 #[derive(Debug, Clone, Serialize, Deserialize, AsRefStr, PartialEq)]
-pub enum CreateFlowTaskState {
+pub enum CreateFlowState {
     /// Prepares to create the flow.
     Prepare,
     /// Creates flows on the flownode.
@@ -180,22 +180,22 @@ pub enum CreateFlowTaskState {
 
 /// The serializable data.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CreateFlowTaskData {
+pub struct CreateFlowData {
     pub(crate) cluster_id: ClusterId,
-    pub(crate) state: CreateFlowTaskState,
+    pub(crate) state: CreateFlowState,
     pub(crate) task: CreateFlowTask,
-    pub(crate) flow_task_id: Option<FlowTaskId>,
+    pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
 }
 
-impl From<&CreateFlowTaskData> for CreateRequest {
-    fn from(value: &CreateFlowTaskData) -> Self {
-        let flow_task_id = value.flow_task_id.unwrap();
+impl From<&CreateFlowData> for CreateRequest {
+    fn from(value: &CreateFlowData) -> Self {
+        let flow_id = value.flow_id.unwrap();
         let source_table_ids = &value.source_table_ids;
 
         CreateRequest {
-            task_id: Some(api::v1::flow::TaskId { id: flow_task_id }),
+            flow_id: Some(api::v1::flow::TaskId { id: flow_id }),
             source_table_ids: source_table_ids
                 .iter()
                 .map(|table_id| api::v1::TableId { id: *table_id })
@@ -206,21 +206,21 @@ impl From<&CreateFlowTaskData> for CreateRequest {
             expire_when: value.task.expire_when.clone(),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
-            task_options: value.task.options.clone(),
+            flow_options: value.task.flow_options.clone(),
         }
     }
 }
 
-impl From<&CreateFlowTaskData> for FlowTaskInfoValue {
-    fn from(value: &CreateFlowTaskData) -> Self {
+impl From<&CreateFlowData> for FlowInfoValue {
+    fn from(value: &CreateFlowData) -> Self {
         let CreateFlowTask {
             catalog_name,
-            task_name,
+            flow_name,
             sink_table_name,
             expire_when,
             comment,
             sql,
-            options,
+            flow_options: options,
             ..
         } = value.task.clone();
 
@@ -231,12 +231,12 @@ impl From<&CreateFlowTaskData> for FlowTaskInfoValue {
             .map(|(idx, peer)| (idx as u32, peer.id))
             .collect::<BTreeMap<_, _>>();
 
-        FlowTaskInfoValue {
+        FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
             sink_table_name,
             flownode_ids,
             catalog_name,
-            task_name,
+            flow_name,
             raw_sql: sql,
             expire_when,
             comment,

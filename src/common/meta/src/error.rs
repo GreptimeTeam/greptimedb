@@ -241,9 +241,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Task already exists: {}", task_name))]
-    TaskAlreadyExists {
-        task_name: String,
+    #[snafu(display("Flow already exists: {}", flow_name))]
+    FlowAlreadyExists {
+        flow_name: String,
         location: Location,
     },
 
@@ -511,7 +511,7 @@ impl ErrorExt for Error {
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
-            | TaskAlreadyExists { .. }
+            | FlowAlreadyExists { .. }
             | MismatchPrefix { .. }
             | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
 

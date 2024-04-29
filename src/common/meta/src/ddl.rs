@@ -19,10 +19,10 @@ use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
+use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
-use crate::ddl::task_meta::FlowTaskMetadataAllocatorRef;
 use crate::error::Result;
-use crate::key::flow_task::FlowTaskMetadataManagerRef;
+use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
@@ -39,9 +39,9 @@ pub mod create_table;
 mod create_table_template;
 pub mod drop_database;
 pub mod drop_table;
+pub mod flow_meta;
 mod physical_table_metadata;
 pub mod table_meta;
-pub mod task_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]
@@ -110,8 +110,8 @@ pub struct DdlContext {
     pub table_metadata_manager: TableMetadataManagerRef,
     /// Allocator for table metadata.
     pub table_metadata_allocator: TableMetadataAllocatorRef,
-    /// Flow task metadata manager.
-    pub flow_task_metadata_manager: FlowTaskMetadataManagerRef,
-    /// Allocator for flow task metadata.
-    pub flow_task_metadata_allocator: FlowTaskMetadataAllocatorRef,
+    /// Flow metadata manager.
+    pub flow_metadata_manager: FlowMetadataManagerRef,
+    /// Allocator for flow metadata.
+    pub flow_metadata_allocator: FlowMetadataAllocatorRef,
 }

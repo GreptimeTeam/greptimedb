@@ -616,7 +616,7 @@ async fn handle_create_flow_task(
     })?);
     info!(
         "Flow {}.{}({flow_id}) is created via procedure_id {id:?}",
-        create_flow_task.catalog_name, create_flow_task.task_name,
+        create_flow_task.catalog_name, create_flow_task.flow_name,
     );
 
     Ok(SubmitDdlTaskResponse {
@@ -756,11 +756,11 @@ mod tests {
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
+    use crate::ddl::flow_meta::FlowMetadataAllocator;
     use crate::ddl::table_meta::TableMetadataAllocator;
-    use crate::ddl::task_meta::FlowTaskMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::DdlContext;
-    use crate::key::flow_task::FlowTaskMetadataManager;
+    use crate::key::flow::FlowMetadataManager;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
@@ -792,11 +792,10 @@ mod tests {
             Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
             Arc::new(WalOptionsAllocator::default()),
         ));
-        let flow_task_metadata_manager = Arc::new(FlowTaskMetadataManager::new(kv_backend.clone()));
-        let flow_task_metadata_allocator =
-            Arc::new(FlowTaskMetadataAllocator::with_noop_peer_allocator(
-                Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
-            ));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
+        ));
 
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
         let procedure_manager = Arc::new(LocalManager::new(Default::default(), state_store));
@@ -807,8 +806,8 @@ mod tests {
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
                 table_metadata_allocator,
-                flow_task_metadata_manager,
-                flow_task_metadata_allocator,
+                flow_metadata_manager,
+                flow_metadata_allocator,
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
             },
             procedure_manager.clone(),

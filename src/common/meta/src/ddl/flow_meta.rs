@@ -17,43 +17,43 @@ use std::sync::Arc;
 use tonic::async_trait;
 
 use crate::error::Result;
-use crate::key::FlowTaskId;
+use crate::key::FlowId;
 use crate::peer::Peer;
 use crate::sequence::SequenceRef;
 
-/// The reference of [FlowTaskMetadataAllocator].
-pub type FlowTaskMetadataAllocatorRef = Arc<FlowTaskMetadataAllocator>;
+/// The reference of [FlowMetadataAllocator].
+pub type FlowMetadataAllocatorRef = Arc<FlowMetadataAllocator>;
 
-/// [FlowTaskMetadataAllocator] provides the ability of:
-/// - [FlowTaskId] Allocation.
+/// [FlowMetadataAllocator] provides the ability of:
+/// - [FlowId] Allocation.
 /// - [FlownodeId] Selection.
 #[derive(Clone)]
-pub struct FlowTaskMetadataAllocator {
-    flow_task_id_sequence: SequenceRef,
+pub struct FlowMetadataAllocator {
+    flow_id_sequence: SequenceRef,
     partition_peer_allocator: PartitionPeerAllocatorRef,
 }
 
-impl FlowTaskMetadataAllocator {
-    /// Returns the [FlowTaskMetadataAllocator] with [NoopPartitionPeerAllocator].
-    pub fn with_noop_peer_allocator(flow_task_id_sequence: SequenceRef) -> Self {
+impl FlowMetadataAllocator {
+    /// Returns the [FlowMetadataAllocator] with [NoopPartitionPeerAllocator].
+    pub fn with_noop_peer_allocator(flow_id_sequence: SequenceRef) -> Self {
         Self {
-            flow_task_id_sequence,
+            flow_id_sequence,
             partition_peer_allocator: Arc::new(NoopPartitionPeerAllocator),
         }
     }
 
-    /// Allocates a the [FlowTaskId].
-    pub(crate) async fn allocate_flow_task_id(&self) -> Result<FlowTaskId> {
-        let flow_task_id = self.flow_task_id_sequence.next().await? as FlowTaskId;
-        Ok(flow_task_id)
+    /// Allocates a the [FlowId].
+    pub(crate) async fn allocate_flow_id(&self) -> Result<FlowId> {
+        let flow_id = self.flow_id_sequence.next().await? as FlowId;
+        Ok(flow_id)
     }
 
-    /// Allocates the [FlowTaskId] and [Peer]s.
-    pub async fn create(&self, partitions: usize) -> Result<(FlowTaskId, Vec<Peer>)> {
-        let flow_task_id = self.allocate_flow_task_id().await?;
+    /// Allocates the [FlowId] and [Peer]s.
+    pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
+        let flow_id = self.allocate_flow_id().await?;
         let peers = self.partition_peer_allocator.alloc(partitions).await?;
 
-        Ok((flow_task_id, peers))
+        Ok((flow_id, peers))
     }
 }
 
