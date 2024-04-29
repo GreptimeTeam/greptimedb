@@ -264,9 +264,12 @@ impl ClusterInfo for MetaClient {
 
         let mut nodes = if get_metasrv_nodes {
             let last_activity_ts = -1; // Metasrv does not provide this information.
-                                       // TODO(dennis): Get Metasrv build info
+
+            // TODO(dennis): Get Metasrv node info
             let git_commit = "unknown";
             let version = "unknown";
+            let start_time_ms = 0;
+
             let (leader, followers) = cluster_client.get_metasrv_peers().await?;
             followers
                 .into_iter()
@@ -276,6 +279,7 @@ impl ClusterInfo for MetaClient {
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
                     version: version.to_string(),
                     git_commit: git_commit.to_string(),
+                    start_time_ms,
                 })
                 .chain(leader.into_iter().map(|leader| NodeInfo {
                     peer: leader,
@@ -283,6 +287,7 @@ impl ClusterInfo for MetaClient {
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
                     version: version.to_string(),
                     git_commit: git_commit.to_string(),
+                    start_time_ms,
                 }))
                 .collect::<Vec<_>>()
         } else {

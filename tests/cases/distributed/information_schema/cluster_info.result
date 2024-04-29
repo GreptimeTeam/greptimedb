@@ -4,30 +4,95 @@ Affected Rows: 0
 
 DESC TABLE CLUSTER_INFO;
 
-+------------+--------+-----+------+---------+---------------+
-| Column     | Type   | Key | Null | Default | Semantic Type |
-+------------+--------+-----+------+---------+---------------+
-| peer_id    | UInt64 |     | NO   |         | FIELD         |
-| peer_type  | String |     | NO   |         | FIELD         |
-| peer_addr  | String |     | YES  |         | FIELD         |
-| version    | String |     | NO   |         | FIELD         |
-| git_commit | String |     | NO   |         | FIELD         |
-+------------+--------+-----+------+---------+---------------+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| peer_id    | UInt64               |     | NO   |         | FIELD         |
+| peer_type  | String               |     | NO   |         | FIELD         |
+| peer_addr  | String               |     | YES  |         | FIELD         |
+| version    | String               |     | NO   |         | FIELD         |
+| git_commit | String               |     | NO   |         | FIELD         |
+| start_time | TimestampMillisecond |     | YES  |         | FIELD         |
+| uptime     | String               |     | YES  |         | FIELD         |
++------------+----------------------+-----+------+---------+---------------+
 
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE unknown UNKNOWN
+-- SQLNESS REPLACE (\s\d\.\d\.\d\s) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
+-- SQLNESS REPLACE (\s(\d+(s|ms|m)\s)+) Uptime
 SELECT * FROM CLUSTER_INFO;
 
-Error: 3001(EngineExecuteQuery), Internal error: Failed to list nodes in cluster: Retry exceeded max times(3), message: Failed to get_metasrv_peers, last error: Some("127.0.0.1:3002 is not a leader").
-This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              | uptime   |
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+| 0       | METASRV   | 127.0.0.1:3002 | UNKNOWN | UNKNOWN    |                         |          |
+| 1       | DATANODE  | 127.0.0.1:4101 |Version  |Hash   |Start_time|Uptime|
+| 2       | DATANODE  | 127.0.0.1:4102 |Version  |Hash   |Start_time|Uptime |
+| 3       | DATANODE  | 127.0.0.1:4103 |Version  |Hash   |Start_time|Uptime|
+| 0       | FRONTEND  | 127.0.0.1:4001 |Version  |Hash   |Start_time|Uptime   |
++---------+-----------+----------------+---------+------------+-------------------------+----------+
 
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE unknown UNKNOWN
+-- SQLNESS REPLACE (\s\d\.\d\.\d\s) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
+-- SQLNESS REPLACE (\s(\d+(s|ms|m)\s)+) Uptime
 SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV';
 
-Error: 3001(EngineExecuteQuery), Internal error: Failed to list nodes in cluster: Retry exceeded max times(3), message: Failed to get_metasrv_peers, last error: Some("127.0.0.1:3002 is not a leader").
-This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
++---------+-----------+----------------+---------+------------+------------+--------+
+| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time | uptime |
++---------+-----------+----------------+---------+------------+------------+--------+
+| 0       | METASRV   | 127.0.0.1:3002 | UNKNOWN | UNKNOWN    |            |        |
++---------+-----------+----------------+---------+------------+------------+--------+
 
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE unknown UNKNOWN
+-- SQLNESS REPLACE (\s\d\.\d\.\d\s) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
+-- SQLNESS REPLACE (\s(\d+(s|ms|m)\s)+) Uptime
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND';
+
++---------+-----------+----------------+---------+------------+-------------------------+--------+
+| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              | uptime |
++---------+-----------+----------------+---------+------------+-------------------------+--------+
+| 0       | FRONTEND  | 127.0.0.1:4001 |Version  |Hash   |Start_time|Uptime |
++---------+-----------+----------------+---------+------------+-------------------------+--------+
+
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE unknown UNKNOWN
+-- SQLNESS REPLACE (\s\d\.\d\.\d\s) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
+-- SQLNESS REPLACE (\s(\d+(s|ms|m)\s)+) Uptime
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND';
+
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              | uptime   |
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+| 0       | METASRV   | 127.0.0.1:3002 | UNKNOWN | UNKNOWN    |                         |          |
+| 1       | DATANODE  | 127.0.0.1:4101 |Version  |Hash   |Start_time|Uptime|
+| 2       | DATANODE  | 127.0.0.1:4102 |Version  |Hash   |Start_time|Uptime|
+| 3       | DATANODE  | 127.0.0.1:4103 |Version  |Hash   |Start_time|Uptime|
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE unknown UNKNOWN
+-- SQLNESS REPLACE (\s\d\.\d\.\d\s) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{23}\s) Start_time
+-- SQLNESS REPLACE (\s(\d+(s|ms|m)\s)+) Uptime
 SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 1;
 
-Error: 3001(EngineExecuteQuery), Internal error: Failed to list nodes in cluster: Retry exceeded max times(3), message: Failed to get_metasrv_peers, last error: Some("127.0.0.1:3002 is not a leader").
-This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+| peer_id | peer_type | peer_addr      | node_version | git_commit | start_time              | uptime   |
++---------+-----------+----------------+---------+------------+-------------------------+----------+
+| 2       | DATANODE  | 127.0.0.1:4102 |Version  |Hash   |Start_time|Uptime|
+| 3       | DATANODE  | 127.0.0.1:4103 |Version  |Hash   |Start_time|Uptime|
++---------+-----------+----------------+---------+------------+-------------------------+----------+
 
 USE PUBLIC;
 

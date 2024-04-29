@@ -39,6 +39,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
+use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
@@ -372,6 +373,7 @@ impl GreptimeDbClusterBuilder {
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
+            &FrontendOptions::default(),
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),

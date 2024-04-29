@@ -268,6 +268,7 @@ impl StartCommand {
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
+            &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),

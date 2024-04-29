@@ -128,6 +128,7 @@ impl cluster_server::Cluster for Metasrv {
 
 impl Metasrv {
     pub fn is_leader(&self) -> bool {
-        self.election().map(|x| x.is_leader()).unwrap_or(false)
+        // Returns true when using memory backend.
+        self.election().map(|x| x.is_leader()).unwrap_or(true)
     }
 }

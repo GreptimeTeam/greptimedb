@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID;
@@ -24,13 +25,17 @@ use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging::warn;
+use common_time::timestamp::Timestamp;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt64VectorBuilder};
+use datatypes::vectors::{
+    StringVectorBuilder, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
+};
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
@@ -44,7 +49,8 @@ const PEER_TYPE: &str = "peer_type";
 const PEER_ADDR: &str = "peer_addr";
 const VERSION: &str = "version";
 const GIT_COMMIT: &str = "git_commit";
-// TODO(dennis): adds `uptime`, `start_time` columns etc.
+const START_TIME: &str = "start_time";
+const UPTIME: &str = "uptime";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -55,10 +61,13 @@ const INIT_CAPACITY: usize = 42;
 /// - `peer_addr`: the peer gRPC address.
 /// - `version`: the build package version of the peer.
 /// - `git_commit`: the build git commit hash of the peer.
+/// - `start_time`: the starting time of the peer.
+/// - `uptime`: the uptime of the peer.
 ///
 pub(super) struct InformationSchemaClusterInfo {
     schema: SchemaRef,
     catalog_manager: Weak<dyn CatalogManager>,
+    start_time_ms: u64,
 }
 
 impl InformationSchemaClusterInfo {
@@ -66,6 +75,7 @@ impl InformationSchemaClusterInfo {
         Self {
             schema: Self::schema(),
             catalog_manager,
+            start_time_ms: common_time::util::current_time_millis() as u64,
         }
     }
 
@@ -76,11 +86,21 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(VERSION, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(GIT_COMMIT, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                START_TIME,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(UPTIME, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
     fn builder(&self) -> InformationSchemaClusterInfoBuilder {
-        InformationSchemaClusterInfoBuilder::new(self.schema.clone(), self.catalog_manager.clone())
+        InformationSchemaClusterInfoBuilder::new(
+            self.schema.clone(),
+            self.catalog_manager.clone(),
+            self.start_time_ms,
+        )
     }
 }
 
@@ -120,6 +140,7 @@ impl InformationTable for InformationSchemaClusterInfo {
 
 struct InformationSchemaClusterInfoBuilder {
     schema: SchemaRef,
+    start_time_ms: u64,
     catalog_manager: Weak<dyn CatalogManager>,
 
     peer_ids: UInt64VectorBuilder,
@@ -127,10 +148,16 @@ struct InformationSchemaClusterInfoBuilder {
     peer_addrs: StringVectorBuilder,
     versions: StringVectorBuilder,
     git_commits: StringVectorBuilder,
+    start_times: TimestampMillisecondVectorBuilder,
+    uptimes: StringVectorBuilder,
 }
 
 impl InformationSchemaClusterInfoBuilder {
-    fn new(schema: SchemaRef, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    fn new(
+        schema: SchemaRef,
+        catalog_manager: Weak<dyn CatalogManager>,
+        start_time_ms: u64,
+    ) -> Self {
         Self {
             schema,
             catalog_manager,
@@ -139,6 +166,9 @@ impl InformationSchemaClusterInfoBuilder {
             peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             versions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             git_commits: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            start_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            uptimes: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            start_time_ms,
         }
     }
 
@@ -164,7 +194,10 @@ impl InformationSchemaClusterInfoBuilder {
                         last_activity_ts: -1,
                         status: NodeStatus::Standalone,
                         version: build_info.version.to_string(),
-                        git_commit: build_info.commit.to_string(),
+                        git_commit: build_info.commit_short.to_string(),
+                        // Use `self.start_time_ms` instead.
+                        // It's not precise but enough.
+                        start_time_ms: self.start_time_ms,
                     },
                 );
             }
@@ -208,6 +241,19 @@ impl InformationSchemaClusterInfoBuilder {
         self.peer_addrs.push(Some(&node_info.peer.addr));
         self.versions.push(Some(&node_info.version));
         self.git_commits.push(Some(&node_info.git_commit));
+        if node_info.start_time_ms > 0 {
+            self.start_times
+                .push(Some(TimestampMillisecond(Timestamp::new_millisecond(
+                    node_info.start_time_ms as i64,
+                ))));
+            let now = common_time::util::current_time_millis() as u64;
+            let duration_since_start = now - node_info.start_time_ms;
+            let format = humantime::format_duration(Duration::from_millis(duration_since_start));
+            self.uptimes.push(Some(format.to_string().as_str()));
+        } else {
+            self.start_times.push(None);
+            self.uptimes.push(None);
+        }
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -217,6 +263,8 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.peer_addrs.finish()),
             Arc::new(self.versions.finish()),
             Arc::new(self.git_commits.finish()),
+            Arc::new(self.start_times.finish()),
+            Arc::new(self.uptimes.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

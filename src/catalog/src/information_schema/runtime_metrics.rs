@@ -184,14 +184,13 @@ impl InformationSchemaMetricsBuilder {
                     .join(", "),
                 // Safety: always has a sample
                 ts.samples[0].value,
-                // TODO(dennis): fetching other peers metrics
-
                 // The peer column is always `None` for standalone
                 None,
                 "standalone",
             );
         }
 
+        // FIXME(dennis): fetching other peers metrics
         self.finish()
     }
 

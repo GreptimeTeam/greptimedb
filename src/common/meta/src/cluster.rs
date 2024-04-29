@@ -90,6 +90,8 @@ pub struct NodeInfo {
     pub version: String,
     // The node build git commit hash
     pub git_commit: String,
+    // The node star timestamp
+    pub start_time_ms: u64,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -290,6 +292,7 @@ mod tests {
             }),
             version: "".to_string(),
             git_commit: "".to_string(),
+            start_time_ms: 1,
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
@@ -306,6 +309,7 @@ mod tests {
                     leader_regions: 3,
                     follower_regions: 4,
                 }),
+                start_time_ms: 1,
                 ..
             }
         );
