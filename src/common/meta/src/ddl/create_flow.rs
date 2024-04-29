@@ -50,7 +50,7 @@ pub struct CreateFlowProcedure {
 }
 
 impl CreateFlowProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlowTask";
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
     pub fn new(cluster_id: ClusterId, task: CreateFlowTask, context: DdlContext) -> Self {
