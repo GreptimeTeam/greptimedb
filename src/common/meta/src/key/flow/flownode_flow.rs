@@ -218,12 +218,9 @@ mod tests {
     #[test]
     fn test_key_serialization() {
         let flownode_flow = FlownodeFlowKey::new(1, 2, 0);
-        assert_eq!(
-            b"__flow/my_catalog/flownode/1/2/0".to_vec(),
-            flownode_flow.to_bytes()
-        );
+        assert_eq!(b"__flow/flownode/1/2/0".to_vec(), flownode_flow.to_bytes());
         let prefix = FlownodeFlowKey::range_start_key(1);
-        assert_eq!(b"__flow/my_catalog/flownode/1/".to_vec(), prefix);
+        assert_eq!(b"__flow/flownode/1/".to_vec(), prefix);
     }
 
     #[test]

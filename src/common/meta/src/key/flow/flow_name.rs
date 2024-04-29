@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn test_key_serialization() {
         let key = FlowNameKey::new("my_catalog".to_string(), "my_task".to_string());
-        assert_eq!(b"__flow/my_catalog/name/my_task".to_vec(), key.to_bytes(),);
+        assert_eq!(b"__flow/name/my_catalog/my_task".to_vec(), key.to_bytes(),);
     }
 
     #[test]
