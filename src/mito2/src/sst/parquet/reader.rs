@@ -743,7 +743,7 @@ pub(crate) struct RowGroupReader {
 
 impl RowGroupReader {
     /// Creates a new reader.
-    fn new(context: PartitionContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn new(context: PartitionContextRef, reader: ParquetRecordBatchReader) -> Self {
         Self {
             context,
             reader,

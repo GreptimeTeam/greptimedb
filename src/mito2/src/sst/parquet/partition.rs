@@ -19,19 +19,19 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
+use parquet::arrow::arrow_reader::RowSelection;
 use snafu::ResultExt;
 
 use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::{RowGroupReaderBuilder, SimpleFilterContext};
+use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
 /// A partition of a parquet SST. Now it is a row group.
+#[allow(dead_code)]
 pub(crate) struct Partition {
     /// Shared context.
     context: PartitionContextRef,
@@ -43,6 +43,7 @@ pub(crate) struct Partition {
 
 impl Partition {
     /// Creates a new partition.
+    #[allow(dead_code)]
     pub(crate) fn new(
         context: PartitionContextRef,
         row_group_idx: usize,
@@ -56,11 +57,15 @@ impl Partition {
     }
 
     /// Returns a reader to read the partition.
-    pub(crate) async fn reader(&self) -> Result<ParquetRecordBatchReader> {
-        self.context
+    #[allow(dead_code)]
+    pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
+        let parquet_reader = self
+            .context
             .reader_builder
             .build(self.row_group_idx, self.row_selection.clone())
-            .await
+            .await?;
+
+        Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
     }
 }
 
