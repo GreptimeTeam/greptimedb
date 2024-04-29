@@ -382,7 +382,12 @@ impl StatementExecutor {
             .get("max_insert_rows")
             .and_then(|val| val.parse::<usize>().ok())
             .unwrap_or(1000);
-        'outer: for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
+        'outer: for (
+            compat_schema,
+            file_schema_projection,
+            projected_table_schema,
+            file_metadata,
+        ) in files
         {
             let mut stream = self
                 .build_read_stream(
