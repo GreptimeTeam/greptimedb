@@ -38,7 +38,7 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::flow_task::flow_task_info::FlowTaskInfoValue;
 use crate::key::FlowTaskId;
-use crate::lock_key::{CatalogLock, FlowTaskNameLock};
+use crate::lock_key::{CatalogLock, FlowTaskNameLock, TableNameLock};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};
@@ -152,9 +152,16 @@ impl Procedure for CreateFlowProcedure {
     fn lock_key(&self) -> LockKey {
         let catalog_name = &self.data.task.catalog_name;
         let task_name = &self.data.task.task_name;
+        let sink_table_name = &self.data.task.sink_table_name;
 
         LockKey::new(vec![
             CatalogLock::Read(catalog_name).into(),
+            TableNameLock::new(
+                &sink_table_name.catalog_name,
+                &sink_table_name.schema_name,
+                &sink_table_name.catalog_name,
+            )
+            .into(),
             FlowTaskNameLock::new(catalog_name, task_name).into(),
         ])
     }
