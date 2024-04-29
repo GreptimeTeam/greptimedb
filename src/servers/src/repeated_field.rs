@@ -75,6 +75,12 @@ impl<T> RepeatedField<T> {
         self.len
     }
 
+    /// Returns true if this container is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Clear.
     #[inline]
     pub fn clear(&mut self) {
@@ -283,13 +289,6 @@ impl<T> RepeatedField<T> {
         self.as_mut_slice().reverse()
     }
 
-    /// Into owned iterator.
-    #[inline]
-    pub fn into_iter(mut self) -> vec::IntoIter<T> {
-        self.vec.truncate(self.len);
-        self.vec.into_iter()
-    }
-
     /// Immutable data iterator.
     #[inline]
     pub fn iter(&self) -> slice::Iter<T> {
@@ -353,10 +352,10 @@ impl<'a, T: Clone> From<&'a [T]> for RepeatedField<T> {
     }
 }
 
-impl<T> Into<Vec<T>> for RepeatedField<T> {
+impl<T> From<RepeatedField<T>> for Vec<T> {
     #[inline]
-    fn into(self) -> Vec<T> {
-        self.into_vec()
+    fn from(val: RepeatedField<T>) -> Self {
+        val.into_vec()
     }
 }
 
@@ -415,12 +414,13 @@ impl<'a, T> IntoIterator for &'a mut RepeatedField<T> {
     }
 }
 
-impl<'a, T> IntoIterator for RepeatedField<T> {
+impl<T> IntoIterator for RepeatedField<T> {
     type Item = T;
     type IntoIter = vec::IntoIter<T>;
 
-    fn into_iter(self) -> vec::IntoIter<T> {
-        self.into_iter()
+    fn into_iter(mut self) -> vec::IntoIter<T> {
+        self.vec.truncate(self.len);
+        self.vec.into_iter()
     }
 }
 
