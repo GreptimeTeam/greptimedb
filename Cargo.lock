@@ -5286,7 +5286,6 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
- "common-version",
  "common-wal",
  "dashmap",
  "datatypes",

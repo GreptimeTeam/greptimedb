@@ -54,7 +54,7 @@ const UPTIME: &str = "uptime";
 
 const INIT_CAPACITY: usize = 42;
 
-/// The `CLUSTER_INFO` table provides information about the current topology information of the cluster.
+/// The `CLUSTER_INFO` table provides information about the current topology of the cluster.
 ///
 /// - `peer_id`: the peer server id.
 /// - `peer_type`: the peer type, such as `datanode`, `frontend`, `metasrv` etc.
