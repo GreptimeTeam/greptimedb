@@ -85,21 +85,20 @@ impl Repl {
         }
 
         let client = Client::with_urls([&cmd.grpc_addr]);
-        todo!()
-        // let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-        //
-        // let query_engine = if let Some(meta_addr) = &cmd.meta_addr {
-        //     create_query_engine(meta_addr).await.map(Some)?
-        // } else {
-        //     None
-        // };
-        //
-        // Ok(Self {
-        //     rl,
-        //     prompt: "> ".to_string(),
-        //     database,
-        //     query_engine,
-        // })
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+
+        let query_engine = if let Some(meta_addr) = &cmd.meta_addr {
+            create_query_engine(meta_addr).await.map(Some)?
+        } else {
+            None
+        };
+
+        Ok(Self {
+            rl,
+            prompt: "> ".to_string(),
+            database,
+            query_engine,
+        })
     }
 
     /// Parse the next command

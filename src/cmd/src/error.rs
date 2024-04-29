@@ -139,13 +139,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to request database, sql: {sql}"))]
-    RequestDatabase {
-        sql: String,
-        location: Location,
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to collect RecordBatches"))]
     CollectRecordBatches {
         location: Location,
@@ -218,8 +211,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to finish http request"))]
-    QuerySql {
+    #[snafu(display("Failed to run http request: {reason}"))]
+    HttpQuerySql {
+        reason: String,
         #[snafu(source)]
         error: reqwest::Error,
         location: Location,
@@ -298,7 +292,6 @@ impl ErrorExt for Error {
             | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
-            Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source, .. }
             | Error::PrettyPrintRecordBatches { source, .. } => source.status_code(),
             Error::StartMetaClient { source, .. } => source.status_code(),
@@ -308,7 +301,7 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::QuerySql { .. } => {
+            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::HttpQuerySql { .. } => {
                 StatusCode::Unexpected
             }
 

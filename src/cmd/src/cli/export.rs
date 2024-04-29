@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use clap::{Parser, ValueEnum};
-use client::{Client, DEFAULT_SCHEMA_NAME};
+use client::DEFAULT_SCHEMA_NAME;
 use common_telemetry::{debug, error, info, warn};
 use serde_json::Value;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
@@ -31,8 +31,8 @@ use tokio::sync::Semaphore;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
-    ConnectServerSnafu, EmptyResultSnafu, Error, FileIoSnafu, InvalidDatabaseNameSnafu,
-    QuerySqlSnafu, Result, SerdeJsonSnafu,
+    EmptyResultSnafu, Error, FileIoSnafu, HttpQuerySqlSnafu, InvalidDatabaseNameSnafu, Result,
+    SerdeJsonSnafu,
 };
 
 type TableReference = (String, String, String);
@@ -79,13 +79,6 @@ pub struct ExportCommand {
 
 impl ExportCommand {
     pub async fn build(&self) -> Result<Instance> {
-        let client = Client::with_urls([self.addr.clone()]);
-        client
-            .health_check()
-            .await
-            .with_context(|_| ConnectServerSnafu {
-                addr: self.addr.clone(),
-            })?;
         let (catalog, schema) = split_database(&self.database)?;
 
         let auth_header = if let Some(basic) = &self.auth_basic {
@@ -96,6 +89,7 @@ impl ExportCommand {
         };
 
         Ok(Instance::new(Box::new(Export {
+            addr: self.addr.clone(),
             catalog,
             schema,
             output_dir: self.output_dir.clone(),
@@ -107,6 +101,7 @@ impl ExportCommand {
 }
 
 pub struct Export {
+    addr: String,
     catalog: String,
     schema: Option<String>,
     output_dir: String,
@@ -118,24 +113,31 @@ pub struct Export {
 impl Export {
     /// Execute one single sql query.
     async fn sql(&self, sql: &str) -> Result<Option<Vec<Vec<Value>>>> {
+        let url = format!(
+            "http://{}/v1/sql?db={}-{}&sql={}",
+            self.addr,
+            self.catalog,
+            self.schema.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
+            sql
+        );
+
         let client = reqwest::Client::new();
         let mut request = client
-            .get(format!(
-                "http://localhost:4000/v1/sql?db={}-{}&sql={}",
-                self.catalog,
-                self.schema.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME),
-                sql
-            ))
+            .get(&url)
             .header("Content-Type", "application/x-www-form-urlencoded");
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
         }
 
-        let response = request.send().await.context(QuerySqlSnafu)?;
+        let response = request
+            .send()
+            .await
+            .with_context(|_| HttpQuerySqlSnafu { reason: url })?;
         snafu::ensure!(response.status() == 200, EmptyResultSnafu);
 
-        let text = response.text().await.context(QuerySqlSnafu)?;
-        // .with_context(|_| RequestDatabaseSnafu { sql })?;
+        let text = response.text().await.with_context(|_| HttpQuerySqlSnafu {
+            reason: "cannot get response text".to_string(),
+        })?;
 
         let body = serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)?;
         match &body.output()[0] {
@@ -175,7 +177,7 @@ impl Export {
         // TODO: SQL injection hurts
         let sql = format!(
             "select table_catalog, table_schema, table_name from \
-            information_schema.tables where table_type = \'BASE TABLE\'\
+            information_schema.tables where table_type = \'BASE TABLE\' \
             and table_catalog = \'{catalog}\' and table_schema = \'{schema}\'",
         );
         let result = self.sql(&sql).await?;
