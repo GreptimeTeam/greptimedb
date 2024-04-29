@@ -18,8 +18,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowTaskExpr, CreateTableExpr, DropColumn, DropColumns, RenameTable,
-    SemanticType, TableName,
+    ColumnDataTypeExtension, CreateFlowTaskExpr, CreateTableExpr, DropColumn, DropColumns,
+    RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
