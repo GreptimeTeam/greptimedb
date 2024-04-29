@@ -190,13 +190,6 @@ pub enum Error {
         error: hyper::Error,
     },
 
-    #[snafu(display("Invalid OpenTSDB line"))]
-    InvalidOpentsdbLine {
-        #[snafu(source)]
-        error: FromUtf8Error,
-        location: Location,
-    },
-
     #[snafu(display("Invalid OpenTSDB Json request"))]
     InvalidOpentsdbJsonRequest {
         #[snafu(source)]
@@ -508,7 +501,6 @@ impl ErrorExt for Error {
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
             | ConnResetByPeer { .. }
-            | InvalidOpentsdbLine { .. }
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
@@ -664,7 +656,6 @@ impl IntoResponse for Error {
             Error::InfluxdbLineProtocol { .. }
             | Error::RowWriter { .. }
             | Error::PromSeriesWrite { .. }
-            | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
             | Error::DecodeOtlpRequest { .. }

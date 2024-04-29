@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod codec;
-pub mod connection;
 
 use api::v1::RowInsertRequests;
 use common_grpc::precision::Precision;
