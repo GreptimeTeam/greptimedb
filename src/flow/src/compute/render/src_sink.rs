@@ -25,7 +25,7 @@ use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
 use crate::expr::GlobalId;
-use crate::repr::{DiffRow, Row, BOARDCAST_CAP};
+use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
 impl<'referred, 'df> Context<'referred, 'df> {
@@ -121,12 +121,12 @@ impl<'referred, 'df> Context<'referred, 'df> {
             .add_subgraph_sink("Sink", collection.into_inner(), move |_ctx, recv| {
                 let data = recv.take_inner();
                 buf.extend(data.into_iter().flat_map(|i| i.into_iter()));
-                if sender.len() >= BOARDCAST_CAP {
+                if sender.len() >= BROADCAST_CAP {
                     return;
                 } else {
                     while let Some(row) = buf.pop_front() {
                         // if the sender is full, stop sending
-                        if sender.len() >= BOARDCAST_CAP {
+                        if sender.len() >= BROADCAST_CAP {
                             break;
                         }
                         // TODO(discord9): handling tokio broadcast error

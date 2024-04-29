@@ -14,6 +14,7 @@
 
 //! For single-thread flow worker
 
+use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
@@ -31,11 +32,35 @@ use crate::repr::{self, DiffRow};
 
 pub type SharedBuf = Arc<Mutex<VecDeque<DiffRow>>>;
 
+/// Create both worker(`!Send`) and worker handle(`Send + Sync`)
+pub fn create_worker<'a>() -> (WorkerHandle, Worker<'a>) {
+    let (itc_client, itc_server) = create_inter_thread_call();
+    let worker_handle = WorkerHandle {
+        itc_client: Mutex::new(itc_client),
+    };
+    let worker = Worker {
+        task_states: BTreeMap::new(),
+        itc_server: Arc::new(Mutex::new(itc_server)),
+    };
+    (worker_handle, worker)
+}
+
 /// ActiveDataflowState is a wrapper around `Hydroflow` and `DataflowState`
+
 pub(crate) struct ActiveDataflowState<'subgraph> {
     df: Hydroflow<'subgraph>,
     state: DataflowState,
     err_collector: ErrCollector,
+}
+
+impl std::fmt::Debug for ActiveDataflowState<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveDataflowState")
+            .field("df", &"<Hydroflow>")
+            .field("state", &self.state)
+            .field("err_collector", &self.err_collector)
+            .finish()
+    }
 }
 
 impl Default for ActiveDataflowState<'_> {
@@ -76,23 +101,11 @@ impl<'subgraph> ActiveDataflowState<'subgraph> {
     }
 }
 
+#[derive(Debug)]
 pub struct WorkerHandle {
     itc_client: Mutex<InterThreadCallClient>,
 }
 
-/// Create both worker(`!Send`) and worker handle(`Send + Sync`)
-pub fn create_worker<'a>(tick_manager: FlowTickManager) -> (WorkerHandle, Worker<'a>) {
-    let (itc_client, itc_server) = create_inter_thread_call();
-    let worker_handle = WorkerHandle {
-        itc_client: Mutex::new(itc_client),
-    };
-    let worker = Worker {
-        task_states: BTreeMap::new(),
-        itc_server: Mutex::new(itc_server),
-        tick_manager,
-    };
-    (worker_handle, worker)
-}
 #[test]
 fn check_if_send_sync() {
     fn check<T: Send + Sync>() {}
@@ -157,11 +170,13 @@ impl WorkerHandle {
         }
     }
 
-    // trigger running the worker
-    pub fn run_available(&self) {
+    /// trigger running the worker, will not block, and will run the worker parallelly
+    ///
+    /// will set the current timestamp to `now` for all dataflows before running them
+    pub fn run_available(&self, now: repr::Timestamp) {
         self.itc_client
             .blocking_lock()
-            .call_non_blocking(Request::RunAvail);
+            .call_non_blocking(Request::RunAvail { now });
     }
 
     pub fn contains_task(&self, task_id: TaskId) -> Result<bool, Error> {
@@ -182,13 +197,20 @@ impl WorkerHandle {
             .with_context(|_| EvalSnafu {})
         }
     }
+
+    /// shutdown the worker
+    pub fn shutdown(&self) {
+        self.itc_client
+            .blocking_lock()
+            .call_non_blocking(Request::Shutdown);
+    }
 }
 
 /// The actual worker that does the work and contain active state
+#[derive(Debug)]
 pub struct Worker<'subgraph> {
     pub task_states: BTreeMap<TaskId, ActiveDataflowState<'subgraph>>,
-    itc_server: Mutex<InterThreadCallServer>,
-    tick_manager: FlowTickManager,
+    itc_server: Arc<Mutex<InterThreadCallServer>>,
 }
 
 impl<'s> Worker<'s> {
@@ -231,64 +253,74 @@ impl<'s> Worker<'s> {
         self.task_states.remove(&task_id).is_some()
     }
 
-    /// run the worker until it is dropped
-    ///
-    /// This method should be called inside a `LocalSet` since it's `!Send`
-    pub async fn run(&mut self) {
+    /// Run the worker, blocking, until shutdown signal is received
+    pub fn run(&mut self) {
         loop {
-            let (req_id, req) = self.itc_server.lock().await.recv().await.unwrap();
-            match req {
-                Request::Create {
-                    task_id,
-                    plan,
-                    sink_id,
-                    sink_sender,
-                    source_ids,
-                    src_recvs,
-                    create_if_not_exist,
-                } => {
-                    let task_create_result = self.create_task(
-                        task_id,
-                        plan,
-                        sink_id,
-                        sink_sender,
-                        &source_ids,
-                        src_recvs,
-                        create_if_not_exist,
-                    );
-                    self.itc_server.lock().await.resp(
-                        req_id,
-                        Response::Create {
-                            result: task_create_result,
-                        },
-                    );
+            let (req_id, req) = self.itc_server.blocking_lock().blocking_recv().unwrap();
+            let ret = self.handle_req(req_id, req);
+            match ret {
+                Ok(Some((id, resp))) => {
+                    self.itc_server.blocking_lock().resp(id, resp);
                 }
-                Request::Remove { task_id } => {
-                    let ret = self.remove_task(task_id);
-                    self.itc_server
-                        .lock()
-                        .await
-                        .resp(req_id, Response::Remove { result: ret })
-                }
-                Request::RunAvail => self.run_tick(),
-                Request::ContainTask { task_id } => {
-                    let ret = self.task_states.contains_key(&task_id);
-                    self.itc_server
-                        .lock()
-                        .await
-                        .resp(req_id, Response::ContainTask { result: ret })
+                Ok(None) => continue,
+                Err(()) => {
+                    break;
                 }
             }
         }
     }
 
-    /// return true if any task is running
-    pub fn run_tick(&mut self) {
-        let now = self.tick_manager.tick();
+    /// run with tick acquired from tick manager(usually means system time)
+    /// TODO(discord9): better tick management
+    pub fn run_tick(&mut self, now: repr::Timestamp) {
         for (_task_id, task_state) in self.task_states.iter_mut() {
             task_state.set_current_ts(now);
             task_state.run_available();
         }
+    }
+    /// handle request, return response if any, Err if receive shutdown signal
+    fn handle_req(&mut self, req_id: usize, req: Request) -> Result<Option<(usize, Response)>, ()> {
+        let ret = match req {
+            Request::Create {
+                task_id,
+                plan,
+                sink_id,
+                sink_sender,
+                source_ids,
+                src_recvs,
+                create_if_not_exist,
+            } => {
+                let task_create_result = self.create_task(
+                    task_id,
+                    plan,
+                    sink_id,
+                    sink_sender,
+                    &source_ids,
+                    src_recvs,
+                    create_if_not_exist,
+                );
+                Some((
+                    req_id,
+                    Response::Create {
+                        result: task_create_result,
+                    },
+                ))
+            }
+            Request::Remove { task_id } => {
+                let ret = self.remove_task(task_id);
+                Some((req_id, Response::Remove { result: ret }))
+            }
+            Request::RunAvail { now } => {
+                self.run_tick(now);
+                None
+            }
+            Request::ContainTask { task_id } => {
+                let ret = self.task_states.contains_key(&task_id);
+                Some((req_id, Response::ContainTask { result: ret }))
+            }
+            Request::Shutdown => return Err(()),
+        };
+        Ok(ret)
     }
 }
 
@@ -307,10 +339,13 @@ enum Request {
         task_id: TaskId,
     },
     /// Trigger the worker to run, useful after input buffer is full
-    RunAvail,
+    RunAvail {
+        now: repr::Timestamp,
+    },
     ContainTask {
         task_id: TaskId,
     },
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -341,6 +376,7 @@ fn create_inter_thread_call() -> (InterThreadCallClient, InterThreadCallServer) 
     (client, server)
 }
 
+#[derive(Debug)]
 struct InterThreadCallClient {
     call_id: Arc<Mutex<usize>>,
     arg_sender: mpsc::UnboundedSender<(usize, Request)>,
@@ -378,6 +414,7 @@ impl InterThreadCallClient {
     }
 }
 
+#[derive(Debug)]
 struct InterThreadCallServer {
     pub arg_recv: mpsc::UnboundedReceiver<(usize, Request)>,
     pub ret_sender: mpsc::UnboundedSender<(usize, Response)>,
@@ -388,8 +425,61 @@ impl InterThreadCallServer {
         self.arg_recv.recv().await
     }
 
+    pub fn blocking_recv(&mut self) -> Option<(usize, Request)> {
+        self.arg_recv.blocking_recv()
+    }
+
     /// Send response back to the client
     pub fn resp(&self, call_id: usize, resp: Response) {
         self.ret_sender.send((call_id, resp)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::expr::Id;
+    use crate::plan::Plan;
+    use crate::repr::{RelationType, Row};
+    #[test]
+    pub fn test_simple_get_with_worker_and_handle() {
+        let flow_tick = FlowTickManager::new();
+        let (tx, rx) = oneshot::channel();
+        let worker_thread_handle = std::thread::spawn(move || {
+            let (handle, mut worker) = create_worker();
+            tx.send(handle).unwrap();
+            worker.run();
+        });
+        let handle = rx.blocking_recv().unwrap();
+        let src_ids = vec![GlobalId::User(1)];
+        let (tx, rx) = broadcast::channel::<DiffRow>(1024);
+        let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<DiffRow>();
+        let (task_id, plan) = (
+            1,
+            TypedPlan {
+                plan: Plan::Get {
+                    id: Id::Global(GlobalId::User(1)),
+                },
+                typ: RelationType::new(vec![]),
+            },
+        );
+        handle
+            .create_task(
+                task_id,
+                plan,
+                GlobalId::User(1),
+                sink_tx,
+                &src_ids,
+                vec![rx],
+                true,
+            )
+            .unwrap();
+        tx.send((Row::empty(), 0, 0)).unwrap();
+        handle.run_available(flow_tick.tick());
+        assert_eq!(sink_rx.blocking_recv().unwrap().0, Row::empty());
+        handle.shutdown();
+        worker_thread_handle.join().unwrap();
     }
 }

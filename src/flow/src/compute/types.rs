@@ -146,7 +146,7 @@ impl CollectionBundle {
 ///
 /// Using a `VecDeque` to preserve the order of errors
 /// when running dataflow continuously and need errors in order
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ErrCollector {
     pub inner: Arc<Mutex<VecDeque<EvalError>>>,
 }

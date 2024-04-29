@@ -46,7 +46,7 @@ use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::plan::{Plan, TypedPlan};
-use crate::repr::{self, ColumnType, DiffRow, RelationType, Row, BOARDCAST_CAP};
+use crate::repr::{self, ColumnType, DiffRow, RelationType, Row, BROADCAST_CAP};
 use crate::transform::sql_to_flow_plan;
 
 pub(crate) mod error;
@@ -64,29 +64,23 @@ pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
 pub type TaskId = u64;
 pub type TableName = Vec<String>;
 
-/// This function shouldn't be called from a async context,
-///
-/// better to be called from i.e. inside a `thread::spawn`
+/// This function will create a new thread for flow worker and return a handle to the flow node manager
 pub fn start_flow_node_and_one_worker(
     frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
     query_engine: Arc<dyn QueryEngine>,
     table_meta: TableMetadataManagerRef,
-) {
-    let node_id = Some(1);
-    let (flow_node_manager, mut worker) =
-        FlowNodeManager::new_with_worker(node_id, frontend_invoker, query_engine, table_meta);
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let local = tokio::task::LocalSet::new();
+) -> FlowNodeManager {
+    let (tx, rx) = oneshot::channel();
 
-    local.block_on(&rt, async move {
-        let worker_handle = tokio::task::spawn_local(async move {
-            worker.run().await;
-        });
-        let node_handle = tokio::task::spawn_local(async move {
-            flow_node_manager.run().await;
-        });
-        tokio::try_join!(worker_handle, node_handle).unwrap();
+    let _handle = std::thread::spawn(move || {
+        let node_id = Some(1);
+        let (flow_node_manager, mut worker) =
+            FlowNodeManager::new_with_worker(node_id, frontend_invoker, query_engine, table_meta);
+        let _ = tx.send(flow_node_manager);
+        worker.run();
     });
+
+    rx.blocking_recv().unwrap()
 }
 
 pub type FlowNodeManagerRef = Arc<FlowNodeManager>;
@@ -116,7 +110,6 @@ impl FlowNodeManager {
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
     pub async fn run(&self) {
         loop {
-            // TODO(discord9): start a server to listen for incoming request
             self.run_available().await;
             // TODO(discord9): error handling
             let _ = self.send_writeback_requests().await;
@@ -154,7 +147,7 @@ impl FlowNodeManager {
         table_meta: TableMetadataManagerRef,
     ) -> (Self, Worker<'s>) {
         let mut zelf = Self::new(node_id, frontend_invoker, query_engine, table_meta);
-        let (handle, worker) = create_worker(zelf.tick_manager.clone());
+        let (handle, worker) = create_worker();
         zelf.add_worker_handle(handle);
         (zelf, worker)
     }
@@ -300,8 +293,9 @@ impl FlowNodeManager {
     /// However this is not blocking and can sometimes return while actual computation is still running in worker thread
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub async fn run_available(&self) {
+        let now = self.tick_manager.tick();
         for worker in self.worker_handles.iter() {
-            worker.lock().await.run_available();
+            worker.lock().await.run_available(now);
         }
     }
 
@@ -433,10 +427,8 @@ impl FlowNodeManager {
     /// steps to create task:
     /// 1. parse query into typed plan(and optional parse expire_when expr)
     /// 2. render source/sink with output table id and used input table id
-    ///
-    /// TODO(discord9): use greptime-proto type to create task instead
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_task(
+    pub async fn create_flow(
         &self,
         task_id: TaskId,
         sink_table_id: TableId,
@@ -552,7 +544,7 @@ impl FlowNodeContext {
         send_buffer.extend(rows);
         let mut row_cnt = 0;
         while let Some(row) = send_buffer.pop_front() {
-            if sender.len() >= BOARDCAST_CAP {
+            if sender.len() >= BROADCAST_CAP {
                 break;
             }
             row_cnt += 1;
@@ -600,7 +592,7 @@ impl FlowNodeContext {
     pub fn add_source_sender(&mut self, table_id: TableId) {
         self.source_sender
             .entry(table_id)
-            .or_insert_with(|| broadcast::channel(BOARDCAST_CAP).0);
+            .or_insert_with(|| broadcast::channel(BROADCAST_CAP).0);
     }
 
     pub fn add_sink_receiver(&mut self, table_name: TableName) {
@@ -744,6 +736,12 @@ impl TriMap {
 #[derive(Clone)]
 pub struct FlowTickManager {
     anchor: Anchor,
+}
+
+impl std::fmt::Debug for FlowTickManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowTickManager").finish()
+    }
 }
 
 impl FlowTickManager {

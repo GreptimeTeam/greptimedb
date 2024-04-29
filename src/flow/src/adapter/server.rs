@@ -67,7 +67,7 @@ impl flow_server::Flow for FlowService {
                     .await?;
                 let ret = self
                     .manager
-                    .create_task(
+                    .create_flow(
                         task_id.id as u64,
                         sink_table_id,
                         &source_table_ids,
@@ -178,8 +178,9 @@ impl servers::server::Server for FlowNodeServer {
                 .serve_with_incoming_shutdown(incoming, rx.map(drop))
                 .await
                 .context(StartGrpcSnafu);
-            // TODO(discord9): better place for dataflow to run per second
         });
+
+        // TODO(discord9): better place for dataflow to run per second
         let manager_ref = self.flow_service.manager.clone();
         let _handle_trigger_run = common_runtime::spawn_bg(async move {
             manager_ref.run().await;
