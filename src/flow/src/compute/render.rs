@@ -238,7 +238,7 @@ mod test {
         for now in time_range {
             state.set_current_ts(now);
             state.run_available_with_schedule(df);
-            assert!(state.get_err_collector().inner.borrow().is_empty());
+            assert!(state.get_err_collector().is_empty());
             if let Some(expected) = expected.get(&now) {
                 assert_eq!(*output.borrow(), *expected, "at ts={}", now);
             } else {

@@ -17,17 +17,65 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+use hydroflow::scheduled::graph::Hydroflow;
 use snafu::ResultExt;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::adapter::error::{Error, EvalSnafu};
-use crate::adapter::{ActiveDataflowState, FlowTickManager, TaskId};
+use crate::adapter::{FlowTickManager, TaskId};
+use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
-use crate::repr::DiffRow;
+use crate::repr::{self, DiffRow};
 
 pub type SharedBuf = Arc<Mutex<VecDeque<DiffRow>>>;
+
+/// ActiveDataflowState is a wrapper around `Hydroflow` and `DataflowState`
+pub(crate) struct ActiveDataflowState<'subgraph> {
+    df: Hydroflow<'subgraph>,
+    state: DataflowState,
+    err_collector: ErrCollector,
+}
+
+impl Default for ActiveDataflowState<'_> {
+    fn default() -> Self {
+        ActiveDataflowState {
+            df: Hydroflow::new(),
+            state: DataflowState::default(),
+            err_collector: ErrCollector::default(),
+        }
+    }
+}
+
+impl<'subgraph> ActiveDataflowState<'subgraph> {
+    /// Create a new render context, assigned with given global id
+    pub fn new_ctx<'ctx>(&'ctx mut self, global_id: GlobalId) -> Context<'ctx, 'subgraph>
+    where
+        'subgraph: 'ctx,
+    {
+        Context {
+            id: global_id,
+            df: &mut self.df,
+            compute_state: &mut self.state,
+            err_collector: self.err_collector.clone(),
+            input_collection: Default::default(),
+            local_scope: Default::default(),
+        }
+    }
+
+    pub fn set_current_ts(&mut self, ts: repr::Timestamp) {
+        self.state.set_current_ts(ts);
+    }
+
+    /// Run all available subgraph
+    ///
+    /// return true if any subgraph actually executed
+    pub fn run_available(&mut self) -> bool {
+        self.state.run_available_with_schedule(&mut self.df)
+    }
+}
+
 pub struct WorkerHandle {
     itc_client: Mutex<InterThreadCallClient>,
 }

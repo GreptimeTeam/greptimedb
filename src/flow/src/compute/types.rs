@@ -21,7 +21,7 @@ use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::handoff::TeeingHandoff;
 use hydroflow::scheduled::port::RecvPort;
 use hydroflow::scheduled::SubgraphId;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::compute::render::Context;
 use crate::expr::{EvalError, ScalarExpr};
@@ -148,12 +148,15 @@ impl CollectionBundle {
 /// when running dataflow continuously and need errors in order
 #[derive(Default, Clone)]
 pub struct ErrCollector {
-    pub inner: Rc<RefCell<VecDeque<EvalError>>>,
+    pub inner: Arc<Mutex<VecDeque<EvalError>>>,
 }
 
 impl ErrCollector {
+    pub fn is_empty(&self) -> bool {
+        self.inner.blocking_lock().is_empty()
+    }
     pub fn push_err(&self, err: EvalError) {
-        self.inner.borrow_mut().push_back(err)
+        self.inner.blocking_lock().push_back(err)
     }
 
     pub fn run<F, R>(&self, f: F) -> Option<R>

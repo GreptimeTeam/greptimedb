@@ -36,7 +36,7 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task::LocalSet;
 
 use crate::adapter::error::{EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu};
@@ -72,8 +72,9 @@ pub fn start_flow_node_and_one_worker(
     query_engine: Arc<dyn QueryEngine>,
     table_meta: TableMetadataManagerRef,
 ) {
+    let node_id = Some(1);
     let (flow_node_manager, mut worker) =
-        FlowNodeManager::new_with_worker(frontend_invoker, query_engine, table_meta);
+        FlowNodeManager::new_with_worker(node_id, frontend_invoker, query_engine, table_meta);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
 
@@ -87,6 +88,8 @@ pub fn start_flow_node_and_one_worker(
         tokio::try_join!(worker_handle, node_handle).unwrap();
     });
 }
+
+pub type FlowNodeManagerRef = Arc<FlowNodeManager>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
@@ -103,18 +106,25 @@ pub struct FlowNodeManager {
     /// contains mapping from table name to global id, and table schema
     node_context: Mutex<FlowNodeContext>,
     tick_manager: FlowTickManager,
+    node_id: Option<u32>,
+    run_task_created: Mutex<bool>,
 }
 
 impl FlowNodeManager {
+    /// Trigger dataflow running, and then send writeback request to the source sender
+    ///
+    /// note that this method didn't handle input mirror request, as this should be handled by grpc server
     pub async fn run(&self) {
         loop {
             // TODO(discord9): start a server to listen for incoming request
             self.run_available().await;
-            self.send_writeback_requests().await;
+            // TODO(discord9): error handling
+            let _ = self.send_writeback_requests().await;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
     pub fn new(
+        node_id: Option<u32>,
         frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
@@ -133,14 +143,17 @@ impl FlowNodeManager {
             frontend_invoker,
             node_context: Mutex::new(node_context),
             tick_manager,
+            node_id,
+            run_task_created: Mutex::new(false),
         }
     }
     pub fn new_with_worker<'s>(
+        node_id: Option<u32>,
         frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> (Self, Worker<'s>) {
-        let mut zelf = Self::new(frontend_invoker, query_engine, table_meta);
+        let mut zelf = Self::new(node_id, frontend_invoker, query_engine, table_meta);
         let (handle, worker) = create_worker(zelf.tick_manager.clone());
         zelf.add_worker_handle(handle);
         (zelf, worker)
@@ -255,51 +268,6 @@ impl TableInfoSource {
     }
 }
 
-/// ActiveDataflowState is a wrapper around `Hydroflow` and `DataflowState`
-pub(crate) struct ActiveDataflowState<'subgraph> {
-    df: Hydroflow<'subgraph>,
-    state: DataflowState,
-    err_collector: ErrCollector,
-}
-
-impl Default for ActiveDataflowState<'_> {
-    fn default() -> Self {
-        ActiveDataflowState {
-            df: Hydroflow::new(),
-            state: DataflowState::default(),
-            err_collector: ErrCollector::default(),
-        }
-    }
-}
-
-impl<'subgraph> ActiveDataflowState<'subgraph> {
-    /// Create a new render context, assigned with given global id
-    pub fn new_ctx<'ctx>(&'ctx mut self, global_id: GlobalId) -> Context<'ctx, 'subgraph>
-    where
-        'subgraph: 'ctx,
-    {
-        Context {
-            id: global_id,
-            df: &mut self.df,
-            compute_state: &mut self.state,
-            err_collector: self.err_collector.clone(),
-            input_collection: Default::default(),
-            local_scope: Default::default(),
-        }
-    }
-
-    pub fn set_current_ts(&mut self, ts: repr::Timestamp) {
-        self.state.set_current_ts(ts);
-    }
-
-    /// Run all available subgraph
-    ///
-    /// return true if any subgraph actually executed
-    pub fn run_available(&mut self) -> bool {
-        self.state.run_available_with_schedule(&mut self.df)
-    }
-}
-
 pub enum DiffRequest {
     Insert(Vec<Row>),
     Delete(Vec<Row>),
@@ -369,6 +337,7 @@ impl FlowNodeManager {
                 table_info.table_info.schema_name,
             );
             let ctx = QueryContext::with(&catalog, &schema);
+
             let primary_keys = table_info
                 .table_info
                 .meta
