@@ -49,9 +49,9 @@ use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::parquet::file_range::{FileRange, FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::partition::{Partition, PartitionContext, PartitionContextRef};
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -154,21 +154,21 @@ impl ParquetReaderBuilder {
         ParquetReader::new(context, row_groups).await
     }
 
-    /// Builds [Partition]s to read and pushes them to `partitions`.
+    /// Builds [FileRange]s to read and pushes them to `file_ranges`.
     #[allow(dead_code)]
-    pub async fn build_partitions(&self, partitions: &mut Vec<Partition>) -> Result<()> {
+    pub async fn build_file_ranges(&self, file_ranges: &mut Vec<FileRange>) -> Result<()> {
         let (context, row_groups) = self.build_reader_input().await?;
         for (row_group_idx, row_selection) in row_groups {
-            let partition = Partition::new(context.clone(), row_group_idx, row_selection);
-            partitions.push(partition);
+            let file_range = FileRange::new(context.clone(), row_group_idx, row_selection);
+            file_ranges.push(file_range);
         }
         Ok(())
     }
 
-    /// Builds a [PartitionContext] and collects row groups to read.
+    /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
-    async fn build_reader_input(&self) -> Result<(PartitionContextRef, RowGroupMap)> {
+    async fn build_reader_input(&self) -> Result<(FileRangeContextRef, RowGroupMap)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -243,7 +243,7 @@ impl ParquetReaderBuilder {
                 .collect(),
         );
 
-        let context = PartitionContext::new(reader_builder, filters, read_format, codec);
+        let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
         Ok((Arc::new(context), row_groups))
     }
 
@@ -622,8 +622,8 @@ type RowGroupMap = BTreeMap<usize, Option<RowSelection>>;
 
 /// Parquet batch reader to read our SST format.
 pub struct ParquetReader {
-    /// Partition context.
-    context: PartitionContextRef,
+    /// File range context.
+    context: FileRangeContextRef,
     /// Indices of row groups to read, along with their respective row selections.
     row_groups: RowGroupMap,
     /// Reader of current row group.
@@ -715,7 +715,7 @@ impl Drop for ParquetReader {
 impl ParquetReader {
     /// Creates a new reader.
     async fn new(
-        context: PartitionContextRef,
+        context: FileRangeContextRef,
         mut row_groups: BTreeMap<usize, Option<RowSelection>>,
     ) -> Result<Self> {
         // No more items in current row group, reads next row group.
@@ -749,8 +749,8 @@ impl ParquetReader {
 
 /// Reader to read a row group of a parquet file.
 pub(crate) struct RowGroupReader {
-    /// Context of partitions.
-    context: PartitionContextRef,
+    /// Context for file ranges.
+    context: FileRangeContextRef,
     /// Inner parquet reader.
     reader: ParquetRecordBatchReader,
     /// Buffered batches to return.
@@ -761,7 +761,7 @@ pub(crate) struct RowGroupReader {
 
 impl RowGroupReader {
     /// Creates a new reader.
-    pub(crate) fn new(context: PartitionContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
         Self {
             context,
             reader,

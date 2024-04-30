@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Structs and functions for reading partitions from a parquet file. A partition
+//! Structs and functions for reading ranges from a parquet file. A file range
 //! is usually a row group in a parquet file.
 
 use std::ops::BitAnd;
@@ -30,21 +30,21 @@ use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
-/// A partition of a parquet SST. Now it is a row group.
-/// We can read different partitions in parallel.
-pub struct Partition {
+/// A range of a parquet SST. Now it is a row group.
+/// We can read different file ranges in parallel.
+pub struct FileRange {
     /// Shared context.
-    context: PartitionContextRef,
+    context: FileRangeContextRef,
     /// Index of the row group in the SST.
     row_group_idx: usize,
     /// Row selection for the row group. `None` means all rows.
     row_selection: Option<RowSelection>,
 }
 
-impl Partition {
-    /// Creates a new partition.
+impl FileRange {
+    /// Creates a new [FileRange].
     pub(crate) fn new(
-        context: PartitionContextRef,
+        context: FileRangeContextRef,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
     ) -> Self {
@@ -55,7 +55,7 @@ impl Partition {
         }
     }
 
-    /// Returns a reader to read the partition.
+    /// Returns a reader to read the [FileRange].
     #[allow(dead_code)]
     pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
         let parquet_reader = self
@@ -68,8 +68,8 @@ impl Partition {
     }
 }
 
-/// Context shared by partitions of the same parquet SST.
-pub(crate) struct PartitionContext {
+/// Context shared by ranges of the same parquet SST.
+pub(crate) struct FileRangeContext {
     // Row group reader builder for the file.
     reader_builder: RowGroupReaderBuilder,
     /// Filters pushed down.
@@ -80,10 +80,10 @@ pub(crate) struct PartitionContext {
     codec: McmpRowCodec,
 }
 
-pub(crate) type PartitionContextRef = Arc<PartitionContext>;
+pub(crate) type FileRangeContextRef = Arc<FileRangeContext>;
 
-impl PartitionContext {
-    /// Creates a new partition context.
+impl FileRangeContext {
+    /// Creates a new [FileRangeContext].
     pub(crate) fn new(
         reader_builder: RowGroupReaderBuilder,
         filters: Vec<SimpleFilterContext>,
