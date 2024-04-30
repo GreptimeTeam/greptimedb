@@ -81,6 +81,21 @@ impl CountWildcardToTimeIndexRule {
         let mut finder = TimeIndexFinder::default();
         // Safety: `TimeIndexFinder` won't throw error.
         plan.visit(&mut finder).unwrap();
+
+        // check if the time index is a valid column as for current plan
+        if let Some(col) = &finder.time_index {
+            let mut is_valid = false;
+            for input in plan.inputs() {
+                if input.schema().has_column_with_unqualified_name(col) {
+                    is_valid = true;
+                    break;
+                }
+            }
+            if !is_valid {
+                return None;
+            }
+        }
+
         finder.time_index
     }
 }
