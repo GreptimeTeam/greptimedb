@@ -34,7 +34,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    StringVectorBuilder, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
+    Int64VectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
 };
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
@@ -54,10 +54,10 @@ const UPTIME: &str = "uptime";
 
 const INIT_CAPACITY: usize = 42;
 
-/// The `CLUSTER_INFO` table provides information about the current topology of the cluster.
+/// The `CLUSTER_INFO` table provides information about the current topology information of the cluster.
 ///
 /// - `peer_id`: the peer server id.
-/// - `peer_type`: the peer type, such as `DATANODE`, `FRONTEND`, `METASRV` etc.
+/// - `peer_type`: the peer type, such as `datanode`, `frontend`, `metasrv` etc.
 /// - `peer_addr`: the peer gRPC address.
 /// - `version`: the build package version of the peer.
 /// - `git_commit`: the build git commit hash of the peer.
@@ -81,7 +81,7 @@ impl InformationSchemaClusterInfo {
 
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new(PEER_ID, ConcreteDataType::uint64_datatype(), false),
+            ColumnSchema::new(PEER_ID, ConcreteDataType::int64_datatype(), false),
             ColumnSchema::new(PEER_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(VERSION, ConcreteDataType::string_datatype(), false),
@@ -143,7 +143,7 @@ struct InformationSchemaClusterInfoBuilder {
     start_time_ms: u64,
     catalog_manager: Weak<dyn CatalogManager>,
 
-    peer_ids: UInt64VectorBuilder,
+    peer_ids: Int64VectorBuilder,
     peer_types: StringVectorBuilder,
     peer_addrs: StringVectorBuilder,
     versions: StringVectorBuilder,
@@ -161,7 +161,7 @@ impl InformationSchemaClusterInfoBuilder {
         Self {
             schema,
             catalog_manager,
-            peer_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            peer_ids: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             peer_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             versions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -236,7 +236,13 @@ impl InformationSchemaClusterInfoBuilder {
             return;
         }
 
-        self.peer_ids.push(Some(node_info.peer.id));
+        if peer_type == "FRONTEND" {
+            // Always set peer_id to be -1 for frontends
+            self.peer_ids.push(Some(-1));
+        } else {
+            self.peer_ids.push(Some(node_info.peer.id as i64));
+        }
+
         self.peer_types.push(Some(peer_type));
         self.peer_addrs.push(Some(&node_info.peer.addr));
         self.versions.push(Some(&node_info.version));

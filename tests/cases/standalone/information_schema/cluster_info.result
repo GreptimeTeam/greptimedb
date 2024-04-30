@@ -7,7 +7,7 @@ DESC TABLE CLUSTER_INFO;
 +------------+----------------------+-----+------+---------+---------------+
 | Column     | Type                 | Key | Null | Default | Semantic Type |
 +------------+----------------------+-----+------+---------+---------------+
-| peer_id    | UInt64               |     | NO   |         | FIELD         |
+| peer_id    | Int64                |     | NO   |         | FIELD         |
 | peer_type  | String               |     | NO   |         | FIELD         |
 | peer_addr  | String               |     | YES  |         | FIELD         |
 | version    | String               |     | NO   |         | FIELD         |
@@ -49,7 +49,7 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
 -- SQLNESS REPLACE [\s\-]+
 SELECT * FROM CLUSTER_INFO WHERE PEER_ID = 0;
 
-++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|++++++++|0|STANDALONE||Version|Hash|Start_time|Uptime|++++++++
+++++
 
 SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 0;
 

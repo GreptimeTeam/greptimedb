@@ -37,7 +37,6 @@ pub mod handler;
 /// The frontend heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 #[derive(Clone)]
 pub struct HeartbeatTask {
-    node_id: u64,
     server_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: u64,
@@ -54,10 +53,6 @@ impl HeartbeatTask {
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
-            // FIXME(dennis): the node_id in FrontendOptions is a string
-            // so we use 0 instead currently.
-            node_id: 0,
-            // We use datanode's start time millis as the node's epoch.
             server_addr: opts.grpc.addr.clone(),
             meta_client,
             report_interval: heartbeat_opts.interval.as_millis() as u64,
@@ -132,7 +127,8 @@ impl HeartbeatTask {
         let report_interval = self.report_interval;
         let start_time_ms = self.start_time_ms;
         let self_peer = Some(Peer {
-            id: self.node_id,
+            // The peer id doesn't make sense for frontend, so we just set it 0.
+            id: 0,
             addr: self.server_addr.clone(),
         });
 
