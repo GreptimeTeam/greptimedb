@@ -16,12 +16,13 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion, TreeNodeVisitor,
 };
-use datafusion_common::Result as DataFusionResult;
+use datafusion_common::{Column, Result as DataFusionResult};
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionDefinition, WindowFunction};
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{col, lit, Expr, LogicalPlan, WindowFunctionDefinition};
 use datafusion_optimizer::utils::NamePreserver;
 use datafusion_optimizer::AnalyzerRule;
+use datafusion_sql::TableReference;
 use table::table::adapter::DfTableProviderAdapter;
 
 /// A replacement to DataFusion's [`CountWildcardRule`]. This rule
@@ -77,16 +78,17 @@ impl CountWildcardToTimeIndexRule {
         })
     }
 
-    fn try_find_time_index_col(plan: &LogicalPlan) -> Option<String> {
+    fn try_find_time_index_col(plan: &LogicalPlan) -> Option<Column> {
         let mut finder = TimeIndexFinder::default();
         // Safety: `TimeIndexFinder` won't throw error.
         plan.visit(&mut finder).unwrap();
+        let col = finder.into_column();
 
         // check if the time index is a valid column as for current plan
-        if let Some(col) = &finder.time_index {
+        if let Some(col) = &col {
             let mut is_valid = false;
             for input in plan.inputs() {
-                if input.schema().has_column_with_unqualified_name(col) {
+                if input.schema().has_column(col) {
                     is_valid = true;
                     break;
                 }
@@ -96,7 +98,7 @@ impl CountWildcardToTimeIndexRule {
             }
         }
 
-        finder.time_index
+        col
     }
 }
 
@@ -129,8 +131,8 @@ impl CountWildcardToTimeIndexRule {
 
 #[derive(Default)]
 struct TimeIndexFinder {
-    time_index: Option<String>,
-    table_alias: Option<String>,
+    time_index_col: Option<String>,
+    table_alias: Option<TableReference>,
 }
 
 impl TreeNodeVisitor for TimeIndexFinder {
@@ -138,7 +140,7 @@ impl TreeNodeVisitor for TimeIndexFinder {
 
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
         if let LogicalPlan::SubqueryAlias(subquery_alias) = node {
-            self.table_alias = Some(subquery_alias.alias.to_string());
+            self.table_alias = Some(subquery_alias.alias.clone());
         }
 
         if let LogicalPlan::TableScan(table_scan) = &node {
@@ -153,9 +155,11 @@ impl TreeNodeVisitor for TimeIndexFinder {
                     .downcast_ref::<DfTableProviderAdapter>()
                 {
                     let table_info = adapter.table().table_info();
-                    let col_name = table_info.meta.schema.timestamp_column().map(|c| &c.name);
-                    let table_name = self.table_alias.as_ref().unwrap_or(&table_info.name);
-                    self.time_index = col_name.map(|s| format!("{}.{}", table_name, s));
+                    self.time_index_col = table_info
+                        .meta
+                        .schema
+                        .timestamp_column()
+                        .map(|c| c.name.clone());
 
                     return Ok(TreeNodeRecursion::Stop);
                 }
@@ -167,5 +171,12 @@ impl TreeNodeVisitor for TimeIndexFinder {
 
     fn f_up(&mut self, _node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Stop)
+    }
+}
+
+impl TimeIndexFinder {
+    fn into_column(self) -> Option<Column> {
+        self.time_index_col
+            .map(|c| Column::new(self.table_alias, c))
     }
 }
