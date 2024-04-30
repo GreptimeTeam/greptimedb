@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod order_hint;
+pub mod remove_duplicate;
 pub mod string_normalization;
 #[cfg(test)]
 mod test_util;
