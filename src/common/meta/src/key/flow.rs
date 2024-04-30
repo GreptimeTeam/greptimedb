@@ -30,9 +30,8 @@ use crate::key::flow::flow_info::FlowInfoManager;
 use crate::key::flow::flow_name::FlowNameManager;
 use crate::key::flow::flownode_flow::FlownodeFlowManager;
 use crate::key::flow::table_flow::TableFlowManager;
-use crate::key::scope::MetaKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::FlowId;
+use crate::key::{FlowId, MetaKey};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
@@ -59,7 +58,7 @@ impl<T> FlowScoped<T> {
     }
 }
 
-impl<T: MetaKey<T>> MetaKey<FlowScoped<T>> for FlowScoped<T> {
+impl<'a, T: MetaKey<'a, T>> MetaKey<'a, FlowScoped<T>> for FlowScoped<T> {
     fn to_bytes(&self) -> Vec<u8> {
         let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         let inner = self.inner.to_bytes();
@@ -69,7 +68,7 @@ impl<T: MetaKey<T>> MetaKey<FlowScoped<T>> for FlowScoped<T> {
         bytes
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowScoped<T>> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowScoped<T>> {
         let prefix = FlowScoped::<T>::PREFIX.as_bytes();
         ensure!(
             bytes.starts_with(prefix),
@@ -139,20 +138,15 @@ impl FlowMetadataManager {
             .flow_name_manager
             .build_create_txn(&flow_value.catalog_name, &flow_value.flow_name, flow_id)?;
 
-        let (create_flow_txn, on_create_flow_failure) = self.flow_info_manager.build_create_txn(
-            &flow_value.catalog_name,
-            flow_id,
-            &flow_value,
-        )?;
+        let (create_flow_txn, on_create_flow_failure) = self
+            .flow_info_manager
+            .build_create_txn(flow_id, &flow_value)?;
 
-        let create_flownode_flow_txn = self.flownode_flow_manager.build_create_txn(
-            &flow_value.catalog_name,
-            flow_id,
-            flow_value.flownode_ids().clone(),
-        );
+        let create_flownode_flow_txn = self
+            .flownode_flow_manager
+            .build_create_txn(flow_id, flow_value.flownode_ids().clone());
 
         let create_table_flow_txn = self.table_flow_manager.build_create_txn(
-            &flow_value.catalog_name,
             flow_id,
             flow_value.flownode_ids().clone(),
             flow_value.source_table_ids(),
@@ -222,7 +216,6 @@ mod tests {
 
     use super::*;
     use crate::key::flow::table_flow::TableFlowKey;
-    use crate::key::scope::CatalogScoped;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::table_name::TableName;
 
@@ -231,12 +224,12 @@ mod tests {
         inner: Vec<u8>,
     }
 
-    impl MetaKey<MockKey> for MockKey {
+    impl<'a> MetaKey<'a, MockKey> for MockKey {
         fn to_bytes(&self) -> Vec<u8> {
             self.inner.clone()
         }
 
-        fn from_bytes(bytes: &[u8]) -> Result<MockKey> {
+        fn from_bytes(bytes: &'a [u8]) -> Result<MockKey> {
             Ok(MockKey {
                 inner: bytes.to_vec(),
             })
@@ -245,27 +238,23 @@ mod tests {
 
     #[test]
     fn test_flow_scoped_to_bytes() {
-        let key = FlowScoped::new(CatalogScoped::new(
-            "my_catalog".to_string(),
-            MockKey {
-                inner: b"hi".to_vec(),
-            },
-        ));
-        assert_eq!(b"__flow/my_catalog/hi".to_vec(), key.to_bytes());
+        let key = FlowScoped::new(MockKey {
+            inner: b"hi".to_vec(),
+        });
+        assert_eq!(b"__flow/hi".to_vec(), key.to_bytes());
     }
 
     #[test]
     fn test_flow_scoped_from_bytes() {
-        let bytes = b"__flow/my_catalog/hi";
-        let key = FlowScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap();
-        assert_eq!(key.catalog(), "my_catalog");
+        let bytes = b"__flow/hi";
+        let key = FlowScoped::<MockKey>::from_bytes(bytes).unwrap();
         assert_eq!(key.inner.inner, b"hi".to_vec());
     }
 
     #[test]
     fn test_flow_scoped_from_bytes_mismatch() {
-        let bytes = b"__table/my_catalog/hi";
-        let err = FlowScoped::<CatalogScoped<MockKey>>::from_bytes(bytes).unwrap_err();
+        let bytes = b"__table/hi";
+        let err = FlowScoped::<MockKey>::from_bytes(bytes).unwrap_err();
         assert_matches!(err, error::Error::MismatchPrefix { .. });
     }
 
@@ -302,14 +291,14 @@ mod tests {
             .unwrap();
         let got = flow_metadata_manager
             .flow_info_manager()
-            .get(catalog_name, flow_id)
+            .get(flow_id)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(got, flow_value);
         let flows = flow_metadata_manager
             .flownode_flow_manager()
-            .flows(catalog_name, 1)
+            .flows(1)
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -317,20 +306,11 @@ mod tests {
         for table_id in [1024, 1025, 1026] {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
-                .nodes(catalog_name, table_id)
+                .nodes(table_id)
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
-            assert_eq!(
-                nodes,
-                vec![TableFlowKey::new(
-                    catalog_name.to_string(),
-                    table_id,
-                    1,
-                    flow_id,
-                    0
-                )]
-            );
+            assert_eq!(nodes, vec![TableFlowKey::new(table_id, 1, flow_id, 0)]);
         }
     }
 

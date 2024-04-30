@@ -24,7 +24,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::TableMetaKey;
+use common_meta::key::MetaKey;
 use partition::manager::TableRouteCacheInvalidator;
 use table::metadata::TableId;
 use tokio::sync::mpsc;
@@ -79,7 +79,7 @@ async fn handle_instruction(
 async fn test_invalidate_table_cache_handler() {
     let table_id = 1;
     let table_info_key = TableInfoKey::new(table_id);
-    let inner = HashMap::from([(table_info_key.as_raw_key(), 1)]);
+    let inner = HashMap::from([(table_info_key.to_bytes(), 1)]);
     let backend = Arc::new(MockKvCacheInvalidator {
         inner: Mutex::new(inner),
     });
@@ -103,7 +103,7 @@ async fn test_invalidate_table_cache_handler() {
         .inner
         .lock()
         .unwrap()
-        .contains_key(&table_info_key.as_raw_key()));
+        .contains_key(&table_info_key.to_bytes()));
 
     // removes a invalid key
     handle_instruction(
@@ -118,7 +118,7 @@ async fn test_invalidate_table_cache_handler() {
 async fn test_invalidate_schema_key_handler() {
     let (catalog, schema) = ("foo", "bar");
     let schema_key = SchemaNameKey { catalog, schema };
-    let inner = HashMap::from([(schema_key.as_raw_key(), 1)]);
+    let inner = HashMap::from([(schema_key.to_bytes(), 1)]);
     let backend = Arc::new(MockKvCacheInvalidator {
         inner: Mutex::new(inner),
     });
@@ -146,7 +146,7 @@ async fn test_invalidate_schema_key_handler() {
         .inner
         .lock()
         .unwrap()
-        .contains_key(&schema_key.as_raw_key()));
+        .contains_key(&schema_key.to_bytes()));
 
     // removes a invalid key
     handle_instruction(

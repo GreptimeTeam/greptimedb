@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::flow::flow_server::Flow;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -19,66 +20,74 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{txn_helper, DeserializedValueWithBytes, FlowId, TableMetaValue, NAME_PATTERN};
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
 const FLOW_NAME_KEY_PREFIX: &str = "name";
 
 lazy_static! {
-    static ref FLOW_NAME_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
+    static ref FLOW_NAME_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})/({NAME_PATTERN})$"
+    ))
+    .unwrap();
 }
 
 /// The key of mapping {flow_name} to [FlowId].
 ///
-/// The layout: `__flow/{catalog}/name/{flow_name}`.
-pub struct FlowNameKey(FlowScoped<CatalogScoped<FlowNameKeyInner>>);
+/// The layout: `__flow/name/{catalog_name}/{flow_name}`.
+pub struct FlowNameKey<'a>(FlowScoped<FlowNameKeyInner<'a>>);
 
-impl FlowNameKey {
+impl<'a> FlowNameKey<'a> {
     /// Returns the [FlowNameKey]
-    pub fn new(catalog: String, flow_name: String) -> FlowNameKey {
-        let inner = FlowNameKeyInner::new(flow_name);
-        FlowNameKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
+    pub fn new(catalog: &'a str, flow_name: &'a str) -> FlowNameKey<'a> {
+        let inner = FlowNameKeyInner::new(catalog, flow_name);
+        FlowNameKey(FlowScoped::new(inner))
     }
 
     /// Returns the catalog.
     pub fn catalog(&self) -> &str {
-        self.0.catalog()
+        self.0.catalog_name
     }
 
     /// Return the `flow_name`
     pub fn flow_name(&self) -> &str {
-        &self.0.flow_name
+        self.0.flow_name
     }
 }
 
-impl MetaKey<FlowNameKey> for FlowNameKey {
+impl<'a> MetaKey<'a, FlowNameKey<'a>> for FlowNameKey<'a> {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowNameKey> {
-        Ok(FlowNameKey(
-            FlowScoped::<CatalogScoped<FlowNameKeyInner>>::from_bytes(bytes)?,
-        ))
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKey<'a>> {
+        Ok(FlowNameKey(FlowScoped::<FlowNameKeyInner>::from_bytes(
+            bytes,
+        )?))
     }
 }
 
 /// The key of mapping name to [FlowId]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowNameKeyInner {
-    pub flow_name: String,
+pub struct FlowNameKeyInner<'a> {
+    pub catalog_name: &'a str,
+    pub flow_name: &'a str,
 }
 
-impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
+impl<'a> MetaKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
     fn to_bytes(&self) -> Vec<u8> {
-        format!("{FLOW_NAME_KEY_PREFIX}/{}", self.flow_name).into_bytes()
+        format!(
+            "{FLOW_NAME_KEY_PREFIX}/{}/{}",
+            self.catalog_name, self.flow_name
+        )
+        .into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowNameKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowNameKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
@@ -95,15 +104,22 @@ impl MetaKey<FlowNameKeyInner> for FlowNameKeyInner {
                     err_msg: format!("Invalid FlowNameKeyInner '{key}'"),
                 })?;
         // Safety: pass the regex check above
-        let flow_name = captures[1].to_string();
-        Ok(FlowNameKeyInner { flow_name })
+        let catalog_name = captures.get(1).unwrap().as_str();
+        let flow_name = captures.get(2).unwrap().as_str();
+        Ok(FlowNameKeyInner {
+            catalog_name,
+            flow_name,
+        })
     }
 }
 
-impl FlowNameKeyInner {
+impl<'a> FlowNameKeyInner<'a> {
     /// Returns a [FlowNameKeyInner].
-    pub fn new(flow_name: String) -> Self {
-        Self { flow_name }
+    pub fn new(catalog_name: &'a str, flow_name: &'a str) -> Self {
+        Self {
+            catalog_name,
+            flow_name,
+        }
     }
 }
 
@@ -138,7 +154,7 @@ impl FlowNameManager {
 
     /// Returns the [FlowNameValue] of specified `catalog.flow`.
     pub async fn get(&self, catalog: &str, flow: &str) -> Result<Option<FlowNameValue>> {
-        let key = FlowNameKey::new(catalog.to_string(), flow.to_string());
+        let key = FlowNameKey::new(catalog, flow);
         let raw_key = key.to_bytes();
         self.kv_backend
             .get(&raw_key)
@@ -149,18 +165,18 @@ impl FlowNameManager {
 
     /// Returns true if the `flow` exists.
     pub async fn exists(&self, catalog: &str, flow: &str) -> Result<bool> {
-        let key = FlowNameKey::new(catalog.to_string(), flow.to_string());
+        let key = FlowNameKey::new(catalog, flow);
         let raw_key = key.to_bytes();
         self.kv_backend.exists(&raw_key).await
     }
 
     /// Builds a create flow name transaction.
-    /// It's expected that the `__flow/{catalog}/name/{flow_name}` wasn't occupied.
+    /// It's expected that the `__flow/name/{catalog}/{flow_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub fn build_create_txn(
         &self,
-        catalog: &str,
-        name: &str,
+        catalog_name: &str,
+        flow_name: &str,
         flow_id: FlowId,
     ) -> Result<(
         Txn,
@@ -168,7 +184,7 @@ impl FlowNameManager {
             &mut TxnOpGetResponseSet,
         ) -> Result<Option<DeserializedValueWithBytes<FlowNameValue>>>,
     )> {
-        let key = FlowNameKey::new(catalog.to_string(), name.to_string());
+        let key = FlowNameKey::new(catalog_name, flow_name);
         let raw_key = key.to_bytes();
         let flow_flow_name_value = FlowNameValue::new(flow_id);
         let txn = txn_helper::build_put_if_absent_txn(
@@ -189,13 +205,13 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let key = FlowNameKey::new("my_catalog".to_string(), "my_task".to_string());
-        assert_eq!(b"__flow/my_catalog/name/my_task".to_vec(), key.to_bytes(),);
+        let key = FlowNameKey::new("my_catalog", "my_task");
+        assert_eq!(b"__flow/name/my_catalog/my_task".to_vec(), key.to_bytes(),);
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow/my_catalog/name/my_task".to_vec();
+        let bytes = b"__flow/name/my_catalog/my_task".to_vec();
         let key = FlowNameKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flow_name(), "my_task");

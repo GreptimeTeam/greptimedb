@@ -19,7 +19,7 @@ use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use client::OutputData;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
-use common_meta::key::{RegionDistribution, TableMetaKey};
+use common_meta::key::{MetaKey, RegionDistribution};
 use common_meta::peer::Peer;
 use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
@@ -176,7 +176,7 @@ async fn has_route_cache(instance: &Arc<Instance>, table_id: TableId) -> bool {
         .cache();
 
     cache
-        .get(TableRouteKey::new(table_id).as_raw_key().as_slice())
+        .get(TableRouteKey::new(table_id).to_bytes().as_slice())
         .await
         .is_some()
 }
