@@ -51,6 +51,7 @@ const VERSION: &str = "version";
 const GIT_COMMIT: &str = "git_commit";
 const START_TIME: &str = "start_time";
 const UPTIME: &str = "uptime";
+const ACTIVE_TIME: &str = "active_time";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -63,6 +64,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `git_commit`: the build git commit hash of the peer.
 /// - `start_time`: the starting time of the peer.
 /// - `uptime`: the uptime of the peer.
+/// - `active_time`: the time since the last activity of the peer.
 ///
 pub(super) struct InformationSchemaClusterInfo {
     schema: SchemaRef,
@@ -92,6 +94,7 @@ impl InformationSchemaClusterInfo {
                 true,
             ),
             ColumnSchema::new(UPTIME, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(ACTIVE_TIME, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -150,6 +153,7 @@ struct InformationSchemaClusterInfoBuilder {
     git_commits: StringVectorBuilder,
     start_times: TimestampMillisecondVectorBuilder,
     uptimes: StringVectorBuilder,
+    active_times: StringVectorBuilder,
 }
 
 impl InformationSchemaClusterInfoBuilder {
@@ -168,6 +172,7 @@ impl InformationSchemaClusterInfoBuilder {
             git_commits: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             start_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             uptimes: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            active_times: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             start_time_ms,
         }
     }
@@ -252,14 +257,27 @@ impl InformationSchemaClusterInfoBuilder {
                 .push(Some(TimestampMillisecond(Timestamp::new_millisecond(
                     node_info.start_time_ms as i64,
                 ))));
-            let now = common_time::util::current_time_millis() as u64;
-            let duration_since_start = now - node_info.start_time_ms;
-            let format = humantime::format_duration(Duration::from_millis(duration_since_start));
-            self.uptimes.push(Some(format.to_string().as_str()));
+            self.uptimes.push(Some(
+                Self::format_duration_since(node_info.start_time_ms).as_str(),
+            ));
         } else {
             self.start_times.push(None);
             self.uptimes.push(None);
         }
+
+        if node_info.last_activity_ts > 0 {
+            self.active_times.push(Some(
+                Self::format_duration_since(node_info.last_activity_ts as u64).as_str(),
+            ));
+        } else {
+            self.active_times.push(None);
+        }
+    }
+
+    fn format_duration_since(ts: u64) -> String {
+        let now = common_time::util::current_time_millis() as u64;
+        let duration_since = now - ts;
+        humantime::format_duration(Duration::from_millis(duration_since)).to_string()
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -271,6 +289,7 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.git_commits.finish()),
             Arc::new(self.start_times.finish()),
             Arc::new(self.uptimes.finish()),
+            Arc::new(self.active_times.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
