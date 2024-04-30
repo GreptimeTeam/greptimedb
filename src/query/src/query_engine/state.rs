@@ -43,6 +43,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -89,18 +90,27 @@ impl QueryEngineState {
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply extension rules
         let mut extension_rules = Vec::new();
+
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
+
+        // Use our custom rule instead to optimize the count(*) query
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
-        analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
+        analyzer
+            .rules
+            .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
+
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
+
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
         physical_optimizer.rules.push(Arc::new(RemoveDuplicate));
