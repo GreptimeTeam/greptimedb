@@ -22,8 +22,7 @@ use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
-use crate::key::{FlowId, FlowPartitionId};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -51,9 +50,9 @@ struct TableFlowKeyInner {
 
 /// The key of mapping [TableId] to [FlownodeId] and [FlowId].
 ///
-/// The layout: `__flow/{catalog}/table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
+/// The layout: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
-pub struct TableFlowKey(FlowScoped<CatalogScoped<TableFlowKeyInner>>);
+pub struct TableFlowKey(FlowScoped<TableFlowKeyInner>);
 
 impl MetaKey<TableFlowKey> for TableFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
@@ -61,38 +60,29 @@ impl MetaKey<TableFlowKey> for TableFlowKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<TableFlowKey> {
-        Ok(TableFlowKey(
-            FlowScoped::<CatalogScoped<TableFlowKeyInner>>::from_bytes(bytes)?,
-        ))
+        Ok(TableFlowKey(FlowScoped::<TableFlowKeyInner>::from_bytes(
+            bytes,
+        )?))
     }
 }
 
 impl TableFlowKey {
     /// Returns a new [TableFlowKey].
     pub fn new(
-        catalog: String,
         table_id: TableId,
         flownode_id: FlownodeId,
         flow_id: FlowId,
         partition_id: FlowPartitionId,
     ) -> TableFlowKey {
         let inner = TableFlowKeyInner::new(table_id, flownode_id, flow_id, partition_id);
-        TableFlowKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
+        TableFlowKey(FlowScoped::new(inner))
     }
 
     /// The prefix used to retrieve all [TableFlowKey]s with the specified `table_id`.
-    pub fn range_start_key(catalog: String, table_id: TableId) -> Vec<u8> {
-        let catalog_scoped_key = CatalogScoped::new(
-            catalog,
-            BytesAdapter::from(TableFlowKeyInner::range_start_key(table_id).into_bytes()),
-        );
+    pub fn range_start_key(table_id: TableId) -> Vec<u8> {
+        let inner = BytesAdapter::from(TableFlowKeyInner::range_start_key(table_id).into_bytes());
 
-        FlowScoped::new(catalog_scoped_key).to_bytes()
-    }
-
-    /// Returns the catalog.
-    pub fn catalog(&self) -> &str {
-        self.0.catalog()
+        FlowScoped::new(inner).to_bytes()
     }
 
     /// Returns the source [TableId].
@@ -198,12 +188,8 @@ impl TableFlowManager {
     }
 
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
-    pub fn nodes(
-        &self,
-        catalog: &str,
-        table_id: TableId,
-    ) -> BoxStream<'static, Result<TableFlowKey>> {
-        let start_key = TableFlowKey::range_start_key(catalog.to_string(), table_id);
+    pub fn nodes(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
+        let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
             self.kv_backend.clone(),
@@ -217,10 +203,9 @@ impl TableFlowManager {
 
     /// Builds a create table flow transaction.
     ///
-    /// Puts `__table_flow/{table_id}/{node_id}/{partition_id}` keys.
+    /// Puts `__flow/source_table/{table_id}/{node_id}/{partition_id}` keys.
     pub fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
-        catalog: &str,
         flow_id: FlowId,
         flownode_ids: I,
         source_table_ids: &[TableId],
@@ -230,14 +215,7 @@ impl TableFlowManager {
             .flat_map(|(partition_id, flownode_id)| {
                 source_table_ids.iter().map(move |table_id| {
                     TxnOp::Put(
-                        TableFlowKey::new(
-                            catalog.to_string(),
-                            *table_id,
-                            flownode_id,
-                            flow_id,
-                            partition_id,
-                        )
-                        .to_bytes(),
+                        TableFlowKey::new(*table_id, flownode_id, flow_id, partition_id).to_bytes(),
                         vec![],
                     )
                 })
@@ -254,20 +232,19 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let table_flow_key = TableFlowKey::new("my_catalog".to_string(), 1024, 1, 2, 0);
+        let table_flow_key = TableFlowKey::new(1024, 1, 2, 0);
         assert_eq!(
-            b"__flow/my_catalog/source_table/1024/1/2/0".to_vec(),
+            b"__flow/source_table/1024/1/2/0".to_vec(),
             table_flow_key.to_bytes(),
         );
-        let prefix = TableFlowKey::range_start_key("my_catalog".to_string(), 1024);
-        assert_eq!(b"__flow/my_catalog/source_table/1024/".to_vec(), prefix);
+        let prefix = TableFlowKey::range_start_key(1024);
+        assert_eq!(b"__flow/source_table/1024/".to_vec(), prefix);
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow/my_catalog/source_table/1024/1/2/0".to_vec();
+        let bytes = b"__flow/source_table/1024/1/2/0".to_vec();
         let key = TableFlowKey::from_bytes(&bytes).unwrap();
-        assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.source_table_id(), 1024);
         assert_eq!(key.flownode_id(), 1);
         assert_eq!(key.flow_id(), 2);

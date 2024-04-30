@@ -36,16 +36,16 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Flow info key: `__flow/{catalog}/info/{flow_id}`
+//! 6. Flow info key: `__flow/info/{flow_id}`
 //!     - Stores metadata of the flow.
 //!
-//! 7. Flow name key: `__flow/{catalog}/name/{flow_name}`
+//! 7. Flow name key: `__flow/name/{catalog}/{flow_name}`
 //!     - Mapping {catalog}/{flow_name} to {flow_id}
 //!
-//! 8. Flownode flow key: `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
+//! 8. Flownode flow key: `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping {flownode_id} to {flow_id}
 //!
-//! 9. Table flow key: `__table_flow/{catalog}/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
+//! 9. Table flow key: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping source table's {table_id} to {flownode_id}
 //!     - Used in `Flownode` booting.
 //!
@@ -60,12 +60,12 @@
 //! The whole picture of flow keys will be like this:
 //!
 //! __flow/
-//!  {catalog}/
-//!    info/
-//!      {tsak_id}
+//!   info/
+//!     {flow_id}
 //!
 //!    name/
-//!      {flow_name}
+//!      {catalog_name}
+//!        {flow_name}
 //!
 //!    flownode/
 //!      {flownode_id}/
@@ -84,7 +84,6 @@ pub mod datanode_table;
 #[allow(unused)]
 pub mod flow;
 pub mod schema_name;
-pub mod scope;
 pub mod table_info;
 pub mod table_name;
 // TODO(weny): removes it.
@@ -192,6 +191,32 @@ lazy_static! {
 
 pub trait TableMetaKey {
     fn as_raw_key(&self) -> Vec<u8>;
+}
+
+/// The key of metadata.
+pub trait MetaKey<T> {
+    fn to_bytes(&self) -> Vec<u8>;
+
+    fn from_bytes(bytes: &[u8]) -> Result<T>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BytesAdapter(Vec<u8>);
+
+impl From<Vec<u8>> for BytesAdapter {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl MetaKey<BytesAdapter> for BytesAdapter {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<BytesAdapter> {
+        Ok(BytesAdapter(bytes.to_vec()))
+    }
 }
 
 pub(crate) trait TableMetaKeyGetTxnOp {

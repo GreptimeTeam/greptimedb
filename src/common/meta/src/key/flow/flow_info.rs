@@ -22,9 +22,10 @@ use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::{CatalogScoped, MetaKey};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{txn_helper, DeserializedValueWithBytes, FlowId, FlowPartitionId, TableMetaValue};
+use crate::key::{
+    txn_helper, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetaKey, TableMetaValue,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::table_name::TableName;
@@ -39,8 +40,8 @@ lazy_static! {
 
 /// The key stores the metadata of the flow.
 ///
-/// The layout: `__flow/{catalog}/info/{flow_id}`.
-pub struct FlowInfoKey(FlowScoped<CatalogScoped<FlowInfoKeyInner>>);
+/// The layout: `__flow/info/{flow_id}`.
+pub struct FlowInfoKey(FlowScoped<FlowInfoKeyInner>);
 
 impl MetaKey<FlowInfoKey> for FlowInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
@@ -48,22 +49,17 @@ impl MetaKey<FlowInfoKey> for FlowInfoKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlowInfoKey> {
-        Ok(FlowInfoKey(
-            FlowScoped::<CatalogScoped<FlowInfoKeyInner>>::from_bytes(bytes)?,
-        ))
+        Ok(FlowInfoKey(FlowScoped::<FlowInfoKeyInner>::from_bytes(
+            bytes,
+        )?))
     }
 }
 
 impl FlowInfoKey {
     /// Returns the [FlowInfoKey].
-    pub fn new(catalog: String, flow_id: FlowId) -> FlowInfoKey {
+    pub fn new(flow_id: FlowId) -> FlowInfoKey {
         let inner = FlowInfoKeyInner::new(flow_id);
-        FlowInfoKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
-    }
-
-    /// Returns the catalog.
-    pub fn catalog(&self) -> &str {
-        self.0.catalog()
+        FlowInfoKey(FlowScoped::new(inner))
     }
 
     /// Returns the [FlowId].
@@ -159,8 +155,8 @@ impl FlowInfoManager {
     }
 
     /// Returns the [FlowInfoValue] of specified `flow_id`.
-    pub async fn get(&self, catalog: &str, flow_id: FlowId) -> Result<Option<FlowInfoValue>> {
-        let key = FlowInfoKey::new(catalog.to_string(), flow_id).to_bytes();
+    pub async fn get(&self, flow_id: FlowId) -> Result<Option<FlowInfoValue>> {
+        let key = FlowInfoKey::new(flow_id).to_bytes();
         self.kv_backend
             .get(&key)
             .await?
@@ -169,11 +165,10 @@ impl FlowInfoManager {
     }
 
     /// Builds a create flow transaction.
-    /// It is expected that the `__flow/{catalog}/info/{flow_id}` wasn't occupied.
+    /// It is expected that the `__flow/info/{flow_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub(crate) fn build_create_txn(
         &self,
-        catalog: &str,
         flow_id: FlowId,
         flow_value: &FlowInfoValue,
     ) -> Result<(
@@ -182,7 +177,7 @@ impl FlowInfoManager {
             &mut TxnOpGetResponseSet,
         ) -> Result<Option<DeserializedValueWithBytes<FlowInfoValue>>>,
     )> {
-        let key = FlowInfoKey::new(catalog.to_string(), flow_id).to_bytes();
+        let key = FlowInfoKey::new(flow_id).to_bytes();
         let txn = txn_helper::build_put_if_absent_txn(key.clone(), flow_value.try_as_raw_value()?);
 
         Ok((
@@ -198,15 +193,14 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let flow_info = FlowInfoKey::new("my_catalog".to_string(), 2);
-        assert_eq!(b"__flow/my_catalog/info/2".to_vec(), flow_info.to_bytes());
+        let flow_info = FlowInfoKey::new(2);
+        assert_eq!(b"__flow/info/2".to_vec(), flow_info.to_bytes());
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow/my_catalog/info/2".to_vec();
+        let bytes = b"__flow/info/2".to_vec();
         let key = FlowInfoKey::from_bytes(&bytes).unwrap();
-        assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flow_id(), 2);
     }
 }

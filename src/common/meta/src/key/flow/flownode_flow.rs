@@ -22,8 +22,7 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::scope::{BytesAdapter, CatalogScoped, MetaKey};
-use crate::key::{FlowId, FlowPartitionId};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -42,8 +41,8 @@ const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 
 /// The key of mapping [FlownodeId] to [FlowId].
 ///
-/// The layout `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
-pub struct FlownodeFlowKey(FlowScoped<CatalogScoped<FlownodeFlowKeyInner>>);
+/// The layout `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
+pub struct FlownodeFlowKey(FlowScoped<FlownodeFlowKeyInner>);
 
 impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
@@ -51,37 +50,29 @@ impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<FlownodeFlowKey> {
-        Ok(FlownodeFlowKey(FlowScoped::<
-            CatalogScoped<FlownodeFlowKeyInner>,
-        >::from_bytes(bytes)?))
+        Ok(FlownodeFlowKey(
+            FlowScoped::<FlownodeFlowKeyInner>::from_bytes(bytes)?,
+        ))
     }
 }
 
 impl FlownodeFlowKey {
     /// Returns a new [FlownodeFlowKey].
     pub fn new(
-        catalog: String,
         flownode_id: FlownodeId,
         flow_id: FlowId,
         partition_id: FlowPartitionId,
     ) -> FlownodeFlowKey {
         let inner = FlownodeFlowKeyInner::new(flownode_id, flow_id, partition_id);
-        FlownodeFlowKey(FlowScoped::new(CatalogScoped::new(catalog, inner)))
+        FlownodeFlowKey(FlowScoped::new(inner))
     }
 
     /// The prefix used to retrieve all [FlownodeFlowKey]s with the specified `flownode_id`.
-    pub fn range_start_key(catalog: String, flownode_id: FlownodeId) -> Vec<u8> {
-        let catalog_scoped_key = CatalogScoped::new(
-            catalog,
-            BytesAdapter::from(FlownodeFlowKeyInner::range_start_key(flownode_id).into_bytes()),
-        );
+    pub fn range_start_key(flownode_id: FlownodeId) -> Vec<u8> {
+        let inner =
+            BytesAdapter::from(FlownodeFlowKeyInner::range_start_key(flownode_id).into_bytes());
 
-        FlowScoped::new(catalog_scoped_key).to_bytes()
-    }
-
-    /// Returns the catalog.
-    pub fn catalog(&self) -> &str {
-        self.0.catalog()
+        FlowScoped::new(inner).to_bytes()
     }
 
     /// Returns the [FlowId].
@@ -184,10 +175,9 @@ impl FlownodeFlowManager {
     /// Retrieves all [FlowId] and [FlowPartitionId]s of the specified `flownode_id`.
     pub fn flows(
         &self,
-        catalog: &str,
         flownode_id: FlownodeId,
     ) -> BoxStream<'static, Result<(FlowId, FlowPartitionId)>> {
-        let start_key = FlownodeFlowKey::range_start_key(catalog.to_string(), flownode_id);
+        let start_key = FlownodeFlowKey::range_start_key(flownode_id);
         let req = RangeRequest::new().with_prefix(start_key);
 
         let stream = PaginationStream::new(
@@ -205,16 +195,13 @@ impl FlownodeFlowManager {
     /// Puts `__flownode_flow/{flownode_id}/{flow_id}/{partition_id}` keys.
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
-        catalog: &str,
         flow_id: FlowId,
         flownode_ids: I,
     ) -> Txn {
         let txns = flownode_ids
             .into_iter()
             .map(|(partition_id, flownode_id)| {
-                let key =
-                    FlownodeFlowKey::new(catalog.to_string(), flownode_id, flow_id, partition_id)
-                        .to_bytes();
+                let key = FlownodeFlowKey::new(flownode_id, flow_id, partition_id).to_bytes();
                 TxnOp::Put(key, vec![])
             })
             .collect::<Vec<_>>();
@@ -226,24 +213,20 @@ impl FlownodeFlowManager {
 #[cfg(test)]
 mod tests {
     use crate::key::flow::flownode_flow::FlownodeFlowKey;
-    use crate::key::scope::MetaKey;
+    use crate::key::MetaKey;
 
     #[test]
     fn test_key_serialization() {
-        let flownode_flow = FlownodeFlowKey::new("my_catalog".to_string(), 1, 2, 0);
-        assert_eq!(
-            b"__flow/my_catalog/flownode/1/2/0".to_vec(),
-            flownode_flow.to_bytes()
-        );
-        let prefix = FlownodeFlowKey::range_start_key("my_catalog".to_string(), 1);
-        assert_eq!(b"__flow/my_catalog/flownode/1/".to_vec(), prefix);
+        let flownode_flow = FlownodeFlowKey::new(1, 2, 0);
+        assert_eq!(b"__flow/flownode/1/2/0".to_vec(), flownode_flow.to_bytes());
+        let prefix = FlownodeFlowKey::range_start_key(1);
+        assert_eq!(b"__flow/flownode/1/".to_vec(), prefix);
     }
 
     #[test]
     fn test_key_deserialization() {
-        let bytes = b"__flow/my_catalog/flownode/1/2/0".to_vec();
+        let bytes = b"__flow/flownode/1/2/0".to_vec();
         let key = FlownodeFlowKey::from_bytes(&bytes).unwrap();
-        assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flownode_id(), 1);
         assert_eq!(key.flow_id(), 2);
         assert_eq!(key.partition_id(), 0);

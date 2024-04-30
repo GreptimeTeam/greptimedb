@@ -82,7 +82,7 @@ impl<'a> TryFrom<&'a str> for CatalogNameKey<'a> {
     }
 }
 
-/// Decoder `KeyValue` to ({catalog},())
+/// Decoder `KeyValue` to {catalog}
 pub fn catalog_decoder(kv: KeyValue) -> Result<String> {
     let str = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
     let catalog_name = CatalogNameKey::try_from(str)?;
