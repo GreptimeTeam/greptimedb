@@ -27,7 +27,7 @@ use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::NAME_PATTERN;
-use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use common_meta::rpc::ddl::{CreateFlowTask, DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
@@ -323,14 +323,27 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn create_flow(&self, stmt: CreateFlow, query_ctx: QueryContextRef) -> Result<()> {
+    pub async fn create_flow(
+        &self,
+        stmt: CreateFlow,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         // TODO(ruihang): do some verification
+        let expr = expr_factory::to_create_flow_task_expr(stmt, query_ctx)?;
 
-        let _expr = expr_factory::to_create_flow_task_expr(stmt, query_ctx)?;
+        self.create_flow_procedure(expr).await?;
+        Ok(Output::new_with_affected_rows(0))
+    }
 
-        // TODO: invoke procedure
+    async fn create_flow_procedure(&self, expr: CreateFlowTask) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_create_flow(expr),
+        };
 
-        Ok(())
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
     }
 
     #[tracing::instrument(skip_all)]

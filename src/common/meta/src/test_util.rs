@@ -20,9 +20,11 @@ pub use common_base::AffectedRows;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
+use crate::ddl::flow_meta::FlowMetadataAllocator;
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::DdlContext;
 use crate::error::Result;
+use crate::key::flow::FlowMetadataManager;
 use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
@@ -99,19 +101,28 @@ pub fn new_ddl_context_with_kv_backend(
     kv_backend: KvBackendRef,
 ) -> DdlContext {
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
-
+    let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
+        Arc::new(
+            SequenceBuilder::new("test", kv_backend.clone())
+                .initial(1024)
+                .build(),
+        ),
+        Arc::new(WalOptionsAllocator::default()),
+    ));
+    let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+    let flow_metadata_allocator =
+        Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
+            SequenceBuilder::new("flow-test", kv_backend)
+                .initial(1024)
+                .build(),
+        )));
     DdlContext {
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),
         memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
-        table_metadata_allocator: Arc::new(TableMetadataAllocator::new(
-            Arc::new(
-                SequenceBuilder::new("test", kv_backend)
-                    .initial(1024)
-                    .build(),
-            ),
-            Arc::new(WalOptionsAllocator::default()),
-        )),
+        table_metadata_allocator,
         table_metadata_manager,
+        flow_metadata_allocator,
+        flow_metadata_manager,
     }
 }

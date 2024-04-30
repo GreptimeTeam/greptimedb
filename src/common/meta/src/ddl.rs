@@ -18,9 +18,11 @@ use std::sync::Arc;
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
 
-use self::table_meta::TableMetadataAllocatorRef;
 use crate::cache_invalidator::CacheInvalidatorRef;
+use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
+use crate::ddl::table_meta::TableMetadataAllocatorRef;
 use crate::error::Result;
+use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
@@ -31,11 +33,13 @@ use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, Procedu
 pub mod alter_logical_tables;
 pub mod alter_table;
 pub mod create_database;
+pub mod create_flow;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
 pub mod drop_database;
 pub mod drop_table;
+pub mod flow_meta;
 mod physical_table_metadata;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
@@ -93,11 +97,21 @@ pub struct TableMetadata {
     pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
+/// The context of ddl.
 #[derive(Clone)]
 pub struct DdlContext {
+    /// Sends querying and requests to nodes.
     pub node_manager: NodeManagerRef,
+    /// Cache invalidation.
     pub cache_invalidator: CacheInvalidatorRef,
-    pub table_metadata_manager: TableMetadataManagerRef,
+    /// Keep tracking operating regions.
     pub memory_region_keeper: MemoryRegionKeeperRef,
+    /// Table metadata manager.
+    pub table_metadata_manager: TableMetadataManagerRef,
+    /// Allocator for table metadata.
     pub table_metadata_allocator: TableMetadataAllocatorRef,
+    /// Flow metadata manager.
+    pub flow_metadata_manager: FlowMetadataManagerRef,
+    /// Allocator for flow metadata.
+    pub flow_metadata_allocator: FlowMetadataAllocatorRef,
 }

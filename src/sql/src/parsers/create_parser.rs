@@ -175,7 +175,7 @@ impl<'a> ParserContext<'a> {
     fn parse_create_flow(&mut self, or_replace: bool) -> Result<Statement> {
         let if_not_exists = self.parse_if_not_exist()?;
 
-        let task_name = self.intern_parse_table_name()?;
+        let flow_name = self.intern_parse_table_name()?;
 
         self.parser
             .expect_token(&Token::make_keyword(SINK))
@@ -219,7 +219,7 @@ impl<'a> ParserContext<'a> {
         let query = Box::new(self.parser.parse_query().context(error::SyntaxSnafu)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
-            flow_name: task_name,
+            flow_name,
             sink_table_name: output_table_name,
             or_replace,
             if_not_exists,
