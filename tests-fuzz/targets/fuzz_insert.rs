@@ -90,8 +90,11 @@ fn generate_insert_expr<R: Rng + 'static>(
     rng: &mut R,
     table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
+    let omit_column_list = rng.gen_bool(0.2);
+
     let insert_generator = InsertExprGeneratorBuilder::default()
         .table_ctx(table_ctx)
+        .omit_column_list(omit_column_list)
         .rows(input.rows)
         .build()
         .unwrap();
