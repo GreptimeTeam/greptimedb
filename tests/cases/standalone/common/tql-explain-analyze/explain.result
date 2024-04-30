@@ -86,7 +86,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 | logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
-| logical_plan after count_wildcard_rule_| SAME TEXT AS ABOVE_|
+| logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after inline_table_scan_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|

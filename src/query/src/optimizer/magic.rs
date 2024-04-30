@@ -18,7 +18,8 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::Result as DataFusionResult;
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionDefinition, WindowFunction};
-use datafusion_expr::{col, Expr, LogicalPlan, WindowFunctionDefinition};
+use datafusion_expr::utils::COUNT_STAR_EXPANSION;
+use datafusion_expr::{col, lit, Expr, LogicalPlan, WindowFunctionDefinition};
 use datafusion_optimizer::utils::NamePreserver;
 use datafusion_optimizer::AnalyzerRule;
 use table::table::adapter::DfTableProviderAdapter;
@@ -48,8 +49,10 @@ impl AnalyzerRule for CountWildcardToTimeIndexRule {
 impl CountWildcardToTimeIndexRule {
     fn analyze_internal(plan: LogicalPlan) -> DataFusionResult<Transformed<LogicalPlan>> {
         let name_preserver = NamePreserver::new(&plan);
-        let Some(time_index) = Self::try_find_time_index_col(&plan) else {
-            return Ok(Transformed::no(plan));
+        let new_arg = if let Some(time_index) = Self::try_find_time_index_col(&plan) {
+            vec![col(time_index)]
+        } else {
+            vec![lit(COUNT_STAR_EXPANSION)]
         };
         plan.map_expressions(|expr| {
             let original_name = name_preserver.save(&expr)?;
@@ -57,13 +60,13 @@ impl CountWildcardToTimeIndexRule {
                 Expr::WindowFunction(mut window_function)
                     if Self::is_count_star_window_aggregate(&window_function) =>
                 {
-                    window_function.args = vec![col(time_index.clone())];
+                    window_function.args = new_arg.clone();
                     Ok(Transformed::yes(Expr::WindowFunction(window_function)))
                 }
                 Expr::AggregateFunction(mut aggregate_function)
                     if Self::is_count_star_aggregate(&aggregate_function) =>
                 {
-                    aggregate_function.args = vec![col(time_index.clone())];
+                    aggregate_function.args = new_arg.clone();
                     Ok(Transformed::yes(Expr::AggregateFunction(
                         aggregate_function,
                     )))
