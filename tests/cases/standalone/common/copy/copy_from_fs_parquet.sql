@@ -22,6 +22,12 @@ Copy with_pattern FROM '/tmp/demo/export/parquet/' WITH (PATTERN = 'demo.*');
 
 select * from with_pattern order by ts;
 
+CREATE TABLE with_limit_rows(host string, cpu double, memory double, ts timestamp time index);
+
+Copy with_limit_rows FROM '/tmp/demo/export/parquet/' WITH (MAX_INSERT_ROWS = 10);
+
+select * from with_limit_rows order by ts;
+
 drop table demo;
 
 drop table with_filename;
@@ -29,3 +35,5 @@ drop table with_filename;
 drop table with_path;
 
 drop table with_pattern;
+
+drop table with_limit_rows;

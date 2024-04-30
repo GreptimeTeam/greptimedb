@@ -61,6 +61,23 @@ select * from with_pattern order by ts;
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
 +-------+------+--------+---------------------+
 
+CREATE TABLE with_limit_rows(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_limit_rows FROM '/tmp/demo/export/parquet/' WITH (MAX_INSERT_ROWS = 10);
+
+Affected Rows: 2
+
+select * from with_limit_rows order by ts;
+
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+
+
 drop table demo;
 
 Affected Rows: 0
@@ -74,6 +91,10 @@ drop table with_path;
 Affected Rows: 0
 
 drop table with_pattern;
+
+Affected Rows: 0
+
+drop table with_limit_rows;
 
 Affected Rows: 0
 
