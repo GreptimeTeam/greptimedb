@@ -1,4 +1,4 @@
-// This file is copied from: https://github.com/iqlusioninc/crates/blob/f98d4ccf/secrecy/src/lib.rs.
+// This file is copied from https://github.com/iqlusioninc/crates/blob/f98d4ccf/secrecy/src/lib.rs
 
 //! [`SecretBox`] wrapper type for more carefully handling secret values
 //! (e.g. passwords, cryptographic keys, access tokens or other credentials)
