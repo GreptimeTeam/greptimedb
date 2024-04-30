@@ -42,6 +42,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::optimizer::magic::CountWildcardToTimeIndexRule;
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
@@ -93,7 +94,10 @@ impl QueryEngineState {
         let mut analyzer = Analyzer::new();
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
-        analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
+        analyzer
+            .rules
+            .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
