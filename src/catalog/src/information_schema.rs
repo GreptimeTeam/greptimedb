@@ -153,6 +153,7 @@ impl InformationSchemaProvider {
     fn build_tables(&mut self) {
         let mut tables = HashMap::new();
 
+        // SECURITY NOTE:
         // Carefully consider the tables that may expose sensitive cluster configurations,
         // authentication details, and other critical information.
         // Only put these tables under `greptime` catalog to prevent info leak.
@@ -169,6 +170,10 @@ impl InformationSchemaProvider {
                 REGION_PEERS.to_string(),
                 self.build_table(REGION_PEERS).unwrap(),
             );
+            tables.insert(
+                CLUSTER_INFO.to_string(),
+                self.build_table(CLUSTER_INFO).unwrap(),
+            );
         }
 
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
@@ -181,10 +186,6 @@ impl InformationSchemaProvider {
         tables.insert(
             TABLE_CONSTRAINTS.to_string(),
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
-        );
-        tables.insert(
-            CLUSTER_INFO.to_string(),
-            self.build_table(CLUSTER_INFO).unwrap(),
         );
 
         // Add memory tables
