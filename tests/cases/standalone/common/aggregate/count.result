@@ -14,10 +14,6 @@ select count(*) from "HelloWorld";
 | 2        |
 +----------+
 
-drop table "HelloWorld";
-
-Affected Rows: 0
-
 create table test (a string, "BbB" timestamp time index);
 
 Affected Rows: 0
@@ -41,6 +37,18 @@ select count(*) from (select count(*) from test where a = 'a');
 +----------+
 | 1        |
 +----------+
+
+select count(*) from (select * from test cross join "HelloWorld");
+
++----------+
+| COUNT(*) |
++----------+
+| 2        |
++----------+
+
+drop table "HelloWorld";
+
+Affected Rows: 0
 
 drop table test;
 

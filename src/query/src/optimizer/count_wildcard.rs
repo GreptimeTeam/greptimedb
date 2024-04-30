@@ -155,6 +155,8 @@ impl TreeNodeVisitor for TimeIndexFinder {
                     .downcast_ref::<DfTableProviderAdapter>()
                 {
                     let table_info = adapter.table().table_info();
+                    self.table_alias
+                        .get_or_insert(TableReference::bare(table_info.name.clone()));
                     self.time_index_col = table_info
                         .meta
                         .schema
@@ -178,5 +180,38 @@ impl TimeIndexFinder {
     fn into_column(self) -> Option<Column> {
         self.time_index_col
             .map(|c| Column::new(self.table_alias, c))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use datafusion_expr::{count, wildcard, LogicalPlanBuilder};
+    use table::table::numbers::NumbersTable;
+
+    use super::*;
+
+    #[test]
+    fn uppercase_table_name() {
+        let numbers_table = NumbersTable::table_with_name(0, "AbCdE".to_string());
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(wildcard())])
+            .unwrap()
+            .alias(r#""FgHiJ""#)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut finder = TimeIndexFinder::default();
+        plan.visit(&mut finder).unwrap();
+
+        assert_eq!(finder.table_alias, Some(TableReference::bare("FgHiJ")));
+        assert!(finder.time_index_col.is_none());
     }
 }
