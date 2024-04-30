@@ -54,12 +54,12 @@ struct TableFlowKeyInner {
 #[derive(Debug, PartialEq)]
 pub struct TableFlowKey(FlowScoped<TableFlowKeyInner>);
 
-impl MetaKey<TableFlowKey> for TableFlowKey {
+impl<'a> MetaKey<'a, TableFlowKey> for TableFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<TableFlowKey> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<TableFlowKey> {
         Ok(TableFlowKey(FlowScoped::<TableFlowKeyInner>::from_bytes(
             bytes,
         )?))
@@ -132,7 +132,7 @@ impl TableFlowKeyInner {
     }
 }
 
-impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
+impl<'a> MetaKey<'a, TableFlowKeyInner> for TableFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{TABLE_FLOW_KEY_PREFIX}/{}/{}/{}/{}",
@@ -141,7 +141,7 @@ impl MetaKey<TableFlowKeyInner> for TableFlowKeyInner {
         .into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<TableFlowKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<TableFlowKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(

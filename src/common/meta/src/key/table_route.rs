@@ -21,19 +21,23 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
-    self, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu,
+    self, InvalidTableMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu,
+    TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    txn_helper, DeserializedValueWithBytes, RegionDistribution, TableMetaKey, TableMetaValue,
-    TABLE_ROUTE_PREFIX,
+    txn_helper, DeserializedValueWithBytes, MetaKey, RegionDistribution, TableMetaValue,
+    TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
 };
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::rpc::store::BatchGetRequest;
 
+/// The key stores table routes
+///
+/// The layout: `__table_route/{table_id}`.
+#[derive(Debug, PartialEq)]
 pub struct TableRouteKey {
     pub table_id: TableId,
 }
@@ -239,9 +243,30 @@ impl LogicalTableRouteValue {
     }
 }
 
-impl TableMetaKey for TableRouteKey {
-    fn as_raw_key(&self) -> Vec<u8> {
+impl<'a> MetaKey<'a, TableRouteKey> for TableRouteKey {
+    fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<TableRouteKey> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidTableMetadataSnafu {
+                err_msg: format!(
+                    "TableRouteKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        let captures =
+            TABLE_ROUTE_KEY_PATTERN
+                .captures(key)
+                .context(InvalidTableMetadataSnafu {
+                    err_msg: format!("Invalid TableRouteKey '{key}'"),
+                })?;
+        // Safety: pass the regex check above
+        let table_id = captures[1].parse::<TableId>().unwrap();
+        Ok(TableRouteKey { table_id })
     }
 }
 
@@ -462,7 +487,7 @@ impl TableRouteStorage {
         ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
 
         let txn = txn_helper::build_put_if_absent_txn(
             raw_key.clone(),
@@ -490,7 +515,7 @@ impl TableRouteStorage {
         ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         let raw_value = current_table_route_value.get_raw_bytes();
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
 
@@ -506,7 +531,7 @@ impl TableRouteStorage {
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
         let key = TableRouteKey::new(table_id);
         self.kv_backend
-            .get(&key.as_raw_key())
+            .get(&key.to_bytes())
             .await?
             .map(|kv| TableRouteValue::try_from_raw_value(&kv.value))
             .transpose()
@@ -519,7 +544,7 @@ impl TableRouteStorage {
     ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
         let key = TableRouteKey::new(table_id);
         self.kv_backend
-            .get(&key.as_raw_key())
+            .get(&key.to_bytes())
             .await?
             .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
@@ -560,7 +585,7 @@ impl TableRouteStorage {
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
         let keys = table_ids
             .iter()
-            .map(|id| TableRouteKey::new(*id).as_raw_key())
+            .map(|id| TableRouteKey::new(*id).to_bytes())
             .collect::<Vec<_>>();
         let resp = self
             .kv_backend
@@ -602,6 +627,20 @@ mod tests {
             new_raw_v,
             r#"Physical(PhysicalTableRouteValue { region_routes: [RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }, RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }], version: 0 })"#
         );
+    }
+
+    #[test]
+    fn test_key_serialization() {
+        let key = TableRouteKey::new(42);
+        let raw_key = key.to_bytes();
+        assert_eq!(raw_key, b"__table_route/42");
+    }
+
+    #[test]
+    fn test_key_deserialization() {
+        let expected = TableRouteKey::new(42);
+        let key = TableRouteKey::from_bytes(b"__table_route/42").unwrap();
+        assert_eq!(key, expected);
     }
 
     #[tokio::test]

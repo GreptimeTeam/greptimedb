@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
@@ -21,10 +22,10 @@ use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
+use super::MetaKey;
 use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::{
-    RegionDistribution, TableMetaKey, TableMetaValue, DATANODE_TABLE_KEY_PATTERN,
-    DATANODE_TABLE_KEY_PREFIX,
+    RegionDistribution, TableMetaValue, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -54,6 +55,9 @@ pub struct RegionInfo {
     pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
+/// The key mapping {datanode_id} to {table_id}
+///
+/// The layout: `__dn_table/{datanode_id}/{table_id}`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DatanodeTableKey {
     pub datanode_id: DatanodeId,
@@ -75,32 +79,42 @@ impl DatanodeTableKey {
     pub fn range_start_key(datanode_id: DatanodeId) -> String {
         format!("{}/", Self::prefix(datanode_id))
     }
+}
 
-    pub fn strip_table_id(raw_key: &[u8]) -> Result<TableId> {
-        let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
+impl<'a> MetaKey<'a, DatanodeTableKey> for DatanodeTableKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<DatanodeTableKey> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
             InvalidTableMetadataSnafu {
                 err_msg: format!(
                     "DatanodeTableKey '{}' is not a valid UTF8 string: {e}",
-                    String::from_utf8_lossy(raw_key)
+                    String::from_utf8_lossy(bytes)
                 ),
             }
             .build()
         })?;
         let captures =
             DATANODE_TABLE_KEY_PATTERN
-                .captures(&key)
+                .captures(key)
                 .context(InvalidTableMetadataSnafu {
                     err_msg: format!("Invalid DatanodeTableKey '{key}'"),
                 })?;
         // Safety: pass the regex check above
+        let datanode_id = captures[1].parse::<DatanodeId>().unwrap();
         let table_id = captures[2].parse::<TableId>().unwrap();
-        Ok(table_id)
+        Ok(DatanodeTableKey {
+            datanode_id,
+            table_id,
+        })
     }
 }
 
-impl TableMetaKey for DatanodeTableKey {
-    fn as_raw_key(&self) -> Vec<u8> {
-        format!("{}/{}", Self::prefix(self.datanode_id), self.table_id).into_bytes()
+impl Display for DatanodeTableKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", Self::prefix(self.datanode_id), self.table_id)
     }
 }
 
@@ -140,7 +154,7 @@ impl DatanodeTableManager {
 
     pub async fn get(&self, key: &DatanodeTableKey) -> Result<Option<DatanodeTableValue>> {
         self.kv_backend
-            .get(&key.as_raw_key())
+            .get(&key.to_bytes())
             .await?
             .map(|kv| DatanodeTableValue::try_from_raw_value(&kv.value))
             .transpose()
@@ -190,7 +204,7 @@ impl DatanodeTableManager {
                     },
                 );
 
-                Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
+                Ok(TxnOp::Put(key.to_bytes(), val.try_as_raw_value()?))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -215,7 +229,7 @@ impl DatanodeTableManager {
         for current_datanode in current_region_distribution.keys() {
             if !new_region_distribution.contains_key(current_datanode) {
                 let key = DatanodeTableKey::new(*current_datanode, table_id);
-                let raw_key = key.as_raw_key();
+                let raw_key = key.to_bytes();
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
@@ -233,7 +247,7 @@ impl DatanodeTableManager {
                 };
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
-                let raw_key = key.as_raw_key();
+                let raw_key = key.to_bytes();
                 // FIXME(weny): add unit tests.
                 let mut new_region_info = region_info.clone();
                 if need_update_options {
@@ -266,7 +280,7 @@ impl DatanodeTableManager {
             .into_keys()
             .map(|datanode_id| {
                 let key = DatanodeTableKey::new(datanode_id, table_id);
-                let raw_key = key.as_raw_key();
+                let raw_key = key.to_bytes();
 
                 Ok(TxnOp::Delete(raw_key))
             })
@@ -283,12 +297,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_serde() {
+    fn test_serialization() {
         let key = DatanodeTableKey {
             datanode_id: 1,
             table_id: 2,
         };
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         assert_eq!(raw_key, b"__dn_table/1/2");
 
         let value = DatanodeTableValue {
@@ -402,9 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_table_id() {
+    fn test_deserialization() {
         fn test_err(raw_key: &[u8]) {
-            let result = DatanodeTableKey::strip_table_id(raw_key);
+            let result = DatanodeTableKey::from_bytes(raw_key);
             assert!(result.is_err());
         }
 
@@ -417,7 +431,7 @@ mod tests {
         test_err(b"__dn_table/invalid_node_id/2");
         test_err(b"__dn_table/1/invalid_table_id");
 
-        let table_id = DatanodeTableKey::strip_table_id(b"__dn_table/1/2").unwrap();
-        assert_eq!(table_id, 2);
+        let key = DatanodeTableKey::from_bytes(b"__dn_table/11/21").unwrap();
+        assert_eq!(DatanodeTableKey::new(11, 21), key);
     }
 }

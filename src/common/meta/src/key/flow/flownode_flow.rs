@@ -44,12 +44,12 @@ const FLOWNODE_FLOW_KEY_PREFIX: &str = "flownode";
 /// The layout `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
 pub struct FlownodeFlowKey(FlowScoped<FlownodeFlowKeyInner>);
 
-impl MetaKey<FlownodeFlowKey> for FlownodeFlowKey {
+impl<'a> MetaKey<'a, FlownodeFlowKey> for FlownodeFlowKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlownodeFlowKey> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlownodeFlowKey> {
         Ok(FlownodeFlowKey(
             FlowScoped::<FlownodeFlowKeyInner>::from_bytes(bytes)?,
         ))
@@ -118,7 +118,7 @@ impl FlownodeFlowKeyInner {
     }
 }
 
-impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
+impl<'a> MetaKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{FLOWNODE_FLOW_KEY_PREFIX}/{}/{}/{}",
@@ -127,7 +127,7 @@ impl MetaKey<FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
         .into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlownodeFlowKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlownodeFlowKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(

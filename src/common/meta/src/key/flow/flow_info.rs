@@ -43,12 +43,12 @@ lazy_static! {
 /// The layout: `__flow/info/{flow_id}`.
 pub struct FlowInfoKey(FlowScoped<FlowInfoKeyInner>);
 
-impl MetaKey<FlowInfoKey> for FlowInfoKey {
+impl<'a> MetaKey<'a, FlowInfoKey> for FlowInfoKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowInfoKey> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowInfoKey> {
         Ok(FlowInfoKey(FlowScoped::<FlowInfoKeyInner>::from_bytes(
             bytes,
         )?))
@@ -81,12 +81,12 @@ impl FlowInfoKeyInner {
     }
 }
 
-impl MetaKey<FlowInfoKeyInner> for FlowInfoKeyInner {
+impl<'a> MetaKey<'a, FlowInfoKeyInner> for FlowInfoKeyInner {
     fn to_bytes(&self) -> Vec<u8> {
         format!("{FLOW_INFO_KEY_PREFIX}/{}", self.flow_id).into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<FlowInfoKeyInner> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<FlowInfoKeyInner> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             error::InvalidTableMetadataSnafu {
                 err_msg: format!(
