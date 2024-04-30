@@ -38,7 +38,7 @@ lazy_static! {
 
 /// The key of mapping {flow_name} to [FlowId].
 ///
-/// The layout: `__flow/name/{flow_name}`.
+/// The layout: `__flow/name/{catalog_name}/{flow_name}`.
 pub struct FlowNameKey(FlowScoped<FlowNameKeyInner>);
 
 impl FlowNameKey {
@@ -171,7 +171,7 @@ impl FlowNameManager {
     }
 
     /// Builds a create flow name transaction.
-    /// It's expected that the `__flow/{catalog}/name/{flow_name}` wasn't occupied.
+    /// It's expected that the `__flow/name/{catalog}/{flow_name}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
     pub fn build_create_txn(
         &self,

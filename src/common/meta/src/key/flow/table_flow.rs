@@ -50,7 +50,7 @@ struct TableFlowKeyInner {
 
 /// The key of mapping [TableId] to [FlownodeId] and [FlowId].
 ///
-/// The layout: `__flow/table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
+/// The layout: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
 pub struct TableFlowKey(FlowScoped<TableFlowKeyInner>);
 
@@ -203,7 +203,7 @@ impl TableFlowManager {
 
     /// Builds a create table flow transaction.
     ///
-    /// Puts `__table_flow/{table_id}/{node_id}/{partition_id}` keys.
+    /// Puts `__flow/source_table/{table_id}/{node_id}/{partition_id}` keys.
     pub fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
         &self,
         flow_id: FlowId,

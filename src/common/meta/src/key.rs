@@ -64,7 +64,8 @@
 //!     {flow_id}
 //!
 //!    name/
-//!      {flow_name}
+//!      {catalog_name}
+//!        {flow_name}
 //!
 //!    flownode/
 //!      {flownode_id}/
