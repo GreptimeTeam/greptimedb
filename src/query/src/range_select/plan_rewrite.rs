@@ -112,7 +112,7 @@ fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
 /// Parse a duraion expr:
 /// 1. duration string (e.g. `'1h'`)
 /// 2. Interval expr (e.g. `INTERVAL '1 year 3 hours 20 minutes'`)
-/// 3. A expr can be evaluate at logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
+/// 3. An expr can be evaluated at the logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
 fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => {
@@ -132,7 +132,7 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 /// Evaluate a time calculation expr, case like:
 /// 1. `INTERVAL '1' day + INTERVAL '1 year 2 hours 3 minutes'`
 /// 2. `now() - INTERVAL '1' day`
-/// 3. A expr can be evaluate at logical plan stage (e.g. `now() - INTERVAL '1' day`)
+///
 /// Output a millisecond timestamp
 fn evaluate_expr_to_millisecond(args: &[Expr], i: usize) -> DFResult<i64> {
     let Some(expr) = args.get(i) else {
@@ -177,7 +177,7 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize) -> DFResult<i64> {
 /// which is used as the basis for dividing time slot during the align operation.
 /// 1. NOW: align to current execute time
 /// 2. Timestamp string: align to specific timestamp
-/// 3. A expr can be evaluate at logical plan stage (e.g. `now() - INTERVAL '1' day`)
+/// 3. An expr can be evaluated at the logical plan stage (e.g. `now() - INTERVAL '1' day`)
 /// 4. leave empty (as Default Option): align to unix epoch 0 (timezone aware)
 fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
     let Ok(s) = parse_str_expr(args, i) else {
