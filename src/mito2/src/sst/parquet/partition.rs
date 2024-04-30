@@ -31,6 +31,7 @@ use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
 /// A partition of a parquet SST. Now it is a row group.
+/// We can read different partitions in parallel.
 pub struct Partition {
     /// Shared context.
     context: PartitionContextRef,
