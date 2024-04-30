@@ -28,7 +28,7 @@ use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
-use crate::options::{CliOptions, Options};
+use crate::options::{GlobalOptions, Options};
 use crate::App;
 
 pub struct Instance {
@@ -82,8 +82,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        self.subcmd.load_options(cli_options)
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+        self.subcmd.load_options(global_options)
     }
 }
 
@@ -99,9 +99,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(cli_options),
+            SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
     }
 }
@@ -131,19 +131,19 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         let mut opts: DatanodeOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             DatanodeOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = &cli_options.log_dir {
+        if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
 
-        if cli_options.log_level.is_some() {
-            opts.logging.level.clone_from(&cli_options.log_level);
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -259,7 +259,7 @@ mod tests {
     use servers::Mode;
 
     use super::*;
-    use crate::options::{CliOptions, ENV_VAR_SEP};
+    use crate::options::{GlobalOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_read_from_config_file() {
@@ -315,7 +315,8 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Datanode(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
+        let Options::Datanode(options) = cmd.load_options(&GlobalOptions::default()).unwrap()
+        else {
             unreachable!()
         };
 
@@ -377,7 +378,7 @@ mod tests {
     #[test]
     fn test_try_from_cmd() {
         if let Options::Datanode(opt) = StartCommand::default()
-            .load_options(&CliOptions::default())
+            .load_options(&GlobalOptions::default())
             .unwrap()
         {
             assert_eq!(Mode::Standalone, opt.mode)
@@ -388,7 +389,7 @@ mod tests {
             metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
-        .load_options(&CliOptions::default())
+        .load_options(&GlobalOptions::default())
         .unwrap()
         {
             assert_eq!(Mode::Distributed, opt.mode)
@@ -398,7 +399,7 @@ mod tests {
             metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
-        .load_options(&CliOptions::default())
+        .load_options(&GlobalOptions::default())
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
@@ -406,7 +407,7 @@ mod tests {
             node_id: Some(42),
             ..Default::default()
         })
-        .load_options(&CliOptions::default())
+        .load_options(&GlobalOptions::default())
         .is_ok());
     }
 
@@ -415,7 +416,7 @@ mod tests {
         let cmd = StartCommand::default();
 
         let options = cmd
-            .load_options(&CliOptions {
+            .load_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -504,7 +505,8 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Datanode(opts) = command.load_options(&CliOptions::default()).unwrap()
+                let Options::Datanode(opts) =
+                    command.load_options(&GlobalOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };
