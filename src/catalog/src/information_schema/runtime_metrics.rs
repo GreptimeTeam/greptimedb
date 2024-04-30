@@ -186,7 +186,7 @@ impl InformationSchemaMetricsBuilder {
                 ts.samples[0].value,
                 // The peer column is always `None` for standalone
                 None,
-                "standalone",
+                "STANDALONE",
             );
         }
 
