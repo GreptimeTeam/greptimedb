@@ -40,7 +40,7 @@ lazy_static! {
 
 /// The key stores the metadata of the flow.
 ///
-/// The layout: `__flow/{catalog}/info/{flow_id}`.
+/// The layout: `__flow/info/{flow_id}`.
 pub struct FlowInfoKey(FlowScoped<FlowInfoKeyInner>);
 
 impl MetaKey<FlowInfoKey> for FlowInfoKey {

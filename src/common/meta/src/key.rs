@@ -36,16 +36,16 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
-//! 6. Flow info key: `__flow/{catalog}/info/{flow_id}`
+//! 6. Flow info key: `__flow/info/{flow_id}`
 //!     - Stores metadata of the flow.
 //!
-//! 7. Flow name key: `__flow/{catalog}/name/{flow_name}`
+//! 7. Flow name key: `__flow/name/{catalog}/{flow_name}`
 //!     - Mapping {catalog}/{flow_name} to {flow_id}
 //!
-//! 8. Flownode flow key: `__flow/{catalog}/flownode/{flownode_id}/{flow_id}/{partition_id}`
+//! 8. Flownode flow key: `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping {flownode_id} to {flow_id}
 //!
-//! 9. Table flow key: `__table_flow/{catalog}/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
+//! 9. Table flow key: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping source table's {table_id} to {flownode_id}
 //!     - Used in `Flownode` booting.
 //!
