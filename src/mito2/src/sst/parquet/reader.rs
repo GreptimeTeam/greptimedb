@@ -51,7 +51,7 @@ use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
-use crate::sst::parquet::partition::{PartitionContext, PartitionContextRef};
+use crate::sst::parquet::partition::{Partition, PartitionContext, PartitionContextRef};
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -146,10 +146,29 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Builds and initializes a [ParquetReader].
+    /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
     pub async fn build(&self) -> Result<ParquetReader> {
+        let (context, row_groups) = self.build_reader_input().await?;
+        ParquetReader::new(context, row_groups).await
+    }
+
+    /// Builds [Partition]s to read and pushes them to `partitions`.
+    #[allow(dead_code)]
+    pub async fn build_partitions(&self, partitions: &mut Vec<Partition>) -> Result<()> {
+        let (context, row_groups) = self.build_reader_input().await?;
+        for (row_group_idx, row_selection) in row_groups {
+            let partition = Partition::new(context.clone(), row_group_idx, row_selection);
+            partitions.push(partition);
+        }
+        Ok(())
+    }
+
+    /// Builds a [PartitionContext] and collects row groups to read.
+    ///
+    /// This needs to perform IO operation.
+    async fn build_reader_input(&self) -> Result<(PartitionContextRef, RowGroupMap)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -225,7 +244,7 @@ impl ParquetReaderBuilder {
         );
 
         let context = PartitionContext::new(reader_builder, filters, read_format, codec);
-        ParquetReader::new(Arc::new(context), row_groups).await
+        Ok((Arc::new(context), row_groups))
     }
 
     /// Decodes region metadata from key value.
@@ -599,12 +618,14 @@ impl SimpleFilterContext {
     }
 }
 
+type RowGroupMap = BTreeMap<usize, Option<RowSelection>>;
+
 /// Parquet batch reader to read our SST format.
 pub struct ParquetReader {
     /// Partition context.
     context: PartitionContextRef,
     /// Indices of row groups to read, along with their respective row selections.
-    row_groups: BTreeMap<usize, Option<RowSelection>>,
+    row_groups: RowGroupMap,
     /// Reader of current row group.
     reader_state: ReaderState,
 }
@@ -638,7 +659,7 @@ impl BatchReader for ParquetReader {
             }
         }
 
-        // The reader is exhaused.
+        // The reader is exhausted.
         reader.metrics.scan_cost += start.elapsed();
         self.reader_state = ReaderState::Exhausted(std::mem::take(&mut reader.metrics));
         Ok(None)

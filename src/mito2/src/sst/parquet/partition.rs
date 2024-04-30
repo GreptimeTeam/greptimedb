@@ -31,8 +31,7 @@ use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
 /// A partition of a parquet SST. Now it is a row group.
-#[allow(dead_code)]
-pub(crate) struct Partition {
+pub struct Partition {
     /// Shared context.
     context: PartitionContextRef,
     /// Index of the row group in the SST.
@@ -43,7 +42,6 @@ pub(crate) struct Partition {
 
 impl Partition {
     /// Creates a new partition.
-    #[allow(dead_code)]
     pub(crate) fn new(
         context: PartitionContextRef,
         row_group_idx: usize,
