@@ -60,13 +60,13 @@ impl CountWildcardToTimeIndexRule {
                 Expr::WindowFunction(mut window_function)
                     if Self::is_count_star_window_aggregate(&window_function) =>
                 {
-                    window_function.args = new_arg.clone();
+                    window_function.args.clone_from(&new_arg);
                     Ok(Transformed::yes(Expr::WindowFunction(window_function)))
                 }
                 Expr::AggregateFunction(mut aggregate_function)
                     if Self::is_count_star_aggregate(&aggregate_function) =>
                 {
-                    aggregate_function.args = new_arg.clone();
+                    aggregate_function.args.clone_from(&new_arg);
                     Ok(Transformed::yes(Expr::AggregateFunction(
                         aggregate_function,
                     )))

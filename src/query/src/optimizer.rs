@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod magic;
+pub mod count_wildcard;
 pub mod order_hint;
 pub mod remove_duplicate;
 pub mod string_normalization;

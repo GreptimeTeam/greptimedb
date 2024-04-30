@@ -43,7 +43,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
-use crate::optimizer::magic::CountWildcardToTimeIndexRule;
+use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::string_normalization::StringNormalizationRule;
