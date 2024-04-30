@@ -194,6 +194,13 @@ impl CreateTableProcedure {
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         let table_route = self.table_route()?.clone();
         let request_builder = self.new_region_request_builder(None)?;
+        // Registers opening regions
+        let guards = self
+            .creator
+            .register_opening_regions(&self.context, &table_route.region_routes)?;
+        if !guards.is_empty() {
+            self.creator.opening_regions = guards;
+        }
         self.create_regions(&table_route.region_routes, request_builder)
             .await
     }
@@ -203,14 +210,6 @@ impl CreateTableProcedure {
         region_routes: &[RegionRoute],
         request_builder: CreateRequestBuilder,
     ) -> Result<Status> {
-        // Registers opening regions
-        let guards = self
-            .creator
-            .register_opening_regions(&self.context, region_routes)?;
-        if !guards.is_empty() {
-            self.creator.opening_regions = guards;
-        }
-
         let create_table_data = &self.creator.data;
         // Safety: the region_wal_options must be allocated
         let region_wal_options = self.region_wal_options()?;
