@@ -79,27 +79,6 @@ impl DatanodeTableKey {
     pub fn range_start_key(datanode_id: DatanodeId) -> String {
         format!("{}/", Self::prefix(datanode_id))
     }
-
-    pub fn strip_table_id(raw_key: &[u8]) -> Result<TableId> {
-        let key = String::from_utf8(raw_key.to_vec()).map_err(|e| {
-            InvalidTableMetadataSnafu {
-                err_msg: format!(
-                    "DatanodeTableKey '{}' is not a valid UTF8 string: {e}",
-                    String::from_utf8_lossy(raw_key)
-                ),
-            }
-            .build()
-        })?;
-        let captures =
-            DATANODE_TABLE_KEY_PATTERN
-                .captures(&key)
-                .context(InvalidTableMetadataSnafu {
-                    err_msg: format!("Invalid DatanodeTableKey '{key}'"),
-                })?;
-        // Safety: pass the regex check above
-        let table_id = captures[2].parse::<TableId>().unwrap();
-        Ok(table_id)
-    }
 }
 
 impl<'a> MetaKey<'a, DatanodeTableKey> for DatanodeTableKey {
@@ -124,7 +103,7 @@ impl<'a> MetaKey<'a, DatanodeTableKey> for DatanodeTableKey {
                     err_msg: format!("Invalid DatanodeTableKey '{key}'"),
                 })?;
         // Safety: pass the regex check above
-        let datanode_id = captures[2].parse::<DatanodeId>().unwrap();
+        let datanode_id = captures[1].parse::<DatanodeId>().unwrap();
         let table_id = captures[2].parse::<TableId>().unwrap();
         Ok(DatanodeTableKey {
             datanode_id,
@@ -318,7 +297,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_serde() {
+    fn test_serialization() {
         let key = DatanodeTableKey {
             datanode_id: 1,
             table_id: 2,
@@ -437,9 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_table_id() {
+    fn test_deserialization() {
         fn test_err(raw_key: &[u8]) {
-            let result = DatanodeTableKey::strip_table_id(raw_key);
+            let result = DatanodeTableKey::from_bytes(raw_key);
             assert!(result.is_err());
         }
 
@@ -452,7 +431,7 @@ mod tests {
         test_err(b"__dn_table/invalid_node_id/2");
         test_err(b"__dn_table/1/invalid_table_id");
 
-        let table_id = DatanodeTableKey::strip_table_id(b"__dn_table/1/2").unwrap();
-        assert_eq!(table_id, 2);
+        let key = DatanodeTableKey::from_bytes(b"__dn_table/11/21").unwrap();
+        assert_eq!(DatanodeTableKey::new(11, 21), key);
     }
 }

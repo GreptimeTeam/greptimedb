@@ -303,13 +303,18 @@ mod tests {
     }
 
     #[test]
-    fn test_serde() {
+    fn test_serialization() {
         let key = TableNameKey::new("my_catalog", "my_schema", "my_table");
         let raw_key = key.to_bytes();
         assert_eq!(
             b"__table_name/my_catalog/my_schema/my_table",
             raw_key.as_slice()
         );
+        let table_name_key =
+            TableNameKey::from_bytes(b"__table_name/my_catalog/my_schema/my_table").unwrap();
+        assert_eq!(table_name_key.catalog, "my_catalog");
+        assert_eq!(table_name_key.schema, "my_schema");
+        assert_eq!(table_name_key.table, "my_table");
 
         let value = TableNameValue::new(1);
         let literal = br#"{"table_id":1}"#;
