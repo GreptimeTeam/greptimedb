@@ -291,9 +291,6 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
 
 #[cfg(test)]
 mod test {
-
-    use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
-
     use super::*;
     use crate::utils::{self, to_metadata_region_id};
 
@@ -302,11 +299,13 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let region_id = to_metadata_region_id(env.default_physical_region_id());
-        let region_dir = join_dir(&env.data_home(), "test_metric_region");
 
         // `join_dir` doesn't suit windows path
         #[cfg(not(target_os = "windows"))]
         {
+            use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
+
+            let region_dir = join_dir(&env.data_home(), "test_metric_region");
             // assert metadata region's dir
             let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
             let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
