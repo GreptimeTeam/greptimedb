@@ -78,9 +78,9 @@ impl CountWildcardToTimeIndexRule {
     }
 
     fn try_find_time_index_col(plan: &LogicalPlan) -> Option<String> {
-        let mut finder = TimeIndexFinder { time_index: None };
+        let mut finder = TimeIndexFinder::default();
         // Safety: `TimeIndexFinder` won't throw error.
-        plan.visit_with_subqueries(&mut finder).unwrap();
+        plan.visit(&mut finder).unwrap();
         finder.time_index
     }
 }
@@ -112,14 +112,20 @@ impl CountWildcardToTimeIndexRule {
     }
 }
 
+#[derive(Default)]
 struct TimeIndexFinder {
     time_index: Option<String>,
+    table_alias: Option<String>,
 }
 
 impl TreeNodeVisitor for TimeIndexFinder {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
+        if let LogicalPlan::SubqueryAlias(subquery_alias) = node {
+            self.table_alias = Some(subquery_alias.alias.to_string());
+        }
+
         if let LogicalPlan::TableScan(table_scan) = &node {
             if let Some(source) = table_scan
                 .source
@@ -131,13 +137,10 @@ impl TreeNodeVisitor for TimeIndexFinder {
                     .as_any()
                     .downcast_ref::<DfTableProviderAdapter>()
                 {
-                    self.time_index = adapter
-                        .table()
-                        .table_info()
-                        .meta
-                        .schema
-                        .timestamp_column()
-                        .map(|c| c.name.clone());
+                    let table_info = adapter.table().table_info();
+                    let col_name = table_info.meta.schema.timestamp_column().map(|c| &c.name);
+                    let table_name = self.table_alias.as_ref().unwrap_or(&table_info.name);
+                    self.time_index = col_name.map(|s| format!("{}.{}", table_name, s));
 
                     return Ok(TreeNodeRecursion::Stop);
                 }
