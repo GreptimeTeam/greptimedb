@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDataTypeExtension,
-    CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
+    AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
+    ColumnDataTypeExtension, CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -38,7 +38,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::create::{CreateExternalTable, CreateFlow, CreateTable, TIME_INDEX};
-use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
+use sql::statements::{
+    column_def_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
+};
 use sql::util::extract_tables_from_query;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
@@ -474,6 +476,23 @@ pub(crate) fn to_alter_expr(
                 location: location.as_ref().map(From::from),
             }],
         }),
+        AlterTableOperation::ChangeColumnType {
+            column_name,
+            target_type,
+        } => {
+            let target_type =
+                sql_data_type_to_concrete_data_type(target_type).context(ParseSqlSnafu)?;
+            let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
+                .map(|w| w.to_parts())
+                .context(ColumnDataTypeSnafu)?;
+            Kind::ChangeColumnTypes(ChangeColumnTypes {
+                change_column_types: vec![ChangeColumnType {
+                    column_name: column_name.value.to_string(),
+                    target_type: target_type as i32,
+                    target_type_extension,
+                }],
+            })
+        }
         AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
             drop_columns: vec![DropColumn {
                 name: name.value.to_string(),
@@ -708,5 +727,40 @@ mod tests {
             matches!(constraint, ColumnDefaultConstraint::Value(Value::Timestamp(ts))
                          if ts.to_iso8601_string() == "2024-01-29 16:01:01+0000")
         );
+    }
+
+    #[test]
+    fn test_to_alter_change_column_type_expr() {
+        let sql = "ALTER TABLE monitor MODIFY mem_usage STRING;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::Alter(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        // query context with system timezone UTC.
+        let expr = to_alter_expr(alter_table.clone(), QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let Kind::ChangeColumnTypes(ChangeColumnTypes {
+            change_column_types,
+        }) = kind
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(1, change_column_types.len());
+        let change_column_type = &change_column_types[0];
+
+        assert_eq!("mem_usage", change_column_type.column_name);
+        assert_eq!(
+            ColumnDataType::String as i32,
+            change_column_type.target_type
+        );
+        assert!(change_column_type.target_type_extension.is_none());
     }
 }

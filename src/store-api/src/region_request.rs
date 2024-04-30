@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt::{self};
+use std::fmt;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{
     alter_request, region_request, AlterRequest, AlterRequests, CloseRequest, CompactRequest,
@@ -457,12 +458,17 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .collect::<Result<Vec<_>>>()?;
                 AlterKind::AddColumns { columns }
             }
+            alter_request::Kind::ChangeColumnTypes(x) => {
+                let columns = x
+                    .change_column_types
+                    .into_iter()
+                    .map(|x| x.into())
+                    .collect::<Vec<_>>();
+                AlterKind::ChangeColumnTypes { columns }
+            }
             alter_request::Kind::DropColumns(x) => {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
-            }
-            alter_request::Kind::ChangeColumnTypes(_) => {
-                unimplemented!()
             }
         };
 
@@ -612,6 +618,21 @@ impl ChangeColumnType {
     pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
         debug_assert!(self.validate(metadata).is_ok());
         metadata.column_by_name(&self.column_name).is_some()
+    }
+}
+
+impl From<v1::ChangeColumnType> for ChangeColumnType {
+    fn from(change_column_type: v1::ChangeColumnType) -> Self {
+        let target_type = ColumnDataTypeWrapper::new(
+            change_column_type.target_type(),
+            change_column_type.target_type_extension,
+        )
+        .into();
+
+        ChangeColumnType {
+            column_name: change_column_type.column_name,
+            target_type,
+        }
     }
 }
 
