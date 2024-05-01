@@ -38,12 +38,19 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
-      - uses: crate-ci/typos@v1.13.10
+      - uses: crate-ci/typos@master
       - name: Check the config docs
         run: |
           make config-docs && \
           git diff --name-only --exit-code ./config/config.md  \
           || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
+
+  license-header-check:
+    runs-on: ubuntu-20.04
+    name: Check License Header
+    steps:
+      - uses: actions/checkout@v4
+      - uses: korandoru/hawkeye@v5
 
   check:
     name: Check
@@ -130,7 +137,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert" ]
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3

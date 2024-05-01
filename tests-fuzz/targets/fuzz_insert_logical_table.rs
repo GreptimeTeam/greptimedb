@@ -29,14 +29,16 @@ use tests_fuzz::fake::{
     merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
     MappedGenerator, WordGenerator,
 };
-use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
+use tests_fuzz::generator::create_expr::{
+    CreateLogicalTableExprGeneratorBuilder, CreatePhysicalTableExprGeneratorBuilder,
+};
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{CreateTableExpr, InsertIntoExpr};
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{init_greptime_connections, Connections};
 
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -51,7 +53,6 @@ impl FuzzContext {
 #[derive(Copy, Clone, Debug)]
 struct FuzzInput {
     seed: u64,
-    columns: usize,
     rows: usize,
 }
 
@@ -59,30 +60,42 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let columns = rng.gen_range(2..30);
         let rows = rng.gen_range(1..4096);
-        Ok(FuzzInput {
-            columns,
-            rows,
-            seed,
-        })
+        Ok(FuzzInput { rows, seed })
     }
 }
 
-fn generate_create_expr<R: Rng + 'static>(
-    input: FuzzInput,
-    rng: &mut R,
-) -> Result<CreateTableExpr> {
-    let create_table_generator = CreateTableExprGeneratorBuilder::default()
+fn generate_create_physical_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
+    let physical_table_if_not_exists = rng.gen_bool(0.5);
+    let create_physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
-        .columns(input.columns)
-        .engine("mito")
+        .if_not_exists(physical_table_if_not_exists)
         .build()
         .unwrap();
-    create_table_generator.generate(rng)
+    create_physical_table_expr.generate(rng)
+}
+
+fn generate_create_logical_table_expr<R: Rng + 'static>(
+    physical_table_ctx: TableContextRef,
+    rng: &mut R,
+) -> Result<CreateTableExpr> {
+    let labels = rng.gen_range(1..=5);
+    let logical_table_if_not_exists = rng.gen_bool(0.5);
+
+    let create_logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
+        .name_generator(Box::new(MappedGenerator::new(
+            WordGenerator,
+            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+        )))
+        .physical_table_ctx(physical_table_ctx)
+        .labels(labels)
+        .if_not_exists(logical_table_if_not_exists)
+        .build()
+        .unwrap();
+    create_logical_table_expr.generate(rng)
 }
 
 fn generate_insert_expr<R: Rng + 'static>(
@@ -90,11 +103,9 @@ fn generate_insert_expr<R: Rng + 'static>(
     rng: &mut R,
     table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
-    let omit_column_list = rng.gen_bool(0.2);
-
     let insert_generator = InsertExprGeneratorBuilder::default()
+        .omit_column_list(false)
         .table_ctx(table_ctx)
-        .omit_column_list(omit_column_list)
         .rows(input.rows)
         .build()
         .unwrap();
@@ -105,16 +116,30 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
 
-    let create_expr = generate_create_expr(input, &mut rng)?;
+    // Create a physical table and a logical table on top of it
+    let create_physical_table_expr = generate_create_physical_table_expr(&mut rng).unwrap();
     let translator = CreateTableExprTranslator;
-    let sql = translator.translate(&create_expr)?;
-    let _result = sqlx::query(&sql)
+    let sql = translator.translate(&create_physical_table_expr)?;
+    let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!("Create physical table: {sql}, result: {result:?}");
 
-    let table_ctx = Arc::new(TableContext::from(&create_expr));
-    let insert_expr = generate_insert_expr(input, &mut rng, table_ctx)?;
+    let physical_table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
+
+    let create_logical_table_expr =
+        generate_create_logical_table_expr(physical_table_ctx, &mut rng).unwrap();
+    let sql = translator.translate(&create_logical_table_expr)?;
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!("Create logical table: {sql}, result: {result:?}");
+
+    let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
+
+    let insert_expr = generate_insert_expr(input, &mut rng, logical_table_ctx)?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
     let result = ctx
@@ -137,15 +162,26 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     // TODO: Validate inserted rows
 
-    // Cleans up
-    let sql = format!("DROP TABLE {}", create_expr.table_name);
+    // Clean up logical table
+    let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!(
+        "Drop table: {}, result: {result:?}",
+        create_logical_table_expr.table_name
+    );
+
+    // Clean up physical table
+    let sql = format!("DROP TABLE {}", create_physical_table_expr.table_name);
     let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
     info!(
-        "Drop table: {}\n\nResult: {result:?}\n\n",
-        create_expr.table_name
+        "Drop table: {}, result: {result:?}",
+        create_physical_table_expr.table_name
     );
     ctx.close().await;
 
@@ -155,7 +191,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 fuzz_target!(|input: FuzzInput| {
     common_telemetry::init_default_ut_logging();
     common_runtime::block_on_write(async {
-        let Connections { mysql } = init_greptime_connections_via_env().await;
+        let Connections { mysql } = init_greptime_connections().await;
         let ctx = FuzzContext {
             greptime: mysql.expect("mysql connection init must be succeed"),
         };
