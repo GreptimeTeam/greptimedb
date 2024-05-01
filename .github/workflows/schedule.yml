@@ -3,7 +3,6 @@ on:
   schedule:
     - cron: '4 2 * * *'
   workflow_dispatch:
-  push:
 
 permissions:
   contents: read
@@ -19,11 +18,11 @@ jobs:
       - uses: pnpm/action-setup@v3
         with:
           package_json_file: 'cyborg/package.json'
-      - name: Maintenance
-        shell: bash
+      - name: Install Dependencies
         working-directory: cyborg
-        run: |
-          pnpm install
-          pnpm exec ts-node bin/schedule.ts
+        run: pnpm install
+      - name: Do Maintenance
+        working-directory: cyborg
+        run: pnpm exec ts-node bin/schedule.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
