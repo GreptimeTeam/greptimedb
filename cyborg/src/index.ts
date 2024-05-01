@@ -9,6 +9,6 @@ export function handleError(err: any): void {
 }
 
 export function obtainClient(): InstanceType<typeof GitHub> {
-    const env = config().parsed
-    return getOctokit(env["GITHUB_TOKEN"])
+    config()
+    return getOctokit(process.env["GITHUB_TOKEN"])
 }
