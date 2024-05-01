@@ -231,7 +231,7 @@ impl FileCache {
     /// Get the parquet metadata in file cache.
     /// If the file is not in the cache or fail to load metadata, return None.
     pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
-        // Check if file cache contrains the key
+        // Check if file cache contains the key
         if let Some(index_value) = self.memory_index.get(&key).await {
             // Load metadata from file cache
             let local_store = self.local_store();

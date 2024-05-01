@@ -398,7 +398,7 @@ impl HashedData {
             }
         }
 
-        // Finilize the hash map
+        // Finalize the hash map
         let batch = interleave_batches(schema, batches, interleave_indices)?;
 
         Ok(Self {
