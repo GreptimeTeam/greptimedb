@@ -139,13 +139,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to request database, sql: {sql}"))]
-    RequestDatabase {
-        sql: String,
-        location: Location,
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to collect RecordBatches"))]
     CollectRecordBatches {
         location: Location,
@@ -215,6 +208,14 @@ pub enum Error {
     SerdeJson {
         #[snafu(source)]
         error: serde_json::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to run http request: {reason}"))]
+    HttpQuerySql {
+        reason: String,
+        #[snafu(source)]
+        error: reqwest::Error,
         location: Location,
     },
 
@@ -290,8 +291,9 @@ impl ErrorExt for Error {
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
-            Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
-            Error::RequestDatabase { source, .. } => source.status_code(),
+            Error::ReplCreation { .. } | Error::Readline { .. } | Error::HttpQuerySql { .. } => {
+                StatusCode::Internal
+            }
             Error::CollectRecordBatches { source, .. }
             | Error::PrettyPrintRecordBatches { source, .. } => source.status_code(),
             Error::StartMetaClient { source, .. } => source.status_code(),

@@ -22,7 +22,7 @@ mod helper;
 
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
 #[allow(unused)]
-mod repl;
+// mod repl;
 // TODO(weny): Removes it
 #[allow(deprecated)]
 mod upgrade;
@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
 use clap::Parser;
 use common_telemetry::logging::LoggingOptions;
-pub use repl::Repl;
+// pub use repl::Repl;
 use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;

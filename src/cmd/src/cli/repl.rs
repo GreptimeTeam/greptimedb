@@ -19,7 +19,7 @@ use std::time::Instant;
 use catalog::kvbackend::{
     CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager,
 };
-use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
