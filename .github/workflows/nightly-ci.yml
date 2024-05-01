@@ -1,5 +1,3 @@
-# Nightly CI: runs tests every night for our second tier plaforms (Windows)
-
 on:
   schedule:
     - cron: '0 23 * * 1-5'
@@ -15,13 +13,29 @@ env:
   RUST_TOOLCHAIN: nightly-2024-04-18
 
 jobs:
-  sqlness:
-    name: Sqlness Test
+  sqlness-test:
+    name: Run sqlness test
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ windows-latest-8-cores ]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run sqlness test
+        uses: ./.github/actions/sqlness-test
+        with:
+          data-root: sqlness-test
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+
+  sqlness-windows:
+    name: Sqlness tests on Windows
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: windows-latest-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +66,7 @@ jobs:
           retention-days: 3
 
   test-on-windows:
+    name: Run tests on Windows
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: windows-latest-8-cores
     timeout-minutes: 60

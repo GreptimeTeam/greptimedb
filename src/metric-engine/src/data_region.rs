@@ -91,7 +91,7 @@ impl DataRegion {
         Ok(())
     }
 
-    /// Generate warpped [RegionAlterRequest] with given [ColumnMetadata].
+    /// Generate wrapped [RegionAlterRequest] with given [ColumnMetadata].
     /// This method will modify `columns` in-place.
     async fn assemble_alter_request(
         &self,
