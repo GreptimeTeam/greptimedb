@@ -16,7 +16,7 @@ inputs:
   dev-mode:
     description: Enable dev mode, only build standard greptime
     required: false
-    default: 'false'
+    default: "false"
   working-dir:
     description: Working directory to build the artifacts
     required: false
@@ -68,7 +68,7 @@ runs:
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build centos7 base image for amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds greptime for centos if the host machine is amd64.
       with:
         base-image: centos
         features: servers/dashboard
@@ -79,7 +79,7 @@ runs:
 
     - name: Build greptime on android base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build android base image on amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds arm64 greptime binary for android if the host machine amd64.
       with:
         base-image: android
         artifacts-dir: greptime-android-arm64-${{ inputs.version }}

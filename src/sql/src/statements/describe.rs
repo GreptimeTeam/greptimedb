@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -29,6 +31,13 @@ impl DescribeTable {
 
     pub fn name(&self) -> &ObjectName {
         &self.name
+    }
+}
+
+impl Display for DescribeTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = self.name();
+        write!(f, r#"DESCRIBE TABLE {name}"#)
     }
 }
 
@@ -107,5 +116,29 @@ mod tests {
             ParseOptions::default()
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_display_describe_table() {
+        let sql = r"describe table monitor;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DescribeTable { .. });
+
+        match &stmts[0] {
+            Statement::DescribeTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DESCRIBE TABLE monitor"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
     }
 }

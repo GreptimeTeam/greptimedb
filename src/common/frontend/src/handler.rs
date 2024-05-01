@@ -12,18 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::ControlFlow;
+use api::v1::{RowDeleteRequests, RowInsertRequests};
+use async_trait::async_trait;
+use common_query::Output;
+use session::context::QueryContextRef;
 
-use sqlparser::ast::{Visit, Visitor};
+use crate::error::Result;
 
-use crate::statements::OptionMap;
+/// [FrontendInvoker] provides the ability to:
+/// - Insert rows
+/// - Delete rows
+#[async_trait]
+pub trait FrontendInvoker {
+    async fn row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output>;
 
-impl Visit for OptionMap {
-    fn visit<V: Visitor>(&self, visitor: &mut V) -> ControlFlow<V::Break> {
-        for (k, v) in &self.map {
-            k.visit(visitor)?;
-            v.visit(visitor)?;
-        }
-        ControlFlow::Continue(())
-    }
+    async fn row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output>;
 }

@@ -14,7 +14,7 @@
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
-use common_grpc::writer::Precision;
+use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
@@ -132,7 +132,7 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         (span.end_in_nanosecond - span.start_in_nanosecond) as f64 / 1_000_000.0, // duration in millisecond
         &mut row,
     )?;
-    row_writer::write_ts_precision(
+    row_writer::write_ts_to_nanos(
         writer,
         GREPTIME_TIMESTAMP,
         Some(span.start_in_nanosecond as i64),

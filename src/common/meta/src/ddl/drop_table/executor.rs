@@ -175,7 +175,7 @@ impl DropTableExecutor {
         let table_id = self.table_id;
 
         for datanode in leaders {
-            let requester = ctx.datanode_manager.datanode(&datanode).await;
+            let requester = ctx.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -271,8 +271,8 @@ mod tests {
     #[tokio::test]
     async fn test_on_prepare() {
         // Drops if exists
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ctx = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ctx = new_ddl_context(node_manager);
         let executor = DropTableExecutor::new(
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,

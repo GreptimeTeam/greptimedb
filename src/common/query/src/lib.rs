@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 use api::greptime_proto::v1::add_column_location::LocationType;
@@ -119,11 +119,23 @@ impl OutputMeta {
 }
 
 pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;
+pub type DfPhysicalPlanRef = Arc<dyn DfPhysicalPlan>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 pub enum AddColumnLocation {
     First,
     After { column_name: String },
+}
+
+impl Display for AddColumnLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AddColumnLocation::First => write!(f, r#"FIRST"#),
+            AddColumnLocation::After { column_name } => {
+                write!(f, r#"AFTER {column_name}"#)
+            }
+        }
+    }
 }
 
 impl From<&AddColumnLocation> for Location {

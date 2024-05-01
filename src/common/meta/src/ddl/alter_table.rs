@@ -105,7 +105,7 @@ impl AlterTableProcedure {
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let requester = self.context.datanode_manager.datanode(&datanode).await;
+            let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
 
             for region in regions {

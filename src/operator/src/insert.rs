@@ -25,7 +25,7 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
-use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
@@ -57,7 +57,7 @@ use crate::statement::StatementExecutor;
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    node_manager: NodeManagerRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -66,12 +66,12 @@ impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        node_manager: NodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
-            datanode_manager,
+            node_manager,
         }
     }
 
@@ -205,9 +205,9 @@ impl Inserter {
             .into_iter()
             .map(|(peer, inserts)| {
                 let request = request_factory.build_insert(inserts);
-                let datanode_manager = self.datanode_manager.clone();
+                let node_manager = self.node_manager.clone();
                 common_runtime::spawn_write(async move {
-                    datanode_manager
+                    node_manager
                         .datanode(&peer)
                         .await
                         .handle(request)

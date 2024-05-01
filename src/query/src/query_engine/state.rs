@@ -30,6 +30,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -42,7 +43,9 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
+use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::order_hint::OrderHintRule;
+use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -87,18 +90,30 @@ impl QueryEngineState {
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply extension rules
         let mut extension_rules = Vec::new();
+
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
+
+        // Use our custom rule instead to optimize the count(*) query
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
-        analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
+        analyzer
+            .rules
+            .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
+
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
+
+        // add physical optimizer
+        let mut physical_optimizer = PhysicalOptimizer::new();
+        physical_optimizer.rules.push(Arc::new(RemoveDuplicate));
 
         let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
             .with_serializer_registry(Arc::new(ExtensionSerializer))
@@ -107,7 +122,8 @@ impl QueryEngineState {
                 catalog_list.clone(),
                 region_query_handler,
             )))
-            .with_optimizer_rules(optimizer.rules);
+            .with_optimizer_rules(optimizer.rules)
+            .with_physical_optimizer_rules(physical_optimizer.rules);
 
         let df_context = SessionContext::new_with_state(session_state);
 

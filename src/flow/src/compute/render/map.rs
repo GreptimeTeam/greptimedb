@@ -124,7 +124,6 @@ fn mfp_subgraph(
     // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
     // 2. Output the updates.
     // 3. Truncate all updates within that range.
-
     let from = arrange.read().last_compaction_time().map(|n| n + 1);
     let from = from.unwrap_or(repr::Timestamp::MIN);
     let output_kv = arrange.read().get_updates_in_range(from..=now);
@@ -135,7 +134,7 @@ fn mfp_subgraph(
         .collect_vec();
     send.give(output);
     let run_compaction = || {
-        arrange.write().compaction_to(now)?;
+        arrange.write().compact_to(now)?;
         Ok(())
     };
     err_collector.run(run_compaction);

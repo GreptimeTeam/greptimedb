@@ -36,15 +36,53 @@
 //!     - The value is a [TableNameValue] struct; it contains the table id.
 //!     - Used in the table name to table id lookup.
 //!
+//! 6. Flow info key: `__flow/info/{flow_id}`
+//!     - Stores metadata of the flow.
+//!
+//! 7. Flow name key: `__flow/name/{catalog}/{flow_name}`
+//!     - Mapping {catalog}/{flow_name} to {flow_id}
+//!
+//! 8. Flownode flow key: `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
+//!     - Mapping {flownode_id} to {flow_id}
+//!
+//! 9. Table flow key: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
+//!     - Mapping source table's {table_id} to {flownode_id}
+//!     - Used in `Flownode` booting.
+//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
-//! To simplify the managers used in struct fields and function parameters, we define a "unify"
-//! table metadata manager: [TableMetadataManager]. It contains all the managers defined above.
-//! It's recommended to just use this manager only.
+//! To simplify the managers used in struct fields and function parameters, we define "unify"
+//! table metadata manager: [TableMetadataManager]
+//! and flow metadata manager: [FlowMetadataManager](crate::key::flow::FlowMetadataManager).
+//! It contains all the managers defined above. It's recommended to just use this manager only.
+//!
+//! The whole picture of flow keys will be like this:
+//!
+//! __flow/
+//!   info/
+//!     {flow_id}
+//!
+//!    name/
+//!      {catalog_name}
+//!        {flow_name}
+//!
+//!    flownode/
+//!      {flownode_id}/
+//!        {flow_id}/
+//!          {partition_id}
+//!
+//!    source_table/
+//!      {table_id}/
+//!        {flownode_id}/
+//!          {flow_id}/
+//!            {partition_id}
 
 pub mod catalog_name;
 pub mod datanode_table;
+/// TODO(weny):removes id.
+#[allow(unused)]
+pub mod flow;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
@@ -56,10 +94,8 @@ pub mod table_region;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
-// TODO(weny): remove it.
-#[allow(dead_code)]
 mod tombstone;
-mod txn_helper;
+pub(crate) mod txn_helper;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
@@ -84,6 +120,8 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::datanode_table::RegionInfo;
+use self::flow::flow_info::FlowInfoValue;
+use self::flow::flow_name::FlowNameValue;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
@@ -103,7 +141,6 @@ pub const MAINTENANCE_KEY: &str = "maintenance";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
-
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
@@ -119,9 +156,24 @@ pub const CACHE_KEY_PREFIXES: [&str; 4] = [
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
+/// The id of flow.
+pub type FlowId = u32;
+/// The partition of flow.
+pub type FlowPartitionId = u32;
+
+lazy_static! {
+    static ref TABLE_INFO_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{TABLE_INFO_KEY_PREFIX}/([0-9]+)$")).unwrap();
+}
+
+lazy_static! {
+    static ref TABLE_ROUTE_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{TABLE_ROUTE_PREFIX}/([0-9]+)$")).unwrap();
+}
+
 lazy_static! {
     static ref DATANODE_TABLE_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9])/([0-9])$")).unwrap();
+        Regex::new(&format!("^{DATANODE_TABLE_KEY_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
 }
 
 lazy_static! {
@@ -147,8 +199,30 @@ lazy_static! {
     .unwrap();
 }
 
-pub trait TableMetaKey {
-    fn as_raw_key(&self) -> Vec<u8>;
+/// The key of metadata.
+pub trait MetaKey<'a, T> {
+    fn to_bytes(&self) -> Vec<u8>;
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<T>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BytesAdapter(Vec<u8>);
+
+impl From<Vec<u8>> for BytesAdapter {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl<'a> MetaKey<'a, BytesAdapter> for BytesAdapter {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<BytesAdapter> {
+        Ok(BytesAdapter(bytes.to_vec()))
+    }
 }
 
 pub(crate) trait TableMetaKeyGetTxnOp {
@@ -158,24 +232,6 @@ pub(crate) trait TableMetaKeyGetTxnOp {
         TxnOp,
         impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
     );
-}
-
-impl TableMetaKey for String {
-    fn as_raw_key(&self) -> Vec<u8> {
-        self.as_bytes().to_vec()
-    }
-}
-
-impl TableMetaKeyGetTxnOp for String {
-    fn build_get_op(
-        &self,
-    ) -> (
-        TxnOp,
-        impl for<'a> FnMut(&'a mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
-    ) {
-        let key = self.as_raw_key();
-        (TxnOp::Get(key.clone()), TxnOpGetResponseSet::filter(key))
-    }
 }
 
 pub trait TableMetaValue {
@@ -199,6 +255,7 @@ pub struct TableMetadataManager {
     kv_backend: KvBackendRef,
 }
 
+#[macro_export]
 macro_rules! ensure_values {
     ($got:expr, $expected_value:expr, $name:expr) => {
         ensure!(
@@ -606,11 +663,11 @@ impl TableMetadataManager {
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<HashSet<_>>();
 
-        keys.push(table_name.as_raw_key());
-        keys.push(table_info_key.as_raw_key());
-        keys.push(table_route_key.as_raw_key());
+        keys.push(table_name.to_bytes());
+        keys.push(table_info_key.to_bytes());
+        keys.push(table_route_key.to_bytes());
         for key in &datanode_table_keys {
-            keys.push(key.as_raw_key());
+            keys.push(key.to_bytes());
         }
         Ok(keys)
     }
@@ -924,21 +981,6 @@ impl TableMetadataManager {
 }
 
 #[macro_export]
-macro_rules! impl_table_meta_key {
-    ($($val_ty: ty), *) => {
-        $(
-            impl std::fmt::Display for $val_ty {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    write!(f, "{}", String::from_utf8_lossy(&self.as_raw_key()))
-                }
-            }
-        )*
-    }
-}
-
-impl_table_meta_key!(TableNameKey<'_>, TableInfoKey, DatanodeTableKey);
-
-#[macro_export]
 macro_rules! impl_table_meta_value {
     ($($val_ty: ty), *) => {
         $(
@@ -955,7 +997,7 @@ macro_rules! impl_table_meta_value {
     }
 }
 
-macro_rules! impl_table_meta_key_get_txn_op {
+macro_rules! impl_meta_key_get_txn_op {
     ($($key: ty), *) => {
         $(
             impl $crate::key::TableMetaKeyGetTxnOp for $key {
@@ -969,7 +1011,7 @@ macro_rules! impl_table_meta_key_get_txn_op {
                         &'a mut TxnOpGetResponseSet,
                     ) -> Option<Vec<u8>>,
                 ) {
-                    let raw_key = self.as_raw_key();
+                    let raw_key = self.to_bytes();
                     (
                         TxnOp::Get(raw_key.clone()),
                         TxnOpGetResponseSet::filter(raw_key),
@@ -980,7 +1022,7 @@ macro_rules! impl_table_meta_key_get_txn_op {
     }
 }
 
-impl_table_meta_key_get_txn_op! {
+impl_meta_key_get_txn_op! {
     TableNameKey<'_>,
     TableInfoKey,
     TableRouteKey,
@@ -1007,7 +1049,9 @@ macro_rules! impl_optional_meta_value {
 impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
-    DatanodeTableValue
+    DatanodeTableValue,
+    FlowInfoValue,
+    FlowNameValue
 }
 
 impl_optional_meta_value! {

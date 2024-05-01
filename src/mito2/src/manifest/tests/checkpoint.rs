@@ -152,7 +152,7 @@ async fn manager_with_checkpoint_distance_1() {
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager
-    manager.stop().await.unwrap();
+    manager.stop().await;
     let manager = reopen_manager(&env, 1, CompressionType::Uncompressed).await;
     assert_eq!(10, manager.manifest().manifest_version);
 }

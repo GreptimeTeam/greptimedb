@@ -50,7 +50,6 @@ prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
 reqwest.workspace = true
-secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
 servers.workspace = true
 session.workspace = true

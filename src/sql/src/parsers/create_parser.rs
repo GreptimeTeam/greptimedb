@@ -28,18 +28,23 @@ use table::requests::validate_table_option;
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu,
-    MissingTimeIndexSnafu, Result, SyntaxSnafu,
+    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateTable, CreateTableLike, Partitions, TIME_INDEX,
+    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
+    TIME_INDEX,
 };
-use crate::statements::get_data_type_by_alias_name;
 use crate::statements::statement::Statement;
+use crate::statements::{get_data_type_by_alias_name, OptionMap};
 use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
+pub const FLOW: &str = "FLOW";
+pub const SINK: &str = "SINK";
+pub const EXPIRE: &str = "EXPIRE";
+pub const WHEN: &str = "WHEN";
 
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
@@ -52,6 +57,35 @@ impl<'a> ParserContext<'a> {
 
                 Keyword::EXTERNAL => self.parse_create_external_table(),
 
+                Keyword::OR => {
+                    let _ = self.parser.next_token();
+                    self.parser
+                        .expect_keyword(Keyword::REPLACE)
+                        .context(SyntaxSnafu)?;
+                    match self.parser.next_token().token {
+                        Token::Word(w) => match w.keyword {
+                            Keyword::NoKeyword => {
+                                let uppercase = w.value.to_uppercase();
+                                match uppercase.as_str() {
+                                    FLOW => self.parse_create_flow(true),
+                                    _ => self.unsupported(w.to_string()),
+                                }
+                            }
+                            _ => self.unsupported(w.to_string()),
+                        },
+                        _ => self.unsupported(w.to_string()),
+                    }
+                }
+
+                Keyword::NoKeyword => {
+                    let _ = self.parser.next_token();
+                    let uppercase = w.value.to_uppercase();
+                    match uppercase.as_str() {
+                        FLOW => self.parse_create_flow(false),
+                        _ => self.unsupported(w.to_string()),
+                    }
+                }
+
                 _ => self.unsupported(w.to_string()),
             },
             unexpected => self.unsupported(unexpected.to_string()),
@@ -63,9 +97,7 @@ impl<'a> ParserContext<'a> {
         self.parser
             .expect_keyword(Keyword::TABLE)
             .context(SyntaxSnafu)?;
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+        let if_not_exists = self.parse_if_not_exist()?;
         let table_name = self.intern_parse_table_name()?;
         let (columns, constraints) = self.parse_columns()?;
         if !columns.is_empty() {
@@ -73,32 +105,12 @@ impl<'a> ParserContext<'a> {
         }
 
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
-        let options = self
-            .parser
-            .parse_options(Keyword::WITH)
-            .context(SyntaxSnafu)?
-            .into_iter()
-            .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_lowercase(), v))
-                } else {
-                    None
-                }
-            })
-            .collect::<HashMap<String, String>>();
-        for key in options.keys() {
-            ensure!(
-                validate_table_option(key),
-                InvalidTableOptionSnafu {
-                    key: key.to_string()
-                }
-            );
-        }
+        let options = self.parse_create_table_options()?;
         Ok(Statement::CreateExternalTable(CreateExternalTable {
             name: table_name,
             columns,
             constraints,
-            options: options.into(),
+            options,
             if_not_exists,
             engine,
         }))
@@ -106,11 +118,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_create_database(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-
+        let if_not_exists = self.parse_if_not_exist()?;
         let database_name = self.parse_object_name().context(error::UnexpectedSnafu {
             sql: self.sql,
             expected: "a database name",
@@ -125,9 +133,8 @@ impl<'a> ParserContext<'a> {
 
     fn parse_create_table(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-        let if_not_exists =
-            self.parser
-                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+
+        let if_not_exists = self.parse_if_not_exist()?;
 
         let table_name = self.intern_parse_table_name()?;
 
@@ -149,20 +156,7 @@ impl<'a> ParserContext<'a> {
         }
 
         let engine = self.parse_table_engine(default_engine())?;
-        let options = self
-            .parser
-            .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu)?;
-        for option in options.iter() {
-            ensure!(
-                validate_table_option(&option.name.value),
-                InvalidTableOptionSnafu {
-                    key: option.name.value.to_string()
-                }
-            );
-        }
-        // Sorts options so that `test_display_create_table` can always pass.
-        let options = options.into_iter().sorted().collect();
+        let options = self.parse_create_table_options()?;
         let create_table = CreateTable {
             if_not_exists,
             name: table_name,
@@ -177,8 +171,113 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::CreateTable(create_table))
     }
 
-    /// "PARTITION BY ..." syntax:
-    // TODO(ruihang): docs
+    /// "CREATE FLOW" clause
+    fn parse_create_flow(&mut self, or_replace: bool) -> Result<Statement> {
+        let if_not_exists = self.parse_if_not_exist()?;
+
+        let flow_name = self.intern_parse_table_name()?;
+
+        self.parser
+            .expect_token(&Token::make_keyword(SINK))
+            .context(SyntaxSnafu)?;
+        self.parser
+            .expect_keyword(Keyword::TO)
+            .context(SyntaxSnafu)?;
+
+        let output_table_name = self.intern_parse_table_name()?;
+
+        let expire_when = if self
+            .parser
+            .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(WHEN)])
+        {
+            Some(self.parser.parse_expr().context(error::SyntaxSnafu)?)
+        } else {
+            None
+        };
+
+        let comment = if self.parser.parse_keyword(Keyword::COMMENT) {
+            match self.parser.next_token() {
+                TokenWithLocation {
+                    token: Token::SingleQuotedString(value, ..),
+                    ..
+                } => Some(value),
+                unexpected => {
+                    return self
+                        .parser
+                        .expected("string", unexpected)
+                        .context(SyntaxSnafu)
+                }
+            }
+        } else {
+            None
+        };
+
+        self.parser
+            .expect_keyword(Keyword::AS)
+            .context(SyntaxSnafu)?;
+
+        let query = Box::new(self.parser.parse_query().context(error::SyntaxSnafu)?);
+
+        Ok(Statement::CreateFlow(CreateFlow {
+            flow_name,
+            sink_table_name: output_table_name,
+            or_replace,
+            if_not_exists,
+            expire_when,
+            comment,
+            query,
+        }))
+    }
+
+    fn parse_if_not_exist(&mut self) -> Result<bool> {
+        match self.parser.peek_token().token {
+            Token::Word(w) if Keyword::IF != w.keyword => return Ok(false),
+            _ => {}
+        }
+
+        if self.parser.parse_keywords(&[Keyword::IF, Keyword::NOT]) {
+            return self
+                .parser
+                .expect_keyword(Keyword::EXISTS)
+                .map(|_| true)
+                .context(UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "EXISTS",
+                    actual: self.peek_token_as_string(),
+                });
+        }
+
+        if self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]) {
+            return UnsupportedSnafu {
+                sql: self.sql,
+                keyword: "EXISTS",
+            }
+            .fail();
+        }
+
+        Ok(false)
+    }
+
+    fn parse_create_table_options(&mut self) -> Result<OptionMap> {
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
+        for key in options.keys() {
+            ensure!(
+                validate_table_option(key),
+                InvalidTableOptionSnafu {
+                    key: key.to_string()
+                }
+            );
+        }
+        Ok(options.into())
+    }
+
+    /// "PARTITION BY ..." clause
     fn parse_partitions(&mut self) -> Result<Option<Partitions>> {
         if !self.parser.parse_keyword(Keyword::PARTITION) {
             return Ok(None);
@@ -729,7 +828,7 @@ mod tests {
     use common_catalog::consts::FILE_ENGINE;
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
-    use sqlparser::ast::{BinaryOperator, ObjectName, Value};
+    use sqlparser::ast::{BinaryOperator, Expr, Function, Interval, ObjectName, Value};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -935,6 +1034,97 @@ mod tests {
                 false
             ))
         );
+    }
+
+    #[test]
+    fn test_parse_create_flow() {
+        let sql = r"
+CREATE OR REPLACE FLOW IF NOT EXISTS task_1
+SINK TO schema_1.table_1
+EXPIRE WHEN timestamp < now() - INTERVAL '5m'
+COMMENT 'test comment'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        let create_task = match &stmts[0] {
+            Statement::CreateFlow(c) => c,
+            _ => unreachable!(),
+        };
+
+        let expected = CreateFlow {
+            flow_name: ObjectName(vec![Ident {
+                value: "task_1".to_string(),
+                quote_style: None,
+            }]),
+            sink_table_name: ObjectName(vec![
+                Ident {
+                    value: "schema_1".to_string(),
+                    quote_style: None,
+                },
+                Ident {
+                    value: "table_1".to_string(),
+                    quote_style: None,
+                },
+            ]),
+            or_replace: true,
+            if_not_exists: true,
+            expire_when: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident {
+                    value: "timestamp".to_string(),
+                    quote_style: None,
+                })),
+                op: BinaryOperator::Lt,
+                right: Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Function(Function {
+                        name: ObjectName(vec![Ident {
+                            value: "now".to_string(),
+                            quote_style: None,
+                        }]),
+                        args: vec![],
+                        filter: None,
+                        null_treatment: None,
+                        over: None,
+                        distinct: false,
+                        special: false,
+                        order_by: vec![],
+                    })),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(Expr::Interval(Interval {
+                        value: Box::new(Expr::Value(Value::SingleQuotedString("5m".to_string()))),
+                        leading_field: None,
+                        leading_precision: None,
+                        last_field: None,
+                        fractional_seconds_precision: None,
+                    })),
+                }),
+            }),
+            comment: Some("test comment".to_string()),
+            // ignore query parse result
+            query: create_task.query.clone(),
+        };
+        assert_eq!(create_task, &expected);
+
+        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE WHEN` and `COMMENT`
+        let sql = r"
+CREATE FLOW task_2
+SINK TO schema_1.table_1
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        let create_task = match &stmts[0] {
+            Statement::CreateFlow(c) => c,
+            _ => unreachable!(),
+        };
+        assert!(!create_task.or_replace);
+        assert!(!create_task.if_not_exists);
+        assert!(create_task.expire_when.is_none());
+        assert!(create_task.comment.is_none());
     }
 
     #[test]
@@ -1415,7 +1605,7 @@ ENGINE=mito";
                              memory float64,
                              TIME INDEX (ts),
                              PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             with(ttl='10s');
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -1448,10 +1638,11 @@ ENGINE=mito";
                         ..
                     }
                 );
-                let options = &c.options;
-                assert_eq!(1, options.len());
-                assert_eq!("regions", &options[0].name.to_string());
-                assert_eq!("1", &options[0].value.to_string());
+                assert_eq!(1, c.options.len());
+                assert_eq!(
+                    [("ttl", "10s")].into_iter().collect::<HashMap<_, _>>(),
+                    c.options.to_str_map()
+                );
             }
             _ => unreachable!(),
         }
@@ -1465,8 +1656,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -1483,8 +1673,7 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -1498,8 +1687,7 @@ ENGINE=mito";
                              t timestamp,
                              memory float64,
                              TIME INDEX (t),
-                             PRIMARY KEY(ts, host)) engine=mito
-                             with(regions=1);
+                             PRIMARY KEY(ts, host)) engine=mito;
          ";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());

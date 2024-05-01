@@ -19,21 +19,21 @@ pub mod options;
 pub(crate) mod version;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use common_telemetry::info;
+use common_telemetry::{error, info, warn};
 use common_wal::options::WalOptions;
+use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
-use tokio::sync::RwLock as TokioRwLock;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::error::{RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result};
+use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
-use crate::memtable::{MemtableBuilderRef, MemtableId};
+use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
@@ -57,6 +57,23 @@ impl RegionUsage {
     }
 }
 
+/// State of the region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionState {
+    /// The region is opened but is still read-only.
+    ReadOnly,
+    /// The region is opened and is writable.
+    Writable,
+    /// The region is altering.
+    Altering,
+    /// The region is dropping.
+    Dropping,
+    /// The region is truncating.
+    Truncating,
+    /// The region is handling a region edit.
+    Editing,
+}
+
 /// Metadata and runtime status of a region.
 ///
 /// Writing and reading a region follow a single-writer-multi-reader rule:
@@ -71,19 +88,19 @@ pub(crate) struct MitoRegion {
     pub(crate) region_id: RegionId,
 
     /// Version controller for this region.
+    ///
+    /// We MUST update the version control inside the write lock of the region manifest manager.
     pub(crate) version_control: VersionControlRef,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
-    /// Manager to maintain manifest for this region.
-    pub(crate) manifest_manager: TokioRwLock<RegionManifestManager>,
+    /// Context to maintain manifest for this region.
+    pub(crate) manifest_ctx: ManifestContextRef,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
     /// Wal options of this region.
     pub(crate) wal_options: WalOptions,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
-    /// Whether the region is writable.
-    writable: AtomicBool,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
@@ -94,15 +111,18 @@ pub(crate) type MitoRegionRef = Arc<MitoRegion>;
 
 impl MitoRegion {
     /// Stop background managers for this region.
-    pub(crate) async fn stop(&self) -> Result<()> {
-        self.manifest_manager.write().await.stop().await?;
+    pub(crate) async fn stop(&self) {
+        self.manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .stop()
+            .await;
 
         info!(
             "Stopped region manifest manager, region_id: {}",
             self.region_id
         );
-
-        Ok(())
     }
 
     /// Returns current metadata of the region.
@@ -128,19 +148,73 @@ impl MitoRegion {
         self.last_flush_millis.store(now, Ordering::Relaxed);
     }
 
-    /// Returns whether the region is writable.
-    pub(crate) fn is_writable(&self) -> bool {
-        self.writable.load(Ordering::Relaxed)
-    }
-
     /// Returns the region dir.
     pub(crate) fn region_dir(&self) -> &str {
         self.access_layer.region_dir()
     }
 
-    /// Sets the writable flag.
+    /// Returns whether the region is writable.
+    pub(crate) fn is_writable(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionState::Writable
+    }
+
+    /// Returns the state of the region.
+    pub(crate) fn state(&self) -> RegionState {
+        self.manifest_ctx.state.load()
+    }
+
+    /// Sets the writable state.
     pub(crate) fn set_writable(&self, writable: bool) {
-        self.writable.store(writable, Ordering::Relaxed);
+        if writable {
+            // Only sets the region to writable if it is read only.
+            // This prevents others updating the manifest.
+            let _ = self
+                .manifest_ctx
+                .state
+                .compare_exchange(RegionState::ReadOnly, RegionState::Writable);
+        } else {
+            self.manifest_ctx.state.store(RegionState::ReadOnly);
+        }
+    }
+
+    /// Sets the altering state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_altering(&self) -> Result<()> {
+        self.compare_exchange_state(RegionState::Writable, RegionState::Altering)
+    }
+
+    /// Sets the dropping state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_dropping(&self) -> Result<()> {
+        self.compare_exchange_state(RegionState::Writable, RegionState::Dropping)
+    }
+
+    /// Sets the truncating state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_truncating(&self) -> Result<()> {
+        self.compare_exchange_state(RegionState::Writable, RegionState::Truncating)
+    }
+
+    /// Sets the editing state.
+    /// You should call this method in the worker loop.
+    pub(crate) fn set_editing(&self) -> Result<()> {
+        self.compare_exchange_state(RegionState::Writable, RegionState::Editing)
+    }
+
+    /// Sets the region to readonly gracefully. This acquires the manifest write lock.
+    pub(crate) async fn set_readonly_gracefully(&self) {
+        let _manager = self.manifest_ctx.manifest_manager.write().await;
+        // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
+        // Then we change the state.
+        self.set_writable(false);
+    }
+
+    /// Switches the region state to `RegionState::Writable` if the current state is `expect`.
+    /// Otherwise, logs an error.
+    pub(crate) fn switch_state_to_writable(&self, expect: RegionState) {
+        if let Err(e) = self.compare_exchange_state(expect, RegionState::Writable) {
+            error!(e; "failed to switch region state to writable, expect state is {:?}", expect);
+        }
     }
 
     /// Returns the region usage in bytes.
@@ -155,7 +229,12 @@ impl MitoRegion {
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
 
-        let manifest_usage = self.manifest_manager.read().await.manifest_usage();
+        let manifest_usage = self
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest_usage();
 
         RegionUsage {
             region_id,
@@ -171,27 +250,132 @@ impl MitoRegion {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
 
-    pub(crate) async fn apply_edit(
-        &self,
-        edit: RegionEdit,
-        memtables_to_remove: &[MemtableId],
-    ) -> Result<()> {
-        info!("Applying {edit:?} to region {}", self.region_id);
-
-        self.manifest_manager
-            .write()
-            .await
-            .update(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-                edit.clone(),
-            )))
-            .await?;
-
-        // Apply edit to region's version.
-        self.version_control
-            .apply_edit(edit, memtables_to_remove, self.file_purger.clone());
+    /// Sets the state of the region to given state if the current state equals to
+    /// the expected.
+    fn compare_exchange_state(&self, expect: RegionState, state: RegionState) -> Result<()> {
+        self.manifest_ctx
+            .state
+            .compare_exchange(expect, state)
+            .map_err(|actual| {
+                RegionStateSnafu {
+                    region_id: self.region_id,
+                    state: actual,
+                    expect,
+                }
+                .build()
+            })?;
         Ok(())
     }
 }
+
+/// Context to update the region manifest.
+#[derive(Debug)]
+pub(crate) struct ManifestContext {
+    /// Manager to maintain manifest for this region.
+    manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
+    /// The state of the region. The region checks the state before updating
+    /// manifest.
+    state: AtomicCell<RegionState>,
+}
+
+impl ManifestContext {
+    pub(crate) fn new(manager: RegionManifestManager, state: RegionState) -> Self {
+        ManifestContext {
+            manifest_manager: tokio::sync::RwLock::new(manager),
+            state: AtomicCell::new(state),
+        }
+    }
+
+    pub(crate) async fn has_update(&self) -> Result<bool> {
+        self.manifest_manager.read().await.has_update().await
+    }
+
+    /// Updates the manifest if current state is `expect_state` and executes
+    /// the `applier` if the manifest is updated.
+    pub(crate) async fn update_manifest(
+        &self,
+        expect_state: RegionState,
+        action_list: RegionMetaActionList,
+        applier: impl FnOnce(),
+    ) -> Result<()> {
+        // Acquires the write lock of the manifest manager.
+        let mut manager = self.manifest_manager.write().await;
+        // Gets current manifest.
+        let manifest = manager.manifest();
+        // Checks state inside the lock. This is to ensure that we won't update the manifest
+        // after `set_readonly_gracefully()` is called.
+        let current_state = self.state.load();
+        ensure!(
+            current_state == expect_state,
+            RegionStateSnafu {
+                region_id: manifest.metadata.region_id,
+                state: current_state,
+                expect: expect_state,
+            }
+        );
+
+        for action in &action_list.actions {
+            // Checks whether the edit is still applicable.
+            let RegionMetaAction::Edit(edit) = &action else {
+                continue;
+            };
+
+            // Checks whether the region is truncated.
+            let Some(truncated_entry_id) = manifest.truncated_entry_id else {
+                continue;
+            };
+
+            // This is an edit from flush.
+            if let Some(flushed_entry_id) = edit.flushed_entry_id {
+                ensure!(
+                    truncated_entry_id < flushed_entry_id,
+                    RegionTruncatedSnafu {
+                        region_id: manifest.metadata.region_id,
+                    }
+                );
+            }
+
+            // This is an edit from compaction.
+            if !edit.files_to_remove.is_empty() {
+                // Input files of the compaction task has been truncated.
+                for file in &edit.files_to_remove {
+                    ensure!(
+                        manifest.files.contains_key(&file.file_id),
+                        RegionTruncatedSnafu {
+                            region_id: manifest.metadata.region_id,
+                        }
+                    );
+                }
+            }
+        }
+
+        // Now we can update the manifest.
+        manager.update(action_list).await.inspect_err(
+            |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
+        )?;
+
+        // Executes the applier. We MUST hold the write lock.
+        applier();
+
+        if self.state.load() == RegionState::ReadOnly {
+            warn!(
+                "Region {} becomes read-only while updating manifest which may cause inconsistency",
+                manifest.metadata.region_id
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ManifestContext {
+    pub(crate) async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
+        self.manifest_manager.read().await.manifest()
+    }
+}
+
+pub(crate) type ManifestContextRef = Arc<ManifestContext>;
 
 /// Regions indexed by ids.
 #[derive(Debug, Default)]
@@ -225,7 +409,14 @@ impl RegionMap {
         let region = self
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
-        ensure!(region.is_writable(), RegionReadonlySnafu { region_id });
+        ensure!(
+            region.is_writable(),
+            RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionState::Writable,
+            }
+        );
         Ok(region)
     }
 
@@ -265,3 +456,15 @@ impl RegionMap {
 }
 
 pub(crate) type RegionMapRef = Arc<RegionMap>;
+
+#[cfg(test)]
+mod tests {
+    use crossbeam_utils::atomic::AtomicCell;
+
+    use crate::region::RegionState;
+
+    #[test]
+    fn test_region_state_lock_free() {
+        assert!(AtomicCell::<RegionState>::is_lock_free());
+    }
+}

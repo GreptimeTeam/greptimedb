@@ -27,7 +27,7 @@ use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{TableRegionKey, TableRegionValue};
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue as NextTableRouteValue};
-use common_meta::key::{RegionDistribution, TableMetaKey, TableMetaValue};
+use common_meta::key::{MetaKey, RegionDistribution, TableMetaValue};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
@@ -137,7 +137,7 @@ impl MigrateTableMetadata {
         while let Some((key, value)) = stream.try_next().await.context(error::IterStreamSnafu)? {
             let table_id = self.migrate_table_route_key(value).await?;
             keys.push(key);
-            keys.push(TableRegionKey::new(table_id).as_raw_key())
+            keys.push(TableRegionKey::new(table_id).to_bytes())
         }
 
         info!("Total migrated TableRouteKeys: {}", keys.len() / 2);
@@ -165,7 +165,7 @@ impl MigrateTableMetadata {
             self.etcd_store
                 .put(
                     PutRequest::new()
-                        .with_key(new_key.as_raw_key())
+                        .with_key(new_key.to_bytes())
                         .with_value(new_table_value.try_as_raw_value().unwrap()),
                 )
                 .await
@@ -192,10 +192,10 @@ impl MigrateTableMetadata {
                 let key = v1SchemaKey::parse(key_str)
                     .unwrap_or_else(|e| panic!("schema key is corrupted: {e}, key: {key_str}"));
 
-                Ok((key, ()))
+                Ok(key)
             }),
         );
-        while let Some((key, _)) = stream.try_next().await.context(error::IterStreamSnafu)? {
+        while let Some(key) = stream.try_next().await.context(error::IterStreamSnafu)? {
             let _ = self.migrate_schema_key(&key).await;
             keys.push(key.to_string().as_bytes().to_vec());
         }
@@ -217,7 +217,7 @@ impl MigrateTableMetadata {
             self.etcd_store
                 .put(
                     PutRequest::new()
-                        .with_key(new_key.as_raw_key())
+                        .with_key(new_key.to_bytes())
                         .with_value(schema_name_value.try_as_raw_value().unwrap()),
                 )
                 .await
@@ -244,10 +244,10 @@ impl MigrateTableMetadata {
                 let key = v1CatalogKey::parse(key_str)
                     .unwrap_or_else(|e| panic!("catalog key is corrupted: {e}, key: {key_str}"));
 
-                Ok((key, ()))
+                Ok(key)
             }),
         );
-        while let Some((key, _)) = stream.try_next().await.context(error::IterStreamSnafu)? {
+        while let Some(key) = stream.try_next().await.context(error::IterStreamSnafu)? {
             let _ = self.migrate_catalog_key(&key).await;
             keys.push(key.to_string().as_bytes().to_vec());
         }
@@ -269,7 +269,7 @@ impl MigrateTableMetadata {
             self.etcd_store
                 .put(
                     PutRequest::new()
-                        .with_key(new_key.as_raw_key())
+                        .with_key(new_key.to_bytes())
                         .with_value(catalog_name_value.try_as_raw_value().unwrap()),
                 )
                 .await
@@ -346,11 +346,11 @@ impl MigrateTableMetadata {
                 .batch_put(
                     BatchPutRequest::new()
                         .add_kv(
-                            table_info_key.as_raw_key(),
+                            table_info_key.to_bytes(),
                             table_info_value.try_as_raw_value().unwrap(),
                         )
                         .add_kv(
-                            table_region_key.as_raw_key(),
+                            table_region_key.to_bytes(),
                             table_region_value.try_as_raw_value().unwrap(),
                         ),
                 )
@@ -378,7 +378,7 @@ impl MigrateTableMetadata {
             self.etcd_store
                 .put(
                     PutRequest::new()
-                        .with_key(table_name_key.as_raw_key())
+                        .with_key(table_name_key.to_bytes())
                         .with_value(table_name_value.try_as_raw_value().unwrap()),
                 )
                 .await
@@ -425,7 +425,7 @@ impl MigrateTableMetadata {
         } else {
             let mut req = BatchPutRequest::new();
             for (key, value) in datanode_table_kvs {
-                req = req.add_kv(key.as_raw_key(), value.try_as_raw_value().unwrap());
+                req = req.add_kv(key.to_bytes(), value.try_as_raw_value().unwrap());
             }
             self.etcd_store.batch_put(req).await.unwrap();
         }

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::secrets::ExposeSecret;
 use common_telemetry::logging::info;
 use object_store::services::S3;
 use object_store::{util, ObjectStore};
-use secrecy::ExposeSecret;
 use snafu::prelude::*;
 
 use crate::config::S3Config;

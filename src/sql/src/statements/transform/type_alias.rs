@@ -365,7 +365,7 @@ CREATE TABLE data_types (
 
         match &stmts[0] {
             Statement::CreateTable(c) => {
-                let expected = r#"CREATE TABLE  data_types (
+                let expected = r#"CREATE TABLE data_types (
   s STRING,
   tt TEXT,
   mt TEXT,

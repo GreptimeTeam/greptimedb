@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod count_wildcard;
+pub mod order_hint;
+pub mod remove_duplicate;
+pub mod string_normalization;
+#[cfg(test)]
+mod test_util;
+pub mod type_conversion;
+
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::Result;
 use datafusion_expr::LogicalPlan;
@@ -20,7 +28,7 @@ use crate::QueryEngineContext;
 
 /// [`ExtensionAnalyzerRule`]s transform [`LogicalPlan`]s in some way to make
 /// the plan valid prior to the rest of the DataFusion optimization process.
-/// It's an extension of datafusion [`AnalyzerRule`]s but accepts [`QueryEngineContext` as the second parameter.
+/// It's an extension of datafusion [`AnalyzerRule`]s but accepts [`QueryEngineContext`] as the second parameter.
 pub trait ExtensionAnalyzerRule {
     /// Rewrite `plan`
     fn analyze(
@@ -30,7 +38,3 @@ pub trait ExtensionAnalyzerRule {
         config: &ConfigOptions,
     ) -> Result<LogicalPlan>;
 }
-
-pub mod order_hint;
-pub mod string_normalization;
-pub mod type_conversion;

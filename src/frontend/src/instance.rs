@@ -25,6 +25,7 @@ pub mod standalone;
 use std::sync::Arc;
 
 use api::v1::meta::Role;
+use api::v1::{RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
@@ -32,6 +33,7 @@ use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_frontend::handler::FrontendInvoker;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
@@ -234,6 +236,33 @@ impl Instance {
 }
 
 #[async_trait]
+impl FrontendInvoker for Instance {
+    async fn row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> common_frontend::error::Result<Output> {
+        self.inserter
+            .handle_row_inserts(requests, ctx, &self.statement_executor)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_frontend::error::ExternalSnafu)
+    }
+
+    async fn row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> common_frontend::error::Result<Output> {
+        self.deleter
+            .handle_row_deletes(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_frontend::error::ExternalSnafu)
+    }
+}
+
+#[async_trait]
 impl FrontendInstance for Instance {
     async fn start(&self) -> Result<()> {
         if let Some(heartbeat_task) = &self.heartbeat_task {
@@ -315,20 +344,18 @@ impl SqlQueryHandler for Instance {
                         break;
                     }
 
-                    match self.query_statement(stmt, query_ctx.clone()).await {
+                    match self.query_statement(stmt.clone(), query_ctx.clone()).await {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
                             results.push(output_result);
                         }
                         Err(e) => {
-                            let redacted = sql::util::redact_sql_secrets(query.as_ref());
                             if e.status_code().should_log_error() {
-                                error!(e; "Failed to execute query: {redacted}");
+                                error!(e; "Failed to execute query: {stmt}");
                             } else {
-                                debug!("Failed to execute query: {redacted}, {e}");
+                                debug!("Failed to execute query: {stmt}, {e}");
                             }
-
                             results.push(Err(e));
                             break;
                         }
@@ -448,9 +475,7 @@ impl PrometheusHandler for Instance {
             .execute_stmt(stmt, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| ExecuteQuerySnafu {
-                query: format!("{query:?}"),
-            })?;
+            .context(ExecuteQuerySnafu)?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
@@ -497,6 +522,10 @@ pub fn check_permission(
         }
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
+        }
+        Statement::CreateFlow(stmt) => {
+            // TODO: should also validate source table name here?
+            validate_param(&stmt.sink_table_name, query_ctx)?;
         }
         Statement::Alter(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
@@ -650,7 +679,7 @@ mod tests {
                             ts TIMESTAMP,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
+                        ) engine=mito;"#;
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test drop table

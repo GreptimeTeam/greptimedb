@@ -34,12 +34,15 @@ use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
 use crate::config::MitoConfig;
 use crate::error::{self, CompactRegionSnafu};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, Source};
 use crate::region::options::IndexOptions;
+use crate::region::version::VersionControlRef;
+use crate::region::{ManifestContextRef, RegionState};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
@@ -47,6 +50,7 @@ use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::LevelMeta;
+use crate::worker::WorkerListener;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
 
@@ -140,6 +144,9 @@ impl Picker for TwcsPicker {
             file_purger,
             start_time,
             cache_manager,
+            manifest_ctx,
+            version_control,
+            listener,
         } = req;
 
         let region_metadata = current_version.metadata.clone();
@@ -197,6 +204,9 @@ impl Picker for TwcsPicker {
             storage: current_version.options.storage.clone(),
             index_options: current_version.options.index_options.clone(),
             append_mode: current_version.options.append_mode,
+            manifest_ctx,
+            version_control,
+            listener,
         };
         Some(Box::new(task))
     }
@@ -341,6 +351,12 @@ pub(crate) struct TwcsCompactionTask {
     pub(crate) index_options: IndexOptions,
     /// The region is using append mode.
     pub(crate) append_mode: bool,
+    /// Manifest context.
+    pub(crate) manifest_ctx: ManifestContextRef,
+    /// Version control to update.
+    pub(crate) version_control: VersionControlRef,
+    /// Event listener.
+    pub(crate) listener: WorkerListener,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -481,18 +497,55 @@ impl TwcsCompactionTask {
         Ok((output_files, inputs))
     }
 
-    async fn handle_compaction(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
+    async fn handle_compaction(&mut self) -> error::Result<()> {
         self.mark_files_compacting(true);
         let merge_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .start_timer();
-        let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
-            error!(e; "Failed to compact region: {}", self.region_id);
-            merge_timer.stop_and_discard();
-            e
-        })?;
-        compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
-        Ok((output, compacted))
+        let (added, mut deleted) = match self.merge_ssts().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(e; "Failed to compact region: {}", self.region_id);
+                merge_timer.stop_and_discard();
+                return Err(e);
+            }
+        };
+        deleted.extend(self.expired_ssts.iter().map(FileHandle::meta));
+        let merge_time = merge_timer.stop_and_record();
+        info!(
+            "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
+            self.region_id,
+            deleted,
+            added,
+            self.compaction_time_window,
+            self.waiters.len(),
+            merge_time,
+        );
+
+        self.listener.on_merge_ssts_finished(self.region_id).await;
+
+        let _manifest_timer = COMPACTION_STAGE_ELAPSED
+            .with_label_values(&["write_manifest"])
+            .start_timer();
+        // Write region edit to manifest.
+        let edit = RegionEdit {
+            files_to_add: added,
+            files_to_remove: deleted,
+            compaction_time_window: self
+                .compaction_time_window
+                .map(|seconds| Duration::from_secs(seconds as u64)),
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        // We might leak files if we fail to update manifest. We can add a cleanup task to
+        // remove them later.
+        self.manifest_ctx
+            .update_manifest(RegionState::Writable, action_list, || {
+                self.version_control
+                    .apply_edit(edit, &[], self.file_purger.clone());
+            })
+            .await
     }
 
     /// Handles compaction failure, notifies all waiters.
@@ -520,27 +573,11 @@ impl TwcsCompactionTask {
 impl CompactionTask for TwcsCompactionTask {
     async fn run(&mut self) {
         let notify = match self.handle_compaction().await {
-            Ok((added, deleted)) => {
-                info!(
-                    "Compacted SST files, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}",
-                    deleted,
-                    added,
-                    self.compaction_time_window,
-                    self.waiters.len(),
-                );
-
-                BackgroundNotify::CompactionFinished(CompactionFinished {
-                    region_id: self.region_id,
-                    compaction_outputs: added,
-                    compacted_files: deleted,
-                    senders: std::mem::take(&mut self.waiters),
-                    file_purger: self.file_purger.clone(),
-                    compaction_time_window: self
-                        .compaction_time_window
-                        .map(|seconds| Duration::from_secs(seconds as u64)),
-                    start_time: self.start_time,
-                })
-            }
+            Ok(()) => BackgroundNotify::CompactionFinished(CompactionFinished {
+                region_id: self.region_id,
+                senders: std::mem::take(&mut self.waiters),
+                start_time: self.start_time,
+            }),
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.region_id);
                 let err = Arc::new(e);

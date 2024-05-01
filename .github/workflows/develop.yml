@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database" ]
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert" ]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
@@ -147,8 +147,9 @@ jobs:
       - name: Set Rust Fuzz
         shell: bash
         run: |
-          sudo apt update && sudo apt install -y libfuzzer-14-dev
-          cargo install cargo-fuzz
+          sudo apt-get install -y libfuzzer-14-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:

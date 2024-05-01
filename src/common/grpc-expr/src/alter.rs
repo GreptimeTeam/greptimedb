@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterExpr, CreateTableExpr, DropColumns,
-    RenameTable, SemanticType,
+    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, CreateTableExpr,
+    DropColumns, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
 
 use crate::error::{
     InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
@@ -62,6 +63,27 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
 
             AlterKind::AddColumns {
                 columns: add_column_requests,
+            }
+        }
+        Kind::ChangeColumnTypes(ChangeColumnTypes {
+            change_column_types,
+        }) => {
+            let change_column_type_requests = change_column_types
+                .into_iter()
+                .map(|cct| {
+                    let target_type =
+                        ColumnDataTypeWrapper::new(cct.target_type(), cct.target_type_extension)
+                            .into();
+
+                    Ok(ChangeColumnTypeRequest {
+                        column_name: cct.column_name,
+                        target_type,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            AlterKind::ChangeColumnTypes {
+                columns: change_column_type_requests,
             }
         }
         Kind::DropColumns(DropColumns { drop_columns }) => AlterKind::DropColumns {
@@ -137,7 +159,10 @@ fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn, SemanticType};
+    use api::v1::{
+        AddColumn, AddColumns, ChangeColumnType, ColumnDataType, ColumnDef, DropColumn,
+        SemanticType,
+    };
     use datatypes::prelude::ConcreteDataType;
 
     use super::*;
@@ -258,6 +283,40 @@ mod tests {
             add_column.column_schema.data_type
         );
         assert_eq!(Some(AddColumnLocation::First), add_column.location);
+    }
+
+    #[test]
+    fn test_change_column_type_expr() {
+        let expr = AlterExpr {
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
+            table_name: "monitor".to_string(),
+
+            kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
+                change_column_types: vec![ChangeColumnType {
+                    column_name: "mem_usage".to_string(),
+                    target_type: ColumnDataType::String as i32,
+                    target_type_extension: None,
+                }],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(1, expr).unwrap();
+        assert_eq!(alter_request.catalog_name, "test_catalog");
+        assert_eq!(alter_request.schema_name, "test_schema");
+        assert_eq!("monitor".to_string(), alter_request.table_name);
+
+        let mut change_column_types = match alter_request.alter_kind {
+            AlterKind::ChangeColumnTypes { columns } => columns,
+            _ => unreachable!(),
+        };
+
+        let change_column_type = change_column_types.pop().unwrap();
+        assert_eq!("mem_usage", change_column_type.column_name);
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            change_column_type.target_type
+        );
     }
 
     #[test]

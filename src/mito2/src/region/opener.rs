@@ -15,7 +15,7 @@
 //! Region opener.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
@@ -27,7 +27,6 @@ use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
-use tokio::sync::RwLock;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
@@ -41,7 +40,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::MitoRegion;
+use crate::region::{ManifestContext, MitoRegion, RegionState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
@@ -203,7 +202,11 @@ impl RegionOpener {
             region_id,
             version_control,
             access_layer: access_layer.clone(),
-            manifest_manager: RwLock::new(manifest_manager),
+            // Region is writable after it is created.
+            manifest_ctx: Arc::new(ManifestContext::new(
+                manifest_manager,
+                RegionState::Writable,
+            )),
             file_purger: Arc::new(LocalFilePurger::new(
                 self.purge_scheduler,
                 access_layer,
@@ -211,8 +214,6 @@ impl RegionOpener {
             )),
             wal_options,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
-            // Region is writable after it is created.
-            writable: AtomicBool::new(true),
             time_provider,
             memtable_builder,
         })
@@ -331,12 +332,14 @@ impl RegionOpener {
             region_id: self.region_id,
             version_control,
             access_layer,
-            manifest_manager: RwLock::new(manifest_manager),
+            // Region is always opened in read only mode.
+            manifest_ctx: Arc::new(ManifestContext::new(
+                manifest_manager,
+                RegionState::ReadOnly,
+            )),
             file_purger,
             wal_options,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
-            // Region is always opened in read only mode.
-            writable: AtomicBool::new(false),
             time_provider,
             memtable_builder,
         };
@@ -438,13 +441,11 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let replay_from_entry_id = flushed_entry_id + 1;
-    let mut stale_entry_found = false;
 
     let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         if entry_id <= flushed_entry_id {
-            stale_entry_found = true;
             warn!("Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}", region_id, flushed_entry_id, entry_id);
             ensure!(
                 allow_stale_entries,
@@ -473,11 +474,8 @@ pub(crate) async fn replay_memtable<S: LogStore>(
         region_write_ctx.write_memtable();
     }
 
-    if allow_stale_entries && stale_entry_found {
-        wal.obsolete(region_id, flushed_entry_id, wal_options)
-            .await?;
-        info!("Force obsolete WAL entries, region id: {}, flushed entry id: {}, last entry id read: {}", region_id, flushed_entry_id, last_entry_id);
-    }
+    wal.obsolete(region_id, flushed_entry_id, wal_options)
+        .await?;
 
     info!(
         "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",

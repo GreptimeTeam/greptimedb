@@ -33,7 +33,7 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Try to close region {}", region_id);
 
-        region.stop().await?;
+        region.stop().await;
         self.regions.remove_region(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);

@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt::{self};
+use std::fmt;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{
     alter_request, region_request, AlterRequest, AlterRequests, CloseRequest, CompactRequest,
@@ -23,6 +24,7 @@ use api::v1::region::{
 };
 use api::v1::{self, Rows, SemanticType};
 pub use common_base::AffectedRows;
+use datatypes::data_type::ConcreteDataType;
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
@@ -246,6 +248,53 @@ pub struct RegionCreateRequest {
     pub region_dir: String,
 }
 
+impl RegionCreateRequest {
+    /// Checks whether the request is valid, returns an error if it is invalid.
+    pub fn validate(&self) -> Result<()> {
+        // time index must exist
+        ensure!(
+            self.column_metadatas
+                .iter()
+                .any(|x| x.semantic_type == SemanticType::Timestamp),
+            InvalidRegionRequestSnafu {
+                region_id: RegionId::new(0, 0),
+                err: "missing timestamp column in create region request".to_string(),
+            }
+        );
+
+        // build column id to indices
+        let mut column_id_to_indices = HashMap::with_capacity(self.column_metadatas.len());
+        for (i, c) in self.column_metadatas.iter().enumerate() {
+            if let Some(previous) = column_id_to_indices.insert(c.column_id, i) {
+                return InvalidRegionRequestSnafu {
+                    region_id: RegionId::new(0, 0),
+                    err: format!(
+                        "duplicate column id {} (at position {} and {}) in create region request",
+                        c.column_id, previous, i
+                    ),
+                }
+                .fail();
+            }
+        }
+
+        // primary key must exist
+        for column_id in &self.primary_key {
+            ensure!(
+                column_id_to_indices.contains_key(column_id),
+                InvalidRegionRequestSnafu {
+                    region_id: RegionId::new(0, 0),
+                    err: format!(
+                        "missing primary key column {} in create region request",
+                        column_id
+                    ),
+                }
+            );
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RegionDropRequest {}
 
@@ -332,6 +381,11 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+    /// Change columns datatype form the region, only fields are allowed to change.
+    ChangeColumnTypes {
+        /// Columns to change.
+        columns: Vec<ChangeColumnType>,
+    },
 }
 
 impl AlterKind {
@@ -350,6 +404,11 @@ impl AlterKind {
                     Self::validate_column_to_drop(name, metadata)?;
                 }
             }
+            AlterKind::ChangeColumnTypes { columns } => {
+                for col_to_change in columns {
+                    col_to_change.validate(metadata)?;
+                }
+            }
         }
         Ok(())
     }
@@ -364,6 +423,9 @@ impl AlterKind {
             AlterKind::DropColumns { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
+            AlterKind::ChangeColumnTypes { columns } => columns
+                .iter()
+                .any(|col_to_change| col_to_change.need_alter(metadata)),
         }
     }
 
@@ -395,6 +457,14 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .map(|x| x.try_into())
                     .collect::<Result<Vec<_>>>()?;
                 AlterKind::AddColumns { columns }
+            }
+            alter_request::Kind::ChangeColumnTypes(x) => {
+                let columns = x
+                    .change_column_types
+                    .into_iter()
+                    .map(|x| x.into())
+                    .collect::<Vec<_>>();
+                AlterKind::ChangeColumnTypes { columns }
             }
             alter_request::Kind::DropColumns(x) => {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
@@ -498,6 +568,71 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
         };
 
         Ok(add_column_location)
+    }
+}
+
+/// Change a column's datatype.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ChangeColumnType {
+    /// Schema of the column to modify.
+    pub column_name: String,
+    /// Column will be changed to this type.
+    pub target_type: ConcreteDataType,
+}
+
+impl ChangeColumnType {
+    /// Returns an error if the column's datatype to change is invalid.
+    pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
+        let column_meta = metadata
+            .column_by_name(&self.column_name)
+            .with_context(|| InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", self.column_name),
+            })?;
+
+        ensure!(
+            matches!(column_meta.semantic_type, SemanticType::Field),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: "'timestamp' or 'tag' column cannot change type".to_string()
+            }
+        );
+        ensure!(
+            column_meta
+                .column_schema
+                .data_type
+                .can_arrow_type_cast_to(&self.target_type),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "column '{}' cannot be cast automatically to type '{}'",
+                    self.column_name, self.target_type
+                ),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Returns true if no column's datatype to change to the region.
+    pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
+        debug_assert!(self.validate(metadata).is_ok());
+        metadata.column_by_name(&self.column_name).is_some()
+    }
+}
+
+impl From<v1::ChangeColumnType> for ChangeColumnType {
+    fn from(change_column_type: v1::ChangeColumnType) -> Self {
+        let target_type = ColumnDataTypeWrapper::new(
+            change_column_type.target_type(),
+            change_column_type.target_type_extension,
+        )
+        .into();
+
+        ChangeColumnType {
+            column_name: change_column_type.column_name,
+            target_type,
+        }
     }
 }
 
@@ -678,6 +813,15 @@ mod tests {
                 semantic_type: SemanticType::Field,
                 column_id: 3,
             })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_1",
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
             .primary_key(vec![2]);
         builder.build().unwrap()
     }
@@ -791,6 +935,55 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_change_column_type() {
+        let metadata = new_metadata();
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
+                column_name: "xxxx".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
+                column_name: "field_1".to_string(),
+                target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
+                column_name: "tag_0".to_string(),
+                target_type: ConcreteDataType::date_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        let kind = AlterKind::ChangeColumnTypes {
+            columns: vec![ChangeColumnType {
+                column_name: "field_0".to_string(),
+                target_type: ConcreteDataType::int32_datatype(),
+            }],
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+    }
+
+    #[test]
     fn test_validate_schema_version() {
         let mut metadata = new_metadata();
         metadata.schema_version = 2;
@@ -842,5 +1035,47 @@ mod tests {
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
+    }
+
+    #[test]
+    fn test_validate_create_region() {
+        let column_metadatas = vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            },
+        ];
+        let create = RegionCreateRequest {
+            engine: "mito".to_string(),
+            column_metadatas,
+            primary_key: vec![3, 4],
+            options: HashMap::new(),
+            region_dir: "path".to_string(),
+        };
+
+        assert!(create.validate().is_err());
     }
 }

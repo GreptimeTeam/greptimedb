@@ -11,6 +11,7 @@ members = [
     "src/common/config",
     "src/common/datasource",
     "src/common/error",
+    "src/common/frontend",
     "src/common/function",
     "src/common/macro",
     "src/common/greptimedb-telemetry",
@@ -98,6 +99,7 @@ bytemuck = "1.12"
 bytes = { version = "1.5", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
+crossbeam-utils = "0.8"
 dashmap = "5.4"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
@@ -114,7 +116,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "73ac0207ab71dfea48f30259ffdb611501b5ecb8" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b5412f72257c18410fdccbb893fa5d245b846141" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -180,6 +182,7 @@ common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-decimal = { path = "src/common/decimal" }
 common-error = { path = "src/common/error" }
+common-frontend = { path = "src/common/frontend" }
 common-function = { path = "src/common/function" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
 common-grpc = { path = "src/common/grpc" }

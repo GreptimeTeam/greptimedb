@@ -45,31 +45,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let is_mutable_empty = region.version().memtables.mutable.is_empty();
 
         // Utilizes the short circuit evaluation.
-        let region =
-            if !is_mutable_empty || region.manifest_manager.read().await.has_update().await? {
-                info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}");
-                let reopened_region = Arc::new(
-                    RegionOpener::new(
-                        region_id,
-                        region.region_dir(),
-                        self.memtable_builder_provider.clone(),
-                        self.object_store_manager.clone(),
-                        self.purge_scheduler.clone(),
-                        self.intermediate_manager.clone(),
-                    )
-                    .cache(Some(self.cache_manager.clone()))
-                    .options(region.version().options.clone())
-                    .skip_wal_replay(true)
-                    .open(&self.config, &self.wal)
-                    .await?,
-                );
-                debug_assert!(!reopened_region.is_writable());
-                self.regions.insert_region(reopened_region.clone());
+        let region = if !is_mutable_empty || region.manifest_ctx.has_update().await? {
+            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}");
+            let reopened_region = Arc::new(
+                RegionOpener::new(
+                    region_id,
+                    region.region_dir(),
+                    self.memtable_builder_provider.clone(),
+                    self.object_store_manager.clone(),
+                    self.purge_scheduler.clone(),
+                    self.intermediate_manager.clone(),
+                )
+                .cache(Some(self.cache_manager.clone()))
+                .options(region.version().options.clone())
+                .skip_wal_replay(true)
+                .open(&self.config, &self.wal)
+                .await?,
+            );
+            debug_assert!(!reopened_region.is_writable());
+            self.regions.insert_region(reopened_region.clone());
 
-                reopened_region
-            } else {
-                region
-            };
+            reopened_region
+        } else {
+            region
+        };
 
         let flushed_entry_id = region.version_control.current().last_entry_id;
         info!("Trying to replay memtable for region: {region_id}, flushed entry id: {flushed_entry_id}");

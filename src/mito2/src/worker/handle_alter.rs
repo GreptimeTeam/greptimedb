@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
@@ -26,9 +26,7 @@ use crate::error::{
     InvalidMetadataSnafu, InvalidRegionRequestSchemaVersionSnafu, InvalidRegionRequestSnafu, Result,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::region::version::Version;
-use crate::region::MitoRegionRef;
+use crate::manifest::action::RegionChange;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -107,49 +105,26 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        // Now we can alter the region directly.
-        if let Err(e) = alter_region_schema(&region, &version, request).await {
-            error!(e; "Failed to alter region schema, region_id: {}", region_id);
-            sender.send(Err(e));
-            return;
-        }
-
         info!(
-            "Schema of region {} is altered from {} to {}",
+            "Try to alter region {} from version {} to {}",
             region_id,
             version.metadata.schema_version,
             region.metadata().schema_version
         );
 
-        // Notifies waiters.
-        sender.send(Ok(0));
+        let new_meta = match metadata_after_alteration(&version.metadata, request) {
+            Ok(new_meta) => new_meta,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+        // Persist the metadata to region's manifest.
+        let change = RegionChange {
+            metadata: new_meta.clone(),
+        };
+        self.handle_manifest_region_change(region, change, sender)
     }
-}
-
-/// Alter the schema of the region.
-async fn alter_region_schema(
-    region: &MitoRegionRef,
-    version: &Version,
-    request: RegionAlterRequest,
-) -> Result<()> {
-    let new_meta = metadata_after_alteration(&version.metadata, request)?;
-    // Persist the metadata to region's manifest.
-    let change = RegionChange {
-        metadata: new_meta.clone(),
-    };
-    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-    region
-        .manifest_manager
-        .write()
-        .await
-        .update(action_list)
-        .await?;
-
-    // Apply the metadata to region's version.
-    region
-        .version_control
-        .alter_schema(new_meta, &region.memtable_builder);
-    Ok(())
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.

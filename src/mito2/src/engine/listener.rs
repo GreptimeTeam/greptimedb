@@ -51,9 +51,9 @@ pub trait EventListener: Send + Sync {
         let _ = removed;
     }
 
-    /// Notifies the listener that the region is going to handle the compaction
-    /// finished request.
-    async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+    /// Notifies the listener that ssts has been merged and the region
+    /// is going to update its manifest.
+    async fn on_merge_ssts_finished(&self, region_id: RegionId) {
         let _ = region_id;
     }
 }
@@ -201,7 +201,7 @@ impl CompactionListener {
 
 #[async_trait]
 impl EventListener for CompactionListener {
-    async fn on_handle_compaction_finished(&self, region_id: RegionId) {
+    async fn on_merge_ssts_finished(&self, region_id: RegionId) {
         info!("Handle compaction finished request, region {region_id}");
 
         self.handle_finished_notify.notify_one();

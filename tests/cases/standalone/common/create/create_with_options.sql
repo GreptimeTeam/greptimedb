@@ -28,7 +28,7 @@ create table if not exists test_opts(
     PRIMARY KEY(host)
 )
 engine=mito
-with(regions=1, ttl='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
+with(ttl='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
 
 drop table test_opts;
 
@@ -41,7 +41,7 @@ create table if not exists test_opts(
     PRIMARY KEY(host)
 )
 engine=mito
-with('regions'=1, 'ttl'='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
+with('ttl'='7d', 'compaction.type'='twcs', 'compaction.twcs.time_window'='1d');
 
 drop table test_opts;
 
@@ -55,7 +55,6 @@ create table if not exists test_mito_options(
 )
 engine=mito
 with(
-    'regions'=1,
     'ttl'='7d',
     'compaction.type'='twcs',
     'compaction.twcs.max_active_window_files'='8',

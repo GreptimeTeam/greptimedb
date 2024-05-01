@@ -18,15 +18,17 @@ use std::{fs, path};
 use async_trait::async_trait;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
+use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
@@ -45,6 +47,7 @@ use frontend::server::Services;
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
+use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -408,11 +411,17 @@ impl StartCommand {
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
         let datanode = builder.build().await.context(StartDatanodeSnafu)?;
 
-        let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+        let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
         let table_id_sequence = Arc::new(
-            SequenceBuilder::new("table_id", kv_backend.clone())
+            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
+        let flow_id_sequence = Arc::new(
+            SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_FLOW_ID as u64)
                 .step(10)
                 .build(),
         );
@@ -420,34 +429,34 @@ impl StartCommand {
             opts.wal_meta.clone(),
             kv_backend.clone(),
         ));
-
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
-
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
+        let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            flow_id_sequence,
+        ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
-            table_metadata_manager,
             procedure_manager.clone(),
-            datanode_manager.clone(),
+            node_manager.clone(),
             multi_cache_invalidator,
+            table_metadata_manager,
             table_meta_allocator,
+            flow_metadata_manager,
+            flow_meta_allocator,
         )
         .await?;
 
-        let mut frontend = FrontendBuilder::new(
-            kv_backend,
-            catalog_manager,
-            datanode_manager,
-            ddl_task_executor,
-        )
-        .with_plugin(fe_plugins.clone())
-        .try_build()
-        .await
-        .context(StartFrontendSnafu)?;
+        let mut frontend =
+            FrontendBuilder::new(kv_backend, catalog_manager, node_manager, ddl_task_executor)
+                .with_plugin(fe_plugins.clone())
+                .try_build()
+                .await
+                .context(StartFrontendSnafu)?;
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()
@@ -466,20 +475,26 @@ impl StartCommand {
     }
 
     pub async fn create_ddl_task_executor(
-        table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        node_manager: NodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
-        table_meta_allocator: TableMetadataAllocatorRef,
+        table_metadata_manager: TableMetadataManagerRef,
+        table_metadata_allocator: TableMetadataAllocatorRef,
+        flow_metadata_manager: FlowMetadataManagerRef,
+        flow_metadata_allocator: FlowMetadataAllocatorRef,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
+                DdlContext {
+                    node_manager,
+                    cache_invalidator,
+                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                    table_metadata_manager,
+                    table_metadata_allocator,
+                    flow_metadata_manager,
+                    flow_metadata_allocator,
+                },
                 procedure_manager,
-                datanode_manager,
-                cache_invalidator,
-                table_metadata_manager,
-                table_meta_allocator,
-                Arc::new(MemoryRegionKeeper::default()),
                 true,
             )
             .context(InitDdlManagerSnafu)?,
@@ -635,7 +650,7 @@ mod tests {
         match &dn_opts.storage.providers[1] {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
-                    "Secret([REDACTED alloc::string::String])".to_string(),
+                    "SecretBox<alloc::string::String>([REDACTED])".to_string(),
                     format!("{:?}", s3_config.access_key_id)
                 );
             }
