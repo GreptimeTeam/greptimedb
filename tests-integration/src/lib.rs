@@ -22,7 +22,6 @@ mod instance;
 mod opentsdb;
 mod otlp;
 mod prom_store;
-mod stream_insert;
 pub mod test_util;
 
 pub mod standalone;

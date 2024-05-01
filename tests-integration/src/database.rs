@@ -18,9 +18,8 @@ use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests, DropTableExpr,
-    GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest, RequestHeader,
-    RowInsertRequests, TruncateTableExpr,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, InsertRequests,
+    QueryRequest, RequestHeader,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -37,8 +36,6 @@ use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use tonic::transport::Channel;
-
-use crate::stream_insert::StreamInserter;
 
 pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 
@@ -104,32 +101,12 @@ impl Database {
         }
     }
 
-    pub fn catalog(&self) -> &String {
-        &self.catalog
-    }
-
     pub fn set_catalog(&mut self, catalog: impl Into<String>) {
         self.catalog = catalog.into();
     }
 
-    pub fn schema(&self) -> &String {
-        &self.schema
-    }
-
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
-    }
-
-    pub fn dbname(&self) -> &String {
-        &self.dbname
-    }
-
-    pub fn set_dbname(&mut self, dbname: impl Into<String>) {
-        self.dbname = dbname.into();
-    }
-
-    pub fn timezone(&self) -> &String {
-        &self.timezone
     }
 
     pub fn set_timezone(&mut self, timezone: impl Into<String>) {
@@ -144,34 +121,6 @@ impl Database {
 
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
         self.handle(Request::Inserts(requests)).await
-    }
-
-    pub async fn row_insert(&self, requests: RowInsertRequests) -> Result<u32> {
-        self.handle(Request::RowInserts(requests)).await
-    }
-
-    pub fn streaming_inserter(&self) -> Result<StreamInserter> {
-        self.streaming_inserter_with_channel_size(65536)
-    }
-
-    pub fn streaming_inserter_with_channel_size(
-        &self,
-        channel_size: usize,
-    ) -> Result<StreamInserter> {
-        let client = make_database_client(&self.client)?.inner;
-
-        let stream_inserter = StreamInserter::new(
-            client,
-            self.dbname().to_string(),
-            self.ctx.auth_header.clone(),
-            channel_size,
-        );
-
-        Ok(stream_inserter)
-    }
-
-    pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
-        self.handle(Request::Deletes(request)).await
     }
 
     async fn handle(&self, request: Request) -> Result<u32> {
@@ -207,32 +156,6 @@ impl Database {
         .await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::LogicalPlan(logical_plan)),
-        }))
-        .await
-    }
-
-    pub async fn prom_range_query(
-        &self,
-        promql: &str,
-        start: &str,
-        end: &str,
-        step: &str,
-    ) -> Result<Output> {
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::PromRangeQuery(PromRangeQuery {
-                query: promql.to_string(),
-                start: start.to_string(),
-                end: end.to_string(),
-                step: step.to_string(),
-                lookback: DEFAULT_LOOKBACK_STRING.to_string(),
-            })),
-        }))
-        .await
-    }
-
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
@@ -243,20 +166,6 @@ impl Database {
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(expr)),
-        }))
-        .await
-    }
-
-    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::DropTable(expr)),
-        }))
-        .await
-    }
-
-    pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::TruncateTable(expr)),
         }))
         .await
     }
@@ -354,7 +263,7 @@ impl Database {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct FlightContext {
+struct FlightContext {
     auth_header: Option<AuthHeader>,
 }
 
