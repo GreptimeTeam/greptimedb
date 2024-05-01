@@ -10,6 +10,10 @@ workspace = true
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+default = []
+unstable = ["nix"]
+
 [dependencies]
 arbitrary = { version = "1.3.0", features = ["derive"] }
 async-trait = { workspace = true }
@@ -24,9 +28,11 @@ derive_builder = { workspace = true }
 dotenv = "0.15"
 lazy_static = { workspace = true }
 libfuzzer-sys = "0.4"
+nix = { version = "0.28", features = ["process", "signal"], optional = true }
 partition = { workspace = true }
 rand = { workspace = true }
 rand_chacha = "0.3.1"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 snafu = { workspace = true }
@@ -38,10 +44,11 @@ sqlx = { version = "0.6", features = [
     "postgres",
     "chrono",
 ] }
+tinytemplate = "1.2"
+tokio = { workspace = true }
 
 [dev-dependencies]
 dotenv.workspace = true
-tokio = { workspace = true }
 
 [[bin]]
 name = "fuzz_create_table"
@@ -91,3 +98,11 @@ path = "targets/fuzz_create_database.rs"
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "unstable_fuzz_create_table_standalone"
+path = "targets/unstable/fuzz_create_table_standalone.rs"
+test = false
+bench = false
+doc = false
+required-features = ["unstable"]
