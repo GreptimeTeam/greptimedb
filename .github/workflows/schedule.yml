@@ -1,0 +1,28 @@
+name: Schedule Management
+on:
+  schedule:
+    - cron: '4 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  maintenance:
+    name: Periodic Maintenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          package_json_file: 'cyborg/package.json'
+      - name: Maintenance
+        shell: bash
+        working-directory: cyborg
+        run: |
+          pnpm install
+          pnpm exec ts-node bin/schedule.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
