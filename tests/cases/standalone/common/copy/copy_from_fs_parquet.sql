@@ -48,4 +48,6 @@ drop table with_path;
 
 drop table with_pattern;
 
+drop table without_limit_rows;
+
 drop table with_limit_rows;

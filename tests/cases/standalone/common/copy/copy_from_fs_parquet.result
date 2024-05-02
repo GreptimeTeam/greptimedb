@@ -129,6 +129,10 @@ drop table with_pattern;
 
 Affected Rows: 0
 
+drop table without_limit_rows;
+
+Affected Rows: 0
+
 drop table with_limit_rows;
 
 Affected Rows: 0
