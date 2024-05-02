@@ -182,7 +182,7 @@ impl MergeScanExec {
         let current_catalog = self.query_ctx.current_catalog().to_string();
         let current_schema = self.query_ctx.current_schema().to_string();
         let timezone = self.query_ctx.timezone().to_string();
-        let extension = self.query_ctx.to_extension();
+        let extensions = self.query_ctx.extensions();
 
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -199,7 +199,7 @@ impl MergeScanExec {
                             current_catalog: current_catalog.clone(),
                             current_schema: current_schema.clone(),
                             timezone: timezone.clone(),
-                            extension: extension.clone(),
+                            extensions: extensions.clone(),
                         }),
                     }),
                     region_id: region_id.into(),

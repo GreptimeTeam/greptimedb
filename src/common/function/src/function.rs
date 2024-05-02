@@ -35,7 +35,7 @@ impl FunctionContext {
     #[cfg(any(test, feature = "testing"))]
     pub fn mock() -> Self {
         Self {
-            query_ctx: QueryContextBuilder::default().build(),
+            query_ctx: QueryContextBuilder::default().build().into(),
             state: Arc::new(FunctionState::mock()),
         }
     }
@@ -44,7 +44,7 @@ impl FunctionContext {
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
-            query_ctx: QueryContextBuilder::default().build(),
+            query_ctx: QueryContextBuilder::default().build().into(),
             state: Arc::new(FunctionState::default()),
         }
     }

@@ -613,7 +613,7 @@ impl RegionServerInner {
         let ctx: QueryContextRef = header
             .as_ref()
             .map(|h| Arc::new(h.into()))
-            .unwrap_or_else(|| QueryContextBuilder::default().build());
+            .unwrap_or_else(|| QueryContextBuilder::default().build().into());
 
         // build dummy catalog list
         let region_status = self

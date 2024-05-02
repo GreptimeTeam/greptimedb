@@ -807,7 +807,8 @@ mod test {
         ];
         let query_context = QueryContextBuilder::default()
             .configuration_parameter(Default::default())
-            .build();
+            .build()
+            .into();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
         for i in values.iter() {
             encode_value(&query_context, i, &mut builder).unwrap();

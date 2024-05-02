@@ -79,7 +79,8 @@ mod tests {
 
         let query_ctx = QueryContextBuilder::default()
             .current_schema("test_db".to_string())
-            .build();
+            .build()
+            .into();
 
         let func_ctx = FunctionContext {
             query_ctx,

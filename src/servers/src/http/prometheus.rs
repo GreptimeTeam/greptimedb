@@ -14,6 +14,7 @@
 
 //! prom supply the prometheus HTTP API Server compliance
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Form};
@@ -572,10 +573,12 @@ pub(crate) fn try_update_catalog_schema(
     schema: &str,
 ) -> QueryContextRef {
     if ctx.current_catalog() != catalog || ctx.current_schema() != schema {
-        QueryContextBuilder::from_existing(&ctx)
-            .current_catalog(catalog.to_string())
-            .current_schema(schema.to_string())
-            .build()
+        Arc::new(
+            QueryContextBuilder::from_existing(&ctx)
+                .current_catalog(catalog.to_string())
+                .current_schema(schema.to_string())
+                .build(),
+        )
     } else {
         ctx
     }

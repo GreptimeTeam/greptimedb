@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Query, RawBody, State};
@@ -76,7 +77,7 @@ pub async fn scripts(
             unwrap_or_json_err!(String::from_utf8(bytes.to_vec()).context(InvalidUtf8ValueSnafu));
 
         // Safety: schema and name are already checked above.
-        let query_ctx = QueryContext::with(&catalog, schema.unwrap());
+        let query_ctx = Arc::new(QueryContext::with(&catalog, schema.unwrap()));
         match script_handler
             .insert_script(query_ctx, name.unwrap(), &script)
             .await
@@ -128,7 +129,7 @@ pub async fn run_script(
         }
 
         // Safety: schema and name are already checked above.
-        let query_ctx = QueryContext::with(&catalog, schema.unwrap());
+        let query_ctx = Arc::new(QueryContext::with(&catalog, schema.unwrap()));
         let output = script_handler
             .execute_script(query_ctx, name.unwrap(), params.params)
             .await;

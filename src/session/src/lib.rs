@@ -70,6 +70,7 @@ impl Session {
             .configuration_parameter(self.configuration_variables.clone())
             .timezone(self.timezone())
             .build()
+            .into()
     }
 
     #[inline]

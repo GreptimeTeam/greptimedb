@@ -56,10 +56,12 @@ def hello() -> vector[str]:
 
     let table = MemTable::table("scripts", recordbatch);
 
-    let query_ctx = QueryContextBuilder::default()
-        .current_catalog(catalog.to_string())
-        .current_schema(schema.to_string())
-        .build();
+    let query_ctx = Arc::new(
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .build(),
+    );
 
     let instance = create_testing_instance(table);
     instance

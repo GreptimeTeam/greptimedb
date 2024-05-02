@@ -1204,7 +1204,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db").await.data;
     assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
     let output = execute_sql_with(
         &instance,
         "create table demo(host string, cpu double, memory double, ts timestamp, time index(ts))",
@@ -1277,7 +1277,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 
     // create test table
     let table_name = "demo";
-    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
     let output = execute_sql_with(
         &instance,
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
@@ -1481,7 +1481,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db1").await.data;
     assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db1");
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db1"));
     let output = execute_sql_with(
         &instance,
         "create table tb1(col_i32 int, ts timestamp, TIME INDEX(ts))",
@@ -1845,7 +1845,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";
-    let query_ctx = QueryContext::with("another_catalog", "another_schema");
+    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
     let output = execute_sql_with(&instance, sql, query_ctx.clone())
         .await
         .data;
@@ -1885,7 +1885,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";
-    let query_ctx = QueryContext::with("another_catalog", "another_schema");
+    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
     let output = execute_sql_with(&instance, sql, query_ctx.clone())
         .await
         .data;

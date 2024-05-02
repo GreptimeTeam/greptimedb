@@ -77,7 +77,7 @@ mod tests {
                          } if  valid_types == vec![]
         ));
 
-        let query_ctx = QueryContextBuilder::default().build();
+        let query_ctx = QueryContextBuilder::default().build().into();
 
         let func_ctx = FunctionContext {
             query_ctx,

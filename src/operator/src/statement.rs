@@ -422,7 +422,8 @@ mod tests {
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
             .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
-            .build();
+            .build()
+            .into();
         let map = OptionMap::from(
             [
                 (COPY_DATABASE_TIME_START_KEY.to_string(), start.to_string()),

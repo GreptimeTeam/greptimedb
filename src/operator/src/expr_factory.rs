@@ -658,7 +658,8 @@ mod tests {
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
             .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
-            .build();
+            .build()
+            .into();
         let expr = create_to_expr(&create_table, ctx).unwrap();
         let ts_column = &expr.column_defs[1];
         let constraint = assert_ts_column(ts_column);
@@ -712,7 +713,8 @@ mod tests {
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
             .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
-            .build();
+            .build()
+            .into();
         let expr = to_alter_expr(alter_table, ctx).unwrap();
         let kind = expr.kind.unwrap();
 
