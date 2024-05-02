@@ -117,6 +117,10 @@ drop table demo;
 
 Affected Rows: 0
 
+drop table demo2;
+
+Affected Rows: 0
+
 drop table with_filename;
 
 Affected Rows: 0

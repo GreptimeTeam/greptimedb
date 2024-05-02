@@ -42,6 +42,8 @@ select * from with_limit_rows;
 
 drop table demo;
 
+drop table demo2;
+
 drop table with_filename;
 
 drop table with_path;
