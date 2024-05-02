@@ -109,6 +109,10 @@ pub struct MetasrvOptions {
     /// limit the number of operations in a txn because an infinitely large txn could
     /// potentially block other operations.
     pub max_txn_ops: usize,
+
+    /// The etcd connect options.
+    /// Most of the options are from `etcd_client::ConnectOptions`.
+    pub etcd_connect_options: EtcdConnectOptions,
 }
 
 impl MetasrvOptions {
@@ -146,6 +150,7 @@ impl Default for MetasrvOptions {
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
+            etcd_connect_options: EtcdConnectOptions::default(),
         }
     }
 }
@@ -153,6 +158,31 @@ impl Default for MetasrvOptions {
 impl MetasrvOptions {
     pub fn to_toml_string(&self) -> String {
         toml::to_string(&self).unwrap()
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EtcdConnectOptions {
+    /// Apply a timeout to each gRPC request.
+    #[serde(with = "humantime_serde")]
+    pub timeout: Option<Duration>,
+
+    /// Apply a timeout to connecting to the endpoint.
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Option<Duration>,
+    // TODO(zyy17): Add TLS options.
+}
+
+impl From<EtcdConnectOptions> for etcd_client::ConnectOptions {
+    fn from(opts: EtcdConnectOptions) -> Self {
+        let mut etcd_opts = etcd_client::ConnectOptions::new();
+        if let Some(timeout) = opts.timeout {
+            etcd_opts = etcd_opts.with_timeout(timeout);
+        }
+        if let Some(connect_timeout) = opts.connect_timeout {
+            etcd_opts = etcd_opts.with_connect_timeout(connect_timeout);
+        }
+        etcd_opts
     }
 }
 

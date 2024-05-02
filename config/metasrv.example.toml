@@ -141,3 +141,12 @@ url = ""
 
 ## HTTP headers of Prometheus remote-write carry.
 headers = { }
+
+## The options for connecting etcd.
+[etcd_connect_options]
+## Apply a timeout to each gRPC request.
+## +toml2docs:none-default
+timeout = "5s"
+## Apply a timeout to connecting to the endpoint.
+## +toml2docs:none-default
+connect_timeout = "5s"

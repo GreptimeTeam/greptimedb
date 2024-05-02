@@ -263,6 +263,9 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `etcd_connect_options` | -- | -- | The options for connecting etcd. |
+| `etcd_connect_options.timeout` | String | `None` | Apply a timeout to each gRPC request. |
+| `etcd_connect_options.connect_timeout` | String | `None` | Apply a timeout to connecting to the endpoint. |
 
 
 ### Datanode

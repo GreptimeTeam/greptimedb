@@ -246,7 +246,11 @@ async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
-    Client::connect(&etcd_endpoints, None)
-        .await
-        .context(error::ConnectEtcdSnafu)
+
+    Client::connect(
+        &etcd_endpoints,
+        Some(opts.etcd_connect_options.clone().into()),
+    )
+    .await
+    .context(error::ConnectEtcdSnafu)
 }
