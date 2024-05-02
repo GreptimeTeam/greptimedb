@@ -291,7 +291,8 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
 
 #[cfg(test)]
 mod test {
-
+    use object_store::services::Fs;
+    use object_store::ObjectStore;
     use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 
     use super::*;
@@ -302,21 +303,21 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let region_id = to_metadata_region_id(env.default_physical_region_id());
-        let region_dir = join_dir(&env.data_home(), "test_metric_region");
 
-        // `join_dir` doesn't suit windows path
-        #[cfg(not(target_os = "windows"))]
-        {
-            // assert metadata region's dir
-            let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
-            let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
-            assert!(exist);
+        let mut builder = Fs::default();
+        builder.root(&env.data_home());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
-            // assert data region's dir
-            let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
-            let exist = tokio::fs::try_exists(data_region_dir).await.unwrap();
-            assert!(exist);
-        }
+        let region_dir = "test_metric_region";
+        // assert metadata region's dir
+        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
+        let exist = object_store.is_exist(&metadata_region_dir).await.unwrap();
+        assert!(exist);
+
+        // assert data region's dir
+        let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
+        let exist = object_store.is_exist(&data_region_dir).await.unwrap();
+        assert!(exist);
 
         // check mito engine
         let metadata_region_id = utils::to_metadata_region_id(region_id);

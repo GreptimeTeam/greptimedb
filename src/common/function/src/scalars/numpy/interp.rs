@@ -152,7 +152,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
 
     let res;
     if xp.len() == 1 {
-        let datas = x
+        let data = x
             .iter_data()
             .map(|x| {
                 if Value::from(x) < xp.get(0) {
@@ -164,7 +164,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                 }
             })
             .collect::<Vec<_>>();
-        res = Float64Vector::from(datas);
+        res = Float64Vector::from(data);
     } else {
         let mut j = 0;
         /* only pre-calculate slopes if there are relatively few of them. */
@@ -191,7 +191,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
             }
             slopes = Some(slopes_tmp);
         }
-        let datas = x
+        let data = x
             .iter_data()
             .map(|x| match x {
                 Some(xi) => {
@@ -255,7 +255,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        res = Float64Vector::from(datas);
+        res = Float64Vector::from(data);
     }
     Ok(Arc::new(res) as _)
 }

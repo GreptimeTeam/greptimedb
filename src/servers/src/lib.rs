@@ -39,8 +39,7 @@ pub mod prom_store;
 pub mod prometheus_handler;
 pub mod proto;
 pub mod query_handler;
-#[allow(clippy::all)]
-mod repeated_field;
+pub mod repeated_field;
 mod row_writer;
 pub mod server;
 mod shutdown;

@@ -31,6 +31,8 @@ use crate::ir::{generate_random_value, Ident};
 #[builder(pattern = "owned")]
 pub struct InsertExprGenerator<R: Rng + 'static> {
     table_ctx: TableContextRef,
+    // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
+    omit_column_list: bool,
     #[builder(default = "1")]
     rows: usize,
     #[builder(default = "Box::new(WordGenerator)")]
@@ -44,11 +46,8 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
 
     /// Generates the [InsertIntoExpr].
     fn generate(&self, rng: &mut R) -> Result<InsertIntoExpr> {
-        // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
-        let omit_column_list = rng.gen_bool(0.2);
-
         let mut values_columns = vec![];
-        if omit_column_list {
+        if self.omit_column_list {
             // If omit column list, then all columns are required in the values list
             values_columns.clone_from(&self.table_ctx.columns);
         } else {
@@ -94,7 +93,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
 
         Ok(InsertIntoExpr {
             table_name: self.table_ctx.name.to_string(),
-            columns: if omit_column_list {
+            columns: if self.omit_column_list {
                 vec![]
             } else {
                 values_columns

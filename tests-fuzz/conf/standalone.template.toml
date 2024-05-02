@@ -1,0 +1,23 @@
+mode = 'standalone'
+enable_memory_catalog = false
+require_lease_before_startup = true
+
+[wal]
+provider = "raft_engine"
+file_size = '1GB'
+purge_interval = '10m'
+purge_threshold = '10GB'
+read_batch_size = 128
+sync_write = false
+
+[storage]
+type = 'File'
+data_home = '{data_home}'
+
+[grpc_options]
+addr = '127.0.0.1:4001'
+runtime_size = 8
+
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"

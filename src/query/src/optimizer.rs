@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod count_wildcard;
 pub mod order_hint;
+pub mod remove_duplicate;
 pub mod string_normalization;
 #[cfg(test)]
 mod test_util;
@@ -26,7 +28,7 @@ use crate::QueryEngineContext;
 
 /// [`ExtensionAnalyzerRule`]s transform [`LogicalPlan`]s in some way to make
 /// the plan valid prior to the rest of the DataFusion optimization process.
-/// It's an extension of datafusion [`AnalyzerRule`]s but accepts [`QueryEngineContext` as the second parameter.
+/// It's an extension of datafusion [`AnalyzerRule`]s but accepts [`QueryEngineContext`] as the second parameter.
 pub trait ExtensionAnalyzerRule {
     /// Rewrite `plan`
     fn analyze(

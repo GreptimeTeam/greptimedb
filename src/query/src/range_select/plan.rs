@@ -667,7 +667,13 @@ impl RangeSelect {
             .range_expr
             .iter()
             .map(|range_fn| {
-                let expr = match &range_fn.expr {
+                let name = range_fn.expr.display_name()?;
+                let range_expr = match &range_fn.expr {
+                    Expr::Alias(expr) => expr.expr.as_ref(),
+                    others => others,
+                };
+
+                let expr = match &range_expr {
                     Expr::AggregateFunction(
                         aggr @ datafusion_expr::expr::AggregateFunction {
                             func_def:
@@ -778,7 +784,7 @@ impl RangeSelect {
                                 &input_phy_exprs,
                                 &order_by,
                                 &input_schema,
-                                range_fn.expr.display_name()?,
+                                name,
                                 false,
                             ),
                             AggregateFunctionDefinition::UDF(fun) => create_aggr_udf_expr(
@@ -787,7 +793,7 @@ impl RangeSelect {
                                 &[],
                                 &[],
                                 &input_schema,
-                                range_fn.expr.display_name()?,
+                                name,
                                 false,
                             ),
                             f => Err(DataFusionError::NotImplemented(format!(
@@ -796,8 +802,8 @@ impl RangeSelect {
                         }
                     }
                     _ => Err(DataFusionError::Plan(format!(
-                        "Unexpected Expr:{} in RangeSelect",
-                        range_fn.expr.display_name()?
+                        "Unexpected Expr: {} in RangeSelect",
+                        range_fn.expr.canonical_name()
                     ))),
                 }?;
                 let args = expr.expressions();

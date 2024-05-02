@@ -1,0 +1,56 @@
+create table "HelloWorld" (a string, b timestamp time index);
+
+Affected Rows: 0
+
+insert into "HelloWorld" values ("a", 1) ,("b", 2);
+
+Affected Rows: 2
+
+select count(*) from "HelloWorld";
+
++----------+
+| COUNT(*) |
++----------+
+| 2        |
++----------+
+
+create table test (a string, "BbB" timestamp time index);
+
+Affected Rows: 0
+
+insert into test values ("c", 1) ;
+
+Affected Rows: 1
+
+select count(*) from test;
+
++----------+
+| COUNT(*) |
++----------+
+| 1        |
++----------+
+
+select count(*) from (select count(*) from test where a = 'a');
+
++----------+
+| COUNT(*) |
++----------+
+| 1        |
++----------+
+
+select count(*) from (select * from test cross join "HelloWorld");
+
++----------+
+| COUNT(*) |
++----------+
+| 2        |
++----------+
+
+drop table "HelloWorld";
+
+Affected Rows: 0
+
+drop table test;
+
+Affected Rows: 0
+

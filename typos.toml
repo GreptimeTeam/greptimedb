@@ -1,6 +1,7 @@
 [default.extend-words]
+Pn = "Pn"
 ue = "ue"
-datas = "datas"
+worl = "worl"
 
 [files]
 extend-exclude = [
