@@ -32,13 +32,13 @@ CREATE TABLE without_limit_rows(host string, cpu double, memory double, ts times
 
 Copy without_limit_rows FROM '/tmp/demo/export/parquet_files/';
 
-select * from without_limit_rows;
+select count(*) from without_limit_rows;
 
 CREATE TABLE with_limit_rows(host string, cpu double, memory double, ts timestamp time index);
 
 Copy with_limit_rows FROM '/tmp/demo/export/parquet_files/' WITH (MAX_INSERT_ROWS = 2);
 
-select * from with_limit_rows;
+select count(*) from with_limit_rows;
 
 drop table demo;
 
