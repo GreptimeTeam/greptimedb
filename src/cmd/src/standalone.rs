@@ -404,8 +404,13 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
-        let catalog_manager =
-            KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
+        let catalog_manager = KvBackendCatalogManager::new(
+            dn_opts.mode,
+            None,
+            kv_backend.clone(),
+            multi_cache_invalidator.clone(),
+        )
+        .await;
 
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());

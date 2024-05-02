@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, Role};
+use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster;
 use common_meta::cluster::{DatanodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
 use common_meta::peer::Peer;
@@ -40,7 +40,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer)) = extract_base_info(req, Role::Frontend) else {
+        let Some((key, peer, info)) = extract_base_info(req, Role::Frontend) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -48,6 +48,9 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
             status: NodeStatus::Frontend(FrontendStatus {}),
+            version: info.version,
+            git_commit: info.git_commit,
+            start_time_ms: info.start_time_ms,
         };
 
         save_to_mem_store(key, value, ctx).await?;
@@ -71,7 +74,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer)) = extract_base_info(req, Role::Datanode) else {
+        let Some((key, peer, info)) = extract_base_info(req, Role::Datanode) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -95,6 +98,9 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
                 leader_regions,
                 follower_regions,
             }),
+            version: info.version,
+            git_commit: info.git_commit,
+            start_time_ms: info.start_time_ms,
         };
 
         save_to_mem_store(key, value, ctx).await?;
@@ -103,12 +109,20 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
     }
 }
 
-fn extract_base_info(req: &HeartbeatRequest, role: Role) -> Option<(NodeInfoKey, Peer)> {
-    let HeartbeatRequest { header, peer, .. } = req;
+fn extract_base_info(
+    req: &HeartbeatRequest,
+    role: Role,
+) -> Option<(NodeInfoKey, Peer, PbNodeInfo)> {
+    let HeartbeatRequest {
+        header, peer, info, ..
+    } = req;
     let Some(header) = &header else {
         return None;
     };
     let Some(peer) = &peer else {
+        return None;
+    };
+    let Some(info) = &info else {
         return None;
     };
 
@@ -122,6 +136,7 @@ fn extract_base_info(req: &HeartbeatRequest, role: Role) -> Option<(NodeInfoKey,
             node_id: peer.id,
         },
         Peer::from(peer.clone()),
+        info.clone(),
     ))
 }
 

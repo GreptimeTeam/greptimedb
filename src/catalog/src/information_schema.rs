@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cluster_info;
 pub mod columns;
 pub mod key_column_usage;
 mod memory_table;
@@ -23,6 +24,7 @@ pub mod schemata;
 mod table_constraints;
 mod table_names;
 pub mod tables;
+pub(crate) mod utils;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -47,6 +49,7 @@ pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
+use crate::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
 use crate::information_schema::partitions::InformationSchemaPartitions;
@@ -150,6 +153,7 @@ impl InformationSchemaProvider {
     fn build_tables(&mut self) {
         let mut tables = HashMap::new();
 
+        // SECURITY NOTE:
         // Carefully consider the tables that may expose sensitive cluster configurations,
         // authentication details, and other critical information.
         // Only put these tables under `greptime` catalog to prevent info leak.
@@ -165,6 +169,10 @@ impl InformationSchemaProvider {
             tables.insert(
                 REGION_PEERS.to_string(),
                 self.build_table(REGION_PEERS).unwrap(),
+            );
+            tables.insert(
+                CLUSTER_INFO.to_string(),
+                self.build_table(CLUSTER_INFO).unwrap(),
             );
         }
 
@@ -249,6 +257,9 @@ impl InformationSchemaProvider {
             )) as _),
             TABLE_CONSTRAINTS => Some(Arc::new(InformationSchemaTableConstraints::new(
                 self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            CLUSTER_INFO => Some(Arc::new(InformationSchemaClusterInfo::new(
                 self.catalog_manager.clone(),
             )) as _),
             _ => None,

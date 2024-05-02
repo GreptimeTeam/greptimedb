@@ -21,6 +21,16 @@ pub fn metadata_store_dir(store_dir: &str) -> String {
     format!("{store_dir}/metadata")
 }
 
+/// The Server running mode
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    // The single process mode.
+    Standalone,
+    // The distributed cluster mode.
+    Distributed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KvBackendConfig {

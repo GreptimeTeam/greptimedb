@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer};
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
@@ -30,28 +30,35 @@ use tokio::time::{Duration, Instant};
 
 use crate::error;
 use crate::error::Result;
+use crate::frontend::FrontendOptions;
 
 pub mod handler;
 
+/// The frontend heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 #[derive(Clone)]
 pub struct HeartbeatTask {
+    server_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: u64,
     retry_interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+    start_time_ms: u64,
 }
 
 impl HeartbeatTask {
     pub fn new(
+        opts: &FrontendOptions,
         meta_client: Arc<MetaClient>,
         heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
+            server_addr: opts.grpc.addr.clone(),
             meta_client,
             report_interval: heartbeat_opts.interval.as_millis() as u64,
             retry_interval: heartbeat_opts.retry_interval.as_millis() as u64,
             resp_handler_executor,
+            start_time_ms: common_time::util::current_time_millis() as u64,
         }
     }
 
@@ -102,12 +109,28 @@ impl HeartbeatTask {
         });
     }
 
+    fn build_node_info(start_time_ms: u64) -> NodeInfo {
+        let build_info = common_version::build_info();
+
+        NodeInfo {
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit_short.to_string(),
+            start_time_ms,
+        }
+    }
+
     fn start_heartbeat_report(
         &self,
         req_sender: HeartbeatSender,
         mut outgoing_rx: Receiver<OutgoingMessage>,
     ) {
         let report_interval = self.report_interval;
+        let start_time_ms = self.start_time_ms;
+        let self_peer = Some(Peer {
+            // The peer id doesn't make sense for frontend, so we just set it 0.
+            id: 0,
+            addr: self.server_addr.clone(),
+        });
 
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -121,6 +144,8 @@ impl HeartbeatTask {
                                 Ok(message) => {
                                     let req = HeartbeatRequest {
                                         mailbox_message: Some(message),
+                                        peer: self_peer.clone(),
+                                        info: Some(Self::build_node_info(start_time_ms)),
                                         ..Default::default()
                                     };
                                     Some(req)
@@ -138,6 +163,8 @@ impl HeartbeatTask {
                     _ = &mut sleep => {
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
                         let req = HeartbeatRequest {
+                            peer: self_peer.clone(),
+                            info: Some(Self::build_node_info(start_time_ms)),
                             ..Default::default()
                         };
                         Some(req)

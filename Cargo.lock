@@ -1245,6 +1245,7 @@ dependencies = [
  "catalog",
  "chrono",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-macro",
  "common-meta",
@@ -1259,6 +1260,7 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "humantime",
  "itertools 0.10.5",
  "lazy_static",
  "log-store",
@@ -2861,6 +2863,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-version",
  "common-wal",
  "dashmap",
  "datafusion",
@@ -3584,6 +3587,8 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-time",
+ "common-version",
  "datanode",
  "futures",
  "humantime-serde",
@@ -3886,7 +3891,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b5412f72257c18410fdccbb893fa5d245b846141#b5412f72257c18410fdccbb893fa5d245b846141"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f699e240f7a6c83f139dabac8669714f08513120#f699e240f7a6c83f139dabac8669714f08513120"
 dependencies = [
  "prost 0.12.4",
  "serde",
@@ -9141,6 +9146,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-grpc",
  "common-macro",

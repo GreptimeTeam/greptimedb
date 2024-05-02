@@ -49,6 +49,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to list nodes in cluster: {source}"))]
+    ListNodes {
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to re-compile script due to internal error"))]
     CompileScriptInternal {
         location: Location,
@@ -294,6 +300,7 @@ impl ErrorExt for Error {
             }
 
             Error::ListCatalogs { source, .. }
+            | Error::ListNodes { source, .. }
             | Error::ListSchemas { source, .. }
             | Error::ListTables { source, .. } => source.status_code(),
 
