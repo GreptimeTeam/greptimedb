@@ -253,6 +253,8 @@ impl StartCommand {
             cached_meta_backend.clone(),
         ]));
         let catalog_manager = KvBackendCatalogManager::new(
+            opts.mode,
+            Some(meta_client.clone()),
             cached_meta_backend.clone(),
             multi_cache_invalidator.clone(),
         )
@@ -266,6 +268,7 @@ impl StartCommand {
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
+            &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),

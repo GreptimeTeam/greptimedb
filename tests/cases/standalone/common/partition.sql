@@ -14,7 +14,7 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 
 -- SQLNESS REPLACE (\d{13}) REGION_ID
 -- SQLNESS REPLACE (\d{1}) PEER_ID
-SELECT region_id, peer_id, is_leader, status FROM information_schema.greptime_region_peers ORDER BY peer_id;
+SELECT region_id, peer_id, is_leader, status FROM information_schema.region_peers ORDER BY peer_id;
 
 INSERT INTO my_table VALUES
     (100, 'a', 1),
@@ -54,7 +54,7 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 
 -- SQLNESS REPLACE (\d{13}) REGION_ID
 -- SQLNESS REPLACE (\d{1}) PEER_ID
-SELECT region_id, peer_id, is_leader, status FROM information_schema.greptime_region_peers ORDER BY peer_id;
+SELECT region_id, peer_id, is_leader, status FROM information_schema.region_peers ORDER BY peer_id;
 
 INSERT INTO my_table VALUES
     (100, 'a', 1),
@@ -65,7 +65,7 @@ INSERT INTO my_table VALUES
     (2100, 'f', 6),
     (2200, 'g', 7),
     (2400, 'h', 8);
-    
+
 SELECT * FROM my_table;
 
 DROP TABLE my_table;
