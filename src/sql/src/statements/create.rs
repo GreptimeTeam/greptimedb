@@ -188,7 +188,12 @@ impl Display for CreateDatabase {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{}", &self.name)
+        write!(f, "{}", &self.name)?;
+        if !self.options.is_empty() {
+            let options = self.options.kv_pairs();
+            write!(f, "\nWITH(\n{}\n)", format_list_indent!(options))?;
+        }
+        Ok(())
     }
 }
 
@@ -470,6 +475,30 @@ CREATE DATABASE test"#,
                 assert_eq!(
                     r#"
 CREATE DATABASE IF NOT EXISTS test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r#"CREATE DATABASE IF NOT EXISTS test WITH (ttl='1h');"#;
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::CreateDatabase { .. });
+
+        match &stmts[0] {
+            Statement::CreateDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+CREATE DATABASE IF NOT EXISTS test
+WITH(
+  ttl = '1h'
+)"#,
                     &new_sql
                 );
             }

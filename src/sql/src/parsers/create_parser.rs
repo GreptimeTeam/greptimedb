@@ -27,9 +27,9 @@ use table::requests::validate_table_option;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu,
-    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
-    self, InvalidColumnOptionSnafu, , InvalidTableOptionSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidTableOptionSnafu,
+    InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu,
+    UnsupportedSnafu,
 };
 use crate::parser::ParserContext;
 use crate::statements::create::{
@@ -132,14 +132,8 @@ impl<'a> ParserContext<'a> {
             .parse_options(Keyword::WITH)
             .context(SyntaxSnafu)?
             .into_iter()
-            .filter_map(|option| {
-                if let Some(v) = parse_option_string(option.value) {
-                    Some((option.name.value.to_lowercase(), v))
-                } else {
-                    None
-                }
-            })
-            .collect::<HashMap<String, String>>();
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
 
         for key in options.keys() {
             ensure!(
@@ -1074,10 +1068,7 @@ mod tests {
             Statement::CreateDatabase(c) => {
                 assert_eq!(c.name.to_string(), "prometheus");
                 assert!(!c.if_not_exists);
-                assert_eq!(
-                    c.options.map.get_key_value("ttl"),
-                    Some((&"ttl".to_string(), &"1h".to_string()))
-                );
+                assert_eq!(c.options.get("ttl"), Some(&"1h".to_string()));
             }
             _ => unreachable!(),
         }

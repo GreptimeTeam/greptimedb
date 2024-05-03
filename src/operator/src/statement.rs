@@ -194,10 +194,10 @@ impl StatementExecutor {
                 self.truncate_table(table_name).await
             }
             Statement::CreateDatabase(stmt) => {
-                let options = if stmt.options.map.is_empty() {
+                let options = if stmt.options.is_empty() {
                     None
                 } else {
-                    Some(stmt.options.map.clone())
+                    Some(stmt.options.into_map())
                 };
                 self.create_database(
                     query_ctx.current_catalog(),
