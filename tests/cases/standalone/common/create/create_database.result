@@ -2,7 +2,7 @@ create database illegal-database;
 
 Error: 1001(Unsupported), SQL statement is not supported: create database illegal-database;, keyword: -
 
-create database 'illegal-database';
+create database 'illegal-database' with (ttl = '1h');
 
 Affected Rows: 1
 
