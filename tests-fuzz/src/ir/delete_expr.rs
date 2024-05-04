@@ -12,8 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod alter_expr;
-pub mod create_expr;
-pub mod insert_expr;
-pub mod select_expr;
-pub mod delete_expr;
+use datatypes::value::Value;
+
+use crate::ir::Column;
+
+pub struct WhereExpr {
+    pub column: String,
+    pub value: Value,
+}
+
+pub struct DeleteExpr {
+    pub table_name: String,
+    pub columns: Vec<Column>,
+    pub where_clause: Vec<WhereExpr>,
+}

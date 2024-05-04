@@ -18,6 +18,7 @@ pub(crate) mod alter_expr;
 pub(crate) mod create_expr;
 pub(crate) mod insert_expr;
 pub(crate) mod select_expr;
+pub(crate) mod delete_expr;
 
 use core::fmt;
 
