@@ -36,6 +36,11 @@ cargo fuzz list --fuzz-dir tests-fuzz
 cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz
 ```
 
+> Note: if you meet the error, you may need to run :
+> ```bash
+> cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz -D -s none
+> ```
+
 ## Crash Reproduction
 If you want to reproduce a crash, you first need to obtain the Base64 encoded code, which usually appears at the end of a crash report, and store it in a file.
 
