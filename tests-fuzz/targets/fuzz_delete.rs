@@ -33,10 +33,12 @@ use tests_fuzz::fake::{
     MappedGenerator, WordGenerator,
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
+use tests_fuzz::generator::delete_expr::DeleteExprGeneratorBuilder;
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
-use tests_fuzz::ir::{CreateTableExpr, InsertIntoExpr};
+use tests_fuzz::ir::{CreateTableExpr, DeleteExpr, InsertIntoExpr};
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
+use tests_fuzz::translator::mysql::delete_expr::DeleteExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
@@ -104,8 +106,85 @@ fn generate_insert_expr<R: Rng + 'static>(
     insert_generator.generate(rng)
 }
 
+fn generate_delete_expr<R: Rng + 'static>(
+    input: FuzzInput,
+    rng: &mut R,
+    table_ctx: TableContextRef,
+) -> Result<DeleteExpr> {
+    let delete_generator = DeleteExprGeneratorBuilder::default()
+        .table_ctx(table_ctx)
+        .build()
+        .unwrap();
+    delete_generator.generate(rng)
+}
+
 async fn execute_delete(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     info!("input: {input:?}");
+    let mut rng = ChaChaRng::seed_from_u64(input.seed);
+
+    let create_expr = generate_create_expr(input, &mut rng)?;
+    let translator = CreateTableExprTranslator;
+    let sql = translator.translate(&create_expr)?;
+    let _result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+    // Generate insert expr
+    let table_ctx = Arc::new(TableContext::from(&create_expr));
+    let insert_expr = generate_insert_expr(input, &mut rng, table_ctx)?;
+    let translator = InsertIntoExprTranslator;
+    let sql = translator.translate(&insert_expr)?;
+    let result = ctx
+        .greptime
+        .execute(sql.as_str())
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+    ensure!(
+        result.rows_affected() == input.rows as u64,
+        error::AssertSnafu {
+            reason: format!(
+                "expected rows affected: {}, actual: {}",
+                input.rows,
+                result.rows_affected(),
+            )
+        }
+    );
+
+    // Generate delete expr
+    let table_ctx = Arc::new(TableContext::from(&create_expr));
+    let delete_expr = generate_delete_expr(input, &mut rng, table_ctx)?;
+    let translator = DeleteExprTranslator;
+    let sql = translator.translate(&delete_expr)?;
+    let result = ctx
+        .greptime
+        .execute(sql.as_str())
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+    ensure!(
+        result.rows_affected() == input.rows as u64,
+        error::AssertSnafu {
+            reason: format!(
+                "expected rows affected: {}, actual: {}",
+                input.rows,
+                result.rows_affected(),
+            )
+        }
+    );
+
+    // Cleans up
+    let sql = format!("DROP TABLE {}", create_expr.table_name);
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    info!(
+        "Drop table: {}\n\nResult: {result:?}\n\n",
+        create_expr.table_name
+    );
+    ctx.close().await;
 
     Ok(())
 }
