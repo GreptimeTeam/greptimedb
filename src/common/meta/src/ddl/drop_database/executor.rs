@@ -89,7 +89,7 @@ impl DropDatabaseExecutor {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for DropDatabaseExecutor {
-    fn on_recover(&mut self, ddl_ctx: &DdlContext) -> Result<()> {
+    fn recover(&mut self, ddl_ctx: &DdlContext) -> Result<()> {
         self.register_dropping_regions(ddl_ctx)
     }
 
@@ -372,7 +372,7 @@ mod tests {
                 drop_if_exists: false,
                 tables: None,
             };
-            state.on_recover(&ddl_context).unwrap();
+            state.recover(&ddl_context).unwrap();
             assert_eq!(state.dropping_regions.len(), 1);
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());

@@ -70,7 +70,7 @@ pub(crate) trait State: Send + Debug {
     ) -> Result<(Box<dyn State>, Status)>;
 
     /// The hook is called during the recovery.
-    fn on_recover(&mut self, _ddl_ctx: &DdlContext) -> Result<()> {
+    fn recover(&mut self, _ddl_ctx: &DdlContext) -> Result<()> {
         Ok(())
     }
 
@@ -94,11 +94,6 @@ impl DropDatabaseProcedure {
         }
     }
 
-    fn on_recover(&mut self) -> Result<()> {
-        let state = &mut self.state;
-        state.on_recover(&self.runtime_context)
-    }
-
     pub fn from_json(json: &str, runtime_context: DdlContext) -> ProcedureResult<Self> {
         let DropDatabaseOwnedData {
             catalog,
@@ -107,7 +102,7 @@ impl DropDatabaseProcedure {
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
-        let mut procedure = Self {
+        Ok(Self {
             runtime_context,
             context: DropDatabaseContext {
                 catalog,
@@ -116,13 +111,12 @@ impl DropDatabaseProcedure {
                 tables: None,
             },
             state,
-        };
-        procedure
-            .on_recover()
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+        })
+    }
 
-        Ok(procedure)
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &dyn State {
+        self.state.as_ref()
     }
 }
 
@@ -130,6 +124,13 @@ impl DropDatabaseProcedure {
 impl Procedure for DropDatabaseProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
+    }
+
+    fn recover(&mut self) -> ProcedureResult<()> {
+        self.state
+            .recover(&self.runtime_context)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {

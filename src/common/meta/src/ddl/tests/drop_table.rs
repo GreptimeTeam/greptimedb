@@ -321,7 +321,8 @@ async fn test_from_json() {
         );
         // Cleans up the keeper.
         ddl_context.memory_region_keeper.clear();
-        let procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
+        let mut procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
+        procedure.recover().unwrap();
         assert_eq!(
             ddl_context.memory_region_keeper.len(),
             num_operating_regions_after_recovery
@@ -350,7 +351,8 @@ async fn test_from_json() {
     );
     // Cleans up the keeper.
     ddl_context.memory_region_keeper.clear();
-    let procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
+    let mut procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
+    procedure.recover().unwrap();
     assert_eq!(
         ddl_context.memory_region_keeper.len(),
         num_operating_regions_after_recovery
