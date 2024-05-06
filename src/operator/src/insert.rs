@@ -279,6 +279,10 @@ impl Inserter {
                         .map_ok(|key| Peer::new(key.flownode_id(), ""))
                         .try_collect::<Vec<_>>()
                         .await
+                        .map(|mut v| {
+                            v.dedup();
+                            v
+                        })
                         .context(RequestInsertsSnafu)?;
 
                     if !peers.is_empty() {
