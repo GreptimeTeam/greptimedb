@@ -190,6 +190,8 @@ impl TableFlowManager {
     }
 
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
+    ///
+    /// TODO(discord9): add cache for it since range request does not support cache.
     pub fn flows(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
         let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
