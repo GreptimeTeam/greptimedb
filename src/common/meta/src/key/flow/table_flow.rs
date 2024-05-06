@@ -176,6 +176,8 @@ pub fn table_flow_decoder(kv: KeyValue) -> Result<TableFlowKey> {
     TableFlowKey::from_bytes(&kv.key)
 }
 
+pub type TableFlowManagerRef = Arc<TableFlowManager>;
+
 /// The manager of [TableFlowKey].
 pub struct TableFlowManager {
     kv_backend: KvBackendRef,
@@ -188,7 +190,9 @@ impl TableFlowManager {
     }
 
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
-    pub fn nodes(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
+    ///
+    /// TODO(discord9): add cache for it since range request does not support cache.
+    pub fn flows(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
         let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
