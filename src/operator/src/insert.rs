@@ -193,13 +193,6 @@ impl Inserter {
     }
 }
 
-/// Peer type enum, determine the type of peer.
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-enum PeerTyped {
-    Datanode(Peer),
-    Flownode(Peer),
-}
-
 impl Inserter {
     async fn do_request(
         &self,
@@ -213,38 +206,44 @@ impl Inserter {
             ..Default::default()
         });
 
+        // spawn all tasks that do job for mirror insert requests for flownode
+        let flow_tasks = self
+            .mirror_flow_node_requests(&requests)
+            .await?
+            .into_iter()
+            .map(|(peer, inserts)| {
+                let node_manager = self.node_manager.clone();
+                common_runtime::spawn_write(async move {
+                    node_manager
+                        .flownode(&peer)
+                        .await
+                        .handle_inserts(inserts)
+                        .await
+                        .map(|flow_response| RegionResponse {
+                            affected_rows: flow_response.affected_rows as AffectedRows,
+                            extension: flow_response.extension,
+                        })
+                        .context(RequestInsertsSnafu)
+                })
+            });
+
         let tasks = self
             .group_requests_by_peer(requests)
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
                 let node_manager = self.node_manager.clone();
-                match peer {
-                    PeerTyped::Datanode(peer) => {
-                        let request = request_factory.build_insert(inserts);
-                        common_runtime::spawn_write(async move {
-                            node_manager
-                                .datanode(&peer)
-                                .await
-                                .handle(request)
-                                .await
-                                .context(RequestInsertsSnafu)
-                        })
-                    }
-                    PeerTyped::Flownode(peer) => common_runtime::spawn_write(async move {
-                        node_manager
-                            .flownode(&peer)
-                            .await
-                            .handle_inserts(inserts)
-                            .await
-                            .map(|flow_response| RegionResponse {
-                                affected_rows: flow_response.affected_rows as AffectedRows,
-                                extension: flow_response.extension,
-                            })
-                            .context(RequestInsertsSnafu)
-                    }),
-                }
-            });
+                let request = request_factory.build_insert(inserts);
+                common_runtime::spawn_write(async move {
+                    node_manager
+                        .datanode(&peer)
+                        .await
+                        .handle(request)
+                        .await
+                        .context(RequestInsertsSnafu)
+                })
+            })
+            .chain(flow_tasks);
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
         let affected_rows = results
@@ -258,15 +257,15 @@ impl Inserter {
         ))
     }
 
-    async fn group_requests_by_peer(
+    /// Mirror requests for source table to flownode
+    async fn mirror_flow_node_requests(
         &self,
-        requests: RegionInsertRequests,
-    ) -> Result<HashMap<PeerTyped, RegionInsertRequests>> {
-        let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
+        requests: &RegionInsertRequests,
+    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // store partial source table requests used by flow node(only store what's in)
         let mut src_table_reqs: HashMap<TableId, RegionInsertRequests> = HashMap::new();
         let mut src_table_to_flownode: HashMap<TableId, Vec<Peer>> = HashMap::new();
-        for req in requests.requests {
+        for req in &requests.requests {
             if let Some(reqs) =
                 src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id())
             {
@@ -294,7 +293,33 @@ impl Inserter {
                     src_table_reqs.insert(table_id, empty_reqs);
                 }
             }
+        }
 
+        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+
+        for (table_id, reqs) in src_table_reqs {
+            let flownodes = src_table_to_flownode
+                .get(&table_id)
+                .expect("Source table should have peers to send to");
+            for flownode in flownodes {
+                inserts
+                    .entry(flownode.clone())
+                    .or_default()
+                    .requests
+                    .extend(reqs.requests.clone());
+            }
+        }
+        Ok(inserts)
+    }
+
+    async fn group_requests_by_peer(
+        &self,
+        requests: RegionInsertRequests,
+    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
+        // group by region ids first to reduce repeatly call `find_region_leader`
+        let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
+
+        for req in requests.requests {
             let region_id = RegionId::from_u64(req.region_id);
             requests_per_region
                 .entry(region_id)
@@ -303,7 +328,7 @@ impl Inserter {
                 .push(req);
         }
 
-        let mut inserts: HashMap<PeerTyped, RegionInsertRequests> = HashMap::new();
+        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
 
         for (region_id, reqs) in requests_per_region {
             let peer = self
@@ -312,23 +337,10 @@ impl Inserter {
                 .await
                 .context(FindRegionLeaderSnafu)?;
             inserts
-                .entry(PeerTyped::Datanode(peer))
+                .entry(peer)
                 .or_default()
                 .requests
                 .extend(reqs.requests);
-        }
-
-        for (table_id, reqs) in src_table_reqs {
-            let flownodes = src_table_to_flownode
-                .get(&table_id)
-                .expect("Source table should have peers to send to");
-            for flownode in flownodes {
-                inserts
-                    .entry(PeerTyped::Flownode(flownode.clone()))
-                    .or_default()
-                    .requests
-                    .extend(reqs.requests.clone());
-            }
         }
 
         Ok(inserts)
