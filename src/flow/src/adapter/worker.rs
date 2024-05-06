@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::adapter::error::{Error, EvalSnafu};
-use crate::adapter::{FlowTickManager, TaskId};
+use crate::adapter::{FlowId, FlowTickManager};
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
@@ -116,16 +116,16 @@ impl WorkerHandle {
     /// create task, return task id
     ///
     #[allow(clippy::too_many_arguments)]
-    pub fn create_task(
+    pub fn create_flow(
         &self,
-        task_id: TaskId,
+        task_id: FlowId,
         plan: TypedPlan,
         sink_id: GlobalId,
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         create_if_not_exist: bool,
-    ) -> Result<Option<TaskId>, Error> {
+    ) -> Result<Option<FlowId>, Error> {
         let req = Request::Create {
             task_id,
             plan,
@@ -154,7 +154,7 @@ impl WorkerHandle {
     }
 
     /// remove task, return task id
-    pub fn remove_task(&self, task_id: TaskId) -> Result<bool, Error> {
+    pub fn remove_flow(&self, task_id: FlowId) -> Result<bool, Error> {
         let req = Request::Remove { task_id };
         let ret = self.itc_client.blocking_lock().call_blocking(req)?;
         if let Response::Remove { result } = ret {
@@ -179,7 +179,7 @@ impl WorkerHandle {
             .call_non_blocking(Request::RunAvail { now });
     }
 
-    pub fn contains_task(&self, task_id: TaskId) -> Result<bool, Error> {
+    pub fn contains_flow(&self, task_id: FlowId) -> Result<bool, Error> {
         let req = Request::ContainTask { task_id };
         let ret = self.itc_client.blocking_lock().call_blocking(req).unwrap();
         if let Response::ContainTask {
@@ -209,22 +209,22 @@ impl WorkerHandle {
 /// The actual worker that does the work and contain active state
 #[derive(Debug)]
 pub struct Worker<'subgraph> {
-    pub task_states: BTreeMap<TaskId, ActiveDataflowState<'subgraph>>,
+    pub task_states: BTreeMap<FlowId, ActiveDataflowState<'subgraph>>,
     itc_server: Arc<Mutex<InterThreadCallServer>>,
 }
 
 impl<'s> Worker<'s> {
     #[allow(clippy::too_many_arguments)]
-    pub fn create_task(
+    pub fn create_flow(
         &mut self,
-        task_id: TaskId,
+        task_id: FlowId,
         plan: TypedPlan,
         sink_id: GlobalId,
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         create_if_not_exist: bool,
-    ) -> Result<Option<TaskId>, Error> {
+    ) -> Result<Option<FlowId>, Error> {
         if create_if_not_exist {
             // check if the task already exists
             if self.task_states.contains_key(&task_id) {
@@ -249,7 +249,7 @@ impl<'s> Worker<'s> {
     }
 
     /// remove task, return true if a task is removed
-    pub fn remove_task(&mut self, task_id: TaskId) -> bool {
+    pub fn remove_flow(&mut self, task_id: FlowId) -> bool {
         self.task_states.remove(&task_id).is_some()
     }
 
@@ -290,7 +290,7 @@ impl<'s> Worker<'s> {
                 src_recvs,
                 create_if_not_exist,
             } => {
-                let task_create_result = self.create_task(
+                let task_create_result = self.create_flow(
                     task_id,
                     plan,
                     sink_id,
@@ -307,7 +307,7 @@ impl<'s> Worker<'s> {
                 ))
             }
             Request::Remove { task_id } => {
-                let ret = self.remove_task(task_id);
+                let ret = self.remove_flow(task_id);
                 Some((req_id, Response::Remove { result: ret }))
             }
             Request::RunAvail { now } => {
@@ -327,7 +327,7 @@ impl<'s> Worker<'s> {
 #[derive(Debug)]
 enum Request {
     Create {
-        task_id: TaskId,
+        task_id: FlowId,
         plan: TypedPlan,
         sink_id: GlobalId,
         sink_sender: mpsc::UnboundedSender<DiffRow>,
@@ -336,14 +336,14 @@ enum Request {
         create_if_not_exist: bool,
     },
     Remove {
-        task_id: TaskId,
+        task_id: FlowId,
     },
     /// Trigger the worker to run, useful after input buffer is full
     RunAvail {
         now: repr::Timestamp,
     },
     ContainTask {
-        task_id: TaskId,
+        task_id: FlowId,
     },
     Shutdown,
 }
@@ -351,7 +351,7 @@ enum Request {
 #[derive(Debug)]
 enum Response {
     Create {
-        result: Result<Option<TaskId>, Error>,
+        result: Result<Option<FlowId>, Error>,
     },
     Remove {
         result: bool,
@@ -466,7 +466,7 @@ mod test {
             },
         );
         handle
-            .create_task(
+            .create_flow(
                 task_id,
                 plan,
                 GlobalId::User(1),

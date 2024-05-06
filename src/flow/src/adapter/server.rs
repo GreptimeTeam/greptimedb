@@ -91,7 +91,7 @@ impl flow_server::Flow for FlowService {
                 task_id: Some(task_id),
             })) => {
                 self.manager
-                    .remove_task(task_id.id as u64)
+                    .remove_flow(task_id.id as u64)
                     .await
                     .map_err(|e| tonic::Status::internal(e.to_string()))?;
                 Ok(Response::new(Default::default()))

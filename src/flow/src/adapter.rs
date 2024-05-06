@@ -61,7 +61,8 @@ use error::Error;
 pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
 
 // TODO: refactor common types for flow to a separate module
-pub type TaskId = u64;
+/// FlowId is a unique identifier for a flow task
+pub type FlowId = u64;
 pub type TableName = Vec<String>;
 
 /// This function will create a new thread for flow worker and return a handle to the flow node manager
@@ -411,11 +412,11 @@ impl FlowNodeManager {
         output
     }
 
-    pub async fn remove_task(&self, task_id: TaskId) -> Result<(), Error> {
+    pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
             let handle = handle.lock().await;
-            if handle.contains_task(task_id)? {
-                handle.remove_task(task_id)?;
+            if handle.contains_flow(flow_id)? {
+                handle.remove_flow(flow_id)?;
                 break;
             }
         }
@@ -430,7 +431,7 @@ impl FlowNodeManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_flow(
         &self,
-        task_id: TaskId,
+        flow_id: FlowId,
         sink_table_id: TableId,
         source_table_ids: &[TableId],
         create_if_not_exist: bool,
@@ -438,11 +439,11 @@ impl FlowNodeManager {
         comment: Option<String>,
         sql: String,
         task_options: HashMap<String, String>,
-    ) -> Result<Option<TaskId>, Error> {
+    ) -> Result<Option<FlowId>, Error> {
         if create_if_not_exist {
             // check if the task already exists
             for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_task(task_id)? {
+                if handle.lock().await.contains_flow(flow_id)? {
                     return Ok(None);
                 }
             }
@@ -458,7 +459,7 @@ impl FlowNodeManager {
                 .assign_global_id_to_table(&self.table_info_source, *source)
                 .await;
         }
-        node_ctx.register_task_src_sink(task_id, source_table_ids, sink_table_id);
+        node_ctx.register_task_src_sink(flow_id, source_table_ids, sink_table_id);
 
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(node_ctx.borrow_mut(), &self.query_engine, &sql).await?;
@@ -486,8 +487,8 @@ impl FlowNodeManager {
             .collect::<Result<Vec<_>, _>>()?;
 
         let handle = &self.worker_handles[0].lock().await;
-        handle.create_task(
-            task_id,
+        handle.create_flow(
+            flow_id,
             flow_plan,
             sink_id,
             sink_sender,
@@ -496,7 +497,7 @@ impl FlowNodeManager {
             create_if_not_exist,
         )?;
 
-        Ok(Some(task_id))
+        Ok(Some(flow_id))
     }
 }
 
@@ -504,9 +505,9 @@ impl FlowNodeManager {
 #[derive(Default)]
 pub struct FlowNodeContext {
     /// mapping from source table to tasks, useful for schedule which task to run when a source table is updated
-    pub source_to_tasks: BTreeMap<TableId, BTreeSet<TaskId>>,
+    pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
     /// mapping from task to sink table, useful for sending data back to the client when a task is done running
-    pub task_to_sink: BTreeMap<TaskId, TableName>,
+    pub flow_to_sink: BTreeMap<FlowId, TableName>,
     /// broadcast sender for source table, any incoming write request will be sent to the source table's corresponding sender
     ///
     /// Note that we are getting insert requests with table id, so we should use table id as the key
@@ -572,7 +573,7 @@ impl FlowNodeContext {
     /// also add their corrseponding broadcast sender/receiver
     fn register_task_src_sink(
         &mut self,
-        task_id: TaskId,
+        task_id: FlowId,
         source_table_ids: &[TableId],
         sink_table_id: TableId,
     ) {
@@ -586,7 +587,7 @@ impl FlowNodeContext {
 
         let sink_table_name = self.table_repr.get_by_table_id(&sink_table_id).unwrap().0;
         self.add_sink_receiver(sink_table_name.clone());
-        self.task_to_sink.insert(task_id, sink_table_name);
+        self.flow_to_sink.insert(task_id, sink_table_name);
     }
 
     pub fn add_source_sender(&mut self, table_id: TableId) {
