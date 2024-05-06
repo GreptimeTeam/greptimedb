@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::region::RegionResponse;
 use api::v1::alter_expr::Kind;
 use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
 use api::v1::{
@@ -25,6 +26,7 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
+use common_meta::key::flow::TableFlowManagerRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
@@ -32,7 +34,7 @@ use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info};
 use datatypes::schema::Schema;
-use futures_util::future;
+use futures_util::{future, TryStreamExt};
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -41,6 +43,7 @@ use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
+use store_api::storage::RegionId;
 use table::requests::InsertRequest as TableInsertRequest;
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -58,6 +61,7 @@ pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
+    table_flow_manager: TableFlowManagerRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -67,11 +71,13 @@ impl Inserter {
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
+        table_flow_manager: TableFlowManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
+            table_flow_manager,
         }
     }
 
@@ -186,6 +192,13 @@ impl Inserter {
     }
 }
 
+/// Peer type enum, determine the type of peer.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+enum PeerTyped {
+    Datanode(Peer),
+    Flownode(Peer),
+}
+
 impl Inserter {
     async fn do_request(
         &self,
@@ -204,16 +217,32 @@ impl Inserter {
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
-                let request = request_factory.build_insert(inserts);
                 let node_manager = self.node_manager.clone();
-                common_runtime::spawn_write(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
-                        .await
-                        .context(RequestInsertsSnafu)
-                })
+                match peer {
+                    PeerTyped::Datanode(peer) => {
+                        let request = request_factory.build_insert(inserts);
+                        common_runtime::spawn_write(async move {
+                            node_manager
+                                .datanode(&peer)
+                                .await
+                                .handle(request)
+                                .await
+                                .context(RequestInsertsSnafu)
+                        })
+                    }
+                    PeerTyped::Flownode(peer) => common_runtime::spawn_write(async move {
+                        node_manager
+                            .flownode(&peer)
+                            .await
+                            .handle_inserts(inserts)
+                            .await
+                            .map(|flow_response| RegionResponse {
+                                affected_rows: flow_response.affected_rows as AffectedRows,
+                                extension: flow_response.extension,
+                            })
+                            .context(RequestInsertsSnafu)
+                    }),
+                }
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
@@ -231,16 +260,37 @@ impl Inserter {
     async fn group_requests_by_peer(
         &self,
         requests: RegionInsertRequests,
-    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
-        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+    ) -> Result<HashMap<PeerTyped, RegionInsertRequests>> {
+        let mut inserts: HashMap<PeerTyped, RegionInsertRequests> = HashMap::new();
 
         for req in requests.requests {
+            // TODO(discord9): impl proper FlowNodeId to Peer Conversion
+            if let Ok(flownodes) = self
+                .table_flow_manager
+                .nodes(RegionId::from_u64(req.region_id).table_id())
+                .map_ok(|key| Peer::new(key.flownode_id(), ""))
+                .try_collect::<Vec<_>>()
+                .await
+            {
+                for flownode in flownodes {
+                    inserts
+                        .entry(PeerTyped::Flownode(flownode))
+                        .or_default()
+                        .requests
+                        .push(req.clone());
+                }
+            }
+
             let peer = self
                 .partition_manager
                 .find_region_leader(req.region_id.into())
                 .await
                 .context(FindRegionLeaderSnafu)?;
-            inserts.entry(peer).or_default().requests.push(req);
+            inserts
+                .entry(PeerTyped::Datanode(peer))
+                .or_default()
+                .requests
+                .push(req);
         }
 
         Ok(inserts)

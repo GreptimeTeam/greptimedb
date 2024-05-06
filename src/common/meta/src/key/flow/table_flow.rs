@@ -176,6 +176,8 @@ pub fn table_flow_decoder(kv: KeyValue) -> Result<TableFlowKey> {
     TableFlowKey::from_bytes(&kv.key)
 }
 
+pub type TableFlowManagerRef = Arc<TableFlowManager>;
+
 /// The manager of [TableFlowKey].
 pub struct TableFlowManager {
     kv_backend: KvBackendRef,
