@@ -492,7 +492,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
     // series
     let res = client
-        .get("/v1/prometheus/api/v1/series?match[]=demo&start=0&end=0")
+        .get("/v1/prometheus/api/v1/series?match[]=demo{}&start=0&end=0")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

@@ -760,6 +760,50 @@ async fn retrieve_label_values_from_record_batch(
     Ok(())
 }
 
+/// Try to parse and extract the name of referenced metric from the promql query.
+///
+/// Returns the metric name if a single metric is referenced, otherwise None.
+fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
+    let promql_expr = promql_parser::parser::parse(query).ok()?;
+    // promql_expr_to_metric_name(&promql_expr)
+
+    struct MetricNameVisitor {
+        metric_name: Option<String>,
+    }
+
+    impl promql_parser::util::ExprVisitor for MetricNameVisitor {
+        type Error = ();
+
+        fn pre_visit(&mut self, plan: &PromqlExpr) -> std::result::Result<bool, Self::Error> {
+            let query_metric_name = match plan {
+                PromqlExpr::VectorSelector(vs) => vs
+                    .matchers
+                    .find_matcher(promql_parser::label::METRIC_NAME)
+                    .or_else(|| vs.name.clone()),
+                PromqlExpr::MatrixSelector(ms) => ms
+                    .vs
+                    .matchers
+                    .find_matcher(promql_parser::label::METRIC_NAME)
+                    .or_else(|| ms.vs.name.clone()),
+                _ => return Ok(true),
+            };
+
+            // set it to empty string if multiple metrics are referenced.
+            if self.metric_name.is_some() && query_metric_name.is_some() {
+                self.metric_name = Some(String::new());
+            } else {
+                self.metric_name = query_metric_name.or_else(|| self.metric_name.clone());
+            }
+
+            Ok(true)
+        }
+    }
+
+    let mut visitor = MetricNameVisitor { metric_name: None };
+    promql_parser::util::walk_expr(&mut visitor, &promql_expr).ok()?;
+    visitor.metric_name
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SeriesQuery {
     start: Option<String>,
@@ -810,7 +854,7 @@ pub async fn series_query(
     let mut series = Vec::new();
     let mut merge_map = HashMap::new();
     for query in queries {
-        let table_name = query.clone();
+        let table_name = retrieve_metric_name_from_promql(&query).unwrap_or_default();
         let prom_query = PromQuery {
             query,
             start: start.clone(),
