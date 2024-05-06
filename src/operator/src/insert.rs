@@ -266,10 +266,12 @@ impl Inserter {
         let mut src_table_reqs: HashMap<TableId, (Vec<Peer>, RegionInsertRequests)> =
             HashMap::new();
         for req in &requests.requests {
-            if let Some(reqs) =
+            if let Some((peers, reqs)) =
                 src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id())
             {
-                reqs.1.requests.push(req.clone())
+                if !peers.is_empty() {
+                    reqs.requests.push(req.clone())
+                } // TODO(discord9): check can peers be empty at this point?
             } else {
                 let table_id = RegionId::from_u64(req.region_id).table_id();
                 let peers = self
@@ -307,6 +309,7 @@ impl Inserter {
         requests: RegionInsertRequests,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // group by region ids first to reduce repeatedly call `find_region_leader`
+        // TODO(discord9): determine if a addition clone is worth it
         let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
 
         for req in requests.requests {
