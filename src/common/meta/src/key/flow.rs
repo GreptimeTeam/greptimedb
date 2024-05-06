@@ -306,7 +306,7 @@ mod tests {
         for table_id in [1024, 1025, 1026] {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
-                .nodes(table_id)
+                .flows(table_id)
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();

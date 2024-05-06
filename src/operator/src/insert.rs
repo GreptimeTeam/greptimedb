@@ -263,6 +263,7 @@ impl Inserter {
         requests: RegionInsertRequests,
     ) -> Result<HashMap<PeerTyped, RegionInsertRequests>> {
         let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
+        // store partial source table requests used by flow node(only store what's in)
         let mut src_table_reqs: HashMap<TableId, RegionInsertRequests> = HashMap::new();
         let mut src_table_to_flownode: HashMap<TableId, Vec<Peer>> = HashMap::new();
         for req in requests.requests {
@@ -274,7 +275,7 @@ impl Inserter {
                 let table_id = RegionId::from_u64(req.region_id).table_id();
                 let is_source_table = self
                     .table_flow_manager
-                    .nodes(table_id)
+                    .flows(table_id)
                     .map_ok(|key| Peer::new(key.flownode_id(), ""))
                     .try_collect::<Vec<_>>()
                     .await

@@ -190,7 +190,7 @@ impl TableFlowManager {
     }
 
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
-    pub fn nodes(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
+    pub fn flows(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
         let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
