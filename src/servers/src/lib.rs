@@ -42,7 +42,6 @@ pub mod query_handler;
 pub mod repeated_field;
 mod row_writer;
 pub mod server;
-mod shutdown;
 pub mod tls;
 
 pub use common_config::Mode;

@@ -25,8 +25,8 @@ use axum::response::IntoResponse;
 use hyper::Body;
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
+    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
@@ -130,11 +130,6 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
-    pub static ref METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_opentsdb_line_write_elapsed",
-        "servers opentsdb line write elapsed"
-    )
-    .unwrap();
     pub static ref METRIC_MYSQL_CONNECTIONS: IntGauge = register_int_gauge!(
         "greptime_servers_mysql_connection_count",
         "servers mysql connection count"

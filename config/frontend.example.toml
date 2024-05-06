@@ -88,12 +88,8 @@ watch = false
 
 ## OpenTSDB protocol options.
 [opentsdb]
-## Whether to enable
+## Whether to enable OpenTSDB put in HTTP API.
 enable = true
-## OpenTSDB telnet API server address.
-addr = "127.0.0.1:4242"
-## The number of server worker threads.
-runtime_size = 2
 
 ## InfluxDB protocol options.
 [influxdb]
