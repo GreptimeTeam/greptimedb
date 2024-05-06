@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::value::Value;
-
+use super::insert_expr::RowValue;
 use crate::ir::Column;
 
 pub struct WhereExpr {
     pub column: String,
-    pub value: Value,
+    pub value: RowValue,
 }
 
+#[derive(Default)]
 pub struct DeleteExpr {
     pub table_name: String,
     pub columns: Vec<Column>,
