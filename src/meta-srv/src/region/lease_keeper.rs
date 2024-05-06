@@ -148,7 +148,7 @@ impl RegionLeaseKeeper {
         // Filters out operating region first, improves the cache hit rate(reduce expensive remote fetches).
         let operating_regions = self
             .memory_region_keeper
-            .filter_operating_regions(datanode_id, &mut region_ids);
+            .extract_operating_regions(datanode_id, &mut region_ids);
         let table_ids = region_ids
             .into_iter()
             .map(|region_id| region_id.table_id())

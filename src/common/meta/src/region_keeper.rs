@@ -83,8 +83,8 @@ impl MemoryRegionKeeper {
         inner.contains(&(datanode_id, region_id))
     }
 
-    /// Filters out all operating regions from `region_ids` and returns operating regions.
-    pub fn filter_operating_regions(
+    /// Extracts all operating regions from `region_ids` and returns operating regions.
+    pub fn extract_operating_regions(
         &self,
         datanode_id: DatanodeId,
         region_ids: &mut HashSet<RegionId>,
@@ -129,7 +129,7 @@ mod tests {
             RegionId::from_u64(2),
             RegionId::from_u64(3),
         ]);
-        let output = keeper.filter_operating_regions(1, &mut regions);
+        let output = keeper.extract_operating_regions(1, &mut regions);
         assert_eq!(output.len(), 2);
 
         assert!(output.contains(&RegionId::from_u64(1)));
