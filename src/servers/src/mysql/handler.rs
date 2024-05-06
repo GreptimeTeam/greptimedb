@@ -24,7 +24,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{debug, error, logging, tracing, warn};
+use common_telemetry::{debug, error, tracing, warn};
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -327,7 +327,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     }
                 };
 
-                logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
+                debug!("Mysql execute prepared plan: {}", plan.display_indent());
                 vec![
                     self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
                         .await,
@@ -335,7 +335,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
             None => {
                 let query = replace_params(params, sql_plan.query);
-                logging::debug!("Mysql execute replaced query: {}", query);
+                debug!("Mysql execute replaced query: {}", query);
                 self.do_query(&query, query_ctx.clone()).await
             }
         };

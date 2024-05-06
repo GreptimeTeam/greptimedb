@@ -28,7 +28,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{logging, tracing};
+use common_telemetry::{debug, error, tracing};
 use common_time::timezone::parse_timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -91,10 +91,10 @@ impl GreptimeRequestHandler {
                 .await
                 .map_err(|e| {
                     if e.status_code().should_log_error() {
-                        logging::error!(e; "Failed to handle request");
+                        error!(e; "Failed to handle request");
                     } else {
                         // Currently, we still print a debug log.
-                        logging::debug!("Failed to handle request, err: {:?}", e);
+                        debug!("Failed to handle request, err: {:?}", e);
                     }
                     e
                 })

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use common_telemetry::logging;
+use common_telemetry::{debug, error, info};
 use tokio::time;
 
 use super::rwlock::OwnedKeyRwLockGuard;
@@ -54,7 +54,7 @@ impl ProcedureGuard {
 impl Drop for ProcedureGuard {
     fn drop(&mut self) {
         if !self.finish {
-            logging::error!("Procedure {} exits unexpectedly", self.meta.id);
+            error!("Procedure {} exits unexpectedly", self.meta.id);
 
             // Set state to failed. This is useful in test as runtime may not abort when the runner task panics.
             // See https://github.com/tokio-rs/tokio/issues/2002 .
@@ -104,7 +104,7 @@ impl Runner {
         // Ensure we can update the procedure state.
         let mut guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
 
-        logging::info!(
+        info!(
             "Runner {}-{} starts",
             self.procedure.type_name(),
             self.meta.id
@@ -149,7 +149,7 @@ impl Runner {
 
             for id in procedure_ids {
                 if let Err(e) = self.store.delete_procedure(id).await {
-                    logging::error!(
+                    error!(
                         e;
                         "Runner {}-{} failed to delete procedure {}",
                         self.procedure.type_name(),
@@ -160,7 +160,7 @@ impl Runner {
             }
         }
 
-        logging::info!(
+        info!(
             "Runner {}-{} exits",
             self.procedure.type_name(),
             self.meta.id
@@ -260,7 +260,7 @@ impl Runner {
             ProcedureState::Running | ProcedureState::Retrying { .. } => {
                 match self.procedure.execute(ctx).await {
                     Ok(status) => {
-                        logging::debug!(
+                        debug!(
                             "Execute procedure {}-{} once, status: {:?}, need_persist: {}",
                             self.procedure.type_name(),
                             self.meta.id,
@@ -299,7 +299,7 @@ impl Runner {
                         }
                     }
                     Err(e) => {
-                        logging::error!(
+                        error!(
                             e;
                             "Failed to execute procedure {}-{}, retry: {}",
                             self.procedure.type_name(),
@@ -394,7 +394,7 @@ impl Runner {
 
     /// Extend the retry time to wait for the next retry.
     async fn wait_on_err(&mut self, d: Duration, i: u64) {
-        logging::info!(
+        info!(
             "Procedure {}-{} retry for the {} times after {} millis",
             self.procedure.type_name(),
             self.meta.id,
@@ -407,7 +407,7 @@ impl Runner {
     async fn on_suspended(&mut self, subprocedures: Vec<ProcedureWithId>) {
         let has_child = !subprocedures.is_empty();
         for subprocedure in subprocedures {
-            logging::info!(
+            info!(
                 "Procedure {}-{} submit subprocedure {}-{}",
                 self.procedure.type_name(),
                 self.meta.id,
@@ -422,7 +422,7 @@ impl Runner {
             );
         }
 
-        logging::info!(
+        info!(
             "Procedure {}-{} is waiting for subprocedures",
             self.procedure.type_name(),
             self.meta.id,
@@ -432,7 +432,7 @@ impl Runner {
         if has_child {
             self.meta.child_notify.notified().await;
 
-            logging::info!(
+            info!(
                 "Procedure {}-{} is waked up",
                 self.procedure.type_name(),
                 self.meta.id,
@@ -454,7 +454,7 @@ impl Runner {
             )
             .await
             .map_err(|e| {
-                logging::error!(
+                error!(
                     e; "Failed to persist procedure {}-{}",
                     self.procedure.type_name(),
                     self.meta.id
@@ -470,7 +470,7 @@ impl Runner {
             .commit_procedure(self.meta.id, self.step)
             .await
             .map_err(|e| {
-                logging::error!(
+                error!(
                     e; "Failed to commit procedure {}-{}",
                     self.procedure.type_name(),
                     self.meta.id
@@ -496,7 +496,7 @@ impl Runner {
             .rollback_procedure(self.meta.id, message)
             .await
             .map_err(|e| {
-                logging::error!(
+                error!(
                     e; "Failed to write rollback key for procedure {}-{}",
                     self.procedure.type_name(),
                     self.meta.id
@@ -509,7 +509,7 @@ impl Runner {
 
     fn done(&self, output: Option<Output>) {
         // TODO(yingwen): Add files to remove list.
-        logging::info!(
+        info!(
             "Procedure {}-{} done",
             self.procedure.type_name(),
             self.meta.id,

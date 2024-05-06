@@ -20,7 +20,6 @@ use client::OutputData;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
-use common_telemetry::logging;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
@@ -1629,7 +1628,9 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    use common_telemetry::info;
+
+    common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
             let instance = instance.frontend();
@@ -1706,7 +1707,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                     "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
                     test.sql, key_id, key, region,
                 );
-                logging::info!("Running sql: {}", sql);
+                info!("Running sql: {}", sql);
 
                 let output = execute_sql(&instance, &sql).await.data;
                 assert!(matches!(output, OutputData::AffectedRows(2)));
@@ -1732,7 +1733,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
 
     // setups
@@ -1766,7 +1767,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
 
     // setups
@@ -1880,7 +1881,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";

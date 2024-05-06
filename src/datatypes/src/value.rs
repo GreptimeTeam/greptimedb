@@ -20,7 +20,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_array::{Array, ListArray};
 use common_base::bytes::{Bytes, StringBytes};
 use common_decimal::Decimal128;
-use common_telemetry::logging;
+use common_telemetry::error;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::interval::IntervalUnit;
@@ -487,7 +487,7 @@ pub fn scalar_value_to_timestamp(
         ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s, timezone) {
             Ok(t) => Some(t),
             Err(e) => {
-                logging::error!(e;"Failed to convert string literal {s} to timestamp");
+                error!(e;"Failed to convert string literal {s} to timestamp");
                 None
             }
         },

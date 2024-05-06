@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use common_telemetry::logging;
+use common_telemetry::{debug, error, info, warn};
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -65,7 +65,7 @@ impl ProcedureStore {
     /// Creates a new [ProcedureStore] from specific [StateStoreRef].
     pub(crate) fn new(parent_path: &str, store: StateStoreRef) -> ProcedureStore {
         let proc_path = format!("{}{PROC_PATH}", parent_path);
-        logging::info!("The procedure state store path is: {}", &proc_path);
+        info!("The procedure state store path is: {}", &proc_path);
         ProcedureStore { proc_path, store }
     }
 
@@ -154,7 +154,7 @@ impl ProcedureStore {
         while let Some((key_set, _)) = key_values.try_next().await? {
             let key = key_set.key();
             let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
-                logging::warn!("Unknown key while deleting procedures, key: {}", key);
+                warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
@@ -165,11 +165,9 @@ impl ProcedureStore {
             }
         }
 
-        logging::debug!(
+        debug!(
             "Delete keys for procedure {}, step_keys: {:?}, finish_keys: {:?}",
-            procedure_id,
-            step_keys,
-            finish_keys
+            procedure_id, step_keys, finish_keys
         );
         // We delete all step keys first.
         self.store.batch_delete(step_keys.as_slice()).await?;
@@ -203,7 +201,7 @@ impl ProcedureStore {
         while let Some((key_set, value)) = key_values.try_next().await? {
             let key = key_set.key();
             let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
-                logging::warn!("Unknown key while loading procedures, key: {}", key);
+                warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };
 
@@ -251,7 +249,7 @@ impl ProcedureStore {
         serde_json::from_slice(value)
             .map_err(|e| {
                 // `e` doesn't impl ErrorExt so we print it as normal error.
-                logging::error!("Failed to parse value, key: {:?}, source: {:?}", key, e);
+                error!("Failed to parse value, key: {:?}, source: {:?}", key, e);
                 e
             })
             .ok()

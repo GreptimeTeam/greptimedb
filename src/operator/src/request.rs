@@ -20,7 +20,7 @@ use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
-use common_telemetry::logging::{error, info};
+use common_telemetry::{error, info};
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
 use partition::manager::{PartitionInfo, PartitionRuleManagerRef};

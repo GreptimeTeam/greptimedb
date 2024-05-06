@@ -28,7 +28,7 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
-use common_telemetry::logging;
+use common_telemetry::error;
 use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
@@ -275,7 +275,7 @@ impl Database {
                 addr: client.addr().to_string(),
                 source: BoxedError::new(ServerSnafu { code, msg }.build()),
             };
-            logging::error!(
+            error!(
                 "Failed to do Flight get, addr: {}, code: {}, source: {:?}",
                 client.addr(),
                 tonic_code,
