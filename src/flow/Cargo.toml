@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "mem-footprint"
+name = "footprint"
 path = "bin/mem_footprint.rs"
 
 [lints]

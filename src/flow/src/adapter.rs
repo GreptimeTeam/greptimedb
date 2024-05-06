@@ -438,7 +438,7 @@ impl FlowNodeManager {
         expire_when: Option<String>,
         comment: Option<String>,
         sql: String,
-        task_options: HashMap<String, String>,
+        flow_options: HashMap<String, String>,
     ) -> Result<Option<FlowId>, Error> {
         if create_if_not_exist {
             // check if the task already exists
@@ -467,7 +467,7 @@ impl FlowNodeManager {
         // TODO(discord9): parse `expire_when`
         let _ = expire_when;
         let _ = comment;
-        let _ = task_options;
+        let _ = flow_options;
 
         // TODO(discord9): add more than one handles
         let sink_id = node_ctx

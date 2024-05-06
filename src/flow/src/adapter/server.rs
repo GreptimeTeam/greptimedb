@@ -17,7 +17,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use api::v1::flow::{CreateRequest, RemoveRequest};
+use api::v1::flow::{CreateRequest, DropRequest};
 use common_telemetry::tracing::info;
 use futures::FutureExt;
 use greptime_proto::v1::flow::{
@@ -50,14 +50,14 @@ impl flow_server::Flow for FlowService {
     ) -> Result<Response<FlowResponse>, Status> {
         match request.into_inner().body {
             Some(flow_request::Body::Create(CreateRequest {
-                task_id: Some(task_id),
+                flow_id: Some(task_id),
                 source_table_ids,
                 sink_table_name: Some(sink_table_name),
                 create_if_not_exists,
                 expire_when,
                 comment,
                 sql,
-                task_options,
+                flow_options,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
                 let sink_table_id = self
@@ -75,7 +75,7 @@ impl flow_server::Flow for FlowService {
                         Some(expire_when),
                         Some(comment),
                         sql,
-                        task_options,
+                        flow_options,
                     )
                     .await
                     .map_err(|e| tonic::Status::internal(e.to_string()))?;
@@ -87,11 +87,11 @@ impl flow_server::Flow for FlowService {
                     ..Default::default()
                 }))
             }
-            Some(flow_request::Body::Remove(RemoveRequest {
-                task_id: Some(task_id),
+            Some(flow_request::Body::Drop(DropRequest {
+                flow_id: Some(flow_id),
             })) => {
                 self.manager
-                    .remove_flow(task_id.id as u64)
+                    .remove_flow(flow_id.id as u64)
                     .await
                     .map_err(|e| tonic::Status::internal(e.to_string()))?;
                 Ok(Response::new(Default::default()))
