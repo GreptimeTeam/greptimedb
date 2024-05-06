@@ -275,6 +275,7 @@ impl Inserter {
                     let peers = self
                         .table_flow_manager
                         .flows(table_id)
+                        // TODO(discord9): determine where to store the flow node address in distributed mode
                         .map_ok(|key| Peer::new(key.flownode_id(), ""))
                         .try_collect::<Vec<_>>()
                         .await
