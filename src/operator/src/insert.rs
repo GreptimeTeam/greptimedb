@@ -266,27 +266,28 @@ impl Inserter {
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
         for req in &requests.requests {
-            if let Some(Some((_peers, reqs))) =
-                src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id())
-            {
-                reqs.requests.push(req.clone())
-            } else {
-                let table_id = RegionId::from_u64(req.region_id).table_id();
-                let peers = self
-                    .table_flow_manager
-                    .flows(table_id)
-                    .map_ok(|key| Peer::new(key.flownode_id(), ""))
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .context(RequestInsertsSnafu)?;
+            match src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id()) {
+                Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
+                // already know this is not source table
+                Some(None) => continue,
+                _ => {
+                    let table_id = RegionId::from_u64(req.region_id).table_id();
+                    let peers = self
+                        .table_flow_manager
+                        .flows(table_id)
+                        .map_ok(|key| Peer::new(key.flownode_id(), ""))
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .context(RequestInsertsSnafu)?;
 
-                if !peers.is_empty() {
-                    let mut reqs = RegionInsertRequests::default();
-                    reqs.requests.push(req.clone());
-                    src_table_reqs.insert(table_id, Some((peers, reqs)));
-                } else {
-                    // insert a empty entry to avoid repeat query
-                    src_table_reqs.insert(table_id, None);
+                    if !peers.is_empty() {
+                        let mut reqs = RegionInsertRequests::default();
+                        reqs.requests.push(req.clone());
+                        src_table_reqs.insert(table_id, Some((peers, reqs)));
+                    } else {
+                        // insert a empty entry to avoid repeat query
+                        src_table_reqs.insert(table_id, None);
+                    }
                 }
             }
         }
