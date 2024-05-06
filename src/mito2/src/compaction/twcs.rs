@@ -29,7 +29,6 @@ use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, FileId};
 use crate::sst::version::LevelMeta;
 
-// const LEVEL_UNCOMPACTED: Level = 0;
 const LEVEL_COMPACTED: Level = 1;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
@@ -67,57 +66,38 @@ impl TwcsPicker {
     /// fragmentation. For other windows, we allow at most 1 file at each window.
     fn build_output(
         &self,
-        time_windows: &BTreeMap<i64, Window>,
+        time_windows: &mut BTreeMap<i64, Window>,
         active_window: Option<i64>,
     ) -> Vec<CompactionOutput> {
         let mut output = vec![];
         for (window, files) in time_windows {
-            let files_in_window = &files.files;
-            let sorted_runs = find_sorted_runs(files_in_window.clone());
-            // we only remove deletion markers once no file in current window overlaps with any other window.
-            let filter_deleted = !files.overlapping && sorted_runs.len() == 1;
-            debug!(
-                "Window {}, found run: {}, filter deleted: {}",
-                *window,
-                sorted_runs.len(),
-                filter_deleted
-            );
-            if let Some(active_window) = active_window
+            let sorted_runs = find_sorted_runs(&mut files.files);
+
+            let max_runs = if let Some(active_window) = active_window
                 && *window == active_window
             {
-                if sorted_runs.len() > self.max_active_window_runs {
-                    let files_to_compact = reduce_runs(sorted_runs, self.max_active_window_runs);
-                    for inputs in files_to_compact {
-                        output.push(CompactionOutput {
-                            output_file_id: FileId::random(),
-                            output_level: LEVEL_COMPACTED, // we only have two levels and always compact to l1
-                            inputs,
-                            filter_deleted,
-                        output_time_range: None, // we do not enforce output time range in twcs compactions.});
-                    }
-                } else {
-                    debug!("Active window not present or no enough sorted runs in active window {:?}, window: {}, current run: {}", active_window, *window, sorted_runs.len());
+                self.max_active_window_runs
+            } else {
+                self.max_inactive_window_runs
+            };
+
+            // we only remove deletion markers once no file in current window overlaps with any other window.
+            let found_runs = sorted_runs.len();
+            let filter_deleted = !files.overlapping && (found_runs == 1 || max_runs == 1);
+
+            if found_runs > max_runs {
+                let files_to_compact = reduce_runs(sorted_runs, max_runs);
+                info!("Building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, output size: {}", active_window, *window,max_runs, found_runs, files_to_compact.len());
+                for inputs in files_to_compact {
+                    output.push(CompactionOutput {
+                        output_file_id: FileId::random(),
+                        output_level: LEVEL_COMPACTED, // always compact to l1
+                        inputs,
+                        filter_deleted,
+                    output_time_range: None, // we do not enforce output time range in twcs compactions.});
                 }
             } else {
-                // not active writing window
-                if sorted_runs.len() > self.max_inactive_window_runs {
-                    let files_to_merge = reduce_runs(sorted_runs, self.max_inactive_window_runs);
-                    for inputs in files_to_merge {
-                        output.push(CompactionOutput {
-                            output_file_id: FileId::random(),
-                            output_level: LEVEL_COMPACTED,
-                            inputs,
-                            filter_deleted,
-                        output_time_range: None,});
-                    }
-                } else {
-                    debug!(
-                        "No enough runs in inactive window {}, current: {}, max_inactive_window_runs: {}",
-                        *window,
-                        sorted_runs.len(),
-                        self.max_inactive_window_runs
-                    )
-                }
+                debug!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
             }
         }
         output
@@ -154,8 +134,9 @@ impl Picker for TwcsPicker {
         // Find active window from files in level 0.
         let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
         // Assign files to windows
-        let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
-        let outputs = self.build_output(&windows, active_window);
+        let mut windows =
+            assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
+        let outputs = self.build_output(&mut windows, active_window);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             return None;
@@ -497,10 +478,10 @@ mod tests {
 
     impl CompactionPickerTestCase {
         fn check(&self) {
-            let windows = assign_to_windows(self.input_files.iter(), self.window_size);
+            let mut windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::new(4, 1, None).build_output(&windows, active_window);
+            let output = TwcsPicker::new(4, 1, None).build_output(&mut windows, active_window);
 
             let output = output
                 .iter()

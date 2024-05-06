@@ -140,13 +140,18 @@ async fn test_compaction_region() {
     assert_eq!(result.affected_rows, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    // Input:
     // [0..9]
     //       [10...19]
     //                [20....29]
     //          -[15.........29]-
     //           [15.....24]
+    // Output:
+    // [0..9]
+    //     [10..14]
+    //            [15..24]
     assert_eq!(
-        2,
+        3,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()

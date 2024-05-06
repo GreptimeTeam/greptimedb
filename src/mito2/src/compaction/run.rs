@@ -28,6 +28,7 @@ use crate::sst::file::FileHandle;
 pub(crate) trait Ranged {
     type BoundType: Ord + Copy;
 
+    /// Returns the inclusive range of item.
     fn range(&self) -> (Self::BoundType, Self::BoundType);
 
     fn overlap<T>(&self, other: &T) -> bool
@@ -310,7 +311,7 @@ where
 }
 
 /// Finds sorted runs in given items.
-pub(crate) fn find_sorted_runs<T>(mut items: Vec<T>) -> Vec<SortedRun<T>>
+pub(crate) fn find_sorted_runs<T>(items: &mut [T]) -> Vec<SortedRun<T>>
 where
     T: Item,
 {
@@ -318,7 +319,7 @@ where
         return vec![];
     }
     // sort files
-    sort_ranged_items(&mut items);
+    sort_ranged_items(items);
 
     let mut current_run = SortedRun::default();
     let mut runs = vec![];
@@ -431,8 +432,8 @@ mod tests {
         ranges: &[(i64, i64)],
         expected_runs: &[Vec<(i64, i64)>],
     ) -> Vec<SortedRun<MockFile>> {
-        let files = build_items(ranges);
-        let runs = find_sorted_runs(files);
+        let mut files = build_items(ranges);
+        let runs = find_sorted_runs(&mut files);
 
         let result_file_ranges: Vec<Vec<_>> = runs
             .iter()
@@ -499,7 +500,8 @@ mod tests {
         expected_penalty: usize,
         expected: &[Vec<(i64, i64)>],
     ) {
-        let mut runs = find_sorted_runs(build_items(items));
+        let mut items = build_items(items);
+        let mut runs = find_sorted_runs(&mut items);
         assert_eq!(2, runs.len());
         let lhs = runs.pop().unwrap();
         let rhs = runs.pop().unwrap();
@@ -611,8 +613,8 @@ mod tests {
         expected_penalty: usize,
         expected: &[Vec<(i64, i64)>],
     ) {
-        let files = build_items(files);
-        let runs = find_sorted_runs(files);
+        let mut files = build_items(files);
+        let runs = find_sorted_runs(&mut files);
         let result = merge_all_runs(runs);
         assert_eq!(expected_penalty, result.penalty);
         assert_eq!(expected.len(), result.items.len());
@@ -658,8 +660,8 @@ mod tests {
 
     #[test]
     fn test_sorted_runs_time_range() {
-        let files = build_items(&[(1, 2), (3, 4), (4, 10)]);
-        let runs = find_sorted_runs(files);
+        let mut files = build_items(&[(1, 2), (3, 4), (4, 10)]);
+        let runs = find_sorted_runs(&mut files);
         assert_eq!(2, runs.len());
         let SortedRun { start, end, .. } = &runs[0];
         assert_eq!(Some(1), *start);
