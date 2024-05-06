@@ -140,6 +140,11 @@ pub trait Procedure: Send {
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
+    /// The hook is called after the procedure recovery.
+    fn recover(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns the [LockKey] that this procedure needs to acquire.
     fn lock_key(&self) -> LockKey;
 }
