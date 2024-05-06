@@ -330,6 +330,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tql_cte() {
+        let sql = r#"
+        WITH cte_test_b AS (
+            SELECT * FROM test WHERE test.k = 'b'
+        )
+        TQL EVAL (0, 10, '1s', '2s') cte_test_b;
+        "#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+    }
+
+    #[test]
     fn test_parse_tql_eval_with_functions() {
         let sql = "TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let statement = parse_into_statement(sql);

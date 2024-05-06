@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datafusion_sql::sqlparser::ast::With;
+// use datafusion::sql::sqlparser::ast::With;
 use snafu::ResultExt;
-use sqlparser::ast::Ident;
+use sqlparser::ast::{Cte, Ident, Query, SetExpr, Table};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
@@ -24,6 +26,7 @@ use crate::error::{self, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
 use crate::statements::transform_statements;
+use sqlparser::ast::Query as SpQuery;
 
 /// SQL Parser options.
 #[derive(Clone, Debug, Default)]
@@ -135,7 +138,44 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::INSERT => self.parse_insert(),
 
-                    Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+                    Keyword::SELECT | Keyword::VALUES => self.parse_query(),
+                    Keyword::WITH => {
+
+                        if self.sql.contains(tql_parser::TQL) { // can replace with something similar to 'find_next_delimiter_token'
+                            let with = if self.parser.parse_keyword(Keyword::WITH) {
+                                Some(sqlparser::ast::With {
+                                    recursive: false,
+                                    cte_tables: vec![self.parser.parse_cte().unwrap()],
+                                })
+                            } else {
+                                None
+                            };
+
+                            let query1 = crate::statements::query::Query {
+                                inner: Query {
+                                    with,
+                                    body: Box::new(SetExpr::Table(Box::new(Table {
+                                        table_name: None,
+                                        schema_name: None,
+                                    }))),
+                                    order_by: vec![],
+                                    limit: None,
+                                    limit_by: vec![],
+                                    offset: None,
+                                    fetch: None,
+                                    locks: vec![],
+                                    for_clause: None,
+                                }
+                            };
+                            let sssk = self.parser.next_token();
+                            dbg!(sssk);
+                            Ok(Statement::Query(Box::new(
+                                query1
+                            )))
+                        } else {
+                            self.parse_query()
+                        }
+                    }
 
                     Keyword::ALTER => self.parse_alter(),
 
