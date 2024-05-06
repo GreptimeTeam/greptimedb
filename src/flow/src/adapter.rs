@@ -532,7 +532,6 @@ pub struct FlowNodeContext {
 }
 
 impl FlowNodeContext {
-    // TODO(discord9): add send_buf in case the broadcast channel is full
     // return number of rows it actuall send(including what's in the buffer)
     pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
         let sender = self

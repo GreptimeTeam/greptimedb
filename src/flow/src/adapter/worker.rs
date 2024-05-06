@@ -161,9 +161,7 @@ impl WorkerHandle {
             Ok(result)
         } else {
             InternalSnafu {
-                reason: format!(
-                    "Flow Node/Worker itc failed, expect Response::Remove, found {ret:?}"
-                ),
+                reason: format!("Flow Node/Worker failed, expect Response::Remove, found {ret:?}"),
             }
             .fail()
             .with_context(|_| EvalSnafu {})
