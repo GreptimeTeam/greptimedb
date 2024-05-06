@@ -64,7 +64,11 @@ impl DropDatabaseExecutor {
 }
 
 impl DropDatabaseExecutor {
-    fn register_dropping_regions(&mut self, ddl_ctx: &DdlContext) -> Result<()> {
+    /// Registers the operating regions.
+    pub(crate) fn register_dropping_regions(&mut self, ddl_ctx: &DdlContext) -> Result<()> {
+        if !self.dropping_regions.is_empty() {
+            return Ok(());
+        }
         let dropping_regions = operating_leader_regions(&self.physical_region_routes);
         let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
         for (region_id, datanode_id) in dropping_regions {
@@ -85,6 +89,10 @@ impl DropDatabaseExecutor {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for DropDatabaseExecutor {
+    fn on_recover(&mut self, ddl_ctx: &DdlContext) -> Result<()> {
+        self.register_dropping_regions(ddl_ctx)
+    }
+
     async fn next(
         &mut self,
         ddl_ctx: &DdlContext,
@@ -337,5 +345,39 @@ mod tests {
         };
         let err = state.next(&ddl_context, &mut ctx).await.unwrap_err();
         assert!(err.is_retry_later());
+    }
+
+    #[tokio::test]
+    async fn test_on_recovery() {
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let ddl_context = new_ddl_context(node_manager);
+        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
+        let (_, table_route) = ddl_context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(physical_table_id)
+            .await
+            .unwrap();
+        {
+            let mut state = DropDatabaseExecutor::new(
+                physical_table_id,
+                physical_table_id,
+                TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy"),
+                table_route.region_routes.clone(),
+                DropTableTarget::Physical,
+            );
+            let mut ctx = DropDatabaseContext {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                drop_if_exists: false,
+                tables: None,
+            };
+            state.on_recover(&ddl_context).unwrap();
+            assert_eq!(state.dropping_regions.len(), 1);
+            let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
+            assert!(!status.need_persist());
+            let cursor = state.as_any().downcast_ref::<DropDatabaseCursor>().unwrap();
+            assert_eq!(cursor.target, DropTableTarget::Physical);
+        }
     }
 }

@@ -296,3 +296,67 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     inner_test(new_drop_table_task("s", logical_table_id, false)).await;
     inner_test(new_drop_table_task("t", physical_table_id, false)).await;
 }
+
+#[tokio::test]
+async fn test_from_json() {
+    for (state, num_operating_regions, num_operating_regions_after_recovery) in [
+        (DropTableState::DeleteMetadata, 0, 1),
+        (DropTableState::InvalidateTableCache, 1, 1),
+        (DropTableState::DatanodeDropRegions, 1, 1),
+        (DropTableState::DeleteTombstone, 1, 0),
+    ] {
+        let cluster_id = 1;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
+
+        let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
+        let task = new_drop_table_task("t", physical_table_id, false);
+        let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+        execute_procedure_until(&mut procedure, |p| p.data.state == state).await;
+        let data = procedure.dump().unwrap();
+        assert_eq!(
+            ddl_context.memory_region_keeper.len(),
+            num_operating_regions
+        );
+        // Cleans up the keeper.
+        ddl_context.memory_region_keeper.clear();
+        let procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
+        assert_eq!(
+            ddl_context.memory_region_keeper.len(),
+            num_operating_regions_after_recovery
+        );
+        assert_eq!(
+            procedure.dropping_regions.len(),
+            num_operating_regions_after_recovery
+        );
+    }
+
+    let num_operating_regions = 0;
+    let num_operating_regions_after_recovery = 0;
+    let cluster_id = 1;
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
+
+    let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
+    let task = new_drop_table_task("t", physical_table_id, false);
+    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+    execute_procedure_until_done(&mut procedure).await;
+    let data = procedure.dump().unwrap();
+    assert_eq!(
+        ddl_context.memory_region_keeper.len(),
+        num_operating_regions
+    );
+    // Cleans up the keeper.
+    ddl_context.memory_region_keeper.clear();
+    let procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
+    assert_eq!(
+        ddl_context.memory_region_keeper.len(),
+        num_operating_regions_after_recovery
+    );
+    assert_eq!(
+        procedure.dropping_regions.len(),
+        num_operating_regions_after_recovery
+    );
+}

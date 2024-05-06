@@ -101,8 +101,15 @@ impl MemoryRegionKeeper {
         inner.len()
     }
 
+    /// Returns true if it's empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    #[cfg(test)]
+    pub fn clear(&self) {
+        let mut inner = self.inner.write().unwrap();
+        inner.clear();
     }
 }
 

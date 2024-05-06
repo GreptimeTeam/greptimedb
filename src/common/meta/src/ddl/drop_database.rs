@@ -20,7 +20,8 @@ pub mod start;
 use std::any::Any;
 use std::fmt::Debug;
 
-use common_procedure::error::{Error as ProcedureError, FromJsonSnafu, ToJsonSnafu};
+use common_error::ext::BoxedError;
+use common_procedure::error::{Error as ProcedureError, ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
@@ -68,6 +69,11 @@ pub(crate) trait State: Send + Debug {
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)>;
 
+    /// The hook is called during the recovery.
+    fn on_recover(&mut self, _ddl_ctx: &DdlContext) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns as [Any](std::any::Any).
     fn as_any(&self) -> &dyn Any;
 }
@@ -88,6 +94,11 @@ impl DropDatabaseProcedure {
         }
     }
 
+    fn on_recover(&mut self) -> Result<()> {
+        let state = &mut self.state;
+        state.on_recover(&self.runtime_context)
+    }
+
     pub fn from_json(json: &str, runtime_context: DdlContext) -> ProcedureResult<Self> {
         let DropDatabaseOwnedData {
             catalog,
@@ -96,7 +107,7 @@ impl DropDatabaseProcedure {
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
-        Ok(Self {
+        let mut procedure = Self {
             runtime_context,
             context: DropDatabaseContext {
                 catalog,
@@ -105,7 +116,13 @@ impl DropDatabaseProcedure {
                 tables: None,
             },
             state,
-        })
+        };
+        procedure
+            .on_recover()
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        Ok(procedure)
     }
 }
 
