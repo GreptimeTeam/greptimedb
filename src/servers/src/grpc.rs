@@ -29,8 +29,7 @@ use async_trait::async_trait;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
-use common_telemetry::logging::info;
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use futures::FutureExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;

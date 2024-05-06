@@ -22,7 +22,7 @@ use catalog::{OpenSystemTableHook, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::logging;
+use common_telemetry::info;
 use futures::future::FutureExt;
 use query::QueryEngineRef;
 use servers::query_handler::grpc::GrpcQueryHandlerRef;
@@ -106,11 +106,11 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptManager<E> {
             let mut compiled = self.compiled.write().unwrap();
             let _ = compiled.insert(name.to_string(), script.clone());
         }
-        logging::info!("Compiled and cached script: {}", name);
+        info!("Compiled and cached script: {}", name);
 
         script.as_ref().register_udf().await;
 
-        logging::info!("Script register as UDF: {}", name);
+        info!("Script register as UDF: {}", name);
 
         Ok(script)
     }

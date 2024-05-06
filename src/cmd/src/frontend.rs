@@ -22,7 +22,7 @@ use client::client_manager::DatanodeClients;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_telemetry::logging;
+use common_telemetry::info;
 use common_time::timezone::set_default_timezone;
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -219,8 +219,8 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        logging::info!("Frontend start command: {:#?}", self);
-        logging::info!("Frontend options: {:#?}", opts);
+        info!("Frontend start command: {:#?}", self);
+        info!("Frontend options: {:#?}", opts);
 
         set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 

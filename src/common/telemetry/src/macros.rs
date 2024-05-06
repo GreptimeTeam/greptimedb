@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_log_error() {
-        crate::logging::init_default_ut_logging();
+        crate::init_default_ut_logging();
 
         let err = MockError::new(StatusCode::Unknown);
         let err_ref = &err;

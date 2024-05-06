@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
-use common_telemetry::logging;
+use common_telemetry::info;
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
@@ -198,8 +198,8 @@ impl StartCommand {
             .await
             .context(StartMetaServerSnafu)?;
 
-        logging::info!("Metasrv start command: {:#?}", self);
-        logging::info!("Metasrv options: {:#?}", opts);
+        info!("Metasrv start command: {:#?}", self);
+        info!("Metasrv options: {:#?}", opts);
 
         let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
             .await

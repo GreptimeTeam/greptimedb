@@ -16,7 +16,7 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
-use common_telemetry::logging;
+use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
 use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
@@ -109,10 +109,10 @@ async fn test_fs_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
-            logging::info!("Running s3 test.");
+            info!("Running s3 test.");
 
             let root = uuid::Uuid::new_v4().to_string();
 
@@ -138,10 +138,10 @@ async fn test_s3_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_oss_backend() -> Result<()> {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_OSS_BUCKET") {
         if !bucket.is_empty() {
-            logging::info!("Running oss test.");
+            info!("Running oss test.");
 
             let root = uuid::Uuid::new_v4().to_string();
 
@@ -166,10 +166,10 @@ async fn test_oss_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_azblob_backend() -> Result<()> {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     if let Ok(container) = env::var("GT_AZBLOB_CONTAINER") {
         if !container.is_empty() {
-            logging::info!("Running azblob test.");
+            info!("Running azblob test.");
 
             let root = uuid::Uuid::new_v4().to_string();
 
@@ -193,10 +193,10 @@ async fn test_azblob_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_gcs_backend() -> Result<()> {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     if let Ok(container) = env::var("GT_AZBLOB_CONTAINER") {
         if !container.is_empty() {
-            logging::info!("Running azblob test.");
+            info!("Running azblob test.");
 
             let mut builder = Gcs::default();
             builder
@@ -219,7 +219,7 @@ async fn test_gcs_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_file_backend_with_lru_cache() -> Result<()> {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
 
     let data_dir = create_temp_dir("test_file_backend_with_lru_cache");
     let tmp_dir = create_temp_dir("test_file_backend_with_lru_cache");
