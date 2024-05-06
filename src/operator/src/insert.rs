@@ -39,11 +39,12 @@ use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use snafu::ResultExt;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use table::requests::InsertRequest as TableInsertRequest;
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -261,36 +262,72 @@ impl Inserter {
         &self,
         requests: RegionInsertRequests,
     ) -> Result<HashMap<PeerTyped, RegionInsertRequests>> {
-        let mut inserts: HashMap<PeerTyped, RegionInsertRequests> = HashMap::new();
-
+        let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
+        let mut src_table_reqs: HashMap<TableId, RegionInsertRequests> = HashMap::new();
+        let mut src_table_to_flownode: HashMap<TableId, Vec<Peer>> = HashMap::new();
         for req in requests.requests {
-            // TODO(discord9): impl proper FlowNodeId to Peer Conversion
-            if let Ok(flownodes) = self
-                .table_flow_manager
-                .nodes(RegionId::from_u64(req.region_id).table_id())
-                .map_ok(|key| Peer::new(key.flownode_id(), ""))
-                .try_collect::<Vec<_>>()
-                .await
+            if let Some(reqs) =
+                src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id())
             {
-                for flownode in flownodes {
-                    inserts
-                        .entry(PeerTyped::Flownode(flownode))
-                        .or_default()
-                        .requests
-                        .push(req.clone());
+                reqs.requests.push(req.clone())
+            } else {
+                let table_id = RegionId::from_u64(req.region_id).table_id();
+                let is_source_table = self
+                    .table_flow_manager
+                    .nodes(table_id)
+                    .map_ok(|key| Peer::new(key.flownode_id(), ""))
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map(|v| {
+                        if !v.is_empty() {
+                            src_table_to_flownode.insert(table_id, v);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .context(RequestInsertsSnafu)?;
+                if is_source_table {
+                    let mut empty_reqs = RegionInsertRequests::default();
+                    empty_reqs.requests.push(req.clone());
+                    src_table_reqs.insert(table_id, empty_reqs);
                 }
             }
 
+            let region_id = RegionId::from_u64(req.region_id);
+            requests_per_region
+                .entry(region_id)
+                .or_default()
+                .requests
+                .push(req);
+        }
+
+        let mut inserts: HashMap<PeerTyped, RegionInsertRequests> = HashMap::new();
+
+        for (region_id, reqs) in requests_per_region {
             let peer = self
                 .partition_manager
-                .find_region_leader(req.region_id.into())
+                .find_region_leader(region_id)
                 .await
                 .context(FindRegionLeaderSnafu)?;
             inserts
                 .entry(PeerTyped::Datanode(peer))
                 .or_default()
                 .requests
-                .push(req);
+                .extend(reqs.requests);
+        }
+
+        for (table_id, reqs) in src_table_reqs {
+            let flownodes = src_table_to_flownode
+                .get(&table_id)
+                .expect("Source table should have peers to send to");
+            for flownode in flownodes {
+                inserts
+                    .entry(PeerTyped::Flownode(flownode.clone()))
+                    .or_default()
+                    .requests
+                    .extend(reqs.requests.clone());
+            }
         }
 
         Ok(inserts)
