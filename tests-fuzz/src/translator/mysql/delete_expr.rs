@@ -40,44 +40,6 @@ impl DslTranslator<DeleteExpr, String> for DeleteExprTranslator {
         ))
     }
 }
-/**
-CREATE TABLE `esT`(
-  `eT` TIMESTAMP(3) TIME INDEX,
-  `eAque` BOOLEAN,
-  `repudiAndae` FLOAT,
-  `ULLaM` BOOLEAN,
-  `COnSECTeTuR` SMALLINT DEFAULT -31852,
-  `OrIBUS` FLOAT NOT NULL,
-  `QUiS` SMALLINT NULL,
-  `consEquatuR` BOOLEAN NOT NULL,
-  `vERO` BOOLEAN,
-  PRIMARY KEY(`repudiAndae`, `ULLaM`)
-) ENGINE = mito;
-
-INSERT INTO
-  `esT` (
-    `consEquatuR`,
-    `eAque`,
-    `eT`,
-    `repudiAndae`,
-    `OrIBUS`
-  )
-VALUES
-  (
-    false,
-    false,
-    '+234049-06-04 01:11:41.163+0000',
-    0.2339946,
-    0.97377783
-  ),
-  (
-    false,
-    true,
-    '-19578-12-20 11:45:59.875+0000',
-    0.3535998,
-    0.3535998
-  );
- */
 
 #[cfg(test)]
 mod tests {
