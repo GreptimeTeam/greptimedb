@@ -207,12 +207,36 @@ impl Context {
     }
 }
 
+/// The value of the leader. It is used to store the leader's address.
 pub struct LeaderValue(pub String);
 
 impl<T: AsRef<[u8]>> From<T> for LeaderValue {
     fn from(value: T) -> Self {
         let string = String::from_utf8_lossy(value.as_ref());
         Self(string.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetasrvNodeInfo {
+    // The metasrv's address
+    pub addr: String,
+    // The node build version
+    pub version: String,
+    // The node build git commit hash
+    pub git_commit: String,
+}
+
+impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
+    fn from(node_info: MetasrvNodeInfo) -> Self {
+        Self {
+            addr: Some(api::v1::meta::Peer {
+                addr: node_info.addr,
+                ..Default::default()
+            }),
+            version: node_info.version,
+            git_commit: node_info.git_commit,
+        }
     }
 }
 

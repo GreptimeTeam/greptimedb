@@ -17,9 +17,8 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::v1::meta::cluster_client::ClusterClient;
-use api::v1::meta::{MetasrvPeersRequest, ResponseHeader, Role};
+use api::v1::meta::{MetasrvNodeInfo, MetasrvPeersRequest, ResponseHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::peer::Peer;
 use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse, RangeRequest, RangeResponse};
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
@@ -72,7 +71,9 @@ impl Client {
         inner.batch_get(req).await
     }
 
-    pub async fn get_metasrv_peers(&self) -> Result<(Option<Peer>, Vec<Peer>)> {
+    pub async fn get_metasrv_peers(
+        &self,
+    ) -> Result<(Option<MetasrvNodeInfo>, Vec<MetasrvNodeInfo>)> {
         let inner = self.inner.read().await;
         inner.get_metasrv_peers().await
     }
@@ -225,7 +226,7 @@ impl Inner {
         .context(ConvertMetaResponseSnafu)
     }
 
-    async fn get_metasrv_peers(&self) -> Result<(Option<Peer>, Vec<Peer>)> {
+    async fn get_metasrv_peers(&self) -> Result<(Option<MetasrvNodeInfo>, Vec<MetasrvNodeInfo>)> {
         self.with_retry(
             "get_metasrv_peers",
             move |mut client| {
@@ -241,10 +242,6 @@ impl Inner {
             |res| &res.header,
         )
         .await
-        .map(|res| {
-            let leader = res.leader.map(|x| x.into());
-            let peers = res.followers.into_iter().map(|x| x.into()).collect();
-            (leader, peers)
-        })
+        .map(|res| (res.leader, res.followers))
     }
 }
