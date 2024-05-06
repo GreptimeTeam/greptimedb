@@ -135,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn test_noop_logstore() {
         let store = NoopLogStore;
-        let e = store.entry(&mut "".as_bytes().to_vec(), 1, NamespaceImpl);
+        let e = store.entry(&mut vec![], 1, NamespaceImpl);
         let _ = store.append(e.clone()).await.unwrap();
         assert!(store.append_batch(vec![e]).await.is_ok());
         store.create_namespace(&NamespaceImpl).await.unwrap();
