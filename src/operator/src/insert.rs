@@ -262,46 +262,36 @@ impl Inserter {
         &self,
         requests: &RegionInsertRequests,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
-        // store partial source table requests used by flow node(only store what's in)
-        let mut src_table_reqs: HashMap<TableId, RegionInsertRequests> = HashMap::new();
-        let mut src_table_to_flownode: HashMap<TableId, Vec<Peer>> = HashMap::new();
+        // store partial source table requests used by flow node(only store what's used)
+        let mut src_table_reqs: HashMap<TableId, (Vec<Peer>, RegionInsertRequests)> =
+            HashMap::new();
         for req in &requests.requests {
             if let Some(reqs) =
                 src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id())
             {
-                reqs.requests.push(req.clone())
+                reqs.1.requests.push(req.clone())
             } else {
                 let table_id = RegionId::from_u64(req.region_id).table_id();
-                let is_source_table = self
+                let peers = self
                     .table_flow_manager
                     .flows(table_id)
                     .map_ok(|key| Peer::new(key.flownode_id(), ""))
                     .try_collect::<Vec<_>>()
                     .await
-                    .map(|v| {
-                        if !v.is_empty() {
-                            src_table_to_flownode.insert(table_id, v);
-                            true
-                        } else {
-                            false
-                        }
-                    })
                     .context(RequestInsertsSnafu)?;
-                if is_source_table {
-                    let mut empty_reqs = RegionInsertRequests::default();
-                    empty_reqs.requests.push(req.clone());
-                    src_table_reqs.insert(table_id, empty_reqs);
+
+                if !peers.is_empty() {
+                    let mut reqs = RegionInsertRequests::default();
+                    reqs.requests.push(req.clone());
+                    src_table_reqs.insert(table_id, (peers, reqs));
                 }
             }
         }
 
         let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
 
-        for (table_id, reqs) in src_table_reqs {
-            let flownodes = src_table_to_flownode
-                .get(&table_id)
-                .expect("Source table should have peers to send to");
-            for flownode in flownodes {
+        for (_table_id, (peers, reqs)) in src_table_reqs {
+            for flownode in peers {
                 inserts
                     .entry(flownode.clone())
                     .or_default()
@@ -316,7 +306,7 @@ impl Inserter {
         &self,
         requests: RegionInsertRequests,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
-        // group by region ids first to reduce repeatly call `find_region_leader`
+        // group by region ids first to reduce repeatedly call `find_region_leader`
         let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
 
         for req in requests.requests {
