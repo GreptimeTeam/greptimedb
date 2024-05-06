@@ -263,15 +263,13 @@ impl Inserter {
         requests: &RegionInsertRequests,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // store partial source table requests used by flow node(only store what's used)
-        let mut src_table_reqs: HashMap<TableId, (Vec<Peer>, RegionInsertRequests)> =
+        let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
         for req in &requests.requests {
-            if let Some((peers, reqs)) =
+            if let Some(Some((_peers, reqs))) =
                 src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id())
             {
-                if !peers.is_empty() {
-                    reqs.requests.push(req.clone())
-                } // TODO(discord9): check can peers be empty at this point?
+                reqs.requests.push(req.clone())
             } else {
                 let table_id = RegionId::from_u64(req.region_id).table_id();
                 let peers = self
@@ -285,14 +283,20 @@ impl Inserter {
                 if !peers.is_empty() {
                     let mut reqs = RegionInsertRequests::default();
                     reqs.requests.push(req.clone());
-                    src_table_reqs.insert(table_id, (peers, reqs));
+                    src_table_reqs.insert(table_id, Some((peers, reqs)));
+                } else {
+                    // insert a empty entry to avoid repeat query
+                    src_table_reqs.insert(table_id, None);
                 }
             }
         }
 
         let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
 
-        for (_table_id, (peers, reqs)) in src_table_reqs {
+        for (_table_id, (peers, reqs)) in src_table_reqs
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+        {
             for flownode in peers {
                 inserts
                     .entry(flownode.clone())
