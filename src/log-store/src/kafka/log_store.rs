@@ -59,14 +59,9 @@ impl LogStore for KafkaLogStore {
     type Namespace = NamespaceImpl;
 
     /// Creates an entry of the associated Entry type.
-    fn entry<D: AsRef<[u8]>>(
-        &self,
-        data: D,
-        entry_id: EntryId,
-        ns: Self::Namespace,
-    ) -> Self::Entry {
+    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry {
         EntryImpl {
-            data: data.as_ref().to_vec(),
+            data: std::mem::take(data),
             id: entry_id,
             ns,
         }

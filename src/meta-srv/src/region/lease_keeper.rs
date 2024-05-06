@@ -90,19 +90,7 @@ fn renew_region_lease_via_region_route(
 }
 
 impl RegionLeaseKeeper {
-    fn collect_tables(&self, datanode_regions: &[RegionId]) -> HashMap<TableId, Vec<RegionId>> {
-        let mut tables = HashMap::<TableId, Vec<RegionId>>::new();
-
-        // Group by `table_id`.
-        for region_id in datanode_regions.iter() {
-            let table = tables.entry(region_id.table_id()).or_default();
-            table.push(*region_id);
-        }
-
-        tables
-    }
-
-    async fn collect_tables_metadata(
+    async fn collect_table_metadata(
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, TableRouteValue>> {
@@ -131,12 +119,12 @@ impl RegionLeaseKeeper {
     fn renew_region_lease(
         &self,
         table_metadata: &HashMap<TableId, TableRouteValue>,
+        operating_regions: &HashSet<RegionId>,
         datanode_id: DatanodeId,
         region_id: RegionId,
         role: RegionRole,
     ) -> Option<(RegionId, RegionRole)> {
-        // Renews the lease if it's a opening region or deleting region.
-        if self.memory_region_keeper.contains(datanode_id, region_id) {
+        if operating_regions.contains(&region_id) {
             return Some((region_id, role));
         }
 
@@ -150,6 +138,23 @@ impl RegionLeaseKeeper {
             region_id.table_id()
         );
         None
+    }
+
+    async fn collect_metadata(
+        &self,
+        datanode_id: DatanodeId,
+        mut region_ids: HashSet<RegionId>,
+    ) -> Result<(HashMap<TableId, TableRouteValue>, HashSet<RegionId>)> {
+        // Filters out operating region first, improves the cache hit rate(reduce expensive remote fetches).
+        let operating_regions = self
+            .memory_region_keeper
+            .extract_operating_regions(datanode_id, &mut region_ids);
+        let table_ids = region_ids
+            .into_iter()
+            .map(|region_id| region_id.table_id())
+            .collect::<Vec<_>>();
+        let table_metadata = self.collect_table_metadata(&table_ids).await?;
+        Ok((table_metadata, operating_regions))
     }
 
     /// Renews the lease of regions for specific datanode.
@@ -169,16 +174,20 @@ impl RegionLeaseKeeper {
         let region_ids = regions
             .iter()
             .map(|(region_id, _)| *region_id)
-            .collect::<Vec<_>>();
-        let tables = self.collect_tables(&region_ids);
-        let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let table_metadata = self.collect_tables_metadata(&table_ids).await?;
-
+            .collect::<HashSet<_>>();
+        let (table_metadata, operating_regions) =
+            self.collect_metadata(datanode_id, region_ids).await?;
         let mut renewed = HashMap::new();
         let mut non_exists = HashSet::new();
 
         for &(region, role) in regions {
-            match self.renew_region_lease(&table_metadata, datanode_id, region, role) {
+            match self.renew_region_lease(
+                &table_metadata,
+                &operating_regions,
+                datanode_id,
+                region,
+                role,
+            ) {
                 Some((region, renewed_role)) => {
                     renewed.insert(region, renewed_role);
                 }
@@ -288,6 +297,58 @@ mod tests {
             non_exists,
             HashSet::from([RegionId::new(1024, 1), RegionId::new(1024, 2)])
         );
+    }
+
+    #[tokio::test]
+    async fn test_collect_metadata() {
+        let region_number = 1u32;
+        let table_id = 1024;
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
+        let region_id = RegionId::new(table_id, 1);
+        let leader_peer_id = 1024;
+        let follower_peer_id = 2048;
+        let region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_peer_id))
+            .follower_peers(vec![Peer::empty(follower_peer_id)])
+            .build()
+            .unwrap();
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![region_route]),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+        let opening_region_id = RegionId::new(1025, 1);
+        let _guard = keeper
+            .memory_region_keeper
+            .register(leader_peer_id, opening_region_id)
+            .unwrap();
+        let another_opening_region_id = RegionId::new(1025, 2);
+        let _guard2 = keeper
+            .memory_region_keeper
+            .register(follower_peer_id, another_opening_region_id)
+            .unwrap();
+
+        let (metadata, regions) = keeper
+            .collect_metadata(
+                leader_peer_id,
+                HashSet::from([region_id, opening_region_id]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata.keys().cloned().collect::<Vec<_>>(),
+            vec![region_id.table_id()]
+        );
+        assert!(regions.contains(&opening_region_id));
+        assert_eq!(regions.len(), 1);
     }
 
     #[tokio::test]

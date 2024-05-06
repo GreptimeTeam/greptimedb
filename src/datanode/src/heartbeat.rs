@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer, RegionRole, RegionStat, Role};
+use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat, Role};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -43,6 +43,7 @@ use crate::region_server::RegionServer;
 pub(crate) mod handler;
 pub(crate) mod task_tracker;
 
+/// The datanode heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 pub struct HeartbeatTask {
     node_id: u64,
     node_epoch: u64,
@@ -246,6 +247,7 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
+                        let build_info = common_version::build_info();
                         let region_stats = Self::load_region_stats(&region_server_clone).await;
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
@@ -254,6 +256,12 @@ impl HeartbeatTask {
                             region_stats,
                             duration_since_epoch,
                             node_epoch,
+                            info: Some(NodeInfo {
+                                version: build_info.version.to_string(),
+                                git_commit: build_info.commit_short.to_string(),
+                                // The start timestamp is the same as node_epoch currently.
+                                start_time_ms: node_epoch,
+                            }),
                             ..Default::default()
                         };
                         sleep.as_mut().reset(now + Duration::from_millis(interval));

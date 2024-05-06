@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -142,6 +143,8 @@ impl FlowInfoValue {
         &self.source_table_ids
     }
 }
+
+pub type FlowInfoManagerRef = Arc<FlowInfoManager>;
 
 /// The manager of [FlowInfoKey].
 pub struct FlowInfoManager {

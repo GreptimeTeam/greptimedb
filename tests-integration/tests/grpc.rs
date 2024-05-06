@@ -20,7 +20,7 @@ use api::v1::{
     PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
-use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -30,6 +30,7 @@ use servers::http::prometheus::{
     PrometheusResponse,
 };
 use servers::server::Server;
+use tests_integration::database::Database;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
 };

@@ -97,12 +97,7 @@ impl LogStore for NoopLogStore {
         Ok(vec![])
     }
 
-    fn entry<D: AsRef<[u8]>>(
-        &self,
-        data: D,
-        entry_id: EntryId,
-        ns: Self::Namespace,
-    ) -> Self::Entry {
+    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry {
         let _ = data;
         let _ = entry_id;
         let _ = ns;
@@ -140,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn test_noop_logstore() {
         let store = NoopLogStore;
-        let e = store.entry("".as_bytes(), 1, NamespaceImpl);
+        let e = store.entry(&mut vec![], 1, NamespaceImpl);
         let _ = store.append(e.clone()).await.unwrap();
         assert!(store.append_batch(vec![e]).await.is_ok());
         store.create_namespace(&NamespaceImpl).await.unwrap();

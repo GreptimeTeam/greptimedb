@@ -55,7 +55,7 @@ const INIT_CAPACITY: usize = 42;
 ///
 /// - `region_id`: the region id
 /// - `peer_id`: the region storage datanode peer id
-/// - `peer_addr`: the region storage datanode peer address
+/// - `peer_addr`: the region storage datanode gRPC peer address
 /// - `is_leader`: whether the peer is the leader
 /// - `status`: the region status, `ALIVE` or `DOWNGRADED`.
 /// - `down_seconds`: the duration of being offline, in seconds.

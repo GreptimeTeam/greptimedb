@@ -14,15 +14,17 @@
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests, DropTableExpr,
-    GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest, RequestHeader,
-    RowInsertRequests, TruncateTableExpr,
+    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, InsertRequests,
+    QueryRequest, RequestHeader,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
+use client::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
+use client::{from_grpc_response, Client, Result};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
@@ -33,9 +35,7 @@ use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
-
-use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
-use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
+use tonic::transport::Channel;
 
 pub const DEFAULT_LOOKBACK_STRING: &str = "5m";
 
@@ -55,6 +55,19 @@ pub struct Database {
 
     client: Client,
     ctx: FlightContext,
+}
+
+pub struct DatabaseClient {
+    pub inner: GreptimeDatabaseClient<Channel>,
+}
+
+fn make_database_client(client: &Client) -> Result<DatabaseClient> {
+    let (_, channel) = client.find_channel()?;
+    Ok(DatabaseClient {
+        inner: GreptimeDatabaseClient::new(channel)
+            .max_decoding_message_size(client.max_grpc_recv_message_size())
+            .max_encoding_message_size(client.max_grpc_send_message_size()),
+    })
 }
 
 impl Database {
@@ -88,32 +101,12 @@ impl Database {
         }
     }
 
-    pub fn catalog(&self) -> &String {
-        &self.catalog
-    }
-
     pub fn set_catalog(&mut self, catalog: impl Into<String>) {
         self.catalog = catalog.into();
     }
 
-    pub fn schema(&self) -> &String {
-        &self.schema
-    }
-
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
-    }
-
-    pub fn dbname(&self) -> &String {
-        &self.dbname
-    }
-
-    pub fn set_dbname(&mut self, dbname: impl Into<String>) {
-        self.dbname = dbname.into();
-    }
-
-    pub fn timezone(&self) -> &String {
-        &self.timezone
     }
 
     pub fn set_timezone(&mut self, timezone: impl Into<String>) {
@@ -127,42 +120,11 @@ impl Database {
     }
 
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
         self.handle(Request::Inserts(requests)).await
     }
 
-    pub async fn row_insert(&self, requests: RowInsertRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
-        self.handle(Request::RowInserts(requests)).await
-    }
-
-    pub fn streaming_inserter(&self) -> Result<StreamInserter> {
-        self.streaming_inserter_with_channel_size(65536)
-    }
-
-    pub fn streaming_inserter_with_channel_size(
-        &self,
-        channel_size: usize,
-    ) -> Result<StreamInserter> {
-        let client = self.client.make_database_client()?.inner;
-
-        let stream_inserter = StreamInserter::new(
-            client,
-            self.dbname().to_string(),
-            self.ctx.auth_header.clone(),
-            channel_size,
-        );
-
-        Ok(stream_inserter)
-    }
-
-    pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_DELETE.start_timer();
-        self.handle(Request::Deletes(request)).await
-    }
-
     async fn handle(&self, request: Request) -> Result<u32> {
-        let mut client = self.client.make_database_client()?.inner;
+        let mut client = make_database_client(&self.client)?.inner;
         let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
@@ -188,43 +150,13 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        let _timer = metrics::METRIC_GRPC_SQL.start_timer();
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
         }))
         .await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_LOGICAL_PLAN.start_timer();
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::LogicalPlan(logical_plan)),
-        }))
-        .await
-    }
-
-    pub async fn prom_range_query(
-        &self,
-        promql: &str,
-        start: &str,
-        end: &str,
-        step: &str,
-    ) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_PROMQL_RANGE_QUERY.start_timer();
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::PromRangeQuery(PromRangeQuery {
-                query: promql.to_string(),
-                start: start.to_string(),
-                end: end.to_string(),
-                step: step.to_string(),
-                lookback: DEFAULT_LOOKBACK_STRING.to_string(),
-            })),
-        }))
-        .await
-    }
-
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_CREATE_TABLE.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
         }))
@@ -232,32 +164,13 @@ impl Database {
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_ALTER.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(expr)),
         }))
         .await
     }
 
-    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_DROP_TABLE.start_timer();
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::DropTable(expr)),
-        }))
-        .await
-    }
-
-    pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_TRUNCATE_TABLE.start_timer();
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::TruncateTable(expr)),
-        }))
-        .await
-    }
-
     async fn do_get(&self, request: Request) -> Result<Output> {
-        // FIXME(paomian): should be added some labels for metrics
-        let _timer = metrics::METRIC_GRPC_DO_GET.start_timer();
         let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
@@ -267,7 +180,7 @@ impl Database {
 
         let response = client.mut_inner().do_get(request).await.map_err(|e| {
             let tonic_code = e.code();
-            let e: error::Error = e.into();
+            let e: Error = e.into();
             let code = e.status_code();
             let msg = e.to_string();
             let error = Error::FlightGet {
@@ -350,7 +263,7 @@ impl Database {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct FlightContext {
+struct FlightContext {
     auth_header: Option<AuthHeader>,
 }
 
@@ -358,8 +271,14 @@ pub struct FlightContext {
 mod tests {
     use api::v1::auth_header::AuthScheme;
     use api::v1::{AuthHeader, Basic};
+    use clap::Parser;
+    use client::Client;
+    use cmd::error::Result as CmdResult;
+    use cmd::options::{CliOptions, Options};
+    use cmd::{cli, standalone, App};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
-    use crate::database::FlightContext;
+    use super::{Database, FlightContext};
 
     #[test]
     fn test_flight_ctx() {
@@ -381,5 +300,73 @@ mod tests {
                 auth_scheme: Some(AuthScheme::Basic(_)),
             })
         ))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let standalone = standalone::Command::parse_from([
+            "standalone",
+            "start",
+            "--data-home",
+            &*output_dir.path().to_string_lossy(),
+        ]);
+        let Options::Standalone(standalone_opts) =
+            standalone.load_options(&CliOptions::default())?
+        else {
+            unreachable!()
+        };
+        let mut instance = standalone.build(*standalone_opts).await?;
+        instance.start().await?;
+
+        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        database
+            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
+            .await
+            .unwrap();
+        database
+            .sql(
+                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
+                        ts TIMESTAMP,
+                        TIME INDEX (ts)
+                    ) engine=mito;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let cli = cli::Command::parse_from([
+            "cli",
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--output-dir",
+            &*output_dir.path().to_string_lossy(),
+            "--target",
+            "create-table",
+        ]);
+        let mut cli_app = cli.build().await?;
+        cli_app.start().await?;
+
+        instance.stop().await?;
+
+        let output_file = output_dir
+            .path()
+            .join("greptime-cli.export.create_table.sql");
+        let res = std::fs::read_to_string(output_file).unwrap();
+        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+
+ENGINE=mito
+;
+"#;
+        assert_eq!(res.trim(), expect.trim());
+
+        Ok(())
     }
 }

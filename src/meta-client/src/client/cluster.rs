@@ -146,6 +146,7 @@ impl Inner {
     {
         let ask_leader = self.ask_leader()?;
         let mut times = 0;
+        let mut last_error = None;
 
         while times < self.max_retry {
             if let Some(leader) = &ask_leader.get_leader() {
@@ -153,6 +154,7 @@ impl Inner {
                 match body_fn(client).await {
                     Ok(res) => {
                         if util::is_not_leader(get_header(&res)) {
+                            last_error = Some(format!("{leader} is not a leader"));
                             warn!("Failed to {task} to {leader}, not a leader");
                             let leader = ask_leader.ask_leader().await?;
                             info!("Cluster client updated to new leader addr: {leader}");
@@ -164,6 +166,7 @@ impl Inner {
                     Err(status) => {
                         // The leader may be unreachable.
                         if util::is_unreachable(&status) {
+                            last_error = Some(status.to_string());
                             warn!("Failed to {task} to {leader}, source: {status}");
                             let leader = ask_leader.ask_leader().await?;
                             info!("Cluster client updated to new leader addr: {leader}");
@@ -180,7 +183,7 @@ impl Inner {
         }
 
         RetryTimesExceededSnafu {
-            msg: "Failed to {task}",
+            msg: format!("Failed to {task}, last error: {:?}", last_error),
             times: self.max_retry,
         }
         .fail()

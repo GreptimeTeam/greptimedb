@@ -33,9 +33,7 @@
 | `postgres.tls.key_path` | String | `None` | Private key file path. |
 | `postgres.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
 | `opentsdb` | -- | -- | OpenTSDB protocol options. |
-| `opentsdb.enable` | Bool | `true` | Whether to enable |
-| `opentsdb.addr` | String | `127.0.0.1:4242` | OpenTSDB telnet API server address. |
-| `opentsdb.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
@@ -168,9 +166,7 @@
 | `postgres.tls.key_path` | String | `None` | Private key file path. |
 | `postgres.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
 | `opentsdb` | -- | -- | OpenTSDB protocol options. |
-| `opentsdb.enable` | Bool | `true` | Whether to enable |
-| `opentsdb.addr` | String | `127.0.0.1:4242` | OpenTSDB telnet API server address. |
-| `opentsdb.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `prom_store` | -- | -- | Prometheus remote storage options |

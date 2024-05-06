@@ -128,6 +128,7 @@ impl cluster_server::Cluster for Metasrv {
 
 impl Metasrv {
     pub fn is_leader(&self) -> bool {
-        self.election().map(|x| x.is_leader()).unwrap_or(false)
+        // Returns true when there is no `election`, indicating the presence of only one `Metasrv` node, which is the leader.
+        self.election().map(|x| x.is_leader()).unwrap_or(true)
     }
 }

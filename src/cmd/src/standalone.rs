@@ -256,8 +256,6 @@ pub struct StartCommand {
     mysql_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
-    #[clap(long)]
-    opentsdb_addr: Option<String>,
     #[clap(short, long)]
     influxdb_enable: bool,
     #[clap(short, long)]
@@ -343,11 +341,6 @@ impl StartCommand {
             opts.postgres.tls = tls_opts;
         }
 
-        if let Some(addr) = &self.opentsdb_addr {
-            opts.opentsdb.enable = true;
-            opts.opentsdb.addr.clone_from(addr);
-        }
-
         if self.influxdb_enable {
             opts.influxdb.enable = self.influxdb_enable;
         }
@@ -404,8 +397,13 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
-        let catalog_manager =
-            KvBackendCatalogManager::new(kv_backend.clone(), multi_cache_invalidator.clone()).await;
+        let catalog_manager = KvBackendCatalogManager::new(
+            dn_opts.mode,
+            None,
+            kv_backend.clone(),
+            multi_cache_invalidator.clone(),
+        )
+        .await;
 
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
@@ -605,6 +603,9 @@ mod tests {
             timeout = "33s"
             body_limit = "128MB"
 
+            [opentsdb]
+            enable = true
+
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
@@ -632,6 +633,7 @@ mod tests {
         assert_eq!(2, fe_opts.mysql.runtime_size);
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
+        assert!(fe_opts.opentsdb.enable);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
             unreachable!()

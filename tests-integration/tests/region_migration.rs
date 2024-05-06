@@ -854,17 +854,21 @@ async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionD
 
     let OutputData::Stream(stream) = run_sql(
         &cluster.frontend,
-        &format!(r#"select b.peer_id as datanode_id,
+        &format!(
+            r#"select b.peer_id as datanode_id,
                            a.greptime_partition_id as region_id
-                    from information_schema.partitions a left join information_schema.greptime_region_peers b
+                    from information_schema.partitions a left join information_schema.region_peers b
                     on a.greptime_partition_id = b.region_id
                     where a.table_name='{TEST_TABLE_NAME}' order by datanode_id asc"#
         ),
         query_ctx.clone(),
     )
-        .await.unwrap().data else {
-            unreachable!();
-        };
+    .await
+    .unwrap()
+    .data
+    else {
+        unreachable!();
+    };
 
     let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 

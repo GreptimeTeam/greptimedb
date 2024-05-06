@@ -402,15 +402,10 @@ impl LogStore for RaftEngineLogStore {
         Ok(namespaces)
     }
 
-    fn entry<D: AsRef<[u8]>>(
-        &self,
-        data: D,
-        entry_id: EntryId,
-        ns: Self::Namespace,
-    ) -> Self::Entry {
+    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry {
         EntryImpl {
             id: entry_id,
-            data: data.as_ref().to_vec(),
+            data: std::mem::take(data),
             namespace_id: ns.id(),
             ..Default::default()
         }

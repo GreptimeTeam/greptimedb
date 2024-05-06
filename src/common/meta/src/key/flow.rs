@@ -26,10 +26,10 @@ use snafu::{ensure, OptionExt};
 use self::flow_info::FlowInfoValue;
 use crate::ensure_values;
 use crate::error::{self, Result};
-use crate::key::flow::flow_info::FlowInfoManager;
-use crate::key::flow::flow_name::FlowNameManager;
-use crate::key::flow::flownode_flow::FlownodeFlowManager;
-use crate::key::flow::table_flow::TableFlowManager;
+use crate::key::flow::flow_info::{FlowInfoManager, FlowInfoManagerRef};
+use crate::key::flow::flow_name::{FlowNameManager, FlowNameManagerRef};
+use crate::key::flow::flownode_flow::{FlownodeFlowManager, FlownodeFlowManagerRef};
+pub use crate::key::flow::table_flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{FlowId, MetaKey};
 use crate::kv_backend::txn::Txn;
@@ -306,7 +306,7 @@ mod tests {
         for table_id in [1024, 1025, 1026] {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
-                .nodes(table_id)
+                .flows(table_id)
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();

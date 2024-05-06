@@ -19,7 +19,6 @@
 
 use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
-use serde::{Deserialize, Serialize};
 
 pub mod configurator;
 pub mod error;
@@ -43,15 +42,9 @@ pub mod query_handler;
 pub mod repeated_field;
 mod row_writer;
 pub mod server;
-mod shutdown;
 pub mod tls;
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Standalone,
-    Distributed,
-}
+pub use common_config::Mode;
 
 /// Cached SQL and logical plan for database interfaces
 #[derive(Clone)]
