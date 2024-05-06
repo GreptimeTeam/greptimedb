@@ -17,10 +17,6 @@ pub mod codec;
 use api::v1::RowInsertRequests;
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use common_runtime::Runtime;
-use common_telemetry::{debug, error, warn};
-use futures::StreamExt;
-use tokio::sync::broadcast;
 
 use self::codec::DataPoint;
 use crate::error::Result;
