@@ -101,7 +101,7 @@ async fn test_append_mode_compaction() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("append_mode", "true")
         .build();
     let region_dir = request.region_dir.clone();

@@ -146,7 +146,7 @@ async fn test_compaction_region() {
     //          -[15.........29]-
     //           [15.....24]
     assert_eq!(
-        3,
+        2,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -167,7 +167,7 @@ async fn test_compaction_region_with_overlapping() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 
@@ -210,8 +210,8 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.max_active_window_runs", "2")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 
@@ -240,6 +240,12 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     assert_eq!(result.affected_rows, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(
+        4,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
     let stream = scanner.scan().await.unwrap();
     let vec = collect_stream_ts(stream).await;
     assert!(vec.is_empty());

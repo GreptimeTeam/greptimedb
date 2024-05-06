@@ -73,10 +73,15 @@ impl TwcsPicker {
         let mut output = vec![];
         for (window, files) in time_windows {
             let files_in_window = &files.files;
-            // we only remove deletion markers once no file in current window overlaps with any other window.
-            let filter_deleted = !files.overlapping;
             let sorted_runs = find_sorted_runs(files_in_window.clone());
-
+            // we only remove deletion markers once no file in current window overlaps with any other window.
+            let filter_deleted = !files.overlapping && sorted_runs.len() == 1;
+            debug!(
+                "Window {}, found run: {}, filter deleted: {}",
+                *window,
+                sorted_runs.len(),
+                filter_deleted
+            );
             if let Some(active_window) = active_window
                 && *window == active_window
             {
