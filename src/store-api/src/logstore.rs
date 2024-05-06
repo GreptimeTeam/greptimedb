@@ -72,8 +72,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 
     /// Makes an entry instance of the associated Entry type
-    fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
-        -> Self::Entry;
+    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry;
 
     /// Makes a namespace instance of the associated Namespace type
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
