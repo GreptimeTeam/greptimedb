@@ -508,10 +508,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .collect::<BTreeMap<String, String>>();
     let expected = BTreeMap::from([
         ("__name__".to_string(), "demo".to_string()),
-        ("ts".to_string(), "1970-01-01 00:00:00+0000".to_string()),
-        ("cpu".to_string(), "1.1".to_string()),
         ("host".to_string(), "host1".to_string()),
-        ("memory".to_string(), "2.2".to_string()),
     ]);
     assert_eq!(actual, expected);
 

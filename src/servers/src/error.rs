@@ -312,10 +312,25 @@ pub enum Error {
     },
 
     #[snafu(display("Error accessing catalog"))]
-    CatalogError { source: catalog::error::Error },
+    CatalogError {
+        source: catalog::error::Error,
+        location: Location,
+    },
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
-    DatabaseNotFound { catalog: String, schema: String },
+    DatabaseNotFound {
+        catalog: String,
+        schema: String,
+        location: Location,
+    },
+
+    #[snafu(display("Cannot find requested table: {}-{}-{}", catalog, schema, table))]
+    TableNotFound {
+        catalog: String,
+        schema: String,
+        table: String,
+        location: Location,
+    },
 
     #[cfg(feature = "mem-prof")]
     #[snafu(display("Failed to dump profile data"))]
@@ -325,10 +340,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid prepare statement: {}", err_msg))]
-    InvalidPrepareStatement { err_msg: String },
+    InvalidPrepareStatement { err_msg: String, location: Location },
 
     #[snafu(display("Invalid flush argument: {}", err_msg))]
-    InvalidFlushArgument { err_msg: String },
+    InvalidFlushArgument { err_msg: String, location: Location },
 
     #[snafu(display("Failed to build gRPC reflection service"))]
     GrpcReflectionService {
@@ -546,6 +561,9 @@ impl ErrorExt for Error {
             | InvalidAuthHeaderInvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
+
+            TableNotFound { .. } => StatusCode::TableNotFound,
+
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
 

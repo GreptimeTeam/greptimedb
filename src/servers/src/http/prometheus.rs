@@ -40,11 +40,12 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
-use snafu::{Location, ResultExt};
+use snafu::{Location, OptionExt, ResultExt};
 
 pub use super::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
-    CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, UnexpectedResultSnafu,
+    CatalogSnafu, CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, TableNotFoundSnafu,
+    UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
 use crate::prom_store::METRIC_NAME_LABEL;
@@ -413,17 +414,41 @@ async fn get_all_column_names(
 async fn retrieve_series_from_query_result(
     result: Result<Output>,
     series: &mut Vec<HashMap<String, String>>,
+    query_ctx: &QueryContext,
     table_name: &str,
+    manager: &CatalogManagerRef,
     metrics: &mut HashMap<String, u64>,
 ) -> Result<()> {
     let result = result?;
+
+    // fetch tag list
+    let table = manager
+        .table(
+            query_ctx.current_catalog(),
+            query_ctx.current_schema(),
+            table_name,
+        )
+        .await
+        .context(CatalogSnafu)?
+        .with_context(|| TableNotFoundSnafu {
+            catalog: query_ctx.current_catalog(),
+            schema: query_ctx.current_schema(),
+            table: table_name,
+        })?;
+    let tag_columns = table
+        .primary_key_columns()
+        .map(|c| c.name)
+        .collect::<HashSet<_>>();
+
     match result.data {
-        OutputData::RecordBatches(batches) => record_batches_to_series(batches, series, table_name),
+        OutputData::RecordBatches(batches) => {
+            record_batches_to_series(batches, series, table_name, &tag_columns)
+        }
         OutputData::Stream(stream) => {
             let batches = RecordBatches::try_collect(stream)
                 .await
                 .context(CollectRecordbatchSnafu)?;
-            record_batches_to_series(batches, series, table_name)
+            record_batches_to_series(batches, series, table_name, &tag_columns)
         }
         OutputData::AffectedRows(_) => Err(Error::UnexpectedResult {
             reason: "expected data result, but got affected rows".to_string(),
@@ -467,8 +492,27 @@ fn record_batches_to_series(
     batches: RecordBatches,
     series: &mut Vec<HashMap<String, String>>,
     table_name: &str,
+    tag_columns: &HashSet<String>,
 ) -> Result<()> {
     for batch in batches.iter() {
+        // project record batch to only contains tag columns
+        let projection = batch
+            .schema
+            .column_schemas()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, col)| {
+                if tag_columns.contains(&col.name) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let batch = batch
+            .try_project(&projection)
+            .context(CollectRecordbatchSnafu)?;
+
         for row in batch.rows() {
             let mut element: HashMap<String, String> = row
                 .iter()
@@ -865,9 +909,15 @@ pub async fn series_query(
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
-        if let Err(err) =
-            retrieve_series_from_query_result(result, &mut series, &table_name, &mut merge_map)
-                .await
+        if let Err(err) = retrieve_series_from_query_result(
+            result,
+            &mut series,
+            &query_ctx,
+            &table_name,
+            &handler.catalog_manager(),
+            &mut merge_map,
+        )
+        .await
         {
             return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg());
         }
