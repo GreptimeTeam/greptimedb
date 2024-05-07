@@ -145,7 +145,7 @@ mod test {
         let name = vec!["numbers".to_string()];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
         let mut tri_map = TriMap::new();
-        tri_map.insert(name.clone(), 0, gid);
+        tri_map.insert(Some(name.clone()), Some(0), gid);
         FlowNodeContext {
             schema: HashMap::from([(gid, schema)]),
             table_repr: tri_map,

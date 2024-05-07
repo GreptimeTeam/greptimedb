@@ -60,16 +60,16 @@ impl flow_server::Flow for FlowService {
                 flow_options,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
-                let sink_table_id = self
-                    .manager
-                    .table_info_source
-                    .get_table_id_from_proto_name(&sink_table_name)
-                    .await?;
+                let sink_table_name = vec![
+                    sink_table_name.catalog_name,
+                    sink_table_name.schema_name,
+                    sink_table_name.table_name,
+                ];
                 let ret = self
                     .manager
                     .create_flow(
                         task_id.id as u64,
-                        sink_table_id,
+                        sink_table_name,
                         &source_table_ids,
                         create_if_not_exists,
                         Some(expire_when),
