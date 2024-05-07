@@ -41,7 +41,12 @@ Affected Rows: 2
 
 SELECT * FROM `esT` order by `eT` desc;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Utf8 but found Int32 at column index 3
++----------------------------+-------+---------+-------------+-------+-------------+------------+------+-------------+------+
+| eT                         | eAque | DoLOruM | repudiAndae | ULLaM | COnSECTeTuR | DOLOrIBUS  | QUiS | consEquatuR | vERO |
++----------------------------+-------+---------+-------------+-------+-------------+------------+------+-------------+------+
+| +234049-06-04T01:11:41.163 | false |         | hello       |       | -31852      | 0.97377783 |      | false       |      |
+| -19578-12-20T11:45:59.875  | true  |         |             |       | -31852      | 0.3535998  |      | false       |      |
++----------------------------+-------+---------+-------------+-------+-------------+------------+------+-------------+------+
 
 DROP TABLE `esT`;
 
