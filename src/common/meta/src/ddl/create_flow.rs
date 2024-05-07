@@ -207,7 +207,7 @@ impl From<&CreateFlowData> for CreateRequest {
         let source_table_ids = &value.source_table_ids;
 
         CreateRequest {
-            flow_id: Some(api::v1::flow::TaskId { id: flow_id }),
+            flow_id: Some(api::v1::FlowId { id: flow_id }),
             source_table_ids: source_table_ids
                 .iter()
                 .map(|table_id| api::v1::TableId { id: *table_id })
