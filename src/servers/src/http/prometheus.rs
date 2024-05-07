@@ -499,7 +499,7 @@ fn record_batches_to_series(
         let projection = batch
             .schema
             .column_schemas()
-            .into_iter()
+            .iter()
             .enumerate()
             .filter_map(|(idx, col)| {
                 if tag_columns.contains(&col.name) {
