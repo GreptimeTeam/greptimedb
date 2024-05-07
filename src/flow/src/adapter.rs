@@ -19,17 +19,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
+use catalog::memory::MemoryCatalogManager;
+use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::kv_backend::KvBackendRef;
 use greptime_proto::v1;
 use hydroflow::scheduled::graph::Hydroflow;
 use itertools::Itertools;
 use minstant::Anchor;
 use prost::bytes::buf;
-use query::QueryEngine;
+use query::{QueryEngine, QueryEngineFactory};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
 use smallvec::SmallVec;
@@ -39,7 +42,9 @@ use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task::LocalSet;
 
-use crate::adapter::error::{EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu};
+use crate::adapter::error::{
+    EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
+};
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::{Context, DataflowState, ErrCollector};
@@ -67,18 +72,83 @@ pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
 pub type FlowId = u64;
 pub type TableName = Vec<String>;
 
+/// Options for flow node
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FlownodeOptions {
+    /// rpc address
+    pub rpc_addr: String,
+}
+
+/// Flownode Builder
+pub struct FlownodeBuilder {
+    opts: FlownodeOptions,
+    plugins: Plugins,
+    kv_backend: Option<KvBackendRef>,
+    table_meta: TableMetadataManagerRef,
+}
+
+impl FlownodeBuilder {
+    /// init flownode builder
+    pub fn new(
+        opts: FlownodeOptions,
+        plugins: Plugins,
+        table_meta: TableMetadataManagerRef,
+    ) -> Self {
+        Self {
+            opts,
+            plugins,
+            kv_backend: None,
+            table_meta,
+        }
+    }
+
+    /// set kv backend
+    pub fn with_kv_backend(self, kv_backend: KvBackendRef) -> Self {
+        Self {
+            kv_backend: Some(kv_backend),
+            ..self
+        }
+    }
+
+    /// TODO(discord9): error handling
+    pub fn build(self) -> FlownodeManager {
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in flownode only translate plan with resolved table source.
+            MemoryCatalogManager::with_default_setup(),
+            None,
+            None,
+            None,
+            false,
+            self.plugins.clone(),
+        );
+        let query_engine = query_engine_factory.query_engine();
+
+        let (tx, rx) = oneshot::channel();
+
+        let _handle = std::thread::spawn(move || {
+            let node_id = Some(1);
+            let (flow_node_manager, mut worker) =
+                FlownodeManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
+            let _ = tx.send(flow_node_manager);
+            worker.run();
+        });
+
+        rx.blocking_recv().unwrap()
+    }
+}
+
 /// This function will create a new thread for flow worker and return a handle to the flow node manager
 pub fn start_flow_node_with_one_worker(
-    frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
     query_engine: Arc<dyn QueryEngine>,
     table_meta: TableMetadataManagerRef,
-) -> FlowNodeManager {
+) -> FlownodeManager {
     let (tx, rx) = oneshot::channel();
 
     let _handle = std::thread::spawn(move || {
         let node_id = Some(1);
         let (flow_node_manager, mut worker) =
-            FlowNodeManager::new_with_worker(node_id, frontend_invoker, query_engine, table_meta);
+            FlownodeManager::new_with_worker(node_id, query_engine, table_meta);
         let _ = tx.send(flow_node_manager);
         worker.run();
     });
@@ -86,12 +156,13 @@ pub fn start_flow_node_with_one_worker(
     rx.blocking_recv().unwrap()
 }
 
-pub type FlowNodeManagerRef = Arc<FlowNodeManager>;
+/// Arc-ed FlowNodeManager, cheaper to clone
+pub type FlownodeManagerRef = Arc<FlownodeManager>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
-pub struct FlowNodeManager {
+pub struct FlownodeManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
@@ -99,7 +170,7 @@ pub struct FlowNodeManager {
     query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
     table_info_source: TableInfoSource,
-    frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
+    frontend_invoker: Mutex<Option<Box<dyn FrontendInvoker + Send + Sync>>>,
     /// contains mapping from table name to global id, and table schema
     node_context: Mutex<FlowNodeContext>,
     tick_manager: FlowTickManager,
@@ -107,7 +178,7 @@ pub struct FlowNodeManager {
     run_task_created: Mutex<bool>,
 }
 
-impl FlowNodeManager {
+impl FlownodeManager {
     /// Trigger dataflow running, and then send writeback request to the source sender
     ///
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
@@ -119,9 +190,15 @@ impl FlowNodeManager {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
+
+    /// set frontend invoker
+    pub async fn set_frontend_invoker(&self, frontend: Box<dyn FrontendInvoker + Send + Sync>) {
+        *self.frontend_invoker.lock().await = Some(frontend);
+    }
+
+    /// Create **without** setting `frontend_invoker`
     pub fn new(
         node_id: Option<u32>,
-        frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
@@ -132,28 +209,31 @@ impl FlowNodeManager {
         let node_context = FlowNodeContext::default();
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
-        FlowNodeManager {
+        FlownodeManager {
             worker_handles,
             query_engine,
             table_info_source: srv_map,
-            frontend_invoker,
+            frontend_invoker: Mutex::new(None),
             node_context: Mutex::new(node_context),
             tick_manager,
             node_id,
             run_task_created: Mutex::new(false),
         }
     }
+
+    /// Create a flownode manager with one worker
     pub fn new_with_worker<'s>(
         node_id: Option<u32>,
-        frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> (Self, Worker<'s>) {
-        let mut zelf = Self::new(node_id, frontend_invoker, query_engine, table_meta);
+        let mut zelf = Self::new(node_id, query_engine, table_meta);
         let (handle, worker) = create_worker();
         zelf.add_worker_handle(handle);
         (zelf, worker)
     }
+
+    /// add a worker handler to manager, meaning this corrseponding worker is under it's manage
     pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
         self.worker_handles.push(Mutex::new(handle));
     }
@@ -164,7 +244,7 @@ impl FlowNodeManager {
 #[test]
 fn check_is_send() {
     fn is_send<T: Send + Sync>() {}
-    is_send::<FlowNodeManager>();
+    is_send::<FlownodeManager>();
 }
 
 /// mapping of table name <-> table id should be query from tableinfo manager
@@ -289,7 +369,7 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
     reqs
 }
 
-impl FlowNodeManager {
+impl FlownodeManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
     ///
@@ -365,6 +445,12 @@ impl FlowNodeManager {
                         };
                         req_cnt += 1;
                         self.frontend_invoker
+                            .lock()
+                            .await
+                            .as_ref()
+                            .with_context(|| UnexpectedSnafu {
+                                reason: "Expect a frontend invoker for flownode to write back",
+                            })?
                             .row_inserts(RowInsertRequests { inserts: vec![req] }, ctx.clone())
                             .await
                             .map_err(BoxedError::new)
@@ -384,6 +470,12 @@ impl FlowNodeManager {
 
                         req_cnt += 1;
                         self.frontend_invoker
+                            .lock()
+                            .await
+                            .as_ref()
+                            .with_context(|| UnexpectedSnafu {
+                                reason: "Expect a frontend invoker for flownode to write back",
+                            })?
                             .row_deletes(RowDeleteRequests { deletes: vec![req] }, ctx.clone())
                             .await
                             .map_err(BoxedError::new)
@@ -414,6 +506,7 @@ impl FlowNodeManager {
         output
     }
 
+    /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
             let handle = handle.lock().await;

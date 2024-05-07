@@ -75,6 +75,12 @@ impl Key {
     }
 }
 
+impl Default for Key {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The type of a relation.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct RelationType {

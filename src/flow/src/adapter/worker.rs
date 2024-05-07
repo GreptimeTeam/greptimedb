@@ -207,7 +207,8 @@ impl WorkerHandle {
 /// The actual worker that does the work and contain active state
 #[derive(Debug)]
 pub struct Worker<'subgraph> {
-    pub task_states: BTreeMap<FlowId, ActiveDataflowState<'subgraph>>,
+    /// Task states
+    pub(crate) task_states: BTreeMap<FlowId, ActiveDataflowState<'subgraph>>,
     itc_server: Arc<Mutex<InterThreadCallServer>>,
 }
 

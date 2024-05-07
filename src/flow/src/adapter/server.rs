@@ -32,14 +32,14 @@ use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{FlowNodeManager, FlowNodeManagerRef};
+use crate::adapter::{FlownodeManager, FlownodeManagerRef};
 use crate::repr::{self, DiffRow};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 
 #[derive(Clone)]
 pub struct FlowService {
-    pub manager: FlowNodeManagerRef,
+    pub manager: FlownodeManagerRef,
 }
 
 #[async_trait::async_trait]

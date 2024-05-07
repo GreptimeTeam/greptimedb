@@ -111,6 +111,9 @@ pub enum Error {
         context: String,
         location: Location,
     },
+
+    #[snafu(display("Unexpected: {reason}"))]
+    Unexpected { reason: String, location: Location },
 }
 
 /// Result type for flow module
@@ -132,7 +135,7 @@ impl ErrorExt for Error {
             | &Self::InvalidQuery { .. }
             | &Self::Plan { .. }
             | &Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::NoProtoType { .. } => StatusCode::Unexpected,
+            Self::NoProtoType { .. } | Self::Unexpected { .. } => StatusCode::Unexpected,
             &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }

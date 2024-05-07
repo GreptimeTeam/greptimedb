@@ -35,6 +35,7 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
+use flow::FlownodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
@@ -129,6 +130,15 @@ impl GreptimeDbStandaloneBuilder {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
+
+        let flow_builder = FlownodeBuilder::new(
+            Default::default(),
+            plugins.clone(),
+            table_metadata_manager.clone(),
+        )
+        .with_kv_backend(kv_backend.clone());
+        let flownode = Arc::new(flow_builder.build());
+
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager = KvBackendCatalogManager::new(
@@ -139,7 +149,10 @@ impl GreptimeDbStandaloneBuilder {
         )
         .await;
 
-        let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+        let node_manager = Arc::new(StandaloneDatanodeManager {
+            region_server: datanode.region_server(),
+            flow_server: flownode.clone(),
+        });
 
         let table_id_sequence = Arc::new(
             SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -192,6 +205,10 @@ impl GreptimeDbStandaloneBuilder {
         .try_build()
         .await
         .unwrap();
+
+        flownode
+            .set_frontend_invoker(Box::new(instance.clone()))
+            .await;
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+catalog.workspace = true
+common-base.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-frontend.workspace = true

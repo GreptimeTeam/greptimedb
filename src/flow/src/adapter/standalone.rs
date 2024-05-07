@@ -21,7 +21,7 @@ use common_meta::node_manager::Flownode;
 use itertools::Itertools;
 use snafu::ResultExt;
 
-use crate::adapter::FlowNodeManager;
+use crate::adapter::FlownodeManager;
 use crate::repr::{self, DiffRow};
 
 fn to_meta_err(err: impl ToString) -> common_meta::error::Error {
@@ -32,7 +32,7 @@ fn to_meta_err(err: impl ToString) -> common_meta::error::Error {
 }
 
 #[async_trait::async_trait]
-impl Flownode for FlowNodeManager {
+impl Flownode for FlownodeManager {
     async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
         match request.body {
             Some(flow_request::Body::Create(CreateRequest {
