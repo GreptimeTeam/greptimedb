@@ -33,7 +33,7 @@ cargo fuzz list --fuzz-dir tests-fuzz
 
 2. Run a fuzz target.
 ```bash
-cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz
+cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz -D -s none
 ```
 
 ## Crash Reproduction
@@ -47,11 +47,11 @@ echo "Base64" > .crash
 Print the `std::fmt::Debug` output for an input.
 
 ```bash
-cargo fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz  
+cargo fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
 ```
 Rerun the fuzz test with the input.
 
 ```bash
-cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz
+cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
 ```
 For more details, visit [cargo fuzz](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html) or run the command `cargo fuzz --help`.
