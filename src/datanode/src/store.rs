@@ -25,7 +25,7 @@ use std::time::Duration;
 use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::logging::info;
+use common_telemetry::info;
 use object_store::layers::{LruCacheLayer, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};

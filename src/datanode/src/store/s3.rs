@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_base::secrets::ExposeSecret;
-use common_telemetry::logging::info;
+use common_telemetry::info;
 use object_store::services::S3;
 use object_store::{util, ObjectStore};
 use snafu::prelude::*;

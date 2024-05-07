@@ -22,7 +22,7 @@ use opendal::raw::{
 };
 use opendal::Result;
 mod read_cache;
-use common_telemetry::logging::info;
+use common_telemetry::info;
 use read_cache::ReadCache;
 
 /// An opendal layer with local LRU file cache supporting.

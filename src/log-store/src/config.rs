@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     pub fn test_default_config() {
-        common_telemetry::logging::init_default_ut_logging();
+        common_telemetry::common_telemetry::init_default_ut_logging();
         let default = LogConfig::default();
         info!("LogConfig::default(): {:?}", default);
         assert_eq!(1024 * 1024 * 1024, default.file_size);

@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{info, logging, tracing};
+use common_telemetry::{error, info, tracing};
 use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
@@ -244,20 +244,18 @@ impl ManagerContext {
     ) -> Option<LoadedProcedure> {
         let loaders = self.loaders.lock().unwrap();
         let loader = loaders.get(&message.type_name).or_else(|| {
-            logging::error!(
+            error!(
                 "Loader not found, procedure_id: {}, type_name: {}",
-                procedure_id,
-                message.type_name
+                procedure_id, message.type_name
             );
             None
         })?;
 
         let procedure = loader(&message.data)
             .map_err(|e| {
-                logging::error!(
+                error!(
                     "Failed to load procedure data, key: {}, source: {:?}",
-                    procedure_id,
-                    e
+                    procedure_id, e
                 );
                 e
             })
@@ -496,7 +494,7 @@ impl LocalManager {
                     continue;
                 };
 
-                logging::info!(
+                info!(
                     "Recover root procedure {}-{}, step: {}",
                     loaded_procedure.procedure.type_name(),
                     procedure_id,
@@ -516,7 +514,7 @@ impl LocalManager {
                 };
 
                 if let Err(e) = loaded_procedure.procedure.recover() {
-                    logging::error!(e; "Failed to recover procedure {}", procedure_id);
+                    error!(e; "Failed to recover procedure {}", procedure_id);
                 }
 
                 if let Err(e) = self.submit_root(
@@ -525,7 +523,7 @@ impl LocalManager {
                     loaded_procedure.step,
                     loaded_procedure.procedure,
                 ) {
-                    logging::error!(e; "Failed to submit recovered procedure {}", procedure_id);
+                    error!(e; "Failed to recover procedure {}", procedure_id);
                 }
             }
         }
@@ -533,7 +531,7 @@ impl LocalManager {
 
     /// Recovers unfinished procedures and reruns them.
     async fn recover(&self) -> Result<()> {
-        logging::info!("LocalManager start to recover");
+        info!("LocalManager start to recover");
         let recover_start = Instant::now();
 
         let (messages, rollback_messages, finished_ids) =
@@ -543,19 +541,19 @@ impl LocalManager {
         self.submit_recovered_messages(messages, InitProcedureState::Running);
 
         if !finished_ids.is_empty() {
-            logging::info!(
+            info!(
                 "LocalManager try to clean finished procedures, num: {}",
                 finished_ids.len()
             );
 
             for procedure_id in finished_ids {
                 if let Err(e) = self.procedure_store.delete_procedure(procedure_id).await {
-                    logging::error!(e; "Failed to delete procedure {}", procedure_id);
+                    error!(e; "Failed to delete procedure {}", procedure_id);
                 }
             }
         }
 
-        logging::info!(
+        info!(
             "LocalManager finish recovery, cost: {}ms",
             recover_start.elapsed().as_millis()
         );

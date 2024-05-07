@@ -126,8 +126,7 @@ pub struct FlightDecoder {
 
 impl FlightDecoder {
     pub fn try_decode(&mut self, flight_data: FlightData) -> Result<FlightMessage> {
-        let bytes = flight_data.data_header.slice(..);
-        let message = root_as_message(&bytes).map_err(|e| {
+        let message = root_as_message(&flight_data.data_header).map_err(|e| {
             InvalidFlightDataSnafu {
                 reason: e.to_string(),
             }

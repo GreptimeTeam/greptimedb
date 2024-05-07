@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
-use common_telemetry::{info, logging};
+use common_telemetry::info;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -210,8 +210,8 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        logging::info!("Datanode start command: {:#?}", self);
-        logging::info!("Datanode options: {:#?}", opts);
+        info!("Datanode start command: {:#?}", self);
+        info!("Datanode options: {:#?}", opts);
 
         let node_id = opts
             .node_id

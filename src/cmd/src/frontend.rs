@@ -22,7 +22,7 @@ use client::client_manager::DatanodeClients;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_telemetry::logging;
+use common_telemetry::info;
 use common_time::timezone::set_default_timezone;
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -126,8 +126,6 @@ pub struct StartCommand {
     mysql_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
-    #[clap(long)]
-    opentsdb_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(short, long)]
@@ -198,11 +196,6 @@ impl StartCommand {
             opts.postgres.tls = tls_opts;
         }
 
-        if let Some(addr) = &self.opentsdb_addr {
-            opts.opentsdb.enable = true;
-            opts.opentsdb.addr.clone_from(addr);
-        }
-
         if let Some(enable) = self.influxdb_enable {
             opts.influxdb.enable = enable;
         }
@@ -226,8 +219,8 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        logging::info!("Frontend start command: {:#?}", self);
-        logging::info!("Frontend options: {:#?}", opts);
+        info!("Frontend start command: {:#?}", self);
+        info!("Frontend options: {:#?}", opts);
 
         set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
@@ -319,7 +312,6 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
-            opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
             disable_dashboard: Some(false),
             ..Default::default()
@@ -333,7 +325,6 @@ mod tests {
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
-        assert_eq!(opts.opentsdb.addr, "127.0.0.1:4321");
 
         let default_opts = FrontendOptions::default();
 
@@ -346,10 +337,6 @@ mod tests {
             default_opts.postgres.runtime_size
         );
         assert!(opts.opentsdb.enable);
-        assert_eq!(
-            opts.opentsdb.runtime_size,
-            default_opts.opentsdb.runtime_size
-        );
 
         assert!(!opts.influxdb.enable);
     }
@@ -364,6 +351,9 @@ mod tests {
             addr = "127.0.0.1:4000"
             timeout = "30s"
             body_limit = "2GB"
+
+            [opentsdb]
+            enable = false
 
             [logging]
             level = "debug"
@@ -389,6 +379,7 @@ mod tests {
 
         assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
+        assert!(!fe_opts.opentsdb.enable);
     }
 
     #[tokio::test]
