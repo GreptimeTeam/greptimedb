@@ -38,6 +38,7 @@ pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
 pub mod drop_database;
+pub mod drop_flow;
 pub mod drop_table;
 pub mod flow_meta;
 mod physical_table_metadata;

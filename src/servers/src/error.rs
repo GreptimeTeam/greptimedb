@@ -608,12 +608,14 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::Cancelled => Code::Cancelled,
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
-        | StatusCode::RegionAlreadyExists => Code::AlreadyExists,
+        | StatusCode::RegionAlreadyExists
+        | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
         StatusCode::TableNotFound
         | StatusCode::RegionNotFound
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
-        | StatusCode::UserNotFound => Code::NotFound,
+        | StatusCode::UserNotFound
+        | StatusCode::FlowNotFound => Code::NotFound,
         StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
         StatusCode::RuntimeResourcesExhausted
         | StatusCode::RateLimited

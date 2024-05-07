@@ -819,6 +819,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
 }
 
 /// Drop flow
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DropFlowTask {
     pub catalog_name: String,
     pub flow_name: String,

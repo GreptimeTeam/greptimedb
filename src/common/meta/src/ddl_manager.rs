@@ -30,6 +30,7 @@ use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
+use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
@@ -149,6 +150,15 @@ impl DdlManager {
                     Box::new(move |json: &str| {
                         let context = context.clone();
                         DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                DropFlowProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        DropFlowProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                     })
                 },
             ),

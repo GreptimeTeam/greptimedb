@@ -64,6 +64,8 @@ pub enum StatusCode {
     // If mutually exclusive operations are reached at the same time,
     // only one can be executed, another one will get region busy.
     RegionBusy = 4009,
+    FlowAlreadyExists = 4010,
+    FlowNotFound = 4011,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
@@ -125,8 +127,10 @@ impl StatusCode {
             | StatusCode::EngineExecuteQuery
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
-            | StatusCode::RegionNotFound
             | StatusCode::RegionAlreadyExists
+            | StatusCode::RegionNotFound
+            | StatusCode::FlowAlreadyExists
+            | StatusCode::FlowNotFound
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
@@ -161,10 +165,12 @@ impl StatusCode {
             | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
+            | StatusCode::RegionAlreadyExists
             | StatusCode::RegionNotFound
+            | StatusCode::FlowAlreadyExists
+            | StatusCode::FlowNotFound
             | StatusCode::RegionNotReady
             | StatusCode::RegionBusy
-            | StatusCode::RegionAlreadyExists
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
