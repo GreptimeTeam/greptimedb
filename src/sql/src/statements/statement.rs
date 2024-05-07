@@ -18,11 +18,10 @@ use datafusion_sql::parser::Statement as DfStatement;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
-use super::create::CreateFlow;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView
+    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
 };
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;

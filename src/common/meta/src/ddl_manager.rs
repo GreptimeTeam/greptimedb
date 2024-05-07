@@ -45,7 +45,7 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
     AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
-    DropDatabase, DropFlow, DropLogicalTables, DropTable, TruncateTable,
+    CreateView, DropFlow, DropDatabase, DropLogicalTables, DropTable, DropView, TruncateTable,
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
@@ -703,6 +703,12 @@ impl ProcedureExecutor for DdlManager {
                 }
                 DropFlow(drop_flow_task) => {
                     handle_drop_flow_task(self, cluster_id, drop_flow_task).await
+                }
+                CreateView(_create_view_task) => {
+                    todo!();
+                }
+                DropView(_create_view_task) => {
+                    todo!();
                 }
             }
         }

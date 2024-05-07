@@ -43,7 +43,7 @@ impl StatementExecutor {
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
                 };
-                QueryLanguageParser::parse_promql(&promql, &query_ctx).context(ParseQuerySnafu)?
+                QueryLanguageParser::parse_promql(&promql, query_ctx).context(ParseQuerySnafu)?
             }
             Tql::Explain(explain) => {
                 let promql = PromQuery {
@@ -60,7 +60,7 @@ impl StatementExecutor {
                 }
                 .to_string();
                 let params = HashMap::from([("name".to_string(), explain_node_name)]);
-                QueryLanguageParser::parse_promql(&promql, &query_ctx)
+                QueryLanguageParser::parse_promql(&promql, query_ctx)
                     .context(ParseQuerySnafu)?
                     .post_process(params)
                     .unwrap()
@@ -82,7 +82,7 @@ impl StatementExecutor {
                 }
                 .to_string();
                 let params = HashMap::from([("name".to_string(), analyze_node_name)]);
-                QueryLanguageParser::parse_promql(&promql, &query_ctx)
+                QueryLanguageParser::parse_promql(&promql, query_ctx)
                     .context(ParseQuerySnafu)?
                     .post_process(params)
                     .unwrap()

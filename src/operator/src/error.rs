@@ -129,6 +129,9 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display("Invalid statement to create view"))]
+    InvalidViewStmt { location: Location },
+
     #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
     ConvertColumnDefaultConstraint {
         column_name: String,
@@ -721,7 +724,9 @@ impl ErrorExt for Error {
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::ConvertIdentifier { .. }
-            | Error::InvalidExpr { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidExpr
+            | Error::InvalidViewStmt { .. }
+            | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 

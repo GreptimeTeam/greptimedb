@@ -159,6 +159,12 @@ impl GrpcQueryHandler for Instance {
                             .drop_flow(catalog_name, flow_name, drop_if_exists, ctx.clone())
                             .await?
                     }
+                    DdlExpr::CreateView(_) => {
+                        todo!()
+                    }
+                    DdlExpr::DropView(_) => {
+                        todo!()
+                    }
                 }
             }
         };
@@ -203,6 +209,16 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
             }
         }
         Expr::DropFlow(expr) => {
+            if expr.catalog_name.is_empty() {
+                expr.catalog_name = catalog.to_string();
+            }
+        }
+        Expr::CreateView(expr) => {
+            if expr.catalog_name.is_empty() {
+                expr.catalog_name = catalog.to_string();
+            }
+        }
+        Expr::DropView(expr) => {
             if expr.catalog_name.is_empty() {
                 expr.catalog_name = catalog.to_string();
             }

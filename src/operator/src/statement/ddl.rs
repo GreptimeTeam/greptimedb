@@ -68,8 +68,9 @@ use crate::error::{
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
     DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -390,13 +391,13 @@ impl StatementExecutor {
             }
             Statement::Tql(query) => self.plan_tql(query, &ctx).await?,
             _ => {
-                todo!("throw an error")
+                return InvalidViewStmtSnafu {}.fail();
             }
         };
         let optimized_plan = self.optimize_logical_plan(logical_plan)?;
 
         // encode logical plan
-        let encoded_plan = DFLogicalSubstraitConvertor
+        let _encoded_plan = DFLogicalSubstraitConvertor
             .encode(&optimized_plan.unwrap_df_plan())
             .context(SubstraitCodecSnafu)?;
 

@@ -20,14 +20,16 @@ use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
     CreateDatabaseTask as PbCreateDatabaseTask, CreateFlowTask as PbCreateFlowTask,
     CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
-    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
-    DropDatabaseTask as PbDropDatabaseTask, DropFlowTask as PbDropFlowTask,
-    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
+    CreateViewTask as PbCreateViewTask, DdlTaskRequest as PbDdlTaskRequest,
+    DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
+    DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
+    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, DropDatabaseExpr, DropFlowExpr,
-    DropTableExpr, QueryContext as PbQueryContext, TruncateTableExpr,
+    AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, QueryContext as PbQueryContext,
+    TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -43,6 +45,7 @@ use crate::error::{self, Result};
 use crate::key::FlowId;
 use crate::table_name::TableName;
 
+/// DDL tasks
 #[derive(Debug, Clone)]
 pub enum DdlTask {
     CreateTable(CreateTableTask),
@@ -56,6 +59,8 @@ pub enum DdlTask {
     DropDatabase(DropDatabaseTask),
     CreateFlow(CreateFlowTask),
     DropFlow(DropFlowTask),
+    CreateView(CreateViewTask),
+    DropView(DropViewTask),
 }
 
 impl DdlTask {
@@ -197,6 +202,8 @@ impl TryFrom<Task> for DdlTask {
             }
             Task::CreateFlowTask(create_flow) => Ok(DdlTask::CreateFlow(create_flow.try_into()?)),
             Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
+            Task::CreateViewTask(create_view) => Ok(DdlTask::CreateView(create_view.try_into()?)),
+            Task::DropViewTask(drop_view) => Ok(DdlTask::DropView(drop_view.try_into()?)),
         }
     }
 }
@@ -213,7 +220,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let task = match request.task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
-            DdlTask::DropTable(task) => Task::DropTableTask(task.try_into()?),
+            DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
             DdlTask::AlterTable(task) => Task::AlterTableTask(task.try_into()?),
             DdlTask::TruncateTable(task) => Task::TruncateTableTask(task.try_into()?),
             DdlTask::CreateLogicalTables(tasks) => {
@@ -227,8 +234,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropLogicalTables(tasks) => {
                 let tasks = tasks
                     .into_iter()
-                    .map(|task| task.try_into())
-                    .collect::<Result<Vec<_>>>()?;
+                    .map(|task| task.into())
+                    .collect::<Vec<_>>();
 
                 Task::DropTableTasks(PbDropTableTasks { tasks })
             }
@@ -244,6 +251,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
             DdlTask::CreateFlow(task) => Task::CreateFlowTask(task.into()),
             DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
+            DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
+            DdlTask::DropView(task) => Task::DropViewTask(task.into()),
         };
 
         Ok(Self {
@@ -291,6 +300,86 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
                 .map(|id| api::v1::TableId { id })
                 .collect(),
             ..Default::default()
+        }
+    }
+}
+
+/// A `CREATE VIEW` task.
+#[derive(Debug, PartialEq, Clone)]
+pub struct CreateViewTask {
+    pub create_view: CreateViewExpr,
+    pub view_info: RawTableInfo,
+}
+
+impl TryFrom<PbCreateViewTask> for CreateViewTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateViewTask) -> Result<Self> {
+        let view_info = serde_json::from_slice(&pb.view_info).context(error::SerdeJsonSnafu)?;
+
+        Ok(CreateViewTask {
+            create_view: pb.create_view.context(error::InvalidProtoMsgSnafu {
+                err_msg: "expected create view",
+            })?,
+            view_info,
+        })
+    }
+}
+
+impl TryFrom<CreateViewTask> for PbCreateViewTask {
+    type Error = error::Error;
+
+    fn try_from(task: CreateViewTask) -> Result<PbCreateViewTask> {
+        Ok(PbCreateViewTask {
+            create_view: Some(task.create_view),
+            view_info: serde_json::to_vec(&task.view_info).context(error::SerdeJsonSnafu)?,
+        })
+    }
+}
+
+/// A `DROP VIEW` task.
+#[derive(Debug, PartialEq, Clone)]
+pub struct DropViewTask {
+    pub catalog: String,
+    pub schema: String,
+    pub view: String,
+    pub view_id: TableId,
+    pub drop_if_exists: bool,
+}
+
+impl TryFrom<PbDropViewTask> for DropViewTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropViewTask) -> Result<Self> {
+        let expr = pb.drop_view.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop view",
+        })?;
+
+        Ok(DropViewTask {
+            catalog: expr.catalog_name,
+            schema: expr.schema_name,
+            view: expr.view_name,
+            view_id: expr
+                .view_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected view_id",
+                })?
+                .id,
+            drop_if_exists: expr.drop_if_exists,
+        })
+    }
+}
+
+impl From<DropViewTask> for PbDropViewTask {
+    fn from(task: DropViewTask) -> Self {
+        PbDropViewTask {
+            drop_view: Some(DropViewExpr {
+                catalog_name: task.catalog,
+                schema_name: task.schema,
+                view_name: task.view,
+                view_id: Some(api::v1::TableId { id: task.view_id }),
+                drop_if_exists: task.drop_if_exists,
+            }),
         }
     }
 }
@@ -346,11 +435,9 @@ impl TryFrom<PbDropTableTask> for DropTableTask {
     }
 }
 
-impl TryFrom<DropTableTask> for PbDropTableTask {
-    type Error = error::Error;
-
-    fn try_from(task: DropTableTask) -> Result<Self> {
-        Ok(PbDropTableTask {
+impl From<DropTableTask> for PbDropTableTask {
+    fn from(task: DropTableTask) -> Self {
+        PbDropTableTask {
             drop_table: Some(DropTableExpr {
                 catalog_name: task.catalog,
                 schema_name: task.schema,
@@ -358,7 +445,7 @@ impl TryFrom<DropTableTask> for PbDropTableTask {
                 table_id: Some(api::v1::TableId { id: task.table_id }),
                 drop_if_exists: task.drop_if_exists,
             }),
-        })
+        }
     }
 }
 
