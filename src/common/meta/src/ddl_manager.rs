@@ -45,7 +45,7 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
     AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
-    CreateView, DropFlow, DropDatabase, DropLogicalTables, DropTable, DropView, TruncateTable,
+    CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView, TruncateTable,
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,

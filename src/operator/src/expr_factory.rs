@@ -18,8 +18,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, DropColumn, DropColumns, RenameTable,
-    SemanticType, TableName,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
+    DropColumns, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -36,7 +36,9 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::create::{CreateExternalTable, CreateFlow, CreateTable, TIME_INDEX};
+use sql::statements::create::{
+    CreateExternalTable, CreateFlow, CreateTable, CreateView, TIME_INDEX,
+};
 use sql::statements::{
     column_def_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
 };
@@ -511,6 +513,29 @@ pub(crate) fn to_alter_expr(
         table_name,
         kind: Some(kind),
     })
+}
+
+pub fn to_create_view_expr(
+    stmt: CreateView,
+    logical_plan: Vec<u8>,
+    query_ctx: QueryContextRef,
+) -> Result<CreateViewExpr> {
+    let (catalog_name, schema_name, view_name) = table_idents_to_full_name(&stmt.name, &query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    let expr = CreateViewExpr {
+        catalog_name,
+        schema_name,
+        view_name,
+        logical_plan,
+        // FIXME(dennis): support it
+        create_if_not_exists: false,
+        create_or_replace: stmt.or_replace,
+    };
+
+    // FIXME(dennis): validate the expr
+    Ok(expr)
 }
 
 pub fn to_create_flow_task_expr(

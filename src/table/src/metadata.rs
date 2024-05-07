@@ -722,7 +722,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     /// The indices of columns in primary key. Note that the index of timestamp column

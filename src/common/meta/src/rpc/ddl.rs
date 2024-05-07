@@ -153,6 +153,14 @@ impl DdlTask {
             table_id,
         })
     }
+
+    // Create a `[DdlTask::CreateView]` task.
+    pub fn new_create_view(create_view: CreateViewExpr, view_info: RawTableInfo) -> Self {
+        DdlTask::CreateView(CreateViewTask {
+            create_view,
+            view_info,
+        })
+    }
 }
 
 impl TryFrom<Task> for DdlTask {

@@ -214,14 +214,10 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
             }
         }
         Expr::CreateView(expr) => {
-            if expr.catalog_name.is_empty() {
-                expr.catalog_name = catalog.to_string();
-            }
+            check_and_fill!(expr);
         }
         Expr::DropView(expr) => {
-            if expr.catalog_name.is_empty() {
-                expr.catalog_name = catalog.to_string();
-            }
+            check_and_fill!(expr);
         }
     }
 }
