@@ -18,6 +18,7 @@ use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use hydroflow::scheduled::graph::Hydroflow;
 use snafu::ResultExt;
 use tokio::sync::{broadcast, mpsc, Mutex};

@@ -131,14 +131,6 @@ impl GreptimeDbStandaloneBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
 
-        let flow_builder = FlownodeBuilder::new(
-            Default::default(),
-            plugins.clone(),
-            table_metadata_manager.clone(),
-        )
-        .with_kv_backend(kv_backend.clone());
-        let flownode = Arc::new(flow_builder.build().await);
-
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
         let catalog_manager = KvBackendCatalogManager::new(
@@ -148,6 +140,15 @@ impl GreptimeDbStandaloneBuilder {
             multi_cache_invalidator.clone(),
         )
         .await;
+
+        let flow_builder = FlownodeBuilder::new(
+            Default::default(),
+            plugins.clone(),
+            table_metadata_manager.clone(),
+            catalog_manager.clone(),
+        )
+        .with_kv_backend(kv_backend.clone());
+        let flownode = Arc::new(flow_builder.build().await);
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
@@ -209,6 +210,7 @@ impl GreptimeDbStandaloneBuilder {
         flownode
             .set_frontend_invoker(Box::new(instance.clone()))
             .await;
+        let _ = flownode.run_background();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

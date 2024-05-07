@@ -413,6 +413,7 @@ impl StartCommand {
             Default::default(),
             fe_plugins.clone(),
             table_metadata_manager.clone(),
+            catalog_manager.clone(),
         )
         .with_kv_backend(kv_backend.clone());
         let flownode = Arc::new(flow_builder.build().await);
@@ -473,6 +474,7 @@ impl StartCommand {
         flownode
             .set_frontend_invoker(Box::new(frontend.clone()))
             .await;
+        let _handle = flownode.clone().run_background();
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()

@@ -182,9 +182,7 @@ impl servers::server::Server for FlowNodeServer {
 
         // TODO(discord9): better place for dataflow to run per second
         let manager_ref = self.flow_service.manager.clone();
-        let _handle_trigger_run = common_runtime::spawn_bg(async move {
-            manager_ref.run().await;
-        });
+        let _handle = manager_ref.clone().run_background();
 
         Ok(addr)
     }

@@ -101,11 +101,11 @@ pub async fn sql_to_flow_plan(
     engine: &Arc<dyn QueryEngine>,
     sql: &str,
 ) -> Result<TypedPlan, Error> {
-    let stmt =
-        QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).context(InvalidQueryPlanSnafu)?;
+    let query_ctx = ctx.query_context.clone().unwrap();
+    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).context(InvalidQueryPlanSnafu)?;
     let plan = engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(stmt, query_ctx)
         .await
         .context(InvalidQueryPlanSnafu)?;
     let LogicalPlan::DfPlan(plan) = plan;
