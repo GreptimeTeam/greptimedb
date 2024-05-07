@@ -23,6 +23,7 @@ pub mod handler {
     use axum::extract::Query;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use common_telemetry::info;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
