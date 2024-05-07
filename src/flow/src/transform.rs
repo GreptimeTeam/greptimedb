@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType as CDT;
 use prost::Message;
 use query::parser::QueryLanguageParser;

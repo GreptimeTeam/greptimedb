@@ -16,7 +16,8 @@
 
 use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
-use common_meta::error::{Result, UnexpectedSnafu};
+use common_error::ext::{BoxedError, ErrorExt, StackError};
+use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
 use itertools::Itertools;
 use snafu::ResultExt;
@@ -24,11 +25,10 @@ use snafu::ResultExt;
 use crate::adapter::FlownodeManager;
 use crate::repr::{self, DiffRow};
 
-fn to_meta_err(err: impl ToString) -> common_meta::error::Error {
-    UnexpectedSnafu {
-        err_msg: err.to_string(),
-    }
-    .build()
+fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
+    Err::<(), _>(BoxedError::new(err))
+        .with_context(|_| ExternalSnafu)
+        .unwrap_err()
 }
 
 #[async_trait::async_trait]

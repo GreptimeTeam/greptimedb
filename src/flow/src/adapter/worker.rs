@@ -116,7 +116,7 @@ impl WorkerHandle {
     /// create task, return task id
     ///
     #[allow(clippy::too_many_arguments)]
-    pub fn create_flow(
+    pub async fn create_flow(
         &self,
         task_id: FlowId,
         plan: TypedPlan,
@@ -136,7 +136,7 @@ impl WorkerHandle {
             create_if_not_exist,
         };
 
-        let ret = self.itc_client.blocking_lock().call_blocking(req)?;
+        let ret = self.itc_client.lock().await.call_blocking(req).await?;
         if let Response::Create {
             result: task_create_result,
         } = ret
@@ -154,9 +154,9 @@ impl WorkerHandle {
     }
 
     /// remove task, return task id
-    pub fn remove_flow(&self, task_id: FlowId) -> Result<bool, Error> {
+    pub async fn remove_flow(&self, task_id: FlowId) -> Result<bool, Error> {
         let req = Request::Remove { task_id };
-        let ret = self.itc_client.blocking_lock().call_blocking(req)?;
+        let ret = self.itc_client.lock().await.call_blocking(req).await?;
         if let Response::Remove { result } = ret {
             Ok(result)
         } else {
@@ -171,15 +171,23 @@ impl WorkerHandle {
     /// trigger running the worker, will not block, and will run the worker parallelly
     ///
     /// will set the current timestamp to `now` for all dataflows before running them
-    pub fn run_available(&self, now: repr::Timestamp) {
+    pub async fn run_available(&self, now: repr::Timestamp) {
         self.itc_client
-            .blocking_lock()
-            .call_non_blocking(Request::RunAvail { now });
+            .lock()
+            .await
+            .call_non_blocking(Request::RunAvail { now })
+            .await;
     }
 
-    pub fn contains_flow(&self, task_id: FlowId) -> Result<bool, Error> {
+    pub async fn contains_flow(&self, task_id: FlowId) -> Result<bool, Error> {
         let req = Request::ContainTask { task_id };
-        let ret = self.itc_client.blocking_lock().call_blocking(req).unwrap();
+        let ret = self
+            .itc_client
+            .lock()
+            .await
+            .call_blocking(req)
+            .await
+            .unwrap();
         if let Response::ContainTask {
             result: task_contain_result,
         } = ret
@@ -197,10 +205,12 @@ impl WorkerHandle {
     }
 
     /// shutdown the worker
-    pub fn shutdown(&self) {
+    pub async fn shutdown(&self) {
         self.itc_client
-            .blocking_lock()
-            .call_non_blocking(Request::Shutdown);
+            .lock()
+            .await
+            .call_non_blocking(Request::Shutdown)
+            .await;
     }
 }
 
@@ -384,24 +394,24 @@ struct InterThreadCallClient {
 
 impl InterThreadCallClient {
     /// call without expecting responses or blocking
-    fn call_non_blocking(&mut self, req: Request) {
+    async fn call_non_blocking(&mut self, req: Request) {
         let call_id = {
-            let mut call_id = self.call_id.blocking_lock();
+            let mut call_id = self.call_id.lock().await;
             *call_id += 1;
             *call_id
         };
         self.arg_sender.send((call_id, req)).unwrap();
     }
     /// call blocking, and return the result
-    fn call_blocking(&mut self, req: Request) -> Result<Response, Error> {
+    async fn call_blocking(&mut self, req: Request) -> Result<Response, Error> {
         let call_id = {
-            let mut call_id = self.call_id.blocking_lock();
+            let mut call_id = self.call_id.lock().await;
             *call_id += 1;
             *call_id
         };
         self.arg_sender.send((call_id, req)).unwrap();
         // TODO(discord9): better inter thread call impl
-        let (ret_call_id, ret) = self.ret_recv.blocking_recv().unwrap();
+        let (ret_call_id, ret) = self.ret_recv.recv().await.unwrap();
         if ret_call_id != call_id {
             return InternalSnafu {
                 reason: "call id mismatch, worker/worker handler should be in sync",
@@ -442,8 +452,8 @@ mod test {
     use crate::expr::Id;
     use crate::plan::Plan;
     use crate::repr::{RelationType, Row};
-    #[test]
-    pub fn test_simple_get_with_worker_and_handle() {
+    #[tokio::test]
+    pub async fn test_simple_get_with_worker_and_handle() {
         let flow_tick = FlowTickManager::new();
         let (tx, rx) = oneshot::channel();
         let worker_thread_handle = std::thread::spawn(move || {
@@ -451,7 +461,7 @@ mod test {
             tx.send(handle).unwrap();
             worker.run();
         });
-        let handle = rx.blocking_recv().unwrap();
+        let handle = rx.await.unwrap();
         let src_ids = vec![GlobalId::User(1)];
         let (tx, rx) = broadcast::channel::<DiffRow>(1024);
         let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<DiffRow>();
@@ -474,11 +484,12 @@ mod test {
                 vec![rx],
                 true,
             )
+            .await
             .unwrap();
         tx.send((Row::empty(), 0, 0)).unwrap();
-        handle.run_available(flow_tick.tick());
-        assert_eq!(sink_rx.blocking_recv().unwrap().0, Row::empty());
-        handle.shutdown();
+        handle.run_available(flow_tick.tick()).await;
+        assert_eq!(sink_rx.recv().await.unwrap().0, Row::empty());
+        handle.shutdown().await;
         worker_thread_handle.join().unwrap();
     }
 }

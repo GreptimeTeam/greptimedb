@@ -381,7 +381,7 @@ impl FlownodeManager {
     pub async fn run_available(&self) {
         let now = self.tick_manager.tick();
         for worker in self.worker_handles.iter() {
-            worker.lock().await.run_available(now);
+            worker.lock().await.run_available(now).await;
         }
     }
 
@@ -513,8 +513,8 @@ impl FlownodeManager {
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
             let handle = handle.lock().await;
-            if handle.contains_flow(flow_id)? {
-                handle.remove_flow(flow_id)?;
+            if handle.contains_flow(flow_id).await? {
+                handle.remove_flow(flow_id).await?;
                 break;
             }
         }
@@ -541,7 +541,7 @@ impl FlownodeManager {
         if create_if_not_exist {
             // check if the task already exists
             for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id)? {
+                if handle.lock().await.contains_flow(flow_id).await? {
                     return Ok(None);
                 }
             }
@@ -581,15 +581,17 @@ impl FlownodeManager {
             .collect::<Result<Vec<_>, _>>()?;
 
         let handle = &self.worker_handles[0].lock().await;
-        handle.create_flow(
-            flow_id,
-            flow_plan,
-            sink_id,
-            sink_sender,
-            &source_ids,
-            source_senders,
-            create_if_not_exist,
-        )?;
+        handle
+            .create_flow(
+                flow_id,
+                flow_plan,
+                sink_id,
+                sink_sender,
+                &source_ids,
+                source_senders,
+                create_if_not_exist,
+            )
+            .await?;
 
         Ok(Some(flow_id))
     }
@@ -780,8 +782,8 @@ impl FlowNodeContext {
         } else {
             let global_id = self.new_global_id();
             if let Some(table_id) = table_id {
-                let schema = srv_map.get_table_schema(&table_id).await.unwrap();
-                self.schema.insert(global_id, schema);
+                let schema = srv_map.get_table_schema(&table_id).await;
+                let _ = schema.map(|schema| self.schema.insert(global_id, schema));
             }
 
             self.table_repr.insert(table_name, table_id, global_id);
