@@ -16,7 +16,8 @@ pub(crate) mod executor;
 mod metadata;
 
 use async_trait::async_trait;
-use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
+use common_error::ext::BoxedError;
+use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
@@ -68,6 +69,7 @@ impl DropTableProcedure {
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
         let executor = data.build_executor();
+
         Ok(Self {
             context,
             data,
@@ -173,6 +175,23 @@ impl DropTableProcedure {
 impl Procedure for DropTableProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
+    }
+
+    fn recover(&mut self) -> ProcedureResult<()> {
+        // Only registers regions if the metadata is deleted.
+        let register_operating_regions = matches!(
+            self.data.state,
+            DropTableState::DeleteMetadata
+                | DropTableState::InvalidateTableCache
+                | DropTableState::DatanodeDropRegions
+        );
+        if register_operating_regions {
+            self.register_dropping_regions()
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+        }
+
+        Ok(())
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {

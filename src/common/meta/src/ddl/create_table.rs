@@ -63,20 +63,13 @@ impl CreateTableProcedure {
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
 
-        let mut creator = TableCreator {
-            data,
-            opening_regions: vec![],
-        };
-
-        // Only registers regions if the table route is allocated.
-        if let Some(x) = &creator.data.table_route {
-            creator.opening_regions = creator
-                .register_opening_regions(&context, &x.region_routes)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-        }
-
-        Ok(CreateTableProcedure { context, creator })
+        Ok(CreateTableProcedure {
+            context,
+            creator: TableCreator {
+                data,
+                opening_regions: vec![],
+            },
+        })
     }
 
     fn table_info(&self) -> &RawTableInfo {
@@ -293,6 +286,19 @@ impl CreateTableProcedure {
 impl Procedure for CreateTableProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
+    }
+
+    fn recover(&mut self) -> ProcedureResult<()> {
+        // Only registers regions if the table route is allocated.
+        if let Some(x) = &self.creator.data.table_route {
+            self.creator.opening_regions = self
+                .creator
+                .register_opening_regions(&self.context, &x.region_routes)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+        }
+
+        Ok(())
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
