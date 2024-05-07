@@ -17,13 +17,15 @@
 use std::collections::HashMap;
 
 use api::v1::value::ValueData;
-use api::v1::Rows;
+use api::v1::{Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
-use store_api::region_request::{RegionOpenRequest, RegionPutRequest};
+use datatypes::schema::ColumnSchema;
+use store_api::metadata::ColumnMetadata;
+use store_api::region_request::{RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
 
 use super::*;
@@ -596,5 +598,104 @@ async fn test_engine_with_write_cache() {
 | a     | 1.0     | 1970-01-01T00:00:01 |
 | a     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_cache_null_primary_key() {
+    let mut env = TestEnv::new();
+    let engine = env
+        .create_engine(MitoConfig {
+            vector_cache_size: ReadableSize::mb(32),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let column_metadatas = vec![
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("tag_1", ConcreteDataType::int64_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 2,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+            semantic_type: SemanticType::Field,
+            column_id: 3,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 4,
+        },
+    ];
+    let request = RegionCreateRequest {
+        engine: MITO_ENGINE_NAME.to_string(),
+        column_metadatas,
+        primary_key: vec![1, 2],
+        options: HashMap::new(),
+        region_dir: "test".to_string(),
+    };
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: vec![
+            api::v1::Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue("1".to_string())),
+                    },
+                    api::v1::Value { value_data: None },
+                    api::v1::Value {
+                        value_data: Some(ValueData::F64Value(10.0)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                    },
+                ],
+            },
+            api::v1::Row {
+                values: vec![
+                    api::v1::Value { value_data: None },
+                    api::v1::Value {
+                        value_data: Some(ValueData::I64Value(200)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::F64Value(20.0)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(2000)),
+                    },
+                ],
+            },
+        ],
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_0 | tag_1 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+|       | 200   | 20.0    | 1970-01-01T00:00:02 |
+| 1     |       | 10.0    | 1970-01-01T00:00:01 |
++-------+-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
