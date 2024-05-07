@@ -326,7 +326,7 @@ jobs:
           # Shares with `Check` job
           shared-key: "check-lint"
       - name: Run cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: make clippy
 
   coverage:
     if: github.event.pull_request.draft == false
