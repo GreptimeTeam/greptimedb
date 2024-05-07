@@ -36,7 +36,7 @@ use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
-use crate::options::{CliOptions, Options};
+use crate::options::{GlobalOptions, Options};
 use crate::App;
 
 pub struct Instance {
@@ -90,8 +90,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        self.subcmd.load_options(cli_options)
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+        self.subcmd.load_options(global_options)
     }
 }
 
@@ -107,9 +107,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(cli_options),
+            SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
     }
 }
@@ -147,19 +147,19 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         let mut opts: FrontendOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             FrontendOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = &cli_options.log_dir {
+        if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
 
-        if cli_options.log_level.is_some() {
-            opts.logging.level.clone_from(&cli_options.log_level);
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
         }
 
         let tls_opts = TlsOption::new(
@@ -304,7 +304,7 @@ mod tests {
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::{CliOptions, ENV_VAR_SEP};
+    use crate::options::{GlobalOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_try_from_start_command() {
@@ -317,7 +317,8 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(&CliOptions::default()).unwrap() else {
+        let Options::Frontend(opts) = command.load_options(&GlobalOptions::default()).unwrap()
+        else {
             unreachable!()
         };
 
@@ -367,7 +368,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(&CliOptions::default()).unwrap()
+        let Options::Frontend(fe_opts) = command.load_options(&GlobalOptions::default()).unwrap()
         else {
             unreachable!()
         };
@@ -414,7 +415,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&CliOptions {
+            .load_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -500,7 +501,7 @@ mod tests {
                 };
 
                 let Options::Frontend(fe_opts) =
-                    command.load_options(&CliOptions::default()).unwrap()
+                    command.load_options(&GlobalOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::ArgMatches;
+use clap::Parser;
 use common_config::KvBackendConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::MetasrvWalConfig;
@@ -61,26 +61,23 @@ pub enum Options {
     Cli(Box<LoggingOptions>),
 }
 
-#[derive(Default)]
-pub struct CliOptions {
+#[derive(Parser, Default, Debug, Clone)]
+pub struct GlobalOptions {
+    #[clap(long, value_name = "LOG_DIR")]
+    #[arg(global = true)]
     pub log_dir: Option<String>,
+
+    #[clap(long, value_name = "LOG_LEVEL")]
+    #[arg(global = true)]
     pub log_level: Option<String>,
 
     #[cfg(feature = "tokio-console")]
+    #[clap(long, value_name = "TOKIO_CONSOLE_ADDR")]
+    #[arg(global = true)]
     pub tokio_console_addr: Option<String>,
 }
 
-impl CliOptions {
-    pub fn new(args: &ArgMatches) -> Self {
-        Self {
-            log_dir: args.get_one::<String>("log-dir").cloned(),
-            log_level: args.get_one::<String>("log-level").cloned(),
-
-            #[cfg(feature = "tokio-console")]
-            tokio_console_addr: args.get_one::<String>("tokio-console-addr").cloned(),
-        }
-    }
-
+impl GlobalOptions {
     pub fn tracing_options(&self) -> TracingOptions {
         TracingOptions {
             #[cfg(feature = "tokio-console")]

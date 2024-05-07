@@ -36,7 +36,7 @@ use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;
 use crate::error::Result;
-use crate::options::{CliOptions, Options};
+use crate::options::{GlobalOptions, Options};
 use crate::App;
 
 #[async_trait]
@@ -80,14 +80,14 @@ impl Command {
         self.cmd.build().await
     }
 
-    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         let mut logging_opts = LoggingOptions::default();
 
-        if let Some(dir) = &cli_options.log_dir {
+        if let Some(dir) = &global_options.log_dir {
             logging_opts.dir.clone_from(dir);
         }
 
-        logging_opts.level.clone_from(&cli_options.log_level);
+        logging_opts.level.clone_from(&global_options.log_level);
 
         Ok(Options::Cli(Box::new(logging_opts)))
     }
