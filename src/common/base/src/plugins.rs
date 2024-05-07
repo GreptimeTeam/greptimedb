@@ -13,40 +13,35 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// [`Plugins`] is a wrapper of [AnyMap](https://github.com/chris-morgan/anymap) and provides a thread-safe way to store and retrieve plugins.
 /// Make it Cloneable and we can treat it like an Arc struct.
 #[derive(Default, Clone)]
 pub struct Plugins {
-    inner: Arc<Mutex<anymap::Map<dyn Any + Send + Sync>>>,
+    inner: Arc<RwLock<anymap::Map<dyn Any + Send + Sync>>>,
 }
 
 impl Plugins {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(anymap::Map::new())),
+            inner: Arc::new(RwLock::new(anymap::Map::new())),
         }
     }
 
-    fn lock(&self) -> MutexGuard<anymap::Map<dyn Any + Send + Sync>> {
-        self.inner.lock().unwrap()
-    }
-
     pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
-        let _ = self.lock().insert(value);
+        let _ = self.write().insert(value);
     }
 
     pub fn get<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {
-        let binding = self.lock();
-        binding.get::<T>().cloned()
+        self.read().get::<T>().cloned()
     }
 
     pub fn map_mut<T: 'static + Send + Sync, F, R>(&self, mapper: F) -> R
     where
         F: FnOnce(Option<&mut T>) -> R,
     {
-        let mut binding = self.lock();
+        let mut binding = self.write();
         let opt = binding.get_mut::<T>();
         mapper(opt)
     }
@@ -55,18 +50,23 @@ impl Plugins {
     where
         F: FnOnce(&T) -> R,
     {
-        let binding = self.lock();
-        binding.get::<T>().map(mapper)
+        self.read().get::<T>().map(mapper)
     }
 
     pub fn len(&self) -> usize {
-        let binding = self.lock();
-        binding.len()
+        self.read().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        let binding = self.lock();
-        binding.is_empty()
+        self.read().is_empty()
+    }
+
+    fn read(&self) -> RwLockReadGuard<anymap::Map<dyn Any + Send + Sync>> {
+        self.inner.read().unwrap()
+    }
+
+    fn write(&self) -> RwLockWriteGuard<anymap::Map<dyn Any + Send + Sync>> {
+        self.inner.write().unwrap()
     }
 }
 
