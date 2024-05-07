@@ -230,7 +230,7 @@ pub struct MetasrvNodeInfo {
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     fn from(node_info: MetasrvNodeInfo) -> Self {
         Self {
-            addr: Some(api::v1::meta::Peer {
+            peer: Some(api::v1::meta::Peer {
                 addr: node_info.addr,
                 ..Default::default()
             }),
