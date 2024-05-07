@@ -179,6 +179,10 @@ impl StatementExecutor {
                 )
                     .await
             }
+            Statement::CreateFlow(stmt) => {
+                self.create_flow(stmt, query_ctx).await?;
+                Ok(Output::new_with_affected_rows(0))
+            }
             Statement::CreateView(stmt) => {
                 let _ = self.create_view(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
