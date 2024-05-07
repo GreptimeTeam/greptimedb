@@ -241,3 +241,7 @@ strip = true
 lto = "thin"
 debug = false
 incremental = false
+
+[profile.dev.package.sqlness-runner]
+debug = false
+strip = true
