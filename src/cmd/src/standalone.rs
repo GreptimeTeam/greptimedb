@@ -415,7 +415,7 @@ impl StartCommand {
             table_metadata_manager.clone(),
         )
         .with_kv_backend(kv_backend.clone());
-        let flownode = Arc::new(flow_builder.build());
+        let flownode = Arc::new(flow_builder.build().await);
 
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());

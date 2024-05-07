@@ -137,7 +137,7 @@ impl GreptimeDbStandaloneBuilder {
             table_metadata_manager.clone(),
         )
         .with_kv_backend(kv_backend.clone());
-        let flownode = Arc::new(flow_builder.build());
+        let flownode = Arc::new(flow_builder.build().await);
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
