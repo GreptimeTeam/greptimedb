@@ -21,7 +21,7 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
 use crate::statements::statement::Statement;
-use crate::statements::{redact_and_sort_options, OptionMap};
+use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";

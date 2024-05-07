@@ -50,7 +50,7 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{
-    CreateExternalTable, CreateTable, CreateFlow, CreateTableLike, CreateView, Partitions,
+    CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
