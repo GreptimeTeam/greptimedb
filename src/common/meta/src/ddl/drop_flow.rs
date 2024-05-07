@@ -109,6 +109,7 @@ impl DropFlowProcedure {
                 body: Some(flow_request::Body::Drop(DropRequest {
                     flow_id: Some(api::v1::FlowId { id: flow_id }),
                 })),
+                ..Default::default()
             };
 
             drop_flow_tasks.push(async move {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod check;
 mod metadata;
 
 use std::collections::BTreeMap;
@@ -29,15 +28,16 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 use table::metadata::TableId;
 
 use super::utils::add_peer_context_if_needed;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::table_name::TableNameKey;
 use crate::key::FlowId;
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
@@ -68,8 +68,8 @@ impl CreateFlowProcedure {
                 flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
-                state: CreateFlowState::CreateMetadata,
                 query_context,
+                state: CreateFlowState::Prepare,
             },
         }
     }
@@ -80,8 +80,49 @@ impl CreateFlowProcedure {
         Ok(CreateFlowProcedure { context, data })
     }
 
-    async fn on_prepare(&mut self) -> Result<Status> {
-        self.check_creation().await?;
+    pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
+        let catalog_name = &self.data.task.catalog_name;
+        let flow_name = &self.data.task.flow_name;
+        let sink_table_name = &self.data.task.sink_table_name;
+        let create_if_not_exists = self.data.task.create_if_not_exists;
+
+        let flow_name_value = self
+            .context
+            .flow_metadata_manager
+            .flow_name_manager()
+            .get(catalog_name, flow_name)
+            .await?;
+
+        if let Some(value) = flow_name_value {
+            ensure!(
+                create_if_not_exists,
+                error::FlowAlreadyExistsSnafu {
+                    flow_name: format!("{}.{}", catalog_name, flow_name),
+                }
+            );
+
+            let flow_id = value.flow_id();
+            return Ok(Status::done_with_output(flow_id));
+        }
+
+        //  Ensures sink table doesn't exist.
+        let exists = self
+            .context
+            .table_metadata_manager
+            .table_name_manager()
+            .exists(TableNameKey::new(
+                &sink_table_name.catalog_name,
+                &sink_table_name.schema_name,
+                &sink_table_name.table_name,
+            ))
+            .await?;
+        ensure!(
+            !exists,
+            error::TableAlreadyExistsSnafu {
+                table_name: sink_table_name.to_string(),
+            }
+        );
+
         self.collect_source_tables().await?;
         self.allocate_flow_id().await?;
         self.data.state = CreateFlowState::CreateFlows;

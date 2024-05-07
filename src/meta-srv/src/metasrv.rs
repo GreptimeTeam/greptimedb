@@ -236,6 +236,7 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
             }),
             version: node_info.version,
             git_commit: node_info.git_commit,
+            ..Default::default()
         }
     }
 }
