@@ -151,7 +151,7 @@ impl Election for EtcdElection {
             git_commit: build_info.commit_short.to_string(),
         };
         let value = serde_json::to_string(&value)
-            .context(error::SerializeToJsonSnafu {
+            .with_context(|_| error::SerializeToJsonSnafu {
                 input: format!("{value:?}"),
             })?
             .into_bytes();
