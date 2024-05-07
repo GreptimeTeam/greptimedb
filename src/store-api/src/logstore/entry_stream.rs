@@ -31,7 +31,6 @@ pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::mem::size_of;
     use std::task::{Context, Poll};
 
     use common_error::ext::StackError;
@@ -50,15 +49,6 @@ mod tests {
     #[snafu(visibility(pub))]
     pub struct Error {}
 
-    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-    pub struct Namespace {}
-
-    impl crate::logstore::Namespace for Namespace {
-        fn id(&self) -> crate::logstore::namespace::Id {
-            0
-        }
-    }
-
     impl ErrorExt for Error {
         fn as_any(&self) -> &dyn Any {
             self
@@ -75,7 +65,6 @@ mod tests {
 
     impl Entry for SimpleEntry {
         type Error = Error;
-        type Namespace = Namespace;
 
         fn data(&self) -> &[u8] {
             &self.data
@@ -85,12 +74,8 @@ mod tests {
             0u64
         }
 
-        fn namespace(&self) -> Self::Namespace {
-            Namespace {}
-        }
-
         fn estimated_size(&self) -> usize {
-            self.data.capacity() * size_of::<u8>()
+            self.data.len()
         }
     }
 
