@@ -52,6 +52,7 @@ use crate::transform::sql_to_flow_plan;
 pub(crate) mod error;
 mod parse_expr;
 mod server;
+mod standalone;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -67,7 +68,7 @@ pub type FlowId = u64;
 pub type TableName = Vec<String>;
 
 /// This function will create a new thread for flow worker and return a handle to the flow node manager
-pub fn start_flow_node_and_one_worker(
+pub fn start_flow_node_with_one_worker(
     frontend_invoker: Box<dyn FrontendInvoker + Send + Sync>,
     query_engine: Arc<dyn QueryEngine>,
     table_meta: TableMetadataManagerRef,
