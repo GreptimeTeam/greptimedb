@@ -167,10 +167,12 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize) -> DFResult<i64> {
         }
         _ => None,
     }
-    .ok_or(DataFusionError::Plan(format!(
-        "{} is not a expr can be evaluate and use in range query",
-        expr.display_name().unwrap_or_default()
-    )))
+    .ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "{} is not a expr can be evaluate and use in range query",
+            expr.display_name().unwrap_or_default()
+        ))
+    })
 }
 
 /// Parse the `align to` clause and return a UTC timestamp with unit of millisecond,
