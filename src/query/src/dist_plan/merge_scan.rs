@@ -41,7 +41,7 @@ use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
-use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
+use greptime_proto::v1::region::{QueryContext, QueryRequest, RegionRequestHeader};
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
@@ -179,7 +179,10 @@ impl MergeScanExec {
 
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
-        let tz = self.query_ctx.timezone().to_string();
+        let current_catalog = self.query_ctx.current_catalog().to_string();
+        let current_schema = self.query_ctx.current_schema().to_string();
+        let timezone = self.query_ctx.timezone().to_string();
+        let extensions = self.query_ctx.extensions();
 
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -192,7 +195,12 @@ impl MergeScanExec {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
-                        timezone: tz.clone(),
+                        query_context: Some(QueryContext {
+                            current_catalog: current_catalog.clone(),
+                            current_schema: current_schema.clone(),
+                            timezone: timezone.clone(),
+                            extensions: extensions.clone(),
+                        }),
                     }),
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),

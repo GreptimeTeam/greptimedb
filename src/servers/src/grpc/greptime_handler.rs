@@ -190,6 +190,7 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
         .current_schema(schema)
         .timezone(Arc::new(timezone))
         .build()
+        .into()
 }
 
 /// Histogram timer for handling gRPC request.

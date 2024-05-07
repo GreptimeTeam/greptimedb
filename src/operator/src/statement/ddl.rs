@@ -1089,7 +1089,7 @@ ENGINE=mito",
                 r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,
             ),
         ];
-        let ctx = QueryContextBuilder::default().build();
+        let ctx = QueryContextBuilder::default().build().into();
         for (sql, expected) in cases {
             let result = ParserContext::create_with_dialect(
                 sql,

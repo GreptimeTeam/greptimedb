@@ -411,7 +411,7 @@ impl PyQueryEngine {
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                 let handle = rt.handle().clone();
                 let res = handle.block_on(async {
-                    let ctx = QueryContextBuilder::default().build();
+                    let ctx = Arc::new(QueryContextBuilder::default().build());
                     let plan = engine
                         .planner()
                         .plan(stmt, ctx.clone())

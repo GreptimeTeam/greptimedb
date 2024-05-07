@@ -339,6 +339,7 @@ fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
         .current_catalog(table_info.catalog_name.to_string())
         .current_schema(table_info.schema_name.to_string())
         .build()
+        .into()
 }
 
 /// Builds scripts schema, returns (time index, primary keys, column defs)

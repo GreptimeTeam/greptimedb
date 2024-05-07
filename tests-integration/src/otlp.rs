@@ -52,7 +52,7 @@ mod test {
     async fn test_otlp(instance: &Arc<Instance>) {
         let req = build_request();
         let db = "otlp";
-        let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
 
         assert!(SqlQueryHandler::do_query(
             instance.as_ref(),

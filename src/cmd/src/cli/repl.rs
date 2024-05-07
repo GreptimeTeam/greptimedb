@@ -161,7 +161,10 @@ impl Repl {
         let start = Instant::now();
 
         let output = if let Some(query_engine) = &self.query_engine {
-            let query_ctx = QueryContext::with(self.database.catalog(), self.database.schema());
+            let query_ctx = Arc::new(QueryContext::with(
+                self.database.catalog(),
+                self.database.schema(),
+            ));
 
             let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx)
                 .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
