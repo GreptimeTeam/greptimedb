@@ -158,6 +158,7 @@ impl ParquetReaderBuilder {
     #[allow(dead_code)]
     pub async fn build_file_ranges(&self, file_ranges: &mut Vec<FileRange>) -> Result<()> {
         let (context, row_groups) = self.build_reader_input().await?;
+        file_ranges.reserve_exact(row_groups.len());
         for (row_group_idx, row_selection) in row_groups {
             let file_range = FileRange::new(context.clone(), row_group_idx, row_selection);
             file_ranges.push(file_range);
@@ -179,21 +180,24 @@ impl ParquetReaderBuilder {
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
-        // Lists all column ids to read, we always use the expected metadata if possible.
-        let column_ids = self.projection.clone().unwrap_or_else(|| {
+        let read_format = if let Some(column_ids) = &self.projection {
+            ReadFormat::new(region_meta.clone(), column_ids)
+        } else {
+            // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            expected_meta
+            let column_ids: Vec<_> = expected_meta
                 .column_metadatas
                 .iter()
                 .map(|col| col.column_id)
-                .collect()
-        });
-        let read_format = ReadFormat::new(region_meta.clone(), &column_ids);
+                .collect();
+            ReadFormat::new(region_meta.clone(), &column_ids)
+        };
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let indices = read_format.projection_indices();
         // Now we assumes we don't have nested schemas.
+        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
         let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
 
         // Computes the field levels.
