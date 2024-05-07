@@ -241,8 +241,8 @@ impl InformationSchemaClusterInfoBuilder {
             return;
         }
 
-        if peer_type == "FRONTEND" {
-            // Always set peer_id to be -1 for frontends
+        if peer_type == "FRONTEND" || peer_type == "METASRV" {
+            // Always set peer_id to be -1 for frontends and metasrvs
             self.peer_ids.push(Some(-1));
         } else {
             self.peer_ids.push(Some(node_info.peer.id as i64));
