@@ -52,6 +52,8 @@ use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 const DEFAULT_READ_BUFFER: usize = 256 * 1024;
+const MAX_INSERT_ROWS: &str = "max_insert_rows";
+const DEFAULT_MAX_INSERT_ROWS: usize = 1000;
 
 enum FileMetadata {
     Parquet {
@@ -377,6 +379,11 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
+        let max_insert_rows = req
+            .with
+            .get(MAX_INSERT_ROWS)
+            .and_then(|val| val.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_INSERT_ROWS);
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -427,6 +434,10 @@ impl StatementExecutor {
                     rows_inserted += rows;
                     insert_cost += cost;
                 }
+
+                if rows_inserted >= max_insert_rows {
+                    return Ok(gen_insert_output(rows_inserted, insert_cost));
+                }
             }
 
             if !pending.is_empty() {
@@ -436,11 +447,15 @@ impl StatementExecutor {
             }
         }
 
-        Ok(Output::new(
-            OutputData::AffectedRows(rows_inserted),
-            OutputMeta::new_with_cost(insert_cost),
-        ))
+        Ok(gen_insert_output(rows_inserted, insert_cost))
     }
+}
+
+fn gen_insert_output(rows_inserted: usize, insert_cost: usize) -> Output {
+    Output::new(
+        OutputData::AffectedRows(rows_inserted),
+        OutputMeta::new_with_cost(insert_cost),
+    )
 }
 
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.
