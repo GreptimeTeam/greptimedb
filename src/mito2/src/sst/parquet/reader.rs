@@ -181,16 +181,17 @@ impl ParquetReaderBuilder {
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
         let read_format = if let Some(column_ids) = &self.projection {
-            ReadFormat::new(region_meta.clone(), column_ids)
+            ReadFormat::new(region_meta.clone(), column_ids.iter().copied())
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            let column_ids: Vec<_> = expected_meta
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect();
-            ReadFormat::new(region_meta.clone(), &column_ids)
+            ReadFormat::new(
+                region_meta.clone(),
+                expected_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            )
         };
 
         // Computes the projection mask.

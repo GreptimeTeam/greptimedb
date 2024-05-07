@@ -130,7 +130,10 @@ pub(crate) struct ReadFormat {
 
 impl ReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub(crate) fn new(metadata: RegionMetadataRef, column_ids: &[ColumnId]) -> ReadFormat {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        column_ids: impl Iterator<Item = ColumnId>,
+    ) -> ReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
@@ -140,13 +143,12 @@ impl ReadFormat {
 
         // Maps column id of a projected field to its index in SST.
         let mut projected_field_id_index: Vec<_> = column_ids
-            .iter()
             .filter_map(|column_id| {
                 // Only apply projection to fields.
                 field_id_to_index
-                    .get(column_id)
+                    .get(&column_id)
                     .copied()
-                    .map(|index| (*column_id, index))
+                    .map(|index| (column_id, index))
             })
             .collect();
         let mut projection_indices: Vec<_> = projected_field_id_index
@@ -745,16 +747,16 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = ReadFormat::new(metadata.clone(), &[3]);
+        let read_format = ReadFormat::new(metadata.clone(), [3].iter().copied());
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Only read field1
-        let read_format = ReadFormat::new(metadata.clone(), &[4]);
+        let read_format = ReadFormat::new(metadata.clone(), [4].iter().copied());
         assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
         // Only read ts
-        let read_format = ReadFormat::new(metadata.clone(), &[5]);
+        let read_format = ReadFormat::new(metadata.clone(), [5].iter().copied());
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Read field0, tag0, ts
-        let read_format = ReadFormat::new(metadata, &[2, 1, 5]);
+        let read_format = ReadFormat::new(metadata, [2, 1, 5].iter().copied());
         assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
     }
 
@@ -801,7 +803,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = ReadFormat::new(metadata, &column_ids);
+        let read_format = ReadFormat::new(metadata, column_ids.iter().copied());
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -820,7 +822,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = ReadFormat::new(metadata, &column_ids);
+        let read_format = ReadFormat::new(metadata, column_ids.iter().copied());
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
