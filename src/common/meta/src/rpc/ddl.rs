@@ -33,6 +33,7 @@ use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
@@ -195,6 +196,7 @@ impl TryFrom<Task> for DdlTask {
 
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
+    pub query_context: QueryContextRef,
     pub task: DdlTask,
 }
 
@@ -238,6 +240,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
         Ok(Self {
             header: None,
+            query_context: Some((*request.query_context).clone().into()),
             task: Some(task),
         })
     }

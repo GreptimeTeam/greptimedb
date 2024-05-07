@@ -18,13 +18,14 @@ mod metadata;
 use std::collections::BTreeMap;
 
 use api::v1::flow::flow_request::Body as PbFlowRequest;
-use api::v1::flow::{CreateRequest, FlowRequest};
+use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,11 @@ impl CreateFlowProcedure {
         for peer in &self.data.peers {
             let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
+                header: Some(FlowRequestHeader {
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    // TODO(weny): add query context.
+                    ..Default::default()
+                }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
             create_flow.push(async move {

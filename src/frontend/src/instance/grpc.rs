@@ -111,17 +111,21 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::CreateTable(mut expr) => {
                         let _ = self
                             .statement_executor
-                            .create_table_inner(&mut expr, None, &ctx)
+                            .create_table_inner(&mut expr, None, ctx.clone())
                             .await?;
                         Output::new_with_affected_rows(0)
                     }
-                    DdlExpr::Alter(expr) => self.statement_executor.alter_table_inner(expr).await?,
+                    DdlExpr::Alter(expr) => {
+                        self.statement_executor
+                            .alter_table_inner(expr, ctx.clone())
+                            .await?
+                    }
                     DdlExpr::CreateDatabase(expr) => {
                         self.statement_executor
                             .create_database(
-                                ctx.current_catalog(),
                                 &expr.schema_name,
                                 expr.create_if_not_exists,
+                                ctx.clone(),
                             )
                             .await?
                     }
@@ -129,13 +133,15 @@ impl GrpcQueryHandler for Instance {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
                         self.statement_executor
-                            .drop_table(table_name, expr.drop_if_exists)
+                            .drop_table(table_name, expr.drop_if_exists, ctx.clone())
                             .await?
                     }
                     DdlExpr::TruncateTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.statement_executor.truncate_table(table_name).await?
+                        self.statement_executor
+                            .truncate_table(table_name, ctx.clone())
+                            .await?
                     }
                     DdlExpr::CreateFlow(_) => {
                         unimplemented!()
