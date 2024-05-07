@@ -114,9 +114,13 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "build-binaries"
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin
       - name: Build greptime binaries
         shell: bash
-        run: cargo build --bin greptime --bin sqlness-runner
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: cargo gc -- --bin greptime --bin sqlness-runner
       - name: Pack greptime binaries
         shell: bash
         run: |
