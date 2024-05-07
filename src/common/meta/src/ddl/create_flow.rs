@@ -41,7 +41,7 @@ use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::FlowId;
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
-use crate::rpc::ddl::CreateFlowTask;
+use crate::rpc::ddl::{CreateFlowTask, QueryContext};
 use crate::{metrics, ClusterId};
 
 /// The procedure of flow creation.
@@ -54,7 +54,12 @@ impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
-    pub fn new(cluster_id: ClusterId, task: CreateFlowTask, context: DdlContext) -> Self {
+    pub fn new(
+        cluster_id: ClusterId,
+        task: CreateFlowTask,
+        query_context: QueryContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: CreateFlowData {
@@ -64,6 +69,7 @@ impl CreateFlowProcedure {
                 peers: vec![],
                 source_table_ids: vec![],
                 state: CreateFlowState::CreateMetadata,
+                query_context,
             },
         }
     }
@@ -91,8 +97,7 @@ impl CreateFlowProcedure {
             let request = FlowRequest {
                 header: Some(FlowRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
-                    // TODO(weny): add query context.
-                    ..Default::default()
+                    query_context: Some(self.data.query_context.clone().into()),
                 }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
@@ -193,6 +198,7 @@ pub struct CreateFlowData {
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
+    pub(crate) query_context: QueryContext,
 }
 
 impl From<&CreateFlowData> for CreateRequest {

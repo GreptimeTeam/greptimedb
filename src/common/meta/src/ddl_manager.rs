@@ -48,7 +48,7 @@ use crate::rpc::ddl::DdlTask::{
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
-    DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -328,9 +328,10 @@ impl DdlManager {
         &self,
         cluster_id: ClusterId,
         create_flow: CreateFlowTask,
+        query_context: QueryContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = CreateFlowProcedure::new(cluster_id, create_flow, context);
+        let procedure = CreateFlowProcedure::new(cluster_id, create_flow, query_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -600,9 +601,10 @@ async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
     create_flow_task: CreateFlowTask,
+    query_context: QueryContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_flow_task(cluster_id, create_flow_task.clone())
+        .submit_create_flow_task(cluster_id, create_flow_task.clone(), query_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -705,7 +707,13 @@ impl ProcedureExecutor for DdlManager {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, cluster_id, create_flow_task).await
+                    handle_create_flow_task(
+                        self,
+                        cluster_id,
+                        create_flow_task,
+                        request.query_context.into(),
+                    )
+                    .await
                 }
             }
         }

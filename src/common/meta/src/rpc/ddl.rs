@@ -27,7 +27,7 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, DropDatabaseExpr, DropFlowExpr,
-    DropTableExpr, TruncateTableExpr,
+    DropTableExpr, QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -852,6 +852,43 @@ impl From<DropFlowTask> for PbDropFlowTask {
                 catalog_name,
                 flow_name,
             }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryContext {
+    current_catalog: String,
+    current_schema: String,
+    timezone: String,
+    extensions: HashMap<String, String>,
+}
+
+impl From<QueryContextRef> for QueryContext {
+    fn from(query_context: QueryContextRef) -> Self {
+        QueryContext {
+            current_catalog: query_context.current_catalog().to_string(),
+            current_schema: query_context.current_schema().to_string(),
+            timezone: query_context.timezone().to_string(),
+            extensions: query_context.extensions(),
+        }
+    }
+}
+
+impl From<QueryContext> for PbQueryContext {
+    fn from(
+        QueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
+        }: QueryContext,
+    ) -> Self {
+        PbQueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
         }
     }
 }
