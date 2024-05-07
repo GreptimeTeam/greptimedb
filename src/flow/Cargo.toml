@@ -34,6 +34,7 @@ greptime-proto.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true
 minstant = "0.1.7"
+nom = "7.1.3"
 num-traits = "0.2"
 prost.workspace = true
 query.workspace = true

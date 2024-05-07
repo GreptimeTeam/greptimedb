@@ -50,6 +50,7 @@ use crate::repr::{self, ColumnType, DiffRow, RelationType, Row, BROADCAST_CAP};
 use crate::transform::sql_to_flow_plan;
 
 pub(crate) mod error;
+mod parse_expr;
 mod server;
 #[cfg(test)]
 mod tests;

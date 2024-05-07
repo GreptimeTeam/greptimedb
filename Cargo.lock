@@ -3537,6 +3537,7 @@ dependencies = [
  "hydroflow",
  "itertools 0.10.5",
  "minstant",
+ "nom",
  "num-traits",
  "prost 0.12.4",
  "query",
