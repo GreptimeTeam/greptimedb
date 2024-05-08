@@ -114,16 +114,16 @@ async fn invalidate_drop_flow(
 }
 
 fn invalidator(
-    cache: Arc<Cache<TableId, FlownodeSet>>,
+    cache: &'_ Cache<TableId, FlownodeSet>,
     caches: Vec<CacheIdent>,
-) -> BoxFuture<'static, Result<()>> {
+) -> BoxFuture<'_, Result<()>> {
     Box::pin(async move {
         for ident in caches {
             match ident {
                 CacheIdent::CreateFlow(create_flow) => {
-                    invalidate_create_flow(&cache, create_flow).await
+                    invalidate_create_flow(cache, create_flow).await
                 }
-                CacheIdent::DropFlow(drop_flow) => invalidate_drop_flow(&cache, drop_flow).await,
+                CacheIdent::DropFlow(drop_flow) => invalidate_drop_flow(cache, drop_flow).await,
                 _ => {}
             }
         }

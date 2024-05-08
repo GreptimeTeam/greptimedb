@@ -31,16 +31,16 @@ pub type TokenFilter<CacheToken> = Box<dyn Fn(Vec<CacheToken>) -> Vec<CacheToken
 
 /// Invalidates cached values by [CacheToken]s.
 pub type Invalidator<K, V, CacheToken> =
-    Box<dyn Fn(Arc<Cache<K, V>>, Vec<CacheToken>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+    Box<dyn Fn(&'_ Cache<K, V>, Vec<CacheToken>) -> BoxFuture<'_, Result<()>> + Send + Sync>;
 
 /// Initializes value (i.e., fetches from remote).
-pub type Initializer<K, V> = Arc<dyn Fn(&K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
+pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
 
 /// [CacheContainer] provides ability to:
 /// - Cache value loaded by [Init].
 /// - Invalidate caches by [Invalidator].
 pub struct CacheContainer<K, V, CacheToken> {
-    cache: Arc<Cache<K, V>>,
+    cache: Cache<K, V>,
     invalidator: Invalidator<K, V, CacheToken>,
     initializer: Initializer<K, V>,
     token_filter: TokenFilter<CacheToken>,
@@ -56,14 +56,14 @@ where
     pub fn new(
         cache: Cache<K, V>,
         invalidator: Invalidator<K, V, CacheToken>,
-        init: Initializer<K, V>,
-        filter: TokenFilter<CacheToken>,
+        initializer: Initializer<K, V>,
+        token_filter: TokenFilter<CacheToken>,
     ) -> Self {
         Self {
-            cache: Arc::new(cache),
+            cache,
             invalidator,
-            initializer: init,
-            token_filter: filter,
+            initializer,
+            token_filter,
         }
     }
 }
@@ -77,7 +77,7 @@ where
     async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
         let caches = (self.token_filter)(caches);
         if !caches.is_empty() {
-            (self.invalidator)(self.cache.clone(), caches).await?;
+            (self.invalidator)(&self.cache, caches).await?;
         }
         Ok(())
     }
@@ -92,7 +92,7 @@ where
     pub async fn invalidate(&self, caches: Vec<CacheToken>) -> Result<()> {
         let caches = (self.token_filter)(caches);
         if !caches.is_empty() {
-            (self.invalidator)(self.cache.clone(), caches).await?;
+            (self.invalidator)(&self.cache, caches).await?;
         }
         Ok(())
     }
