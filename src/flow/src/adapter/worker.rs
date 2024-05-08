@@ -125,6 +125,7 @@ impl WorkerHandle {
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
+        expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
     ) -> Result<Option<FlowId>, Error> {
         let req = Request::Create {
@@ -134,6 +135,7 @@ impl WorkerHandle {
             sink_sender,
             source_ids: source_ids.to_vec(),
             src_recvs,
+            expire_when,
             create_if_not_exist,
         };
 
@@ -233,6 +235,8 @@ impl<'s> Worker<'s> {
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
+        // TODO(discord9): set expire duration for all arrangment and compare to sys timestamp instead
+        expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
     ) -> Result<Option<FlowId>, Error> {
         if create_if_not_exist {
@@ -298,6 +302,7 @@ impl<'s> Worker<'s> {
                 sink_sender,
                 source_ids,
                 src_recvs,
+                expire_when,
                 create_if_not_exist,
             } => {
                 let task_create_result = self.create_flow(
@@ -307,6 +312,7 @@ impl<'s> Worker<'s> {
                     sink_sender,
                     &source_ids,
                     src_recvs,
+                    expire_when,
                     create_if_not_exist,
                 );
                 Some((
@@ -343,6 +349,7 @@ enum Request {
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: Vec<GlobalId>,
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
+        expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
     },
     Remove {
@@ -484,6 +491,7 @@ mod test {
                 sink_tx,
                 &src_ids,
                 vec![rx],
+                None,
                 true,
             )
             .await

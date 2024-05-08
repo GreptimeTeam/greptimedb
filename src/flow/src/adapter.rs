@@ -50,6 +50,7 @@ use tokio::task::LocalSet;
 use crate::adapter::error::{
     EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
+use crate::adapter::parse_expr::{parse_duration, parse_fixed};
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::{Context, DataflowState, ErrCollector};
@@ -507,7 +508,7 @@ impl FlownodeManager {
                 (wout_ts, with_ts)
             };
 
-            let proto_schema_wout_ts = column_schemas_to_proto(schema_wout_ts, &primary_keys)?;
+            let _proto_schema_wout_ts = column_schemas_to_proto(schema_wout_ts, &primary_keys)?;
 
             let proto_schema_with_ts = column_schemas_to_proto(with_ts, &primary_keys)?;
 
@@ -669,7 +670,15 @@ impl FlownodeManager {
         node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
 
         // TODO(discord9): parse `expire_when`
-        let _ = expire_when;
+        let expire_when = expire_when
+            .map(|d| {
+                let d = d.as_ref();
+                parse_fixed(d)
+                    .map(|(_, n)| n)
+                    .map_err(|err| err.to_string())
+            })
+            .transpose()
+            .map_err(|err| UnexpectedSnafu { reason: err }.build())?;
         let _ = comment;
         let _ = flow_options;
 
@@ -695,6 +704,7 @@ impl FlownodeManager {
                 sink_sender,
                 &source_ids,
                 source_senders,
+                expire_when,
                 create_if_not_exist,
             )
             .await?;
