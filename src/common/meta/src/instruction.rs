@@ -23,7 +23,7 @@ use table::metadata::TableId;
 
 use crate::key::schema_name::SchemaName;
 use crate::table_name::TableName;
-use crate::{ClusterId, DatanodeId};
+use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct RegionIdent {
@@ -152,12 +152,26 @@ pub struct UpgradeRegion {
     pub wait_for_replay_timeout: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// The identifier of cache.
 pub enum CacheIdent {
     TableId(TableId),
     TableName(TableName),
     SchemaName(SchemaName),
+    CreateFlow(CreateFlow),
+    DropFlow(DropFlow),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateFlow {
+    pub source_table_ids: Vec<TableId>,
+    pub flownode_ids: Vec<FlownodeId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DropFlow {
+    pub source_table_ids: Vec<TableId>,
+    pub flownode_ids: Vec<FlownodeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]

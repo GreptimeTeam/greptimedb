@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod flow;
+
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -50,7 +52,7 @@ where
     V: Send + Sync,
     CacheToken: Send + Sync,
 {
-    /// Constructs an [AdvancedCache].
+    /// Constructs an [CacheContainer].
     pub fn new(
         cache: Cache<K, V>,
         invalidator: Invalidator<K, V, CacheToken>,
