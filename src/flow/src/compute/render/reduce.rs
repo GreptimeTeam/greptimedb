@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{ListValue, Value};
 use hydroflow::scheduled::graph_ext::GraphExt;
@@ -378,7 +379,7 @@ fn reduce_accum_subgraph(
 
     let mut all_updates = Vec::with_capacity(key_to_vals.len());
     let mut all_outputs = Vec::with_capacity(key_to_vals.len());
-
+    let null_vals = (0..full_aggrs.len()).map(|_| Value::Null);
     // lock the arrange for write for the rest of function body
     // so to prevent wide race condition since we are going to update the arrangement by write after read
     // TODO(discord9): consider key-based lock
@@ -394,7 +395,17 @@ fn reduce_accum_subgraph(
                 None => continue,
             }
         };
-        let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
+        let (accums, old_ts, _) = arrange.get(now, &key).unwrap_or_default();
+        if !accums.is_empty() {
+            info!("Get old_ts as: {old_ts}");
+            // first explictly remove old key(because arrange use pk as only pk, but
+            // database use pk+ts as true pk for dedup, so we need to manualy remove old values first)
+            let mut del_key_val = key.clone();
+            // adding null as values so the output length are correct
+            del_key_val.extend(null_vals.clone());
+
+            all_outputs.push((del_key_val, now, -1));
+        }
         let accums = accums.inner;
 
         // deser accums from offsets

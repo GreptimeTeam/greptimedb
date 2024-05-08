@@ -107,6 +107,11 @@ impl Row {
         Self { inner: vec![] }
     }
 
+    /// Returns true if the Row contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Create a row from a vector of values
     pub fn new(row: Vec<Value>) -> Self {
         Self { inner: row }
