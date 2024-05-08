@@ -252,7 +252,7 @@ impl Procedure for DropTableProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DropTableData {
     pub state: DropTableState,
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     pub task: DropTableTask,
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,

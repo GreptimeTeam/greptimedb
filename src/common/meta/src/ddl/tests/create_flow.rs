@@ -24,12 +24,12 @@ use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
 use crate::ddl::DdlContext;
-use crate::error;
 use crate::key::table_route::TableRouteValue;
 use crate::key::FlowId;
 use crate::rpc::ddl::CreateFlowTask;
 use crate::table_name::TableName;
 use crate::test_util::{new_ddl_context, MockFlownodeManager};
+use crate::{error, ClusterId};
 
 pub(crate) fn test_create_flow_task(
     name: &str,
@@ -72,7 +72,7 @@ async fn test_create_flow_source_table_not_found() {
 
 pub(crate) async fn create_test_flow(
     ddl_context: &DdlContext,
-    cluster_id: u64,
+    cluster_id: ClusterId,
     flow_name: &str,
     source_table_names: Vec<TableName>,
     sink_table_name: TableName,

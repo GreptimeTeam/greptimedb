@@ -193,7 +193,7 @@ impl Procedure for DropFlowProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropFlowData {
     state: DropFlowState,
-    cluster_id: u64,
+    cluster_id: ClusterId,
     task: DropFlowTask,
     pub(crate) flow_info_value: Option<FlowInfoValue>,
 }
