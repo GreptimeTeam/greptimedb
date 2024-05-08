@@ -29,7 +29,7 @@ use datatypes::vectors::VectorRef;
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
-use store_api::storage::RegionId;
+use store_api::storage::{ConcreteDataType, RegionId};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -123,16 +123,21 @@ impl CacheManager {
     }
 
     /// Gets a vector with repeated value for specific `key`.
-    pub fn get_repeated_vector(&self, key: &Value) -> Option<VectorRef> {
+    pub fn get_repeated_vector(
+        &self,
+        data_type: &ConcreteDataType,
+        value: &Value,
+    ) -> Option<VectorRef> {
         self.vector_cache.as_ref().and_then(|vector_cache| {
-            let value = vector_cache.get(key);
+            let value = vector_cache.get(&(data_type.clone(), value.clone()));
             update_hit_miss(value, VECTOR_TYPE)
         })
     }
 
     /// Puts a vector with repeated value into the cache.
-    pub fn put_repeated_vector(&self, key: Value, vector: VectorRef) {
+    pub fn put_repeated_vector(&self, value: Value, vector: VectorRef) {
         if let Some(cache) = &self.vector_cache {
+            let key = (vector.data_type(), value);
             CACHE_BYTES
                 .with_label_values(&[VECTOR_TYPE])
                 .add(vector_cache_weight(&key, &vector).into());
@@ -249,9 +254,9 @@ fn meta_cache_weight(k: &SstMetaKey, v: &Arc<ParquetMetaData>) -> u32 {
     (k.estimated_size() + parquet_meta_size(v)) as u32
 }
 
-fn vector_cache_weight(_k: &Value, v: &VectorRef) -> u32 {
+fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
     // We ignore the heap size of `Value`.
-    (mem::size_of::<Value>() + v.memory_size()) as u32
+    (mem::size_of::<ConcreteDataType>() + mem::size_of::<Value>() + v.memory_size()) as u32
 }
 
 fn page_cache_weight(k: &PageKey, v: &Arc<PageValue>) -> u32 {
@@ -323,7 +328,7 @@ type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 /// Maps [Value] to a vector that holds this value repeatedly.
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
-type VectorCache = Cache<Value, VectorRef>;
+type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (region, file, row group, column) to [PageValue].
 type PageCache = Cache<PageKey, Arc<PageValue>>;
 
@@ -353,7 +358,9 @@ mod tests {
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
-        assert!(cache.get_repeated_vector(&value).is_none());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+            .is_none());
 
         let key = PageKey {
             region_id,
@@ -394,10 +401,14 @@ mod tests {
     fn test_repeated_vector_cache() {
         let cache = CacheManager::builder().vector_cache_size(4096).build();
         let value = Value::Int64(10);
-        assert!(cache.get_repeated_vector(&value).is_none());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+            .is_none());
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
-        let cached = cache.get_repeated_vector(&value).unwrap();
+        let cached = cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+            .unwrap();
         assert_eq!(vector, cached);
     }
 
