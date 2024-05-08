@@ -60,7 +60,7 @@ impl flow_server::Flow for FlowService {
                 flow_options,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
-                let sink_table_name = vec![
+                let sink_table_name = [
                     sink_table_name.catalog_name,
                     sink_table_name.schema_name,
                     sink_table_name.table_name,

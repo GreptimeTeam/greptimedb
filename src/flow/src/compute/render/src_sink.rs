@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use common_telemetry::info;
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -64,9 +65,10 @@ impl<'referred, 'df> Context<'referred, 'df> {
                         to_arrange.push(((r, Row::empty()), t, d));
                     }
                 }
-                let all = prev_avail.chain(to_send);
+                let all = prev_avail.chain(to_send).collect_vec();
+                info!("Flow receive {} rows", all.len());
                 err_collector.run(|| arrange_handler_inner.write().apply_updates(now, to_arrange));
-                send.give(all.collect_vec());
+                send.give(all);
             });
         let arranged = Arranged::new(arrange_handler);
         arranged.writer.borrow_mut().replace(sub);
@@ -97,7 +99,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     if sender.is_closed() {
                         break;
                     }
-                    // TODO(discord9): handling tokio broadcast error
+                    // TODO(discord9): handling tokio error
                     let _ = sender.send(row);
                 }
             },

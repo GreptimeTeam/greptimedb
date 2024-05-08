@@ -115,11 +115,11 @@ impl TypedPlan {
             Some(RelType::Read(read)) => {
                 if let Some(ReadType::NamedTable(nt)) = &read.as_ref().read_type {
                     let query_ctx = ctx.query_context.clone().unwrap();
-                    let mut table_reference = vec![
+                    let table_reference = [
                         query_ctx.current_catalog().to_string(),
                         query_ctx.current_schema().to_string(),
+                        nt.names[0].clone(),
                     ];
-                    table_reference.extend(nt.names.clone());
                     let table = ctx.table(&table_reference)?;
                     let get_table = Plan::Get {
                         id: crate::expr::Id::Global(table.0),

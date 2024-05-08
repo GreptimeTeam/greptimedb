@@ -30,6 +30,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_runtime::JoinHandle;
 use common_telemetry::info;
+use datatypes::schema::ColumnSchema;
 use greptime_proto::v1;
 use hydroflow::scheduled::graph::Hydroflow;
 use itertools::Itertools;
@@ -73,7 +74,7 @@ pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
 // TODO: refactor common types for flow to a separate module
 /// FlowId is a unique identifier for a flow task
 pub type FlowId = u64;
-pub type TableName = Vec<String>;
+pub type TableName = [String; 3];
 
 /// Options for flow node
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -183,7 +184,6 @@ pub struct FlownodeManager {
     node_context: Mutex<FlowNodeContext>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
-    run_task_created: Mutex<bool>,
 }
 
 impl FlownodeManager {
@@ -199,10 +199,12 @@ impl FlownodeManager {
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
     pub async fn run(&self) {
         loop {
-            info!("Trigger one run of flownode");
+            // TODO(discord9): only run when new inputs arrive or scheduled to
             self.run_available().await;
+            info!("Complete run_available");
             // TODO(discord9): error handling
             let _ = self.send_writeback_requests().await;
+            info!("Complete send_writeback_requests");
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
@@ -236,7 +238,6 @@ impl FlownodeManager {
             node_context: Mutex::new(node_context),
             tick_manager,
             node_id,
-            run_task_created: Mutex::new(false),
         }
     }
 
@@ -317,7 +318,7 @@ impl TableInfoSource {
                 msg: format!("TableId = {:?}, couldn't found table name", table_id),
             })
             .map(|name| name.unwrap().table_name())
-            .map(|name| vec![name.catalog_name, name.schema_name, name.table_name])
+            .map(|name| [name.catalog_name, name.schema_name, name.table_name])
     }
     /// query metasrv about the table name and table id
     pub async fn get_table_info_value(
@@ -346,7 +347,7 @@ impl TableInfoSource {
             })?;
 
         let table_name = table_info_value.table_name();
-        let table_name = vec![
+        let table_name = [
             table_name.catalog_name,
             table_name.schema_name,
             table_name.table_name,
@@ -377,6 +378,7 @@ impl TableInfoSource {
     }
 }
 
+#[derive(Debug)]
 pub enum DiffRequest {
     Insert(Vec<Row>),
     Delete(Vec<Row>),
@@ -396,7 +398,9 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
                 rows.push(row);
             }
             (Some(DiffRequest::Delete(_)), 1) => reqs.push(DiffRequest::Insert(vec![row])),
-            _ => (),
+            (None, 1) => reqs.push(DiffRequest::Insert(vec![row])),
+            (None, -1) => reqs.push(DiffRequest::Delete(vec![row])),
+            _ => {}
         }
     }
     reqs
@@ -431,9 +435,15 @@ impl FlownodeManager {
     /// Return the number of requests it made
     pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
         let all_reqs = self.generate_writeback_request().await;
+        info!("Sending writeback requests, all reqs={:?}", all_reqs);
         let mut req_cnt = 0;
         for (table_name, reqs) in all_reqs {
-            let table_id = self
+            if reqs.is_empty() {
+                continue;
+            }
+            let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
+            let ctx = QueryContext::with(&catalog, &schema);
+            /*let table_id = self
                 .table_info_source
                 .get_table_id_from_name(&table_name)
                 .await?;
@@ -442,12 +452,6 @@ impl FlownodeManager {
                 .get_table_info_value(&table_id)
                 .await?
                 .unwrap();
-            let (catalog, schema) = (
-                table_info.table_info.catalog_name,
-                table_info.table_info.schema_name,
-            );
-            let ctx = QueryContext::with(&catalog, &schema);
-
             let primary_keys = table_info
                 .table_info
                 .meta
@@ -459,11 +463,38 @@ impl FlownodeManager {
                         .clone()
                 })
                 .collect_vec();
-
             let schema = table_info.table_info.meta.schema.column_schemas;
+            */
+            let primary_keys = vec![];
+
+            let schema = {
+                let node_ctx = self.node_context.lock().await;
+                let gid: GlobalId = node_ctx
+                    .table_repr
+                    .get_by_name(&table_name)
+                    .map(|x| x.1)
+                    .unwrap();
+                let schema = node_ctx
+                    .schema
+                    .get(&gid)
+                    .with_context(|| TableNotFoundSnafu {
+                        name: format!("Table name = {:?}", table_name),
+                    })?
+                    .clone();
+
+                schema
+                    .column_types
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, typ)| {
+                        ColumnSchema::new(format!("Col_{idx}"), typ.scalar_type, typ.nullable)
+                    })
+                    .collect_vec()
+            };
+
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
             info!(
-                "Sending {} writeback requests for table {}",
+                "Sending {} writeback requests to table {}",
                 reqs.len(),
                 table_name.join(".")
             );
@@ -536,7 +567,9 @@ impl FlownodeManager {
             .map(|(n, (_s, r))| (n, r))
         {
             let mut rows = Vec::new();
-            let _recv_cnt = sink_recv.recv_many(&mut rows, PER_REQ_MAX_ROW_CNT).await;
+            while let Ok(row) = sink_recv.try_recv() {
+                rows.push(row);
+            }
             let reqs = diff_row_to_request(rows);
             output.insert(name.clone(), reqs);
         }
@@ -599,6 +632,8 @@ impl FlownodeManager {
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(node_ctx.borrow_mut(), &self.query_engine, &sql).await?;
 
+        node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
+
         // TODO(discord9): parse `expire_when`
         let _ = expire_when;
         let _ = comment;
@@ -658,7 +693,7 @@ pub struct FlowNodeContext {
     >,
     /// store source in buffer for each source table, in case broadcast channel is full
     pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
-    /// the schema of the table
+    /// the schema of the table, query from metasrv or infered from TypedPlan
     pub schema: HashMap<GlobalId, RelationType>,
     /// All the tables that have been registered in the worker
     pub table_repr: TriMap,
@@ -782,7 +817,7 @@ impl FlowNodeContext {
     /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &Vec<String>) -> Result<(GlobalId, RelationType), Error> {
+    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationType), Error> {
         let id = self
             .table_repr
             .get_by_name(name)
@@ -838,6 +873,23 @@ impl FlowNodeContext {
             self.table_repr.insert(table_name, table_id, global_id);
             Ok(global_id)
         }
+    }
+
+    /// Assign a schema to a table
+    ///
+    /// TODO(discord9): error handling
+    pub fn assign_table_schema(
+        &mut self,
+        table_name: &TableName,
+        schema: RelationType,
+    ) -> Result<(), Error> {
+        let gid = self
+            .table_repr
+            .get_by_name(table_name)
+            .map(|(_, gid)| gid)
+            .unwrap();
+        self.schema.insert(gid, schema);
+        Ok(())
     }
 
     /// Get a new global id

@@ -395,7 +395,7 @@ struct InterThreadCallClient {
 
 impl InterThreadCallClient {
     /// call without expecting responses or blocking
-    async fn call_non_blocking(&mut self, req: Request) {
+    async fn call_non_blocking(&self, req: Request) {
         let call_id = {
             let mut call_id = self.call_id.lock().await;
             *call_id += 1;

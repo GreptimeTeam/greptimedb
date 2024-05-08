@@ -143,7 +143,7 @@ mod test {
 
     pub fn create_test_ctx() -> FlowNodeContext {
         let gid = GlobalId::User(0);
-        let name = vec!["numbers".to_string()];
+        let name = ["".to_string(), "".to_string(), "numbers".to_string()];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
         let mut tri_map = TriMap::new();
         tri_map.insert(Some(name.clone()), Some(0), gid);

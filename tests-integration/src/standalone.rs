@@ -210,7 +210,7 @@ impl GreptimeDbStandaloneBuilder {
         flownode
             .set_frontend_invoker(Box::new(instance.clone()))
             .await;
-        let _ = flownode.run_background();
+        flownode.run_background().await.unwrap();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

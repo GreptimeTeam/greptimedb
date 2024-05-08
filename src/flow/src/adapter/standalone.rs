@@ -46,7 +46,7 @@ impl Flownode for FlownodeManager {
                 flow_options,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
-                let sink_table_name = vec![
+                let sink_table_name = [
                     sink_table_name.catalog_name,
                     sink_table_name.schema_name,
                     sink_table_name.table_name,
@@ -106,9 +106,6 @@ impl Flownode for FlownodeManager {
                 .await
                 .map_err(to_meta_err)?;
         }
-        // since `run_available` doesn't blocking, we can just trigger a run here
-        self.run_available().await;
-        // write back should be config to be timed in somewhere else like one attempt per second
         Ok(Default::default())
     }
 }
