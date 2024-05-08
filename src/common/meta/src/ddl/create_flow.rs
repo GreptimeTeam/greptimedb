@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
+use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
@@ -97,7 +98,7 @@ impl CreateFlowProcedure {
             ensure!(
                 create_if_not_exists,
                 error::FlowAlreadyExistsSnafu {
-                    flow_name: format!("{}.{}", catalog_name, flow_name),
+                    flow_name: format_full_flow_name(catalog_name, flow_name),
                 }
             );
 

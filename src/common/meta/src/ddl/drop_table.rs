@@ -36,10 +36,10 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
-use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{operating_leader_regions, RegionRoute};
+use crate::{metrics, ClusterId};
 
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
@@ -55,7 +55,7 @@ pub struct DropTableProcedure {
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub fn new(cluster_id: u64, task: DropTableTask, context: DdlContext) -> Self {
+    pub fn new(cluster_id: ClusterId, task: DropTableTask, context: DdlContext) -> Self {
         let data = DropTableData::new(cluster_id, task);
         let executor = data.build_executor();
         Self {
@@ -259,7 +259,7 @@ pub struct DropTableData {
 }
 
 impl DropTableData {
-    pub fn new(cluster_id: u64, task: DropTableTask) -> Self {
+    pub fn new(cluster_id: ClusterId, task: DropTableTask) -> Self {
         Self {
             state: DropTableState::Prepare,
             cluster_id,

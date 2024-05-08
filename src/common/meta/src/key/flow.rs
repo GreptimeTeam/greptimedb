@@ -222,31 +222,19 @@ impl FlowMetadataManager {
         let flow_info_key = FlowInfoKey::new(flow_id);
         keys.push(flow_info_key.to_bytes());
 
-        /// Builds flownode flow keys
-        let flownode_flow_keys = flow_value
+        /// Builds flownode flow keys & table flow keys
+        flow_value
             .flownode_ids
             .iter()
-            .map(|(&partition_id, &flownode_id)| {
-                FlownodeFlowKey::new(flownode_id, flow_id, partition_id)
-            })
-            .collect::<Vec<_>>();
-        for key in &flownode_flow_keys {
-            keys.push(key.to_bytes());
-        }
+            .for_each(|(&partition_id, &flownode_id)| {
+                keys.push(FlownodeFlowKey::new(flownode_id, flow_id, partition_id).to_bytes());
 
-        /// Builds table flow keys
-        let table_flow_keys = flow_value
-            .flownode_ids
-            .iter()
-            .flat_map(|(&partition_id, &flownode_id)| {
-                source_table_ids.iter().map(move |&table_id| {
-                    TableFlowKey::new(table_id, flownode_id, flow_id, partition_id)
+                source_table_ids.iter().for_each(|&table_id| {
+                    keys.push(
+                        TableFlowKey::new(table_id, flownode_id, flow_id, partition_id).to_bytes(),
+                    );
                 })
-            })
-            .collect::<Vec<_>>();
-        for key in &table_flow_keys {
-            keys.push(key.to_bytes());
-        }
+            });
 
         keys
     }

@@ -64,8 +64,6 @@ pub enum StatusCode {
     // If mutually exclusive operations are reached at the same time,
     // only one can be executed, another one will get region busy.
     RegionBusy = 4009,
-    FlowAlreadyExists = 4010,
-    FlowNotFound = 4011,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
@@ -99,6 +97,11 @@ pub enum StatusCode {
     /// User is not authorized to perform the operation
     PermissionDenied = 7006,
     // ====== End of auth related status code =====
+
+    // ====== Begin of flow related status code =====
+    FlowAlreadyExists = 8000,
+    FlowNotFound = 8001,
+    // ====== End of flow related status code =====
 }
 
 impl StatusCode {

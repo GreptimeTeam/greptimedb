@@ -520,7 +520,7 @@ impl ErrorExt for Error {
             | MismatchPrefix { .. }
             | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
 
-            &FlowNotFound { .. } => StatusCode::FlowNotFound,
+            FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowAlreadyExists { .. } => StatusCode::FlowAlreadyExists,
 
             TableNotFound { .. } => StatusCode::TableNotFound,

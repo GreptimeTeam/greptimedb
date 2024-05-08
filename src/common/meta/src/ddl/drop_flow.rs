@@ -33,9 +33,9 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::lock_key::{CatalogLock, FlowLock};
-use crate::metrics;
 use crate::peer::Peer;
 use crate::rpc::ddl::DropFlowTask;
+use crate::{metrics, ClusterId};
 
 /// The procedure for dropping a flow.
 pub struct DropFlowProcedure {
@@ -48,7 +48,7 @@ pub struct DropFlowProcedure {
 impl DropFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure:DropFlow";
 
-    pub fn new(cluster_id: u64, task: DropFlowTask, context: DdlContext) -> Self {
+    pub fn new(cluster_id: ClusterId, task: DropFlowTask, context: DdlContext) -> Self {
         Self {
             context,
             data: DropFlowData {
@@ -182,7 +182,7 @@ impl Procedure for DropFlowProcedure {
 
         let lock_key = vec![
             CatalogLock::Read(catalog_name).into(),
-            FlowLock::Read(flow_id).into(),
+            FlowLock::Write(flow_id).into(),
         ];
 
         LockKey::new(lock_key)
@@ -209,4 +209,5 @@ enum DropFlowState {
     InvalidateFlowCache,
     /// Drop flows on flownode
     DropFlows,
+    // TODO(weny): support to rollback
 }
