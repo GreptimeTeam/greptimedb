@@ -115,11 +115,27 @@ impl TypedPlan {
             Some(RelType::Read(read)) => {
                 if let Some(ReadType::NamedTable(nt)) = &read.as_ref().read_type {
                     let query_ctx = ctx.query_context.clone().unwrap();
-                    let table_reference = [
-                        query_ctx.current_catalog().to_string(),
-                        query_ctx.current_schema().to_string(),
-                        nt.names[0].clone(),
-                    ];
+                    let table_reference = match nt.names.len() {
+                        1 => [
+                            query_ctx.current_catalog().to_string(),
+                            query_ctx.current_schema().to_string(),
+                            nt.names[0].clone(),
+                        ],
+                        2 => [
+                            query_ctx.current_catalog().to_string(),
+                            nt.names[0].clone(),
+                            nt.names[1].clone(),
+                        ],
+                        3 => [
+                            nt.names[0].clone(),
+                            nt.names[1].clone(),
+                            nt.names[2].clone(),
+                        ],
+                        _ => InvalidQuerySnafu {
+                            reason: "Expect table to have name",
+                        }
+                        .fail()?,
+                    };
                     let table = ctx.table(&table_reference)?;
                     let get_table = Plan::Get {
                         id: crate::expr::Id::Global(table.0),
