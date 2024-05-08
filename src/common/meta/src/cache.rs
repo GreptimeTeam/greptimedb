@@ -85,6 +85,32 @@ where
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
 where
+    K: Copy + Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    /// Returns a _clone_ of the value corresponding to the key.
+    pub async fn get(&self, key: K) -> Result<Option<V>> {
+        let moved_init = self.initializer.clone();
+        let moved_key = key;
+        let init = async move {
+            moved_init(&moved_key)
+                .await
+                .transpose()
+                .context(error::ValueNotExistSnafu)?
+        };
+
+        match self.cache.try_get_with(key, init).await {
+            Ok(value) => Ok(Some(value)),
+            Err(err) => match err.as_ref() {
+                Error::ValueNotExist { .. } => Ok(None),
+                _ => Err(err).context(error::GetCacheSnafu),
+            },
+        }
+    }
+}
+
+impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
+where
     K: Hash + Eq + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
@@ -98,7 +124,7 @@ where
     }
 
     /// Returns a _clone_ of the value corresponding to the key.
-    pub async fn get<Q>(&self, key: &Q) -> Result<Option<V>>
+    pub async fn get_by_ref<Q>(&self, key: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
         Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
@@ -131,8 +157,32 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    struct NameKey<'a> {
+        name: &'a str,
+    }
+
     #[tokio::test]
     async fn test_get() {
+        let cache: Cache<NameKey, String> = CacheBuilder::new(128).build();
+        let filter = Box::new(|caches| caches);
+        let counter = Arc::new(AtomicI32::new(0));
+        let moved_counter = counter.clone();
+        let init: Initializer<NameKey, String> = Arc::new(move |_| {
+            moved_counter.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(Some("hi".to_string())) })
+        });
+        let invalidator: Invalidator<NameKey, String, String> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+
+        let adv_cache = CacheContainer::new(cache, invalidator, init, filter);
+        let key = NameKey { name: "key" };
+        let value = adv_cache.get(key).await.unwrap().unwrap();
+        assert_eq!(value, "hi");
+    }
+
+    #[tokio::test]
+    async fn test_get_by_ref() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
         let filter = Box::new(|caches| caches);
         let counter = Arc::new(AtomicI32::new(0));
@@ -145,12 +195,12 @@ mod tests {
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
         let adv_cache = CacheContainer::new(cache, invalidator, init, filter);
-        let value = adv_cache.get("foo").await.unwrap().unwrap();
+        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
-        let value = adv_cache.get("foo").await.unwrap().unwrap();
+        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
-        let value = adv_cache.get("bar").await.unwrap().unwrap();
+        let value = adv_cache.get_by_ref("bar").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
@@ -175,16 +225,16 @@ mod tests {
         });
 
         let adv_cache = CacheContainer::new(cache, invalidator, init, filter);
-        let value = adv_cache.get("foo").await.unwrap().unwrap();
+        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
-        let value = adv_cache.get("foo").await.unwrap().unwrap();
+        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         adv_cache
             .invalidate(vec!["foo".to_string(), "bar".to_string()])
             .await
             .unwrap();
-        let value = adv_cache.get("foo").await.unwrap().unwrap();
+        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }

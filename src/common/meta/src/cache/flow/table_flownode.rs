@@ -155,7 +155,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let cache = CacheBuilder::new(128).build();
         let cache = new_table_flownode_set_cache(cache, mem_kv);
-        let set = cache.get(&1024).await.unwrap().unwrap();
+        let set = cache.get(1024).await.unwrap().unwrap();
         assert!(set.is_empty());
     }
 
@@ -169,9 +169,9 @@ mod tests {
             flownode_ids: vec![1, 2, 3, 4, 5],
         })];
         cache.invalidate(ident).await.unwrap();
-        let set = cache.get(&1024).await.unwrap().unwrap();
+        let set = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(set.len(), 5);
-        let set = cache.get(&1025).await.unwrap().unwrap();
+        let set = cache.get(1025).await.unwrap().unwrap();
         assert_eq!(set.len(), 5);
     }
 
@@ -191,9 +191,9 @@ mod tests {
             }),
         ];
         cache.invalidate(ident).await.unwrap();
-        let set = cache.get(&1024).await.unwrap().unwrap();
+        let set = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(set.len(), 7);
-        let set = cache.get(&1025).await.unwrap().unwrap();
+        let set = cache.get(1025).await.unwrap().unwrap();
         assert_eq!(set.len(), 7);
 
         let ident = vec![CacheIdent::DropFlow(DropFlow {
@@ -201,9 +201,9 @@ mod tests {
             flownode_ids: vec![1, 2, 3, 4, 5],
         })];
         cache.invalidate(ident).await.unwrap();
-        let set = cache.get(&1024).await.unwrap().unwrap();
+        let set = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(set, HashSet::from([11, 12]));
-        let set = cache.get(&1025).await.unwrap().unwrap();
+        let set = cache.get(1025).await.unwrap().unwrap();
         assert_eq!(set, HashSet::from([11, 12]));
     }
 }
