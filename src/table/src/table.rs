@@ -100,7 +100,7 @@ impl Table {
             .meta
             .primary_key_indices
             .iter()
-            .map(|i| *i)
+            .copied()
             .collect::<HashSet<_>>();
 
         self.table_info
