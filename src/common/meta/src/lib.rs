@@ -18,7 +18,10 @@
 #![feature(let_chains)]
 #![feature(extract_if)]
 #![feature(hash_extract_if)]
+#![feature(type_alias_impl_trait)]
+#![feature(impl_trait_in_fn_trait_return)]
 
+pub mod cache;
 pub mod cache_invalidator;
 pub mod cluster;
 pub mod ddl;

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::str::Utf8Error;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -447,6 +448,12 @@ pub enum Error {
         error: std::string::FromUtf8Error,
         location: Location,
     },
+
+    #[snafu(display("Value not exists"))]
+    ValueNotExist { location: Location },
+
+    #[snafu(display("Failed to get cache"))]
+    GetCache { source: Arc<Error> },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -460,7 +467,9 @@ impl ErrorExt for Error {
             | EtcdFailed { .. }
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
-            | MoveValues { .. } => StatusCode::Internal,
+            | MoveValues { .. }
+            | ValueNotExist { .. }
+            | GetCache { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | ParseOption { .. }
