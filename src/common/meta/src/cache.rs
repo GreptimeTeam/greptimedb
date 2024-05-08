@@ -37,7 +37,7 @@ pub type Invalidator<K, V, CacheToken> =
 pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
 
 /// [CacheContainer] provides ability to:
-/// - Cache value loaded by [Init].
+/// - Cache value loaded by [Initializer].
 /// - Invalidate caches by [Invalidator].
 pub struct CacheContainer<K, V, CacheToken> {
     cache: Cache<K, V>,
