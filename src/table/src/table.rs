@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
@@ -89,5 +90,26 @@ impl Table {
             .primary_key_indices
             .iter()
             .map(|i| self.table_info.meta.schema.column_schemas()[*i].clone())
+    }
+
+    /// Get field columns in the definition order.
+    pub fn field_columns(&self) -> impl Iterator<Item = ColumnSchema> + '_ {
+        // `value_indices` in TableMeta is not reliable. Do a filter here.
+        let primary_keys = self
+            .table_info
+            .meta
+            .primary_key_indices
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+
+        self.table_info
+            .meta
+            .schema
+            .column_schemas()
+            .iter()
+            .enumerate()
+            .filter(move |(i, c)| !primary_keys.contains(i) && !c.is_time_index())
+            .map(|(_, c)| c.clone())
     }
 }

@@ -30,6 +30,7 @@ use common_version::BuildInfo;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector};
+use futures::StreamExt;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -49,7 +50,7 @@ use crate::error::{
     UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
-use crate::prom_store::METRIC_NAME_LABEL;
+use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 /// For [ValueType::Vector] result type
@@ -690,6 +691,23 @@ pub async fn label_values_query(
         };
         table_names.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
+    } else if label_name == FIELD_NAME_LABEL {
+        let field_columns =
+            match retrieve_field_names(&query_ctx, handler.catalog_manager(), params.matches.0)
+                .await
+            {
+                Ok(table_names) => table_names,
+                Err(e) => {
+                    return PrometheusJsonResponse::error(
+                        e.status_code().to_string(),
+                        e.output_msg(),
+                    );
+                }
+            };
+
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
+            field_columns.into_iter().collect(),
+        ));
     }
 
     let queries = params.matches.0;
@@ -740,6 +758,44 @@ pub async fn label_values_query(
     let mut resp = PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
     resp.resp_metrics = merge_map;
     resp
+}
+
+async fn retrieve_field_names(
+    query_ctx: &QueryContext,
+    manager: CatalogManagerRef,
+    matches: Vec<String>,
+) -> Result<HashSet<String>> {
+    let mut field_columns = HashSet::new();
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+
+    if matches.is_empty() {
+        // query all tables if no matcher is provided
+        while let Some(table) = manager.tables(catalog, schema).await.next().await {
+            let table = table.context(CatalogSnafu)?;
+            for column in table.field_columns() {
+                field_columns.insert(column.name);
+            }
+        }
+        return Ok(field_columns);
+    }
+
+    for table_name in matches {
+        let table = manager
+            .table(catalog, schema, &table_name)
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+                table: table_name.to_string(),
+            })?;
+
+        for column in table.field_columns() {
+            field_columns.insert(column.name);
+        }
+    }
+    Ok(field_columns)
 }
 
 async fn retrieve_label_values(

@@ -310,14 +310,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
+    #[snafu(display("Cannot find requested database: {}.{}", catalog, schema))]
     DatabaseNotFound {
         catalog: String,
         schema: String,
         location: Location,
     },
 
-    #[snafu(display("Cannot find requested table: {}-{}-{}", catalog, schema, table))]
+    #[snafu(display("Cannot find requested table: {}.{}.{}", catalog, schema, table))]
     TableNotFound {
         catalog: String,
         schema: String,
