@@ -362,6 +362,7 @@ enum Request {
 enum Response {
     Create {
         result: Result<Option<FlowId>, Error>,
+        // TODO(discord9): add flow err_collector
     },
     Remove {
         result: bool,

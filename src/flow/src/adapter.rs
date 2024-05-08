@@ -201,10 +201,8 @@ impl FlownodeManager {
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
             self.run_available().await;
-            info!("Complete run_available");
             // TODO(discord9): error handling
             let _ = self.send_writeback_requests().await;
-            info!("Complete send_writeback_requests");
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
@@ -435,6 +433,9 @@ impl FlownodeManager {
     /// Return the number of requests it made
     pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
         let all_reqs = self.generate_writeback_request().await;
+        if all_reqs.is_empty() || all_reqs.iter().all(|v| v.1.is_empty()) {
+            return Ok(0);
+        }
         info!("Sending writeback requests, all reqs={:?}", all_reqs);
         let mut req_cnt = 0;
         for (table_name, reqs) in all_reqs {
@@ -730,6 +731,10 @@ impl FlowNodeContext {
                 })
                 .with_context(|_| EvalSnafu)?;
         }
+        info!(
+            "FlowNodeContext send {} rows to table_id = {}",
+            row_cnt, table_id
+        );
 
         Ok(row_cnt)
     }
