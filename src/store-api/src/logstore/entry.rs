@@ -14,8 +14,6 @@
 
 use common_error::ext::ErrorExt;
 
-use crate::logstore::namespace::Namespace;
-
 /// An entry's id.
 /// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
@@ -24,7 +22,6 @@ pub type Id = u64;
 /// The log store implementation may have larger or smaller data storage unit than an entry.
 pub trait Entry: Send + Sync {
     type Error: ErrorExt + Send + Sync;
-    type Namespace: Namespace;
 
     /// Returns the contained data of the entry.
     fn data(&self) -> &[u8];
@@ -33,9 +30,6 @@ pub trait Entry: Send + Sync {
     /// Usually the namespace id is identical with the region id.
     fn id(&self) -> Id;
 
-    /// Returns the namespace of the entry.
-    fn namespace(&self) -> Self::Namespace;
-
-    /// Computes the estimated size in bytes of the entry.
+    /// Computes the estimated encoded size.
     fn estimated_size(&self) -> usize;
 }

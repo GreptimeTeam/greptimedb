@@ -37,7 +37,6 @@ impl Namespace for NamespaceImpl {
 
 impl Entry for EntryImpl {
     type Error = Error;
-    type Namespace = NamespaceImpl;
 
     fn data(&self) -> &[u8] {
         &[]
@@ -45,10 +44,6 @@ impl Entry for EntryImpl {
 
     fn id(&self) -> EntryId {
         0
-    }
-
-    fn namespace(&self) -> Self::Namespace {
-        Default::default()
     }
 
     fn estimated_size(&self) -> usize {

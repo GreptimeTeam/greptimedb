@@ -68,7 +68,6 @@ impl Namespace for NamespaceImpl {
 
 impl Entry for EntryImpl {
     type Error = Error;
-    type Namespace = NamespaceImpl;
 
     fn data(&self) -> &[u8] {
         self.data.as_slice()
@@ -78,31 +77,20 @@ impl Entry for EntryImpl {
         self.id
     }
 
-    fn namespace(&self) -> Self::Namespace {
-        NamespaceImpl {
-            id: self.namespace_id,
-            ..Default::default()
-        }
-    }
-
     fn estimated_size(&self) -> usize {
-        size_of::<Self>() + self.data.capacity() * size_of::<u8>()
+        self.data.len() + size_of::<u64>() + size_of::<u64>()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::mem::size_of;
-
     use store_api::logstore::entry::Entry;
 
     use crate::raft_engine::protos::logstore::EntryImpl;
 
     #[test]
     fn test_estimated_size() {
-        let entry = EntryImpl::create(1, 1, Vec::with_capacity(100));
-        let expected = size_of::<EntryImpl>() + 100;
-        let got = entry.estimated_size();
-        assert_eq!(expected, got);
+        let entry = EntryImpl::create(1, 1, b"hello, world".to_vec());
+        assert_eq!(28, entry.estimated_size());
     }
 }
