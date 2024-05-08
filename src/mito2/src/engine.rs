@@ -62,7 +62,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -324,6 +324,15 @@ impl RegionEngine for MitoEngine {
             .scan()
             .await
             .map_err(BoxedError::new)
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_partitioned_query(
+        &self,
+        _region_id: RegionId,
+        _request: ScanRequest,
+    ) -> Result<RegionScannerRef, BoxedError> {
+        unimplemented!()
     }
 
     /// Retrieve region's metadata.

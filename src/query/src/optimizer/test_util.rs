@@ -28,7 +28,7 @@ use datatypes::schema::ColumnSchema;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest};
 
@@ -68,6 +68,14 @@ impl RegionEngine for MetaRegionEngine {
         _region_id: RegionId,
         _request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
+        unimplemented!()
+    }
+
+    async fn handle_partitioned_query(
+        &self,
+        _region_id: RegionId,
+        _request: ScanRequest,
+    ) -> Result<RegionScannerRef, BoxedError> {
         unimplemented!()
     }
 

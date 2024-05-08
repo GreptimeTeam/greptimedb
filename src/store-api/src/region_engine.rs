@@ -15,7 +15,7 @@
 //! Region Engine's definition
 
 use std::any::Any;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
@@ -120,6 +120,21 @@ impl From<PbRegionRole> for RegionRole {
     }
 }
 
+/// Properties of the scanner.
+pub struct ScannerProperties {}
+
+/// A scanner that provides a way to scan the region concurrently.
+/// The scanner splits the region into partitions so that each partition can be scanned concurrently.
+pub trait RegionScanner: Debug + Send {
+    /// Returns the properties of the scanner.
+    fn properties(&self) -> &ScannerProperties;
+
+    /// Scans the partition and returns a stream of record batches.
+    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
+}
+
+pub type RegionScannerRef = Arc<dyn RegionScanner>;
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -138,6 +153,13 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Handles query and return a scanner that can be used to scan the region concurrently.
+    async fn handle_partitioned_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RegionScannerRef, BoxedError>;
 
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
