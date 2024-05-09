@@ -22,7 +22,9 @@ use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
-use datafusion::physical_plan::{ExecutionPlan, RecordBatchStream as DfRecordBatchStream};
+use datafusion::physical_plan::{
+    accept, ExecutionPlan, ExecutionPlanVisitor, RecordBatchStream as DfRecordBatchStream,
+};
 use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::DataFusionError;
 use datatypes::schema::{Schema, SchemaRef};
@@ -228,7 +230,7 @@ impl RecordBatchStream for RecordBatchStreamAdapter {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         match &self.metrics_2 {
-            Metrics::Resolved(metrics) => Some(*metrics),
+            Metrics::Resolved(metrics) => Some(metrics.clone()),
             Metrics::Unavailable | Metrics::Unresolved(_) => None,
         }
     }
@@ -259,11 +261,9 @@ impl Stream for RecordBatchStreamAdapter {
             }
             Poll::Ready(None) => {
                 if let Metrics::Unresolved(df_plan) = &self.metrics_2 {
-                    let mut metrics_holder = RecordBatchMetrics::default();
-                    collect_metrics(df_plan, &mut metrics_holder);
-                    if metrics_holder.elapsed_compute != 0 || metrics_holder.memory_usage != 0 {
-                        self.metrics_2 = Metrics::Resolved(metrics_holder);
-                    }
+                    let mut metric_collector = MetricCollector::default();
+                    accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                    self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
                 }
                 Poll::Ready(None)
             }
@@ -276,28 +276,89 @@ impl Stream for RecordBatchStreamAdapter {
     }
 }
 
-fn collect_metrics(df_plan: &Arc<dyn ExecutionPlan>, result: &mut RecordBatchMetrics) {
-    if let Some(metrics) = df_plan.metrics() {
-        metrics.iter().for_each(|m| match m.value() {
-            MetricValue::ElapsedCompute(ec) => result.elapsed_compute += ec.value(),
-            MetricValue::CurrentMemoryUsage(m) => result.memory_usage += m.value(),
-            _ => {}
-        });
+/// An [ExecutionPlanVisitor] to collect metrics from a [ExecutionPlan].
+#[derive(Default)]
+struct MetricCollector {
+    current_level: usize,
+    record_batch_metrics: RecordBatchMetrics,
+}
+
+impl ExecutionPlanVisitor for MetricCollector {
+    type Error = crate::error::Error;
+
+    fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> std::result::Result<bool, Self::Error> {
+        // skip if no metric available
+        let Some(metric) = plan.metrics() else {
+            self.record_batch_metrics.plan_metrics.push(PlanMetrics {
+                plan: plan.name().to_string(),
+                level: self.current_level,
+                metrics: vec![],
+            });
+            return Ok(true);
+        };
+
+        // scrape plan metrics
+        let metric = metric
+            .aggregate_by_name()
+            .sorted_for_display()
+            .timestamps_removed();
+        let mut plan_metric = PlanMetrics {
+            plan: plan.name().to_string(),
+            level: self.current_level,
+            metrics: Vec::with_capacity(metric.iter().size_hint().0),
+        };
+        for m in metric.iter() {
+            plan_metric
+                .metrics
+                .push((m.value().name().to_string(), m.value().as_usize()));
+
+            // aggregate high-level metrics
+            match m.value() {
+                MetricValue::ElapsedCompute(ec) => {
+                    self.record_batch_metrics.elapsed_compute += ec.value()
+                }
+                MetricValue::CurrentMemoryUsage(m) => {
+                    self.record_batch_metrics.memory_usage += m.value()
+                }
+                _ => {}
+            }
+        }
+        self.record_batch_metrics.plan_metrics.push(plan_metric);
+
+        self.current_level += 1;
+        Ok(true)
     }
 
-    for child in df_plan.children() {
-        collect_metrics(&child, result);
+    fn post_visit(&mut self, _plan: &dyn ExecutionPlan) -> std::result::Result<bool, Self::Error> {
+        // the last miuns will underflow
+        self.current_level = self.current_level.wrapping_sub(1);
+        Ok(true)
     }
 }
 
 /// [`RecordBatchMetrics`] carrys metrics value
 /// from datanode to frontend through gRPC
-#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct RecordBatchMetrics {
-    // cpu consumption in nanoseconds
+    // High-level aggregated metrics
+    /// CPU consumption in nanoseconds
     pub elapsed_compute: usize,
-    // memory used by the plan in bytes
+    /// Memory used by the plan in bytes
     pub memory_usage: usize,
+    // Detailed per-plan metrics
+    /// An ordered list of plan metrics, from top to bottom in post-order.
+    pub plan_metrics: Vec<PlanMetrics>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
+pub struct PlanMetrics {
+    /// The plan name
+    pub plan: String,
+    /// The level of the plan, starts from 0
+    pub level: usize,
+    /// An ordered key-value list of metrics.
+    /// Key is metric label and value is metric value.
+    pub metrics: Vec<(String, usize)>,
 }
 
 enum AsyncRecordBatchStreamAdapterState {

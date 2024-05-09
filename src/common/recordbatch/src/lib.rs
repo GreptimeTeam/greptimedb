@@ -260,7 +260,7 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
     }
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
-        self.metrics.load().as_ref().map(|s| *s.as_ref())
+        self.metrics.load().as_ref().map(|s| s.as_ref().clone())
     }
 }
 
