@@ -18,13 +18,14 @@ mod metadata;
 use std::collections::BTreeMap;
 
 use api::v1::flow::flow_request::Body as PbFlowRequest;
-use api::v1::flow::{CreateRequest, FlowRequest};
+use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,7 @@ use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::FlowId;
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
-use crate::rpc::ddl::CreateFlowTask;
+use crate::rpc::ddl::{CreateFlowTask, QueryContext};
 use crate::{metrics, ClusterId};
 
 /// The procedure of flow creation.
@@ -53,7 +54,12 @@ impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
-    pub fn new(cluster_id: ClusterId, task: CreateFlowTask, context: DdlContext) -> Self {
+    pub fn new(
+        cluster_id: ClusterId,
+        task: CreateFlowTask,
+        query_context: QueryContext,
+        context: DdlContext,
+    ) -> Self {
         Self {
             context,
             data: CreateFlowData {
@@ -63,6 +69,7 @@ impl CreateFlowProcedure {
                 peers: vec![],
                 source_table_ids: vec![],
                 state: CreateFlowState::CreateMetadata,
+                query_context,
             },
         }
     }
@@ -88,6 +95,10 @@ impl CreateFlowProcedure {
         for peer in &self.data.peers {
             let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
+                header: Some(FlowRequestHeader {
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    query_context: Some(self.data.query_context.clone().into()),
+                }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
             create_flow.push(async move {
@@ -187,6 +198,7 @@ pub struct CreateFlowData {
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
+    pub(crate) query_context: QueryContext,
 }
 
 impl From<&CreateFlowData> for CreateRequest {

@@ -175,13 +175,15 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name, stmt.drop_if_exists()).await
+                self.drop_table(table_name, stmt.drop_if_exists(), query_ctx)
+                    .await
             }
             Statement::DropDatabase(stmt) => {
                 self.drop_database(
                     query_ctx.current_catalog().to_string(),
                     format_raw_object_name(stmt.name()),
                     stmt.drop_if_exists(),
+                    query_ctx,
                 )
                 .await
             }
@@ -191,13 +193,13 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.truncate_table(table_name).await
+                self.truncate_table(table_name, query_ctx).await
             }
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
-                    query_ctx.current_catalog(),
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
+                    query_ctx,
                 )
                 .await
             }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{
@@ -56,10 +57,20 @@ impl procedure_service_server::ProcedureService for Metasrv {
     }
 
     async fn ddl(&self, request: Request<PbDdlTaskRequest>) -> GrpcResult<PbDdlTaskResponse> {
-        let PbDdlTaskRequest { header, task, .. } = request.into_inner();
+        let PbDdlTaskRequest {
+            header,
+            query_context,
+            task,
+            ..
+        } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
         let cluster_id = header.cluster_id;
+        let query_context = query_context
+            .context(error::MissingRequiredParameterSnafu {
+                param: "query_context",
+            })?
+            .into();
         let task: DdlTask = task
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
@@ -72,7 +83,10 @@ impl procedure_service_server::ProcedureService for Metasrv {
                     cluster_id: Some(cluster_id),
                     tracing_context: Some(header.tracing_context),
                 },
-                SubmitDdlTaskRequest { task },
+                SubmitDdlTaskRequest {
+                    query_context: Arc::new(query_context),
+                    task,
+                },
             )
             .await
             .context(error::SubmitDdlTaskSnafu)?

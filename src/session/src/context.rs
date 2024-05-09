@@ -96,6 +96,36 @@ impl From<&RegionRequestHeader> for QueryContext {
     }
 }
 
+impl From<api::v1::QueryContext> for QueryContext {
+    fn from(ctx: api::v1::QueryContext) -> Self {
+        QueryContextBuilder::default()
+            .current_catalog(ctx.current_catalog)
+            .current_schema(ctx.current_schema)
+            .timezone(Arc::new(parse_timezone(Some(&ctx.timezone))))
+            .extensions(ctx.extensions)
+            .build()
+    }
+}
+
+impl From<QueryContext> for api::v1::QueryContext {
+    fn from(
+        QueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
+            ..
+        }: QueryContext,
+    ) -> Self {
+        api::v1::QueryContext {
+            current_catalog,
+            current_schema,
+            timezone: timezone.to_string(),
+            extensions,
+        }
+    }
+}
+
 impl QueryContext {
     pub fn arc() -> QueryContextRef {
         Arc::new(QueryContextBuilder::default().build())

@@ -406,7 +406,7 @@ impl Inserter {
             if !alter_tables.is_empty() {
                 // Alter logical tables in batch.
                 statement_executor
-                    .alter_logical_tables(alter_tables)
+                    .alter_logical_tables(alter_tables, ctx.clone())
                     .await?;
             }
         } else {
@@ -414,7 +414,9 @@ impl Inserter {
                 self.create_table(req, ctx, statement_executor).await?;
             }
             for alter_expr in alter_tables.into_iter() {
-                statement_executor.alter_table_inner(alter_expr).await?;
+                statement_executor
+                    .alter_table_inner(alter_expr, ctx.clone())
+                    .await?;
             }
         }
 
@@ -466,7 +468,7 @@ impl Inserter {
 
         // create physical table
         let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx)
+            .create_table_inner(create_table_expr, None, ctx.clone())
             .await;
 
         match res {
@@ -538,7 +540,7 @@ impl Inserter {
 
         // TODO(weny): multiple regions table.
         let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx)
+            .create_table_inner(create_table_expr, None, ctx.clone())
             .await;
 
         match res {
@@ -589,7 +591,7 @@ impl Inserter {
             .collect::<Result<Vec<_>>>()?;
 
         let res = statement_executor
-            .create_logical_tables(&create_table_exprs)
+            .create_logical_tables(&create_table_exprs, ctx.clone())
             .await;
 
         match res {
