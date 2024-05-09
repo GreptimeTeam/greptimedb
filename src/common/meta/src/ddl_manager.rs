@@ -49,8 +49,9 @@ use crate::rpc::ddl::DdlTask::{
     CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
-    DropFlowTask, DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,CreateViewTask
+    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, CreateViewTask,
+    DropDatabaseTask, DropFlowTask, DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+    TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
