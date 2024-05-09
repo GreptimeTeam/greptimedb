@@ -75,6 +75,25 @@ impl From<StandaloneWalConfig> for MetasrvWalConfig {
     }
 }
 
+impl From<MetasrvWalConfig> for StandaloneWalConfig {
+    fn from(config: MetasrvWalConfig) -> Self {
+        match config {
+            MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
+            MetasrvWalConfig::Kafka(config) => Self::Kafka(StandaloneKafkaConfig {
+                broker_endpoints: config.broker_endpoints,
+                num_topics: config.num_topics,
+                selector_type: config.selector_type,
+                topic_name_prefix: config.topic_name_prefix,
+                num_partitions: config.num_partitions,
+                replication_factor: config.replication_factor,
+                create_topic_timeout: config.create_topic_timeout,
+                backoff: config.backoff,
+                ..Default::default()
+            }),
+        }
+    }
+}
+
 impl From<StandaloneWalConfig> for DatanodeWalConfig {
     fn from(config: StandaloneWalConfig) -> Self {
         match config {
