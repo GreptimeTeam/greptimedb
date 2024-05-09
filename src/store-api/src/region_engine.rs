@@ -22,8 +22,10 @@ use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_query::error::ExecuteRepeatedlySnafu;
 use common_recordbatch::SendableRecordBatchStream;
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
@@ -120,8 +122,31 @@ impl From<PbRegionRole> for RegionRole {
     }
 }
 
-/// Properties of the scanner.
-pub struct ScannerProperties {}
+/// Output partition properties of the [RegionScanner].
+#[derive(Debug)]
+pub enum ScannerPartitioning {
+    /// Unknown partitioning scheme with a known number of partitions
+    Unknown(usize),
+}
+
+/// Properties of the [RegionScanner].
+#[derive(Debug)]
+pub struct ScannerProperties {
+    /// Partitions to scan.
+    partitioning: ScannerPartitioning,
+}
+
+impl ScannerProperties {
+    /// Creates a new [ScannerProperties] with the given partitioning.
+    pub fn new(partitioning: ScannerPartitioning) -> Self {
+        Self { partitioning }
+    }
+
+    /// Returns properties of partitions to scan.
+    pub fn partitioning(&self) -> &ScannerPartitioning {
+        &self.partitioning
+    }
+}
 
 /// A scanner that provides a way to scan the region concurrently.
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -194,3 +219,41 @@ pub trait RegionEngine: Send + Sync {
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;
+
+/// A [RegionScanner] that only scans a single partition.
+pub struct SinglePartitionScanner {
+    stream: std::sync::Mutex<Option<SendableRecordBatchStream>>,
+    properties: ScannerProperties,
+}
+
+impl SinglePartitionScanner {
+    /// Creates a new [SinglePartitionScanner] with the given stream.
+    pub fn new(stream: SendableRecordBatchStream) -> Self {
+        Self {
+            stream: std::sync::Mutex::new(Some(stream)),
+            properties: ScannerProperties::new(ScannerPartitioning::Unknown(1)),
+        }
+    }
+}
+
+impl Debug for SinglePartitionScanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinglePartitionScanner")
+            .field("stream", &"SendableRecordBatchStream")
+            .finish()
+    }
+}
+
+impl RegionScanner for SinglePartitionScanner {
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+        let mut stream = self.stream.lock().unwrap();
+        stream
+            .take()
+            .context(ExecuteRepeatedlySnafu)
+            .map_err(|e| BoxedError::new(e))
+    }
+}
