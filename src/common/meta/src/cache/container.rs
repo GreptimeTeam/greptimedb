@@ -23,6 +23,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::cache_invalidator::{CacheInvalidator, Context};
 use crate::error::{self, Error, Result};
 use crate::instruction::CacheIdent;
+use crate::metrics;
 
 /// Filters out unused [CacheToken]s
 pub type TokenFilter<CacheToken> = Box<dyn Fn(&CacheToken) -> bool + Send + Sync>;
@@ -38,6 +39,7 @@ pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>
 /// - Cache value loaded by [Initializer].
 /// - Invalidate caches by [Invalidator].
 pub struct CacheContainer<K, V, CacheToken> {
+    name: String,
     cache: Cache<K, V>,
     invalidator: Invalidator<K, V, CacheToken>,
     initializer: Initializer<K, V>,
@@ -52,12 +54,14 @@ where
 {
     /// Constructs an [CacheContainer].
     pub fn new(
+        name: String,
         cache: Cache<K, V>,
         invalidator: Invalidator<K, V, CacheToken>,
         initializer: Initializer<K, V>,
         token_filter: TokenFilter<CacheToken>,
     ) -> Self {
         Self {
+            name,
             cache,
             invalidator,
             initializer,
@@ -128,9 +132,17 @@ where
         K: Borrow<Q>,
         Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
     {
+        metrics::CACHE_CONTAINER_CACHE_GET
+            .with_label_values(&[&self.name])
+            .inc();
         let moved_init = self.initializer.clone();
         let moved_key = key.to_owned();
+
         let init = async move {
+            metrics::CACHE_CONTAINER_CACHE_MISS
+                .with_label_values(&[&self.name])
+                .inc();
+
             moved_init(&moved_key)
                 .await
                 .transpose()
@@ -174,7 +186,7 @@ mod tests {
         let invalidator: Invalidator<NameKey, String, String> =
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
-        let adv_cache = CacheContainer::new(cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
         let key = NameKey { name: "key" };
         let value = adv_cache.get(key).await.unwrap().unwrap();
         assert_eq!(value, "hi");
@@ -193,7 +205,7 @@ mod tests {
         let invalidator: Invalidator<String, String, String> =
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
-        let adv_cache = CacheContainer::new(cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
@@ -221,7 +233,7 @@ mod tests {
             })
         });
 
-        let adv_cache = CacheContainer::new(cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();

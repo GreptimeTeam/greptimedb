@@ -35,13 +35,14 @@ pub type TableFlownodeSetCache = CacheContainer<TableId, FlownodeSet, CacheIdent
 
 /// Constructs a [TableFlownodeSetCache].
 pub fn new_table_flownode_set_cache(
+    name: String,
     cache: Cache<TableId, FlownodeSet>,
     kv_backend: KvBackendRef,
 ) -> TableFlownodeSetCache {
     let table_flow_manager = Arc::new(TableFlowManager::new(kv_backend));
     let init = init_factory(table_flow_manager);
 
-    CacheContainer::new(cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
 }
 
 fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId, FlownodeSet> {
@@ -146,7 +147,7 @@ mod tests {
     async fn test_cache_empty_set() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let cache = CacheBuilder::new(128).build();
-        let cache = new_table_flownode_set_cache(cache, mem_kv);
+        let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let set = cache.get(1024).await.unwrap().unwrap();
         assert!(set.is_empty());
     }
@@ -155,7 +156,7 @@ mod tests {
     async fn test_create_flow() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let cache = CacheBuilder::new(128).build();
-        let cache = new_table_flownode_set_cache(cache, mem_kv);
+        let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let ident = vec![CacheIdent::CreateFlow(CreateFlow {
             source_table_ids: vec![1024, 1025],
             flownode_ids: vec![1, 2, 3, 4, 5],
@@ -171,7 +172,7 @@ mod tests {
     async fn test_drop_flow() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let cache = CacheBuilder::new(128).build();
-        let cache = new_table_flownode_set_cache(cache, mem_kv);
+        let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let ident = vec![
             CacheIdent::CreateFlow(CreateFlow {
                 source_table_ids: vec![1024, 1025],
