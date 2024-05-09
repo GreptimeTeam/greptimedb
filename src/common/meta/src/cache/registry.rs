@@ -29,9 +29,9 @@ pub struct CacheRegistry {
 
 impl CacheRegistry {
     /// Invalidates caches by [CacheIdent]s
-    pub async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
+    pub async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
         for index in &self.indexes {
-            index.invalidate(ctx, caches.clone()).await?;
+            index.invalidate(ctx, caches).await?;
         }
         Ok(())
     }

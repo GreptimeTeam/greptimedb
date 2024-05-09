@@ -154,7 +154,7 @@ impl DropTableExecutor {
         cache_invalidator
             .invalidate(
                 &ctx,
-                vec![
+                &[
                     CacheIdent::TableName(self.table.table_ref().into()),
                     CacheIdent::TableId(self.table_id),
                 ],

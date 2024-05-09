@@ -175,7 +175,7 @@ impl AlterLogicalTablesProcedure {
 
         self.context
             .cache_invalidator
-            .invalidate(&ctx, to_invalidate)
+            .invalidate(&ctx, &to_invalidate)
             .await?;
         Ok(Status::done())
     }

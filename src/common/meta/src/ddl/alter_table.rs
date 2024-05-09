@@ -185,7 +185,7 @@ impl AlterTableProcedure {
         };
 
         cache_invalidator
-            .invalidate(&Context::default(), cache_keys)
+            .invalidate(&Context::default(), &cache_keys)
             .await?;
 
         Ok(Status::done())

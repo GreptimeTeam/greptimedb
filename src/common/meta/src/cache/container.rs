@@ -76,12 +76,9 @@ where
     K: Send + Sync,
     V: Send + Sync,
 {
-    async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
-        for token in caches
-            .into_iter()
-            .filter(|token| (self.token_filter)(token))
-        {
-            (self.invalidator)(&self.cache, &token).await?;
+    async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
+        for token in caches.iter().filter(|token| (self.token_filter)(token)) {
+            (self.invalidator)(&self.cache, token).await?;
         }
         Ok(())
     }

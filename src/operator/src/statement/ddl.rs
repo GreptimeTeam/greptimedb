@@ -404,7 +404,7 @@ impl StatementExecutor {
             self.cache_invalidator
                 .invalidate(
                     &Context::default(),
-                    vec![
+                    &[
                         CacheIdent::TableId(table_id),
                         CacheIdent::TableName(table_name.clone()),
                     ],
@@ -619,7 +619,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate(&Context::default(), invalidate_keys)
+            .invalidate(&Context::default(), &invalidate_keys)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 

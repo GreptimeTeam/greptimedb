@@ -82,7 +82,7 @@ impl CacheInvalidator for TableCacheInvalidator {
     async fn invalidate(
         &self,
         _ctx: &Context,
-        caches: Vec<CacheIdent>,
+        caches: &[CacheIdent],
     ) -> common_meta::error::Result<()> {
         for cache in caches {
             if let CacheIdent::TableName(table_name) = cache {
