@@ -102,7 +102,7 @@ jobs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
       macos-runner: ${{ inputs.macos_runner || vars.DEFAULT_MACOS_RUNNER }}
-      windows-runner: windows-latest-8-cores
+      windows-runner: windows-2019-8-cores
 
       # The following EC2 resource id will be used for resource releasing.
       linux-amd64-ec2-runner-label: ${{ steps.start-linux-amd64-runner.outputs.label }}

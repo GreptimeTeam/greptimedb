@@ -35,7 +35,7 @@ jobs:
   sqlness-windows:
     name: Sqlness tests on Windows
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: windows-latest-8-cores
+    runs-on: windows-2019-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
   test-on-windows:
     name: Run tests on Windows
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: windows-latest-8-cores
+    runs-on: windows-2019-8-cores
     timeout-minutes: 60
     steps:
       - run: git config --global core.autocrlf false
