@@ -75,4 +75,18 @@ lazy_static! {
         &["step"]
     )
     .unwrap();
+    /// Cache container cache get counter.
+    pub static ref CACHE_CONTAINER_CACHE_GET: IntCounterVec = register_int_counter_vec!(
+        "greptime_meta_cache_container_cache_get",
+        "cache container cache get",
+        &["name"]
+    )
+    .unwrap();
+    /// Cache container cache miss counter.
+    pub static ref CACHE_CONTAINER_CACHE_MISS: IntCounterVec = register_int_counter_vec!(
+        "greptime_meta_cache_container_cache_miss",
+        "cache container cache miss",
+        &["name"]
+    )
+    .unwrap();
 }
