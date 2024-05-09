@@ -28,7 +28,7 @@ use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
 use store_api::storage::ScanRequest;
 
-use super::scan::StreamScanAdapter;
+use crate::table::scan::StreamScanAdapter;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
