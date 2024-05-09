@@ -14,10 +14,12 @@
 
 //! for getting data from source and sending results to sink
 //! and communicating with other parts of the database
-use std::borrow::{Borrow, BorrowMut};
+#![warn(unused_imports)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
+use api::v1::flow::flow_server::Flow;
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::memory::MemoryCatalogManager;
@@ -29,7 +31,7 @@ use common_meta::key::table_name::{TableNameKey, TableNameManager};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_runtime::JoinHandle;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
@@ -50,7 +52,9 @@ use tokio::task::LocalSet;
 use crate::adapter::error::{
     EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
+pub(crate) use crate::adapter::node_context::{FlownodeContext, IdToNameMap};
 use crate::adapter::parse_expr::{parse_duration, parse_fixed};
+use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::{Context, DataflowState, ErrCollector};
@@ -61,13 +65,16 @@ use crate::repr::{self, ColumnType, DiffRow, RelationType, Row, BROADCAST_CAP};
 use crate::transform::sql_to_flow_plan;
 
 pub(crate) mod error;
+mod flownode_impl;
 mod parse_expr;
 mod server;
-mod standalone;
 #[cfg(test)]
 mod tests;
 mod util;
 mod worker;
+
+mod node_context;
+mod table_source;
 
 use error::Error;
 
@@ -180,35 +187,17 @@ pub struct FlownodeManager {
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
-    table_info_source: TableInfoSource,
+    table_info_source: TableSource,
     frontend_invoker: RwLock<Option<Box<dyn FrontendInvoker + Send + Sync>>>,
     /// contains mapping from table name to global id, and table schema
-    node_context: Mutex<FlowNodeContext>,
+    node_context: Mutex<FlownodeContext>,
+    flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
 }
 
+/// Building FlownodeManager
 impl FlownodeManager {
-    /// run in common_runtime background runtime
-    pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
-        info!("Starting flownode manager task");
-        common_runtime::spawn_bg(async move {
-            self.run().await;
-        })
-    }
-    /// Trigger dataflow running, and then send writeback request to the source sender
-    ///
-    /// note that this method didn't handle input mirror request, as this should be handled by grpc server
-    pub async fn run(&self) {
-        loop {
-            // TODO(discord9): only run when new inputs arrive or scheduled to
-            self.run_available().await;
-            // TODO(discord9): error handling
-            self.send_writeback_requests().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    }
-
     /// set frontend invoker
     pub async fn set_frontend_invoker(
         self: &Arc<Self>,
@@ -223,11 +212,11 @@ impl FlownodeManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
-        let srv_map = TableInfoSource::new(
+        let srv_map = TableSource::new(
             table_meta.table_info_manager().clone(),
             table_meta.table_name_manager().clone(),
         );
-        let node_context = FlowNodeContext::default();
+        let node_context = FlownodeContext::default();
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
         FlownodeManager {
@@ -236,6 +225,7 @@ impl FlownodeManager {
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: Mutex::new(node_context),
+            flow_err_collectors: Default::default(),
             tick_manager,
             node_id,
         }
@@ -259,135 +249,13 @@ impl FlownodeManager {
     }
 }
 
-/// Just check if NodeManager's other fields are `Send` so later we can refactor so A Flow Node Manager
-/// can manage multiple flow worker(thread) then we can run multiple flow worker in a single flow node manager
-#[test]
-fn check_is_send() {
-    fn is_send<T: Send + Sync>() {}
-    is_send::<FlownodeManager>();
-}
-
-/// mapping of table name <-> table id should be query from tableinfo manager
-pub struct TableInfoSource {
-    /// for query `TableId -> TableName` mapping
-    table_info_manager: TableInfoManager,
-    table_name_manager: TableNameManager,
-}
-
-impl TableInfoSource {
-    pub fn new(table_info_manager: TableInfoManager, table_name_manager: TableNameManager) -> Self {
-        TableInfoSource {
-            table_info_manager,
-            table_name_manager,
-        }
-    }
-
-    pub async fn get_table_id_from_proto_name(
-        &self,
-        name: &greptime_proto::v1::TableName,
-    ) -> Result<TableId, Error> {
-        self.table_name_manager
-            .get(TableNameKey::new(
-                &name.catalog_name,
-                &name.schema_name,
-                &name.table_name,
-            ))
-            .await
-            .with_context(|_| TableNotFoundMetaSnafu {
-                msg: format!("Table name = {:?}, couldn't found table id", name),
-            })
-            .map(|id| id.unwrap().table_id())
-    }
-
-    /// If the table havn't been created in database, the tableId returned would be null
-    pub async fn get_table_id_from_name(&self, name: &TableName) -> Result<Option<TableId>, Error> {
-        let ret = self
-            .table_name_manager
-            .get(TableNameKey::new(&name[0], &name[1], &name[2]))
-            .await
-            .with_context(|_| TableNotFoundMetaSnafu {
-                msg: format!("Table name = {:?}, couldn't found table id", name),
-            })?
-            .map(|id| id.table_id());
-        Ok(ret)
-    }
-
-    /// query metasrv about the table name and table id
-    pub async fn get_table_name(&self, table_id: &TableId) -> Result<TableName, Error> {
-        self.table_info_manager
-            .get(*table_id)
-            .await
-            .with_context(|_| TableNotFoundMetaSnafu {
-                msg: format!("TableId = {:?}, couldn't found table name", table_id),
-            })
-            .map(|name| name.unwrap().table_name())
-            .map(|name| [name.catalog_name, name.schema_name, name.table_name])
-    }
-    /// query metasrv about the table name and table id
-    pub async fn get_table_info_value(
-        &self,
-        table_id: &TableId,
-    ) -> Result<Option<TableInfoValue>, Error> {
-        Ok(self
-            .table_info_manager
-            .get(*table_id)
-            .await
-            .with_context(|_| TableNotFoundMetaSnafu {
-                msg: format!("TableId = {:?}, couldn't found table name", table_id),
-            })?
-            .map(|v| v.into_inner()))
-    }
-
-    pub async fn get_table_name_schema(
-        &self,
-        table_id: &TableId,
-    ) -> Result<(TableName, RelationType), Error> {
-        let table_info_value = self
-            .get_table_info_value(table_id)
-            .await?
-            .with_context(|| TableNotFoundSnafu {
-                name: format!("TableId = {:?}, Can't found table info", table_id),
-            })?;
-
-        let table_name = table_info_value.table_name();
-        let table_name = [
-            table_name.catalog_name,
-            table_name.schema_name,
-            table_name.table_name,
-        ];
-
-        let raw_schema = table_info_value.table_info.meta.schema;
-        let column_types = raw_schema
-            .column_schemas
-            .into_iter()
-            .map(|col| ColumnType {
-                nullable: col.is_nullable(),
-                scalar_type: col.data_type,
-            })
-            .collect_vec();
-
-        let key = table_info_value.table_info.meta.primary_key_indices;
-        let keys = vec![repr::Key::from(key)];
-
-        let time_index = raw_schema.timestamp_index;
-        Ok((
-            table_name,
-            RelationType {
-                column_types,
-                keys,
-                time_index,
-            },
-        ))
-    }
-}
-
 #[derive(Debug)]
 pub enum DiffRequest {
     Insert(Vec<(Row, repr::Timestamp)>),
     Delete(Vec<(Row, repr::Timestamp)>),
 }
 
-/// iterate through the diff row and from from continuous diff row with same diff type
+/// iterate through the diff row and form continuous diff row with same diff type
 pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
     let mut reqs = Vec::new();
     for (row, ts, diff) in rows {
@@ -409,30 +277,8 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
     reqs
 }
 
+/// This impl block contains methods to send writeback requests to frontend
 impl FlownodeManager {
-    /// Run all available subgraph in the flow node
-    /// This will try to run all dataflow in this node
-    ///
-    /// However this is not blocking and can sometimes return while actual computation is still running in worker thread
-    /// TODO(discord9): add flag for subgraph that have input since last run
-    pub async fn run_available(&self) {
-        let now = self.tick_manager.tick();
-        for worker in self.worker_handles.iter() {
-            worker.lock().await.run_available(now).await;
-        }
-    }
-
-    /// send write request to related source sender
-    pub async fn handle_write_request(
-        &self,
-        region_id: RegionId,
-        rows: Vec<DiffRow>,
-    ) -> Result<(), Error> {
-        let table_id = region_id.table_id();
-        self.node_context.lock().await.send(table_id, rows)?;
-        Ok(())
-    }
-
     /// TODO(discord9): merge all same type of diff row into one requests
     ///
     /// Return the number of requests it made
@@ -448,70 +294,70 @@ impl FlownodeManager {
             }
             let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
-            /*let table_id = self
+            // TODO(discord9): instead of auto build table from request schema, actually build table
+            // before `create flow` to be able to assign pk and ts etc.
+            let (primary_keys, schema) = if let Some(table_id) = self
                 .table_info_source
                 .get_table_id_from_name(&table_name)
-                .await?;
-            let table_info = self
-                .table_info_source
-                .get_table_info_value(&table_id)
                 .await?
-                .unwrap();
-            let primary_keys = table_info
-                .table_info
-                .meta
-                .primary_key_indices
-                .into_iter()
-                .map(|i| {
-                    table_info.table_info.meta.schema.column_schemas[i]
-                        .name
-                        .clone()
-                })
-                .collect_vec();
-            let schema = table_info.table_info.meta.schema.column_schemas;
-            */
-            let primary_keys = vec![];
-
-            let (schema_wout_ts, with_ts) = {
-                let node_ctx = self.node_context.lock().await;
-                let gid: GlobalId = node_ctx
-                    .table_repr
-                    .get_by_name(&table_name)
-                    .map(|x| x.1)
+            {
+                let table_info = self
+                    .table_info_source
+                    .get_table_info_value(&table_id)
+                    .await?
                     .unwrap();
-                let schema = node_ctx
-                    .schema
-                    .get(&gid)
-                    .with_context(|| TableNotFoundSnafu {
-                        name: format!("Table name = {:?}", table_name),
-                    })?
-                    .clone();
-
-                let ts_col = ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true);
-
-                let wout_ts = schema
-                    .column_types
+                let meta = table_info.table_info.meta;
+                let primary_keys = meta
+                    .primary_key_indices
                     .into_iter()
-                    .enumerate()
-                    .map(|(idx, typ)| {
-                        ColumnSchema::new(format!("Col_{idx}"), typ.scalar_type, typ.nullable)
-                    })
+                    .map(|i| meta.schema.column_schemas[i].name.clone())
                     .collect_vec();
-                let mut with_ts = wout_ts.clone();
-                with_ts.push(ts_col);
-                (wout_ts, with_ts)
+                let schema = meta.schema.column_schemas;
+                (primary_keys, schema)
+            } else {
+                // TODO(discord9): get ts column from `RelationType` once we are done rewriting flow plan to attach ts
+                let primary_keys = vec![];
+
+                let with_ts = {
+                    let node_ctx = self.node_context.lock().await;
+                    let gid: GlobalId = node_ctx
+                        .table_repr
+                        .get_by_name(&table_name)
+                        .map(|x| x.1)
+                        .unwrap();
+                    let schema = node_ctx
+                        .schema
+                        .get(&gid)
+                        .with_context(|| TableNotFoundSnafu {
+                            name: format!("Table name = {:?}", table_name),
+                        })?
+                        .clone();
+
+                    let ts_col = ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        true,
+                    )
+                    .with_time_index(true);
+
+                    let wout_ts = schema
+                        .column_types
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, typ)| {
+                            ColumnSchema::new(format!("Col_{idx}"), typ.scalar_type, typ.nullable)
+                        })
+                        .collect_vec();
+                    let mut with_ts = wout_ts.clone();
+                    with_ts.push(ts_col);
+                    with_ts
+                };
+                (primary_keys, with_ts)
             };
 
-            let _proto_schema_wout_ts = column_schemas_to_proto(schema_wout_ts, &primary_keys)?;
+            let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
 
-            let proto_schema_with_ts = column_schemas_to_proto(with_ts, &primary_keys)?;
-
-            info!(
+            debug!(
                 "Sending {} writeback requests to table {}",
                 reqs.len(),
                 table_name.join(".")
@@ -533,7 +379,7 @@ impl FlownodeManager {
                         let req = RowInsertRequest {
                             table_name,
                             rows: Some(v1::Rows {
-                                schema: proto_schema_with_ts.clone(),
+                                schema: proto_schema.clone(),
                                 rows: rows_proto,
                             }),
                         };
@@ -565,7 +411,7 @@ impl FlownodeManager {
                         let req = RowDeleteRequest {
                             table_name,
                             rows: Some(v1::Rows {
-                                schema: proto_schema_with_ts.clone(),
+                                schema: proto_schema.clone(),
                                 rows: rows_proto,
                             }),
                         };
@@ -609,7 +455,57 @@ impl FlownodeManager {
         }
         output
     }
+}
 
+/// Flow Runtime related methods
+impl FlownodeManager {
+    /// run in common_runtime background runtime
+    pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
+        info!("Starting flownode manager's background task");
+        common_runtime::spawn_bg(async move {
+            self.run().await;
+        })
+    }
+
+    /// Trigger dataflow running, and then send writeback request to the source sender
+    ///
+    /// note that this method didn't handle input mirror request, as this should be handled by grpc server
+    pub async fn run(&self) {
+        loop {
+            // TODO(discord9): only run when new inputs arrive or scheduled to
+            self.run_available().await;
+            // TODO(discord9): error handling
+            self.send_writeback_requests().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Run all available subgraph in the flow node
+    /// This will try to run all dataflow in this node
+    ///
+    /// However this is not blocking and can sometimes return while actual computation is still running in worker thread
+    /// TODO(discord9): add flag for subgraph that have input since last run
+    pub async fn run_available(&self) {
+        let now = self.tick_manager.tick();
+        for worker in self.worker_handles.iter() {
+            worker.lock().await.run_available(now).await;
+        }
+    }
+
+    /// send write request to related source sender
+    pub async fn handle_write_request(
+        &self,
+        region_id: RegionId,
+        rows: Vec<DiffRow>,
+    ) -> Result<(), Error> {
+        let table_id = region_id.table_id();
+        self.node_context.lock().await.send(table_id, rows)?;
+        Ok(())
+    }
+}
+
+/// Create&Remove flow
+impl FlownodeManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
@@ -662,14 +558,12 @@ impl FlownodeManager {
 
         node_ctx.register_task_src_sink(flow_id, source_table_ids, sink_table_name.clone());
 
-        // TODO(discord9): pass the actual `QueryContext` in here
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
-        let flow_plan = sql_to_flow_plan(node_ctx.borrow_mut(), &self.query_engine, &sql).await?;
+        let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
         info!("Flow Plan is {:?}", flow_plan);
         node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
 
-        // TODO(discord9): parse `expire_when`
         let expire_when = expire_when
             .and_then(|s| {
                 if s.is_empty() || s.split_whitespace().join("").is_empty() {
@@ -701,7 +595,11 @@ impl FlownodeManager {
             .iter()
             .map(|id| node_ctx.get_source_by_global_id(id).map(|s| s.subscribe()))
             .collect::<Result<Vec<_>, _>>()?;
-
+        let err_collector = ErrCollector::default();
+        self.flow_err_collectors
+            .write()
+            .await
+            .insert(flow_id, err_collector.clone());
         let handle = &self.worker_handles[0].lock().await;
         handle
             .create_flow(
@@ -713,6 +611,7 @@ impl FlownodeManager {
                 source_senders,
                 expire_when,
                 create_if_not_exist,
+                err_collector,
             )
             .await?;
         info!("Successfully create flow with id={}", flow_id);
@@ -720,278 +619,10 @@ impl FlownodeManager {
     }
 }
 
-/// A context that holds the information of the dataflow
-#[derive(Default)]
-pub struct FlowNodeContext {
-    /// mapping from source table to tasks, useful for schedule which task to run when a source table is updated
-    pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
-    /// mapping from task to sink table, useful for sending data back to the client when a task is done running
-    pub flow_to_sink: BTreeMap<FlowId, TableName>,
-    /// broadcast sender for source table, any incoming write request will be sent to the source table's corresponding sender
-    ///
-    /// Note that we are getting insert requests with table id, so we should use table id as the key
-    pub source_sender: BTreeMap<TableId, broadcast::Sender<DiffRow>>,
-    /// broadcast receiver for sink table, there should only be one receiver, and it will receive all the data from the sink table
-    ///
-    /// and send it back to the client, since we are mocking the sink table as a client, we should use table name as the key
-    /// note that the sink receiver should only have one, and we are using broadcast as mpsc channel here
-    pub sink_receiver: BTreeMap<
-        TableName,
-        (
-            mpsc::UnboundedSender<DiffRow>,
-            mpsc::UnboundedReceiver<DiffRow>,
-        ),
-    >,
-    /// store source in buffer for each source table, in case broadcast channel is full
-    pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
-    /// the schema of the table, query from metasrv or infered from TypedPlan
-    pub schema: HashMap<GlobalId, RelationType>,
-    /// All the tables that have been registered in the worker
-    pub table_repr: TriMap,
-    pub query_context: Option<Arc<QueryContext>>,
-}
-
-impl FlowNodeContext {
-    // return number of rows it actuall send(including what's in the buffer)
-    pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        let sender = self
-            .source_sender
-            .get(&table_id)
-            .with_context(|| TableNotFoundSnafu {
-                name: table_id.to_string(),
-            })?;
-        let send_buffer = self.send_buffer.entry(table_id).or_default();
-        send_buffer.extend(rows);
-        let mut row_cnt = 0;
-        while let Some(row) = send_buffer.pop_front() {
-            if sender.len() >= BROADCAST_CAP {
-                break;
-            }
-            row_cnt += 1;
-            sender
-                .send(row)
-                .map_err(|err| {
-                    InternalSnafu {
-                        reason: format!(
-                            "Failed to send row to table_id = {:?}, error = {:?}",
-                            table_id, err
-                        ),
-                    }
-                    .build()
-                })
-                .with_context(|_| EvalSnafu)?;
-        }
-
-        Ok(row_cnt)
-    }
-}
-
-impl FlowNodeContext {
-    /// mapping source table to task, and sink table to task in worker context
-    ///
-    /// also add their corrseponding broadcast sender/receiver
-    fn register_task_src_sink(
-        &mut self,
-        task_id: FlowId,
-        source_table_ids: &[TableId],
-        sink_table_name: TableName,
-    ) {
-        for source_table_id in source_table_ids {
-            self.add_source_sender(*source_table_id);
-            self.source_to_tasks
-                .entry(*source_table_id)
-                .or_default()
-                .insert(task_id);
-        }
-
-        self.add_sink_receiver(sink_table_name.clone());
-        self.flow_to_sink.insert(task_id, sink_table_name);
-    }
-
-    pub fn add_source_sender(&mut self, table_id: TableId) {
-        self.source_sender
-            .entry(table_id)
-            .or_insert_with(|| broadcast::channel(BROADCAST_CAP).0);
-    }
-
-    pub fn add_sink_receiver(&mut self, table_name: TableName) {
-        self.sink_receiver
-            .entry(table_name)
-            .or_insert_with(mpsc::unbounded_channel::<DiffRow>);
-    }
-
-    pub fn get_source_by_global_id(
-        &self,
-        id: &GlobalId,
-    ) -> Result<&broadcast::Sender<DiffRow>, Error> {
-        let table_id = self
-            .table_repr
-            .get_by_global_id(id)
-            .with_context(|| TableNotFoundSnafu {
-                name: format!("Global Id = {:?}", id),
-            })?
-            .1
-            .with_context(|| TableNotFoundSnafu {
-                name: format!("Table Id = {:?}", id),
-            })?;
-        self.source_sender
-            .get(&table_id)
-            .with_context(|| TableNotFoundSnafu {
-                name: table_id.to_string(),
-            })
-    }
-
-    pub fn get_sink_by_global_id(
-        &self,
-        id: &GlobalId,
-    ) -> Result<mpsc::UnboundedSender<DiffRow>, Error> {
-        let table_name = self
-            .table_repr
-            .get_by_global_id(id)
-            .with_context(|| TableNotFoundSnafu {
-                name: format!("{:?}", id),
-            })?
-            .0
-            .with_context(|| TableNotFoundSnafu {
-                name: format!("Global Id = {:?}", id),
-            })?;
-        self.sink_receiver
-            .get(&table_name)
-            .map(|(s, _r)| s.clone())
-            .with_context(|| TableNotFoundSnafu {
-                name: table_name.join("."),
-            })
-    }
-}
-
-impl FlowNodeContext {
-    /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
-    ///
-    /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationType), Error> {
-        let id = self
-            .table_repr
-            .get_by_name(name)
-            .map(|(_tid, gid)| gid)
-            .with_context(|| TableNotFoundSnafu {
-                name: name.join("."),
-            })?;
-        let schema = self
-            .schema
-            .get(&id)
-            .cloned()
-            .with_context(|| TableNotFoundSnafu {
-                name: name.join("."),
-            })?;
-        Ok((id, schema))
-    }
-
-    /// Assign a global id to a table, if already assigned, return the existing global id
-    ///
-    /// require at least one of `table_name` or `table_id` to be `Some`
-    ///
-    /// and will try to fetch the schema from table info manager(if table exist now)
-    ///
-    /// NOTE: this will not actually render the table into collection refered as GlobalId
-    /// merely creating a mapping from table id to global id
-    pub async fn assign_global_id_to_table(
-        &mut self,
-        srv_map: &TableInfoSource,
-        mut table_name: Option<TableName>,
-        table_id: Option<TableId>,
-    ) -> Result<GlobalId, Error> {
-        // if we can find by table name/id. not assign it
-        if let Some(gid) = table_name
-            .as_ref()
-            .and_then(|table_name| self.table_repr.get_by_name(table_name))
-            .map(|(_, gid)| gid)
-            .or_else(|| {
-                table_id
-                    .and_then(|id| self.table_repr.get_by_table_id(&id))
-                    .map(|(_, gid)| gid)
-            })
-        {
-            Ok(gid)
-        } else {
-            let global_id = self.new_global_id();
-
-            if let Some(table_id) = table_id {
-                let (known_table_name, schema) = srv_map.get_table_name_schema(&table_id).await?;
-                table_name = table_name.or(Some(known_table_name));
-                self.schema.insert(global_id, schema);
-            } // if we don't have table id, it means database havn't assign one yet or we don't need it
-
-            self.table_repr.insert(table_name, table_id, global_id);
-            Ok(global_id)
-        }
-    }
-
-    /// Assign a schema to a table
-    ///
-    /// TODO(discord9): error handling
-    pub fn assign_table_schema(
-        &mut self,
-        table_name: &TableName,
-        schema: RelationType,
-    ) -> Result<(), Error> {
-        let gid = self
-            .table_repr
-            .get_by_name(table_name)
-            .map(|(_, gid)| gid)
-            .unwrap();
-        self.schema.insert(gid, schema);
-        Ok(())
-    }
-
-    /// Get a new global id
-    pub fn new_global_id(&self) -> GlobalId {
-        GlobalId::User(self.table_repr.global_id_to_name_id.len() as u64)
-    }
-}
-
-/// A tri-directional map that maps table name, table id, and global id
-#[derive(Default, Debug)]
-pub struct TriMap {
-    name_to_global_id: HashMap<TableName, GlobalId>,
-    id_to_global_id: HashMap<TableId, GlobalId>,
-    global_id_to_name_id: BTreeMap<GlobalId, (Option<TableName>, Option<TableId>)>,
-}
-
-impl TriMap {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn insert(&mut self, name: Option<TableName>, id: Option<TableId>, global_id: GlobalId) {
-        name.clone()
-            .and_then(|name| self.name_to_global_id.insert(name.clone(), global_id));
-        id.and_then(|id| self.id_to_global_id.insert(id, global_id));
-        self.global_id_to_name_id.insert(global_id, (name, id));
-    }
-
-    pub fn get_by_name(&self, name: &TableName) -> Option<(Option<TableId>, GlobalId)> {
-        self.name_to_global_id.get(name).map(|global_id| {
-            let (_name, id) = self.global_id_to_name_id.get(global_id).unwrap();
-            (*id, *global_id)
-        })
-    }
-
-    pub fn get_by_table_id(&self, id: &TableId) -> Option<(Option<TableName>, GlobalId)> {
-        self.id_to_global_id.get(id).map(|global_id| {
-            let (name, _id) = self.global_id_to_name_id.get(global_id).unwrap();
-            (name.clone(), *global_id)
-        })
-    }
-
-    pub fn get_by_global_id(
-        &self,
-        global_id: &GlobalId,
-    ) -> Option<(Option<TableName>, Option<TableId>)> {
-        self.global_id_to_name_id.get(global_id).cloned()
-    }
-}
-
-/// FlowTickManager is a manager for flow tick
+/// FlowTickManager is a manager for flow tick, which trakc flow execution progress
+///
+/// TODO(discord9): better way to do it, and not expose flow tick even to other flow to avoid
+/// TSO coord mess
 #[derive(Clone)]
 pub struct FlowTickManager {
     anchor: Anchor,

@@ -29,7 +29,7 @@ use crate::adapter::error::{
     Error, InvalidQueryPlanSnafu, InvalidQueryProstSnafu, InvalidQuerySubstraitSnafu,
     NotImplementedSnafu, TableNotFoundSnafu,
 };
-use crate::adapter::FlowNodeContext;
+use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::RelationType;
@@ -94,10 +94,8 @@ impl FunctionExtensions {
 
 /// To reuse existing code for parse sql, the sql is first parsed into a datafusion logical plan,
 /// then to a substrait plan, and finally to a flow plan.
-///
-/// TODO(discord9): check if use empty `QueryContext` influence anything
 pub async fn sql_to_flow_plan(
-    ctx: &mut FlowNodeContext,
+    ctx: &mut FlownodeContext,
     engine: &Arc<dyn QueryEngine>,
     sql: &str,
 ) -> Result<TypedPlan, Error> {
@@ -138,10 +136,10 @@ mod test {
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
-    use crate::adapter::TriMap;
+    use crate::adapter::IdToNameMap;
     use crate::repr::ColumnType;
 
-    pub fn create_test_ctx() -> FlowNodeContext {
+    pub fn create_test_ctx() -> FlownodeContext {
         let gid = GlobalId::User(0);
         let name = [
             "greptime".to_string(),
@@ -149,9 +147,9 @@ mod test {
             "numbers".to_string(),
         ];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-        let mut tri_map = TriMap::new();
+        let mut tri_map = IdToNameMap::new();
         tri_map.insert(Some(name.clone()), Some(0), gid);
-        FlowNodeContext {
+        FlownodeContext {
             schema: HashMap::from([(gid, schema)]),
             table_repr: tri_map,
             query_context: Some(Arc::new(QueryContext::with("greptime", "public"))),

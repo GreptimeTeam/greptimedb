@@ -145,8 +145,6 @@ fn mfp_subgraph(
 
 /// The core of evaluating MFP operator, given a MFP and a input, evaluate the MFP operator,
 /// return the output updates **And** possibly any number of errors that occurred during the evaluation
-///
-/// TODO(discord9): deal with primary key overwrite issue
 fn eval_mfp_core(
     input: impl IntoIterator<Item = DiffRow>,
     mfp_plan: &MfpPlan,

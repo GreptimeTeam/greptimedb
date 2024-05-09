@@ -37,6 +37,7 @@ use crate::adapter::{FlownodeManager, FlownodeManagerRef};
 use crate::repr::{self, DiffRow};
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 
+/// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
     pub manager: FlownodeManagerRef,
@@ -86,19 +87,19 @@ impl flow_server::Flow for FlowService {
     }
 }
 
-pub struct FlowNodeServer {
+pub struct FlownodeServer {
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     pub flow_service: FlowService,
 }
 
-impl FlowNodeServer {
+impl FlownodeServer {
     pub fn create_flow_service(&self) -> flow_server::FlowServer<impl flow_server::Flow> {
         flow_server::FlowServer::new(self.flow_service.clone())
     }
 }
 
 #[async_trait::async_trait]
-impl servers::server::Server for FlowNodeServer {
+impl servers::server::Server for FlownodeServer {
     async fn shutdown(&self) -> Result<(), servers::error::Error> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
         if let Some(tx) = shutdown_tx.take() {

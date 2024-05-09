@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! impl `FlowNode` trait for FlowNodeManager so standalone can easily call them
+//! impl `FlowNode` trait for FlowNodeManager so standalone can call them
 
 use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
@@ -26,6 +26,7 @@ use crate::adapter::FlownodeManager;
 use crate::repr::{self, DiffRow};
 
 fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
+    // TODO(discord9): refactor this
     Err::<(), _>(BoxedError::new(err))
         .with_context(|_| ExternalSnafu)
         .unwrap_err()

@@ -21,6 +21,7 @@ use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::handoff::TeeingHandoff;
 use hydroflow::scheduled::port::RecvPort;
 use hydroflow::scheduled::SubgraphId;
+use itertools::Itertools;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::compute::render::Context;
@@ -152,9 +153,14 @@ pub struct ErrCollector {
 }
 
 impl ErrCollector {
+    pub async fn get_all(&self) -> Vec<EvalError> {
+        self.inner.lock().await.drain(..).collect_vec()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.inner.blocking_lock().is_empty()
     }
+
     pub fn push_err(&self, err: EvalError) {
         self.inner.blocking_lock().push_back(err)
     }

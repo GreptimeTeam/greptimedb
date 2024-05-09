@@ -14,11 +14,14 @@
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
+use common_error::ext::BoxedError;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
+use itertools::Itertools;
+use snafu::ResultExt;
 
-use crate::adapter::error::Error;
+use crate::adapter::error::{Error, ExternalSnafu};
 
-/// TODO(discord9): error handling
+/// convert `ColumnSchema` lists to it's corrsponding proto type
 pub fn column_schemas_to_proto(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],
@@ -28,9 +31,10 @@ pub fn column_schemas_to_proto(
         .map(|c| {
             ColumnDataTypeWrapper::try_from(c.data_type.clone())
                 .map(|w| w.to_parts())
-                .unwrap()
+                .map_err(BoxedError::new)
+                .with_context(|_| ExternalSnafu)
         })
-        .collect::<Vec<_>>();
+        .try_collect()?;
 
     let ret = column_schemas
         .iter()

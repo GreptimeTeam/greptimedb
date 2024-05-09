@@ -54,11 +54,11 @@ use crate::expr::{
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, ColumnType, RelationType};
-use crate::transform::{FlowNodeContext, FunctionExtensions};
+use crate::transform::{FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
     fn from_substrait_agg_grouping(
-        ctx: &mut FlowNodeContext,
+        ctx: &mut FlownodeContext,
         groupings: &[Grouping],
         typ: &RelationType,
         extensions: &FunctionExtensions,
@@ -84,7 +84,7 @@ impl TypedExpr {
 
 impl AggregateExpr {
     fn from_substrait_agg_measures(
-        ctx: &mut FlowNodeContext,
+        ctx: &mut FlownodeContext,
         measures: &[Measure],
         typ: &RelationType,
         extensions: &FunctionExtensions,
@@ -218,7 +218,7 @@ impl KeyValPlan {
 impl TypedPlan {
     /// Convert AggregateRel into Flow's TypedPlan
     pub fn from_substrait_agg_rel(
-        ctx: &mut FlowNodeContext,
+        ctx: &mut FlownodeContext,
         agg: &proto::AggregateRel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {

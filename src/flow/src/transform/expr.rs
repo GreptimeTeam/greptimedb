@@ -100,7 +100,7 @@ impl TypedExpr {
                 },
             )
             .unzip();
-        info!("Function: {:?}", f);
+
         match arg_len {
             // because variadic function can also have 1 arguments, we need to check if it's a variadic function first
             1 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {

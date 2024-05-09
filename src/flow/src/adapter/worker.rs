@@ -107,12 +107,6 @@ pub struct WorkerHandle {
     itc_client: Mutex<InterThreadCallClient>,
 }
 
-#[test]
-fn check_if_send_sync() {
-    fn check<T: Send + Sync>() {}
-    check::<WorkerHandle>();
-}
-
 impl WorkerHandle {
     /// create task, return task id
     ///
@@ -127,6 +121,7 @@ impl WorkerHandle {
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
+        err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
         let req = Request::Create {
             task_id,
@@ -137,6 +132,7 @@ impl WorkerHandle {
             src_recvs,
             expire_when,
             create_if_not_exist,
+            err_collector,
         };
 
         let ret = self.itc_client.lock().await.call_blocking(req).await?;
@@ -235,9 +231,10 @@ impl<'s> Worker<'s> {
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
-        // TODO(discord9): set expire duration for all arrangment and compare to sys timestamp instead
+        // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
         expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
+        err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
         let _ = expire_when;
         if create_if_not_exist {
@@ -247,7 +244,10 @@ impl<'s> Worker<'s> {
             }
         }
 
-        let mut cur_task_state = ActiveDataflowState::<'s>::default();
+        let mut cur_task_state = ActiveDataflowState::<'s> {
+            err_collector,
+            ..Default::default()
+        };
 
         {
             let mut ctx = cur_task_state.new_ctx(sink_id);
@@ -305,6 +305,7 @@ impl<'s> Worker<'s> {
                 src_recvs,
                 expire_when,
                 create_if_not_exist,
+                err_collector,
             } => {
                 let task_create_result = self.create_flow(
                     task_id,
@@ -315,6 +316,7 @@ impl<'s> Worker<'s> {
                     src_recvs,
                     expire_when,
                     create_if_not_exist,
+                    err_collector,
                 );
                 Some((
                     req_id,
@@ -352,6 +354,7 @@ enum Request {
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
+        err_collector: ErrCollector,
     },
     Remove {
         task_id: FlowId,
@@ -494,6 +497,7 @@ mod test {
                 vec![rx],
                 None,
                 true,
+                ErrCollector::default(),
             )
             .await
             .unwrap();

@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Somewhere integration-ish(more like mock) test for adapter module
+//! Mock test for adapter module
+//! TODO(discord9): write mock test
 
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::kv_backend::memory::MemoryKvBackend;
