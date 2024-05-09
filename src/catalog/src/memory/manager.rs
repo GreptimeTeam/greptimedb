@@ -117,11 +117,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(result)
     }
 
-    async fn tables<'a>(
-        &'a self,
-        catalog: &'a str,
-        schema: &'a str,
-    ) -> BoxStream<'a, Result<TableRef>> {
+    fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>> {
         let catalogs = self.catalogs.read().unwrap();
 
         let Some(schemas) = catalogs.get(catalog) else {
@@ -141,11 +137,11 @@ impl CatalogManager for MemoryCatalogManager {
 
         let tables = tables.values().cloned().collect::<Vec<_>>();
 
-        return Box::pin(try_stream!({
+        Box::pin(try_stream!({
             for table in tables {
                 yield table;
             }
-        }));
+        }))
     }
 }
 
@@ -368,9 +364,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let stream = catalog_list
-            .tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-            .await;
+        let stream = catalog_list.tables(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         let tables = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(tables.len(), 1);
         assert_eq!(
