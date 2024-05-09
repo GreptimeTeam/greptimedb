@@ -29,6 +29,7 @@ use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::{Result as DataFusionResult, Statistics};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
+use datafusion::execution::TaskContext;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_expr;
 use datafusion::physical_plan::{
@@ -957,7 +958,7 @@ impl ExecutionPlan for RangeSelectExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<common_query::physical_plan::TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DfResult<DfSendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
         let input = self.input.execute(partition, context)?;

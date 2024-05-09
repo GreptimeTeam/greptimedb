@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use common_query::physical_plan::ExecutionPlan;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion::physical_plan::ExecutionPlan;
 
 use crate::error::Result;
 use crate::query_engine::QueryEngineContext;

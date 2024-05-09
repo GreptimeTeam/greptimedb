@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_query::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::ExecutionPlan;
 use session::context::QueryContextRef;
 
 /// wrap physical plan with additional layer

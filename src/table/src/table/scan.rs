@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_query::error::ExecuteRepeatedlySnafu;
-use common_query::physical_plan::{ExecutionPlan, Partitioning};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
@@ -27,11 +26,11 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
-use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};

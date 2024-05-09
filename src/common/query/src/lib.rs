@@ -18,14 +18,13 @@ use std::sync::Arc;
 use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use physical_plan::ExecutionPlan;
+use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 
 pub mod columnar_value;
 pub mod error;
 mod function;
 pub mod logical_plan;
-pub mod physical_plan;
 pub mod prelude;
 mod signature;
 use sqlparser_derive::{Visit, VisitMut};
