@@ -14,8 +14,6 @@
 
 //! Datanode configurations
 
-use std::any::Any;
-
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::SecretString;
 use common_config::Configurable;
@@ -270,10 +268,6 @@ impl Default for DatanodeOptions {
 }
 
 impl Configurable<'_> for DatanodeOptions {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client.metasrv_addrs", "wal.broker_endpoints"])
     }

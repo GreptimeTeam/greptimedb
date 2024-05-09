@@ -22,8 +22,6 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 pub trait Configurable<'de>: Serialize + Deserialize<'de> + Default + Sized {
-    fn as_any(&self) -> &dyn std::any::Any;
-
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: config file > environment variables > default values.
     /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
@@ -126,10 +124,6 @@ mod tests {
     }
 
     impl Configurable<'_> for TestDatanodeConfig {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
         fn env_list_keys() -> Option<&'static [&'static str]> {
             Some(&["meta_client.metasrv_addrs"])
         }

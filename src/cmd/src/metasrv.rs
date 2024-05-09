@@ -129,12 +129,24 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: MetasrvOptions = MetasrvOptions::load_layered_options(
-            self.config_file.as_deref(),
-            self.env_prefix.as_ref(),
-        )
-        .context(LoadLayeredConfigSnafu)?;
+        Ok(Options::Metasrv(Box::new(
+            self.merge_with_cli_options(
+                global_options,
+                MetasrvOptions::load_layered_options(
+                    self.config_file.as_deref(),
+                    self.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        )))
+    }
 
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        mut opts: MetasrvOptions,
+    ) -> Result<MetasrvOptions> {
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -197,7 +209,7 @@ impl StartCommand {
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;
 
-        Ok(Options::Metasrv(Box::new(opts)))
+        Ok(opts)
     }
 
     async fn build(self, mut opts: MetasrvOptions) -> Result<Instance> {

@@ -75,10 +75,6 @@ impl Default for FrontendOptions {
 }
 
 impl Configurable<'_> for FrontendOptions {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client.metasrv_addrs"])
     }

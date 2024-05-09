@@ -136,12 +136,24 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: DatanodeOptions = DatanodeOptions::load_layered_options(
-            self.config_file.as_deref(),
-            self.env_prefix.as_ref(),
-        )
-        .context(LoadLayeredConfigSnafu)?;
+        Ok(Options::Datanode(Box::new(
+            self.merge_with_cli_options(
+                global_options,
+                DatanodeOptions::load_layered_options(
+                    self.config_file.as_deref(),
+                    self.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        )))
+    }
 
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        mut opts: DatanodeOptions,
+    ) -> Result<DatanodeOptions> {
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -211,7 +223,7 @@ impl StartCommand {
         // Disable dashboard in datanode.
         opts.http.disable_dashboard = true;
 
-        Ok(Options::Datanode(Box::new(opts)))
+        Ok(opts)
     }
 
     async fn build(self, mut opts: DatanodeOptions) -> Result<Instance> {

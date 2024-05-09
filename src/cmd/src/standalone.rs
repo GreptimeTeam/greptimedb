@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -162,10 +161,6 @@ impl Default for StandaloneOptions {
 }
 
 impl Configurable<'_> for StandaloneOptions {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints"])
     }
@@ -293,12 +288,25 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = StandaloneOptions::load_layered_options(
-            self.config_file.as_deref(),
-            self.env_prefix.as_ref(),
-        )
-        .context(LoadLayeredConfigSnafu)?;
+        Ok(Options::Standalone(Box::new(
+            self.merge_with_cli_options(
+                global_options,
+                StandaloneOptions::load_layered_options(
+                    self.config_file.as_deref(),
+                    self.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        )))
+    }
 
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<StandaloneOptions> {
+        // Should always be standalone mode.
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &global_options.log_dir {
@@ -359,7 +367,7 @@ impl StartCommand {
 
         opts.user_provider.clone_from(&self.user_provider);
 
-        Ok(Options::Standalone(Box::new(opts)))
+        Ok(opts)
     }
 
     #[allow(unreachable_code)]

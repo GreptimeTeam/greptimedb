@@ -14,7 +14,6 @@
 
 pub mod builder;
 
-use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -150,10 +149,6 @@ impl Default for MetasrvOptions {
 }
 
 impl Configurable<'_> for MetasrvOptions {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints"])
     }
