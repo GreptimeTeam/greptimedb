@@ -25,6 +25,8 @@ use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
 use crate::statements::transform_statements;
 
+pub const FLOW: &str = "FLOW";
+
 /// SQL Parser options.
 #[derive(Clone, Debug, Default)]
 pub struct ParseOptions {}

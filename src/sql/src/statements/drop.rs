@@ -91,6 +91,45 @@ impl Display for DropDatabase {
     }
 }
 
+/// DROP FLOW statement.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct DropFlow {
+    flow_name: ObjectName,
+    /// drop flow if exists
+    drop_if_exists: bool,
+}
+
+impl DropFlow {
+    /// Creates a statement for `DROP DATABASE`
+    pub fn new(flow_name: ObjectName, if_exists: bool) -> Self {
+        Self {
+            flow_name,
+            drop_if_exists: if_exists,
+        }
+    }
+
+    /// Returns the flow name.
+    pub fn flow_name(&self) -> &ObjectName {
+        &self.flow_name
+    }
+
+    /// Return the `drop_if_exists`.
+    pub fn drop_if_exists(&self) -> bool {
+        self.drop_if_exists
+    }
+}
+
+impl Display for DropFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DROP FLOW")?;
+        if self.drop_if_exists() {
+            f.write_str(" IF EXISTS")?;
+        }
+        let flow_name = self.flow_name();
+        write!(f, r#" {flow_name}"#)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
@@ -180,6 +219,51 @@ DROP TABLE test"#,
                 assert_eq!(
                     r#"
 DROP TABLE IF EXISTS test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_drop_flow() {
+        let sql = r"drop flow test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropFlow { .. });
+
+        match &stmts[0] {
+            Statement::DropFlow(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP FLOW test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"drop flow if exists test;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropFlow { .. });
+
+        match &stmts[0] {
+            Statement::DropFlow(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP FLOW IF EXISTS test"#,
                     &new_sql
                 );
             }
