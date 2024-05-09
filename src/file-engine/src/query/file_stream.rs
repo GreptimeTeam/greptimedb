@@ -20,7 +20,6 @@ use common_datasource::file_format::orc::{OrcFormat, OrcOpener};
 use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
 use common_datasource::file_format::Format;
 use common_query::prelude::Expr;
-use common_query::DfPhysicalPlan;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::common::{Statistics, ToDFSchema};
@@ -31,6 +30,7 @@ use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStre
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::utils::conjunction;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;

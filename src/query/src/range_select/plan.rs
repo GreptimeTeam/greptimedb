@@ -25,7 +25,6 @@ use std::time::Duration;
 use ahash::RandomState;
 use arrow::compute::{self, cast_with_options, CastOptions, SortColumn};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
-use common_query::DfPhysicalPlan;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::{Result as DataFusionResult, Statistics};
 use datafusion::error::Result as DfResult;
@@ -930,14 +929,14 @@ impl ExecutionPlan for RangeSelectExec {
         &self.cache
     }
 
-    fn children(&self) -> Vec<Arc<dyn DfPhysicalPlan>> {
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
         vec![self.input.clone()]
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        children: Vec<Arc<dyn DfPhysicalPlan>>,
-    ) -> datafusion_common::Result<Arc<dyn DfPhysicalPlan>> {
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         Ok(Arc::new(Self {
             input: children[0].clone(),

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use physical_plan::PhysicalPlan;
+use physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 
 pub mod columnar_value;
@@ -49,7 +49,7 @@ pub enum OutputData {
 #[derive(Debug, Default)]
 pub struct OutputMeta {
     /// May exist for query output. One can retrieve execution metrics from this plan.
-    pub plan: Option<Arc<dyn PhysicalPlan>>,
+    pub plan: Option<Arc<dyn ExecutionPlan>>,
     pub cost: OutputCost,
 }
 
@@ -102,11 +102,11 @@ impl Debug for OutputData {
 }
 
 impl OutputMeta {
-    pub fn new(plan: Option<Arc<dyn PhysicalPlan>>, cost: usize) -> Self {
+    pub fn new(plan: Option<Arc<dyn ExecutionPlan>>, cost: usize) -> Self {
         Self { plan, cost }
     }
 
-    pub fn new_with_plan(plan: Arc<dyn PhysicalPlan>) -> Self {
+    pub fn new_with_plan(plan: Arc<dyn ExecutionPlan>) -> Self {
         Self {
             plan: Some(plan),
             cost: 0,
@@ -117,9 +117,6 @@ impl OutputMeta {
         Self { plan: None, cost }
     }
 }
-
-pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;
-pub type DfPhysicalPlanRef = Arc<dyn DfPhysicalPlan>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 pub enum AddColumnLocation {

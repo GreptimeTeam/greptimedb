@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_plugins::GREPTIME_EXEC_PREFIX;
-use common_query::physical_plan::PhysicalPlan;
 use datafusion::physical_plan::metrics::MetricValue;
+use datafusion::physical_plan::ExecutionPlan;
 use headers::{Header, HeaderName, HeaderValue};
 use hyper::HeaderMap;
 use serde_json::Value;
@@ -126,7 +126,7 @@ fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u6
     }
 }
 
-pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
+pub fn collect_plan_metrics(plan: Arc<dyn ExecutionPlan>, maps: &mut [&mut HashMap<String, u64>]) {
     if let Some(m) = plan.metrics() {
         m.iter().for_each(|m| match m.value() {
             MetricValue::Count { name, count } => {

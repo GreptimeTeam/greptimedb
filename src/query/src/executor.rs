@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_query::physical_plan::PhysicalPlan;
+use common_query::physical_plan::ExecutionPlan;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::error::Result;
@@ -25,6 +25,6 @@ pub trait QueryExecutor {
     fn execute_stream(
         &self,
         ctx: &QueryEngineContext,
-        plan: &Arc<dyn PhysicalPlan>,
+        plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream>;
 }

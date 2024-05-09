@@ -18,13 +18,12 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common_query::physical_plan::DfPhysicalPlanAdapter;
-use common_query::DfPhysicalPlan;
 use common_recordbatch::OrderOption;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
@@ -157,7 +156,7 @@ impl TableProvider for DummyTableProvider {
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> datafusion::error::Result<Arc<dyn DfPhysicalPlan>> {
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let mut request = self.scan_request.lock().unwrap().clone();
         request.projection = match projection {
             Some(x) if !x.is_empty() => Some(x.clone()),
@@ -174,9 +173,7 @@ impl TableProvider for DummyTableProvider {
             .handle_query(self.region_id, request)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        Ok(Arc::new(DfPhysicalPlanAdapter(Arc::new(
-            StreamScanAdapter::new(stream),
-        ))))
+        Ok(Arc::new(StreamScanAdapter::new(stream)))
     }
 
     fn supports_filters_pushdown(

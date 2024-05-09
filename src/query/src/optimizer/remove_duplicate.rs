@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::DfPhysicalPlanRef;
+use std::sync::Arc;
+
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DfResult;
 
@@ -30,9 +32,9 @@ pub struct RemoveDuplicate;
 impl PhysicalOptimizerRule for RemoveDuplicate {
     fn optimize(
         &self,
-        plan: DfPhysicalPlanRef,
+        plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
-    ) -> DfResult<DfPhysicalPlanRef> {
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
         Self::do_optimize(plan)
     }
 
@@ -46,7 +48,7 @@ impl PhysicalOptimizerRule for RemoveDuplicate {
 }
 
 impl RemoveDuplicate {
-    fn do_optimize(plan: DfPhysicalPlanRef) -> DfResult<DfPhysicalPlanRef> {
+    fn do_optimize(plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
         let result = plan
             .transform_down_mut(&mut |plan| {
                 if plan.as_any().is::<CoalesceBatchesExec>()
