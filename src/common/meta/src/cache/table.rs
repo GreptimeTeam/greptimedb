@@ -12,5 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod table_info;
 mod table_name;
+pub use table_info::{new_table_info_cache, TableInfoCache, TableInfoCacheRef};
 pub use table_name::{new_table_name_cache, TableNameCache, TableNameCacheRef};

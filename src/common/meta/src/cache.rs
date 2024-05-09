@@ -18,4 +18,7 @@ mod table;
 
 pub use container::{CacheContainer, Initializer, Invalidator, TokenFilter};
 pub use flow::{new_table_flownode_set_cache, TableFlownodeSetCache};
-pub use table::{new_table_name_cache, TableNameCache, TableNameCacheRef};
+pub use table::{
+    new_table_info_cache, new_table_name_cache, TableInfoCache, TableInfoCacheRef, TableNameCache,
+    TableNameCacheRef,
+};
