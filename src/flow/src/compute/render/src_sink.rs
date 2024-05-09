@@ -60,10 +60,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let prev_avail = arr.into_iter().map(|((k, _), t, d)| (k, t, d));
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();
-                let mut recv_cnt = 0;
+
                 // TODO(discord9): handling tokio broadcast error
                 while let Ok((r, t, d)) = src_recv.try_recv() {
-                    recv_cnt += 1;
                     if t <= now {
                         to_send.push((r, t, d));
                     } else {
@@ -71,12 +70,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     }
                 }
                 let all = prev_avail.chain(to_send).collect_vec();
-                if recv_cnt != 0 {
-                    info!(
-                        "Flow receive {recv_cnt} rows, send as source {} rows at {now}",
-                        all.len()
-                    );
-                }
+
                 err_collector.run(|| arrange_handler_inner.write().apply_updates(now, to_arrange));
                 send.give(all);
                 // always schedule source to run at next tick

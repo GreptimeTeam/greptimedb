@@ -242,7 +242,6 @@ impl FrontendInvoker for Instance {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> common_frontend::error::Result<Output> {
-        info!("Received row inserts: {:?}", requests);
         self.inserter
             .handle_row_inserts(requests, ctx, &self.statement_executor)
             .await

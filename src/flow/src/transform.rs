@@ -154,7 +154,7 @@ mod test {
         FlowNodeContext {
             schema: HashMap::from([(gid, schema)]),
             table_repr: tri_map,
-            query_context: Some(QueryContext::with("greptime", "public")),
+            query_context: Some(Arc::new(QueryContext::with("greptime", "public"))),
             ..Default::default()
         }
     }

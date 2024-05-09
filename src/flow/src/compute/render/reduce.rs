@@ -379,9 +379,8 @@ fn reduce_accum_subgraph(
 
     let mut all_updates = Vec::with_capacity(key_to_vals.len());
     let mut all_outputs = Vec::with_capacity(key_to_vals.len());
-    let null_vals = (0..full_aggrs.len()).map(|_| Value::Null);
     // lock the arrange for write for the rest of function body
-    // so to prevent wide race condition since we are going to update the arrangement by write after read
+    // so to prevent wired race condition since we are going to update the arrangement by write after read
     // TODO(discord9): consider key-based lock
     let mut arrange = arrange.write();
     for (key, value_diffs) in key_to_vals {

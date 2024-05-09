@@ -441,14 +441,13 @@ impl FlownodeManager {
         if all_reqs.is_empty() || all_reqs.iter().all(|v| v.1.is_empty()) {
             return Ok(0);
         }
-        info!("Sending writeback requests, all reqs={:?}", all_reqs);
         let mut req_cnt = 0;
         for (table_name, reqs) in all_reqs {
             if reqs.is_empty() {
                 continue;
             }
             let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
-            let ctx = QueryContext::with(&catalog, &schema);
+            let ctx = Arc::new(QueryContext::with(&catalog, &schema));
             /*let table_id = self
                 .table_info_source
                 .get_table_id_from_name(&table_name)
@@ -663,7 +662,7 @@ impl FlownodeManager {
         node_ctx.register_task_src_sink(flow_id, source_table_ids, sink_table_name.clone());
 
         // TODO(discord9): pass the actual `QueryContext` in here
-        node_ctx.query_context = Some(QueryContext::with("greptime", "public"));
+        node_ctx.query_context = Some(Arc::new(QueryContext::with("greptime", "public")));
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(node_ctx.borrow_mut(), &self.query_engine, &sql).await?;
         info!("Flow Plan is {:?}", flow_plan);
@@ -781,10 +780,6 @@ impl FlowNodeContext {
                 })
                 .with_context(|_| EvalSnafu)?;
         }
-        info!(
-            "FlowNodeContext send {} rows to table_id = {}",
-            row_cnt, table_id
-        );
 
         Ok(row_cnt)
     }
