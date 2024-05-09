@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::cache_invalidator::{CacheInvalidator, Context};
 use crate::error::Result;
@@ -25,6 +25,11 @@ pub type CacheRegistryRef = Arc<CacheRegistry>;
 /// - Register the [CacheContainer](crate::cache::CacheContainer) which implements the [CacheInvalidator] trait.
 #[derive(Default)]
 pub struct CacheRegistry {
+    inner: RwLock<CacheRegistryInner>,
+}
+
+#[derive(Default)]
+struct CacheRegistryInner {
     indexes: Vec<Arc<dyn CacheInvalidator>>,
     registry: anymap2::SendSyncAnyMap,
 }
@@ -32,7 +37,11 @@ pub struct CacheRegistry {
 #[async_trait::async_trait]
 impl CacheInvalidator for Arc<CacheRegistry> {
     async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
-        for index in &self.indexes {
+        let indexes = {
+            let inner = self.inner.read().unwrap();
+            inner.indexes.clone()
+        };
+        for index in indexes {
             index.invalidate(ctx, caches).await?;
         }
         Ok(())
@@ -42,14 +51,29 @@ impl CacheInvalidator for Arc<CacheRegistry> {
 impl CacheRegistry {
     /// Sets the value stored in the collection for the type `T`.
     /// Returns true if the collection already had a value of type `T`
-    pub fn register<T: CacheInvalidator + 'static>(&mut self, cache: Arc<T>) -> bool {
-        self.indexes.push(cache.clone());
-        self.registry.insert(cache).is_some()
+    pub fn register<T: CacheInvalidator + 'static>(&self, cache: Arc<T>) -> bool {
+        let mut inner = self.inner.write().unwrap();
+        inner.indexes.push(cache.clone());
+        inner.registry.insert(cache).is_some()
     }
 
-    /// Returns a reference to the value stored in the collection for the type `T`, if it exists.
-    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
-        self.registry.get()
+    /// Returns __cloned__ the value stored in the collection for the type `T`, if it exists.
+    pub fn get<T: Send + Sync + Clone + 'static>(&self) -> Option<T> {
+        let inner = self.inner.read().unwrap();
+        inner.registry.get().cloned()
+    }
+
+    /// Sets the value stored in the collection for the type `T` if not exists.
+    /// Returns stored value or existing value of type `T`.
+    pub fn get_or_register<T: CacheInvalidator + 'static>(&self, cache: Arc<T>) -> Arc<T> {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(cache) = inner.registry.get::<Arc<T>>() {
+            cache.clone()
+        } else {
+            inner.indexes.push(cache.clone());
+            inner.registry.insert(cache.clone());
+            cache
+        }
     }
 }
 
@@ -64,7 +88,7 @@ mod tests {
     use crate::cache::*;
     use crate::instruction::CacheIdent;
 
-    fn test_cache() -> CacheContainer<String, String, CacheIdent> {
+    fn test_cache(name: &str) -> CacheContainer<String, String, CacheIdent> {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
         let filter: TokenFilter<CacheIdent> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
@@ -76,7 +100,7 @@ mod tests {
         let invalidator: Invalidator<String, String, CacheIdent> =
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
-        CacheContainer::new("test".to_string(), cache, invalidator, init, filter)
+        CacheContainer::new(name.to_string(), cache, invalidator, init, filter)
     }
 
     fn test_i32_cache() -> CacheContainer<i32, String, CacheIdent> {
@@ -96,11 +120,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_register() {
-        let mut registry = CacheRegistry::default();
-        let cache = Arc::new(test_cache());
+        let registry = CacheRegistry::default();
+        let cache = Arc::new(test_cache("test"));
         assert!(!registry.register(cache.clone()));
         assert!(registry.register(cache.clone()));
-        let cache = Arc::new(test_cache());
+        let cache = Arc::new(test_cache("test"));
         assert!(registry.register(cache.clone()));
         let cache = Arc::new(test_i32_cache());
         assert!(!registry.register(cache.clone()));
@@ -110,5 +134,15 @@ mod tests {
             .get::<Arc<CacheContainer<i32, String, CacheIdent>>>()
             .unwrap();
         assert_eq!(cache.get(1024).await.unwrap().unwrap(), "foo");
+    }
+
+    #[tokio::test]
+    async fn test_get_or_register() {
+        let registry = CacheRegistry::default();
+        let cache = Arc::new(test_cache("test"));
+        registry.get_or_register(cache);
+        let another_cache = Arc::new(test_cache("yet another"));
+        let registered = registry.get_or_register(another_cache);
+        assert_eq!(registered.name(), "test");
     }
 }

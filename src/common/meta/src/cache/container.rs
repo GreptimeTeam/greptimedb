@@ -68,6 +68,11 @@ where
             token_filter,
         }
     }
+
+    /// Returns the `name`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 #[async_trait::async_trait]
