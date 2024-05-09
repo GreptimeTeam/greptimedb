@@ -638,6 +638,7 @@ impl FlownodeManager {
         comment: Option<String>,
         sql: String,
         flow_options: HashMap<String, String>,
+        query_ctx: Option<QueryContext>,
     ) -> Result<Option<FlowId>, Error> {
         if create_if_not_exist {
             // check if the task already exists
@@ -662,7 +663,7 @@ impl FlownodeManager {
         node_ctx.register_task_src_sink(flow_id, source_table_ids, sink_table_name.clone());
 
         // TODO(discord9): pass the actual `QueryContext` in here
-        node_ctx.query_context = Some(Arc::new(QueryContext::with("greptime", "public")));
+        node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(node_ctx.borrow_mut(), &self.query_engine, &sql).await?;
         info!("Flow Plan is {:?}", flow_plan);

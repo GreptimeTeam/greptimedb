@@ -34,6 +34,10 @@ fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
 #[async_trait::async_trait]
 impl Flownode for FlownodeManager {
     async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
+        let query_ctx = request
+            .header
+            .and_then(|h| h.query_context)
+            .map(|ctx| ctx.into());
         match request.body {
             Some(flow_request::Body::Create(CreateRequest {
                 flow_id: Some(task_id),
@@ -61,6 +65,7 @@ impl Flownode for FlownodeManager {
                         Some(comment),
                         sql,
                         flow_options,
+                        query_ctx,
                     )
                     .await
                     .map_err(to_meta_err)?;
