@@ -27,11 +27,11 @@ use crate::error::{self, Error, Result};
 use crate::instruction::CacheIdent;
 
 /// Filters out unused [CacheToken]s
-pub type TokenFilter<CacheToken> = Box<dyn Fn(Vec<CacheToken>) -> Vec<CacheToken> + Send + Sync>;
+pub type TokenFilter<CacheToken> = Box<dyn Fn(&CacheToken) -> bool + Send + Sync>;
 
 /// Invalidates cached values by [CacheToken]s.
 pub type Invalidator<K, V, CacheToken> =
-    Box<dyn Fn(&'_ Cache<K, V>, Vec<CacheToken>) -> BoxFuture<'_, Result<()>> + Send + Sync>;
+    Box<dyn for<'a> Fn(&'a Cache<K, V>, &'a CacheToken) -> BoxFuture<'a, Result<()>> + Send + Sync>;
 
 /// Initializes value (i.e., fetches from remote).
 pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
@@ -75,9 +75,11 @@ where
     V: Send + Sync,
 {
     async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
-        let caches = (self.token_filter)(caches);
-        if !caches.is_empty() {
-            (self.invalidator)(&self.cache, caches).await?;
+        for token in caches
+            .into_iter()
+            .filter(|token| (self.token_filter)(token))
+        {
+            (self.invalidator)(&self.cache, &token).await?;
         }
         Ok(())
     }
@@ -115,10 +117,9 @@ where
     V: Clone + Send + Sync + 'static,
 {
     /// Invalidates cache by [CacheToken].
-    pub async fn invalidate(&self, caches: Vec<CacheToken>) -> Result<()> {
-        let caches = (self.token_filter)(caches);
-        if !caches.is_empty() {
-            (self.invalidator)(&self.cache, caches).await?;
+    pub async fn invalidate(&self, caches: &[CacheToken]) -> Result<()> {
+        for token in caches.iter().filter(|token| (self.token_filter)(token)) {
+            (self.invalidator)(&self.cache, token).await?;
         }
         Ok(())
     }
@@ -165,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn test_get() {
         let cache: Cache<NameKey, String> = CacheBuilder::new(128).build();
-        let filter = Box::new(|caches| caches);
+        let filter: TokenFilter<String> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<NameKey, String> = Arc::new(move |_| {
@@ -184,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_by_ref() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let filter = Box::new(|caches| caches);
+        let filter: TokenFilter<String> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
@@ -208,18 +209,16 @@ mod tests {
     #[tokio::test]
     async fn test_invalidate() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let filter = Box::new(|caches| caches);
+        let filter: TokenFilter<String> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let invalidator: Invalidator<String, String, String> = Box::new(|cache, keys| {
+        let invalidator: Invalidator<String, String, String> = Box::new(|cache, key| {
             Box::pin(async move {
-                for key in keys {
-                    cache.invalidate(&key).await;
-                }
+                cache.invalidate(key).await;
                 Ok(())
             })
         });
@@ -231,7 +230,7 @@ mod tests {
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         adv_cache
-            .invalidate(vec!["foo".to_string(), "bar".to_string()])
+            .invalidate(&["foo".to_string(), "bar".to_string()])
             .await
             .unwrap();
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();

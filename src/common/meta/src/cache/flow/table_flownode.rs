@@ -63,10 +63,10 @@ async fn invalidate_create_flow(
     CreateFlow {
         source_table_ids,
         flownode_ids,
-    }: CreateFlow,
+    }: &CreateFlow,
 ) {
     for table_id in source_table_ids {
-        let entry = cache.entry(table_id);
+        let entry = cache.entry(*table_id);
         entry
             .and_compute_with(
                 async |entry: Option<moka::Entry<u32, HashSet<u64>>>| match entry {
@@ -88,16 +88,16 @@ async fn invalidate_drop_flow(
     DropFlow {
         source_table_ids,
         flownode_ids,
-    }: DropFlow,
+    }: &DropFlow,
 ) {
     for table_id in source_table_ids {
-        let entry = cache.entry(table_id);
+        let entry = cache.entry(*table_id);
         entry
             .and_compute_with(
                 async |entry: Option<moka::Entry<u32, HashSet<u64>>>| match entry {
                     Some(entry) => {
                         let mut set = entry.into_value();
-                        for flownode_id in &flownode_ids {
+                        for flownode_id in flownode_ids {
                             set.remove(flownode_id);
                         }
 
@@ -113,30 +113,22 @@ async fn invalidate_drop_flow(
     }
 }
 
-fn invalidator(
-    cache: &'_ Cache<TableId, FlownodeSet>,
-    caches: Vec<CacheIdent>,
-) -> BoxFuture<'_, Result<()>> {
+fn invalidator<'a>(
+    cache: &'a Cache<TableId, FlownodeSet>,
+    ident: &'a CacheIdent,
+) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        for ident in caches {
-            match ident {
-                CacheIdent::CreateFlow(create_flow) => {
-                    invalidate_create_flow(cache, create_flow).await
-                }
-                CacheIdent::DropFlow(drop_flow) => invalidate_drop_flow(cache, drop_flow).await,
-                _ => {}
-            }
+        match ident {
+            CacheIdent::CreateFlow(create_flow) => invalidate_create_flow(cache, create_flow).await,
+            CacheIdent::DropFlow(drop_flow) => invalidate_drop_flow(cache, drop_flow).await,
+            _ => {}
         }
-
         Ok(())
     })
 }
 
-fn filter(caches: Vec<CacheIdent>) -> Vec<CacheIdent> {
-    caches
-        .into_iter()
-        .filter(|cache| matches!(cache, CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_)))
-        .collect()
+fn filter(ident: &CacheIdent) -> bool {
+    matches!(ident, CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_))
 }
 
 #[cfg(test)]
@@ -168,7 +160,7 @@ mod tests {
             source_table_ids: vec![1024, 1025],
             flownode_ids: vec![1, 2, 3, 4, 5],
         })];
-        cache.invalidate(ident).await.unwrap();
+        cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(set.len(), 5);
         let set = cache.get(1025).await.unwrap().unwrap();
@@ -190,7 +182,7 @@ mod tests {
                 flownode_ids: vec![11, 12],
             }),
         ];
-        cache.invalidate(ident).await.unwrap();
+        cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(set.len(), 7);
         let set = cache.get(1025).await.unwrap().unwrap();
@@ -200,7 +192,7 @@ mod tests {
             source_table_ids: vec![1024, 1025],
             flownode_ids: vec![1, 2, 3, 4, 5],
         })];
-        cache.invalidate(ident).await.unwrap();
+        cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
         assert_eq!(set, HashSet::from([11, 12]));
         let set = cache.get(1025).await.unwrap().unwrap();
