@@ -336,6 +336,20 @@ impl Display for Epoch {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestSource {
+    Dashboard,
+}
+
+impl RequestSource {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "dashboard" => Some(RequestSource::Dashboard),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub enum HttpResponse {
     Arrow(ArrowResponse),
