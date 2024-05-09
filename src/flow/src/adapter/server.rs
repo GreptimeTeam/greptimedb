@@ -15,26 +15,20 @@
 //! Implementation of grpc service for flow node
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
-use api::v1::flow::{CreateRequest, DropRequest};
 use common_meta::node_manager::Flownode;
 use common_telemetry::tracing::info;
 use futures::FutureExt;
-use greptime_proto::v1::flow::{
-    flow_request, flow_server, FlowRequest, FlowResponse, InsertRequests,
-};
+use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use snafu::{ensure, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tonic::transport::server::TcpIncoming;
-use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{FlownodeManager, FlownodeManagerRef};
-use crate::repr::{self, DiffRow};
+use crate::adapter::FlownodeManagerRef;
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 
 /// wrapping flow node manager to avoid orphan rule with Arc<...>

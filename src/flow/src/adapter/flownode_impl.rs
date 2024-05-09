@@ -16,7 +16,7 @@
 
 use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
-use common_error::ext::{BoxedError, ErrorExt, StackError};
+use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
 use itertools::Itertools;

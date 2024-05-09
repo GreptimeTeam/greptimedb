@@ -14,17 +14,15 @@
 
 //! For single-thread flow worker
 
-use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use common_telemetry::info;
 use hydroflow::scheduled::graph::Hydroflow;
 use snafu::ResultExt;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::adapter::error::{Error, EvalSnafu};
-use crate::adapter::{FlowId, FlowTickManager};
+use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
@@ -462,6 +460,7 @@ mod test {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::adapter::FlowTickManager;
     use crate::expr::Id;
     use crate::plan::Plan;
     use crate::repr::{RelationType, Row};

@@ -15,12 +15,9 @@
 //! Mock test for adapter module
 //! TODO(discord9): write mock test
 
-use common_meta::key::table_info::TableInfoKey;
-use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::{KvBackend, KvBackendRef};
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use store_api::storage::ConcreteDataType;
-use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder};
+use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
 use super::*;
 

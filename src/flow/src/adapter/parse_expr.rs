@@ -16,12 +16,11 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case};
-use nom::character::complete::{alphanumeric1, digit0, multispace0, multispace1};
+use nom::character::complete::{alphanumeric1, digit0, multispace0};
 use nom::combinator::peek;
 use nom::sequence::tuple;
-use nom::{multi, IResult};
+use nom::IResult;
 
-use crate::expr::ScalarExpr;
 use crate::repr;
 
 #[test]

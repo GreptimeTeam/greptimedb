@@ -14,7 +14,6 @@
 
 #![warn(unused_imports)]
 
-use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType as CDT;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};

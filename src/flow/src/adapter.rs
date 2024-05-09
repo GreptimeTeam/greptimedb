@@ -16,52 +16,40 @@
 //! and communicating with other parts of the database
 #![warn(unused_imports)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use api::v1::flow::flow_server::Flow;
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use catalog::kvbackend::KvBackendCatalogManager;
-use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
-use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
-use common_meta::key::table_name::{TableNameKey, TableNameManager};
-use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
-use hydroflow::scheduled::graph::Hydroflow;
 use itertools::Itertools;
 use minstant::Anchor;
-use prost::bytes::buf;
 use query::{QueryEngine, QueryEngineFactory};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
-use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
-use tokio::task::LocalSet;
+use tokio::sync::{oneshot, Mutex, RwLock};
 
-use crate::adapter::error::{
-    EvalSnafu, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
-};
-pub(crate) use crate::adapter::node_context::{FlownodeContext, IdToNameMap};
-use crate::adapter::parse_expr::{parse_duration, parse_fixed};
+use crate::adapter::error::{ExternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
+pub(crate) use crate::adapter::node_context::FlownodeContext;
+use crate::adapter::parse_expr::parse_fixed;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
-use crate::compute::{Context, DataflowState, ErrCollector};
-use crate::expr::error::InternalSnafu;
+use crate::compute::ErrCollector;
 use crate::expr::GlobalId;
-use crate::plan::{Plan, TypedPlan};
-use crate::repr::{self, ColumnType, DiffRow, RelationType, Row, BROADCAST_CAP};
+use crate::repr::{self, DiffRow, Row};
 use crate::transform::sql_to_flow_plan;
 
 pub(crate) mod error;
@@ -73,7 +61,7 @@ mod tests;
 mod util;
 mod worker;
 
-mod node_context;
+pub(crate) mod node_context;
 mod table_source;
 
 use error::Error;

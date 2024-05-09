@@ -20,9 +20,7 @@ use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use serde::{Deserialize, Serialize};
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 

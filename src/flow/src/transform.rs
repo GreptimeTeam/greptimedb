@@ -120,6 +120,10 @@ pub async fn sql_to_flow_plan(
     Ok(flow_plan)
 }
 
+fn rewrite_to_prop_ts(plan: TypedPlan) -> TypedPlan {
+    todo!()
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
@@ -136,7 +140,7 @@ mod test {
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
-    use crate::adapter::IdToNameMap;
+    use crate::adapter::node_context::IdToNameMap;
     use crate::repr::ColumnType;
 
     pub fn create_test_ctx() -> FlownodeContext {

@@ -15,7 +15,7 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_error::ext::BoxedError;
-use datatypes::schema::{ColumnSchema, COMMENT_KEY};
+use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
 use snafu::ResultExt;
 
