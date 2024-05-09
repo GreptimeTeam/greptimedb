@@ -295,6 +295,8 @@ pub struct CreateView {
     pub input: Box<Statement>,
     /// Whether to replace existing VIEW
     pub or_replace: bool,
+    /// Create VIEW only when it doesn't exists
+    pub if_not_exists: bool,
 }
 
 #[cfg(test)]

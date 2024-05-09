@@ -33,8 +33,8 @@ use crate::error::{
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
-    TIME_INDEX,
+    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
+    Partitions, TIME_INDEX,
 };
 use crate::statements::statement::Statement;
 use crate::statements::{get_data_type_by_alias_name, OptionMap};
@@ -77,6 +77,7 @@ impl<'a> ParserContext<'a> {
                                     _ => self.unsupported(w.to_string()),
                                 }
                             }
+                            Keyword::VIEW => self.parse_create_view(true),
                             _ => self.unsupported(w.to_string()),
                         },
                         _ => self.unsupported(w.to_string()),
@@ -91,11 +92,32 @@ impl<'a> ParserContext<'a> {
                         _ => self.unsupported(w.to_string()),
                     }
                 }
-
+                Keyword::VIEW => {
+                    let _ = self.parser.next_token();
+                    self.parse_create_view(false)
+                }
                 _ => self.unsupported(w.to_string()),
             },
             unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    fn parse_create_view(&mut self, or_replace: bool) -> Result<Statement> {
+        let if_not_exists = self.parse_if_not_exist()?;
+        let view_name = self.intern_parse_table_name()?;
+
+        self.parser
+            .expect_keyword(Keyword::AS)
+            .context(SyntaxSnafu)?;
+
+        let query = self.parse_query()?;
+
+        Ok(Statement::CreateView(CreateView {
+            name: view_name,
+            or_replace,
+            input: Box::new(query),
+            if_not_exists,
+        }))
     }
 
     fn parse_create_external_table(&mut self) -> Result<Statement> {

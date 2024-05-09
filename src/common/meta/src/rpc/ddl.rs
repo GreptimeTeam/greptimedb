@@ -319,6 +319,20 @@ pub struct CreateViewTask {
     pub view_info: RawTableInfo,
 }
 
+impl CreateViewTask {
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.create_view.catalog_name,
+            schema: &self.create_view.schema_name,
+            table: &self.create_view.view_name,
+        }
+    }
+
+    pub fn raw_logical_plan(&self) -> &Vec<u8> {
+        &self.create_view.logical_plan
+    }
+}
+
 impl TryFrom<PbCreateViewTask> for CreateViewTask {
     type Error = error::Error;
 
@@ -342,6 +356,43 @@ impl TryFrom<CreateViewTask> for PbCreateViewTask {
             create_view: Some(task.create_view),
             view_info: serde_json::to_vec(&task.view_info).context(error::SerdeJsonSnafu)?,
         })
+    }
+}
+
+impl Serialize for CreateViewTask {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let view_info = serde_json::to_vec(&self.view_info)
+            .map_err(|err| serde::ser::Error::custom(err.to_string()))?;
+
+        let pb = PbCreateViewTask {
+            create_view: Some(self.create_view.clone()),
+            view_info,
+        };
+        let buf = pb.encode_to_vec();
+        let encoded = general_purpose::STANDARD_NO_PAD.encode(buf);
+        serializer.serialize_str(&encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateViewTask {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let buf = general_purpose::STANDARD_NO_PAD
+            .decode(encoded)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+        let expr: PbCreateViewTask = PbCreateViewTask::decode(&*buf)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        let expr = CreateViewTask::try_from(expr)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        Ok(expr)
     }
 }
 

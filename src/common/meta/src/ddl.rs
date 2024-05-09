@@ -38,6 +38,7 @@ pub mod create_flow;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
+pub mod create_view;
 pub mod drop_database;
 pub mod drop_flow;
 pub mod drop_table;
@@ -89,6 +90,7 @@ pub struct TableMetadataAllocatorContext {
 }
 
 /// Metadata allocated to a table.
+#[derive(Default)]
 pub struct TableMetadata {
     /// Table id.
     pub table_id: TableId,

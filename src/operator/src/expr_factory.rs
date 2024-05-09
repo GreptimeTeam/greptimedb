@@ -529,8 +529,7 @@ pub fn to_create_view_expr(
         schema_name,
         view_name,
         logical_plan,
-        // FIXME(dennis): support it
-        create_if_not_exists: false,
+        create_if_not_exists: stmt.if_not_exists,
         create_or_replace: stmt.or_replace,
     };
 

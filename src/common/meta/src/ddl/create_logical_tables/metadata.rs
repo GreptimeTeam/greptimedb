@@ -43,7 +43,7 @@ impl CreateLogicalTablesProcedure {
             } else {
                 self.context
                     .table_metadata_allocator
-                    .allocate_table_id(task)
+                    .allocate_table_id(&task.create_table.table_id)
                     .await?
             };
             task.set_table_id(table_id);
