@@ -222,6 +222,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_value_not_exits() {
+        let cache: Cache<String, String> = CacheBuilder::new(128).build();
+        let filter: TokenFilter<String> = Box::new(|_| true);
+        let init: Initializer<String, String> =
+            Arc::new(move |_| Box::pin(async { error::ValueNotExistSnafu {}.fail() }));
+        let invalidator: Invalidator<String, String, String> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+
+        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
+        let value = adv_cache.get_by_ref("foo").await.unwrap();
+        assert!(value.is_none());
+    }
+
+    #[tokio::test]
     async fn test_invalidate() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
         let filter: TokenFilter<String> = Box::new(|_| true);
