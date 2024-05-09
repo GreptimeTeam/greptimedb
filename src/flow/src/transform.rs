@@ -143,13 +143,18 @@ mod test {
 
     pub fn create_test_ctx() -> FlowNodeContext {
         let gid = GlobalId::User(0);
-        let name = ["".to_string(), "".to_string(), "numbers".to_string()];
+        let name = [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers".to_string(),
+        ];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
         let mut tri_map = TriMap::new();
         tri_map.insert(Some(name.clone()), Some(0), gid);
         FlowNodeContext {
             schema: HashMap::from([(gid, schema)]),
             table_repr: tri_map,
+            query_context: Some(QueryContext::with("greptime", "public")),
             ..Default::default()
         }
     }
