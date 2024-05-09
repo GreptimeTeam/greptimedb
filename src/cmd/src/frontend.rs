@@ -23,6 +23,7 @@ use cache::{
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
+use common_config::Configurable;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -40,7 +41,9 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
+use crate::error::{
+    self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
+};
 use crate::options::{GlobalOptions, Options};
 use crate::App;
 
@@ -153,11 +156,11 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: FrontendOptions = Options::load_layered_options(
+        let mut opts: FrontendOptions = FrontendOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            FrontendOptions::env_list_keys(),
-        )?;
+        )
+        .context(LoadLayeredConfigSnafu)?;
 
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
@@ -336,12 +339,13 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
+    use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use frontend::service_config::GrpcOptions;
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::{GlobalOptions, ENV_VAR_SEP};
+    use crate::options::GlobalOptions;
 
     #[test]
     fn test_try_from_start_command() {

@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use config::ConfigError;
 use rustyline::error::ReadlineError;
 use snafu::{Location, Snafu};
 
@@ -210,7 +209,7 @@ pub enum Error {
     #[snafu(display("Failed to load layered config"))]
     LoadLayeredConfig {
         #[snafu(source)]
-        error: ConfigError,
+        source: common_config::error::Error,
         #[snafu(implicit)]
         location: Location,
     },

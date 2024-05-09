@@ -14,12 +14,14 @@
 
 pub mod builder;
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
+use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::ProcedureExecutorRef;
@@ -113,12 +115,6 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
 }
 
-impl MetasrvOptions {
-    pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints"])
-    }
-}
-
 impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
@@ -153,9 +149,13 @@ impl Default for MetasrvOptions {
     }
 }
 
-impl MetasrvOptions {
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string(&self).unwrap()
+impl Configurable<'_> for MetasrvOptions {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
     }
 }
 

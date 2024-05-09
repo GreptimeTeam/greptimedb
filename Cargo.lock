@@ -978,6 +978,9 @@ name = "bitflags"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf4b9d6a944f767f8e5e0db018570623c85f3d925ac718db4e06d0187adb21c1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitvec"
@@ -1624,7 +1627,6 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
- "config",
  "datanode",
  "datatypes",
  "either",
@@ -1728,9 +1730,22 @@ name = "common-config"
 version = "0.7.2"
 dependencies = [
  "common-base",
+ "common-error",
+ "common-macro",
+ "common-telemetry",
+ "common-test-util",
+ "common-wal",
+ "config",
+ "datanode",
+ "meta-client",
  "num_cpus",
  "serde",
+ "serde_json",
+ "snafu 0.8.2",
  "sysinfo",
+ "temp-env",
+ "tempfile",
+ "toml 0.8.12",
 ]
 
 [[package]]
@@ -1824,7 +1839,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
- "ron",
+ "ron 0.7.1",
  "serde",
  "serde_json",
  "session",
@@ -2168,20 +2183,21 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "0.13.4"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23738e11972c7643e4ec947840fc463b6a571afcd3e735bdfce7d03c7a784aca"
+checksum = "7328b20597b53c2454f0b1919720c25c7339051c02b72b7e05409e00b14132be"
 dependencies = [
  "async-trait",
+ "convert_case",
  "json5",
  "lazy_static",
  "nom",
  "pathdiff",
- "ron",
- "rust-ini 0.18.0",
+ "ron 0.8.1",
+ "rust-ini 0.19.0",
  "serde",
  "serde_json",
- "toml 0.5.11",
+ "toml 0.8.12",
  "yaml-rust",
 ]
 
@@ -2271,6 +2287,15 @@ name = "constant_time_eq"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
+
+[[package]]
+name = "convert_case"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca"
+dependencies = [
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "core-foundation"
@@ -3149,6 +3174,7 @@ dependencies = [
  "catalog",
  "client",
  "common-base",
+ "common-config",
  "common-error",
  "common-function",
  "common-greptimedb-telemetry",
@@ -3434,12 +3460,6 @@ dependencies = [
  "redox_users",
  "winapi",
 ]
-
-[[package]]
-name = "dlv-list"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0688c2a7f92e427f44895cd63841bff7b29f8d7a1648b9e7e07a4a365b2e1257"
 
 [[package]]
 name = "dlv-list"
@@ -5601,6 +5621,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-greptimedb-telemetry",
  "common-grpc",
@@ -6727,12 +6748,12 @@ dependencies = [
 
 [[package]]
 name = "ordered-multimap"
-version = "0.4.3"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccd746e37177e1711c20dd619a1620f34f5c8b569c53590a72dedd5344d8924a"
+checksum = "4ed8acf08e98e744e5384c8bc63ceb0364e68a6854187221c18df61c4797690e"
 dependencies = [
- "dlv-list 0.3.0",
- "hashbrown 0.12.3",
+ "dlv-list",
+ "hashbrown 0.13.2",
 ]
 
 [[package]]
@@ -6741,7 +6762,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
- "dlv-list 0.5.2",
+ "dlv-list",
  "hashbrown 0.14.5",
 ]
 
@@ -8392,6 +8413,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ron"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
+dependencies = [
+ "base64 0.21.7",
+ "bitflags 2.5.0",
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
 name = "rsa"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8530,12 +8563,12 @@ dependencies = [
 
 [[package]]
 name = "rust-ini"
-version = "0.18.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6d5f2436026b4f6e79dc829837d467cc7e9a55ee40e750d716713540715a2df"
+checksum = "7e2a3bcec1f113553ef1c88aae6c020a369d03d55b58de9869a0908930385091"
 dependencies = [
  "cfg-if 1.0.0",
- "ordered-multimap 0.4.3",
+ "ordered-multimap 0.6.0",
 ]
 
 [[package]]
@@ -9248,7 +9281,7 @@ dependencies = [
  "pyo3",
  "query",
  "rayon",
- "ron",
+ "ron 0.7.1",
  "rustpython-codegen",
  "rustpython-compiler",
  "rustpython-compiler-core",

@@ -16,13 +16,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 
-use crate::error::{self, Result, StartMetaServerSnafu};
+use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::{GlobalOptions, Options};
 use crate::App;
 
@@ -128,11 +129,11 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: MetasrvOptions = Options::load_layered_options(
+        let mut opts: MetasrvOptions = MetasrvOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            MetasrvOptions::env_list_keys(),
-        )?;
+        )
+        .context(LoadLayeredConfigSnafu)?;
 
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
@@ -225,11 +226,11 @@ mod tests {
     use std::io::Write;
 
     use common_base::readable_size::ReadableSize;
+    use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use meta_srv::selector::SelectorType;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
 
     #[test]
     fn test_read_from_cmd() {

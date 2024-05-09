@@ -14,8 +14,11 @@
 
 //! Datanode configurations
 
+use std::any::Any;
+
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::SecretString;
+use common_config::Configurable;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
@@ -266,13 +269,13 @@ impl Default for DatanodeOptions {
     }
 }
 
-impl DatanodeOptions {
-    pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client.metasrv_addrs", "wal.broker_endpoints"])
+impl Configurable<'_> for DatanodeOptions {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string(&self).unwrap()
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["meta_client.metasrv_addrs", "wal.broker_endpoints"])
     }
 }
 

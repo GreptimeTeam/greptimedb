@@ -15,6 +15,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use common_config::Configurable;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
@@ -23,7 +24,7 @@ use servers::server::{ServerHandler, ServerHandlers};
 use snafu::ResultExt;
 
 use crate::config::DatanodeOptions;
-use crate::error::{ParseAddrSnafu, Result};
+use crate::error::{ParseAddrSnafu, Result, TomlFormatSnafu};
 use crate::region_server::RegionServer;
 
 pub struct DatanodeServiceBuilder<'a> {
@@ -75,7 +76,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
         if self.enable_http_service {
             let http_server = HttpServerBuilder::new(self.opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(self.opts.to_toml_string())
+                .with_greptime_config_options(self.opts.to_toml().context(TomlFormatSnafu)?)
                 .build();
             let addr: SocketAddr = self.opts.http.addr.parse().context(ParseAddrSnafu {
                 addr: &self.opts.http.addr,
