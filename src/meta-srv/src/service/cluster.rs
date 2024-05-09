@@ -88,35 +88,23 @@ impl cluster_server::Cluster for Metasrv {
             return Ok(Response::new(resp));
         }
 
-        fn make_node_info(addr: String) -> Option<MetasrvNodeInfo> {
-            let build_info = common_version::build_info();
-            Some(
-                metasrv::MetasrvNodeInfo {
-                    addr,
-                    version: build_info.version.to_string(),
-                    git_commit: build_info.commit_short.to_string(),
-                }
-                .into(),
-            )
-        }
-
+        let leader_addr = &self.options().server_addr;
         let (leader, followers) = match self.election() {
             Some(election) => {
-                let leader = election.leader().await?;
                 let nodes = election.all_candidates().await?;
                 let followers = nodes
                     .into_iter()
-                    .filter(|node_info| node_info.addr != leader.0)
+                    .filter(|node_info| &node_info.addr != leader_addr)
                     .map(api::v1::meta::MetasrvNodeInfo::from)
                     .collect();
-                (make_node_info(leader.0.clone()), followers)
+                (self.node_info().into(), followers)
             }
-            None => (make_node_info(self.options().server_addr.clone()), vec![]),
+            None => (self.make_node_info(leader_addr), vec![]),
         };
 
         let resp = MetasrvPeersResponse {
             header: Some(ResponseHeader::success(0)),
-            leader,
+            leader: Some(leader),
             followers,
         };
 
@@ -128,5 +116,16 @@ impl Metasrv {
     pub fn is_leader(&self) -> bool {
         // Returns true when there is no `election`, indicating the presence of only one `Metasrv` node, which is the leader.
         self.election().map(|x| x.is_leader()).unwrap_or(true)
+    }
+
+    fn make_node_info(&self, addr: &str) -> MetasrvNodeInfo {
+        let build_info = common_version::build_info();
+        metasrv::MetasrvNodeInfo {
+            addr: addr.to_string(),
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit_short.to_string(),
+            start_time_ms: self.start_time_ms(),
+        }
+        .into()
     }
 }

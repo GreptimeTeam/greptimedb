@@ -301,11 +301,7 @@ impl CatalogManager for KvBackendCatalogManager {
         })
     }
 
-    async fn tables<'a>(
-        &'a self,
-        catalog: &'a str,
-        schema: &'a str,
-    ) -> BoxStream<'a, Result<TableRef>> {
+    fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>> {
         let sys_tables = try_stream!({
             // System tables
             let sys_table_names = self.system_catalog.table_names(schema);

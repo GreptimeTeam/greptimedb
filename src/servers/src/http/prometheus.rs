@@ -771,7 +771,7 @@ async fn retrieve_field_names(
 
     if matches.is_empty() {
         // query all tables if no matcher is provided
-        while let Some(table) = manager.tables(catalog, schema).await.next().await {
+        while let Some(table) = manager.tables(catalog, schema).next().await {
             let table = table.context(CatalogSnafu)?;
             for column in table.field_columns() {
                 field_columns.insert(column.name);
