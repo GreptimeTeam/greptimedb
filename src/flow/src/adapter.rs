@@ -671,6 +671,13 @@ impl FlownodeManager {
 
         // TODO(discord9): parse `expire_when`
         let expire_when = expire_when
+            .and_then(|s| {
+                if s.is_empty() || s.split_whitespace().join("").is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            })
             .map(|d| {
                 let d = d.as_ref();
                 parse_fixed(d)

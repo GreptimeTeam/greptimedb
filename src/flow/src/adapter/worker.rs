@@ -239,6 +239,7 @@ impl<'s> Worker<'s> {
         expire_when: Option<repr::Duration>,
         create_if_not_exist: bool,
     ) -> Result<Option<FlowId>, Error> {
+        let _ = expire_when;
         if create_if_not_exist {
             // check if the task already exists
             if self.task_states.contains_key(&task_id) {

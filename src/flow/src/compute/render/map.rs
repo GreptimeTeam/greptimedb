@@ -155,7 +155,7 @@ fn eval_mfp_core(
 ) -> Vec<KeyValDiffRow> {
     let mut all_updates = Vec::new();
     for (mut row, _sys_time, diff) in input.into_iter() {
-        // this updates is expected to be only zero to two rows
+        // this updates is expected to be only zero, one or two rows
         let updates = mfp_plan.evaluate::<EvalError>(&mut row.inner, now, diff);
         // TODO(discord9): refactor error handling
         // Expect error in a single row to not interrupt the whole evaluation

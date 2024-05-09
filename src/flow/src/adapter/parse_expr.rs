@@ -123,7 +123,7 @@ fn parse_item(input: &str) -> IResult<&str, Expr> {
         Ok((r, Expr::Col(name.to_string())))
     } else if let Ok((r, _now)) = parse_now(input) {
         Ok((r, Expr::Now))
-    } else if let Ok((r, _num)) = parse_quality(input) {
+    } else if let Ok((_r, _num)) = parse_quality(input) {
         todo!()
     } else {
         todo!()
