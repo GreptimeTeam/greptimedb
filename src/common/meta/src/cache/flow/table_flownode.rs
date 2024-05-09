@@ -134,14 +134,18 @@ fn filter(ident: &CacheIdent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
     use std::sync::Arc;
 
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use moka::future::CacheBuilder;
 
     use crate::cache::flow::table_flownode::new_table_flownode_set_cache;
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
+    use crate::key::flow::flow_info::FlowInfoValue;
+    use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::table_name::TableName;
 
     #[tokio::test]
     async fn test_cache_empty_set() {
@@ -150,6 +154,41 @@ mod tests {
         let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let set = cache.get(1024).await.unwrap().unwrap();
         assert!(set.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flownode_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        flownode_metadata_manager
+            .create_flow_metadata(
+                1024,
+                FlowInfoValue {
+                    source_table_ids: vec![1024, 1025],
+                    sink_table_name: TableName {
+                        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                        table_name: "sink_table".to_string(),
+                    },
+                    flownode_ids: BTreeMap::from([(0, 1), (1, 2), (2, 3)]),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    flow_name: "my_flow".to_string(),
+                    raw_sql: "sql".to_string(),
+                    expire_when: "expire".to_string(),
+                    comment: "comment".to_string(),
+                    options: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let cache = CacheBuilder::new(128).build();
+        let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
+        let set = cache.get(1024).await.unwrap().unwrap();
+        assert_eq!(set, HashSet::from([1, 2, 3]));
+        let set = cache.get(1025).await.unwrap().unwrap();
+        assert_eq!(set, HashSet::from([1, 2, 3]));
+        let result = cache.get(1026).await.unwrap().unwrap();
+        assert_eq!(result.len(), 0);
     }
 
     #[tokio::test]
