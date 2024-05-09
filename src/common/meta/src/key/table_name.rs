@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -208,11 +207,8 @@ impl TableNameManager {
         Ok(txn)
     }
 
-    pub async fn get<'a, T: Borrow<TableNameKey<'a>>>(
-        &self,
-        key: T,
-    ) -> Result<Option<TableNameValue>> {
-        let raw_key = key.borrow().to_bytes();
+    pub async fn get(&self, key: TableNameKey<'_>) -> Result<Option<TableNameValue>> {
+        let raw_key = key.to_bytes();
         self.kv_backend
             .get(&raw_key)
             .await?

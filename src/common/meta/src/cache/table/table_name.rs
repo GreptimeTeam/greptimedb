@@ -163,10 +163,11 @@ mod tests {
         let got = cache.get_by_ref(&table_name).await.unwrap().unwrap();
         assert_eq!(got, table_id);
 
+        assert!(cache.contains_key(&table_name));
         cache
             .invalidate(&[CacheIdent::TableName(table_name.clone())])
             .await
             .unwrap();
-        assert_eq!(cache.entry_count(), 0);
+        assert!(!cache.contains_key(&table_name));
     }
 }

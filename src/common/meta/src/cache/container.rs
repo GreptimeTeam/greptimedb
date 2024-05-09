@@ -68,11 +68,6 @@ where
             token_filter,
         }
     }
-
-    // Returns an approximate number of entries in this cache.
-    pub fn entry_count(&self) -> u64 {
-        self.cache.entry_count()
-    }
 }
 
 #[async_trait::async_trait]
@@ -129,6 +124,15 @@ where
             (self.invalidator)(&self.cache, token).await?;
         }
         Ok(())
+    }
+
+    /// Returns true if the cache contains a value for the key.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.cache.contains_key(key)
     }
 
     /// Returns a _clone_ of the value corresponding to the key.
