@@ -190,6 +190,11 @@ mod tests {
         let key = NameKey { name: "key" };
         let value = adv_cache.get(key).await.unwrap().unwrap();
         assert_eq!(value, "hi");
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        let key = NameKey { name: "key" };
+        let value = adv_cache.get(key).await.unwrap().unwrap();
+        assert_eq!(value, "hi");
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
