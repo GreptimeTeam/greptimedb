@@ -207,6 +207,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
 
 [[package]]
+name = "anymap2"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d301b3b94cb4b2f23d7917810addbbaff90738e0ca2be692bd027e70d7e0330c"
+
+[[package]]
 name = "api"
 version = "0.7.2"
 dependencies = [
@@ -1906,7 +1912,7 @@ dependencies = [
 name = "common-meta"
 version = "0.7.2"
 dependencies = [
- "anymap",
+ "anymap2",
  "api",
  "async-recursion",
  "async-trait",

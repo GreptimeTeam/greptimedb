@@ -11,7 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
-anymap = "1.0.0-beta.2"
+anymap2 = "0.13.0"
 api.workspace = true
 async-recursion = "1.0"
 async-trait.workspace = true
@@ -23,8 +23,8 @@ common-catalog.workspace = true
 common-error.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true
-common-procedure.workspace = true
 common-procedure-test.workspace = true
+common-procedure.workspace = true
 common-recordbatch.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
@@ -33,8 +33,8 @@ datafusion-common.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
-futures.workspace = true
 futures-util.workspace = true
+futures.workspace = true
 hex = { version = "0.4" }
 humantime-serde.workspace = true
 itertools.workspace = true

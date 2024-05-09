@@ -18,24 +18,28 @@ use crate::cache_invalidator::{CacheInvalidator, Context};
 use crate::error::Result;
 use crate::instruction::CacheIdent;
 
+pub type CacheRegistryRef = Arc<CacheRegistry>;
+
 /// [CacheRegistry] provides ability of
 /// - Get a specific [CacheContainer](crate::cache::CacheContainer).
 /// - Register the [CacheContainer](crate::cache::CacheContainer) which implements the [CacheInvalidator] trait.
 #[derive(Default)]
 pub struct CacheRegistry {
     indexes: Vec<Arc<dyn CacheInvalidator>>,
-    registry: anymap::AnyMap,
+    registry: anymap2::SendSyncAnyMap,
 }
 
-impl CacheRegistry {
-    /// Invalidates caches by [CacheIdent]s
-    pub async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
+#[async_trait::async_trait]
+impl CacheInvalidator for Arc<CacheRegistry> {
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
         for index in &self.indexes {
             index.invalidate(ctx, caches).await?;
         }
         Ok(())
     }
+}
 
+impl CacheRegistry {
     /// Sets the value stored in the collection for the type `T`.
     /// Returns true if the collection already had a value of type `T`
     pub fn register<T: CacheInvalidator + 'static>(&mut self, cache: Arc<T>) -> bool {
@@ -44,7 +48,7 @@ impl CacheRegistry {
     }
 
     /// Returns a reference to the value stored in the collection for the type `T`, if it exists.
-    pub fn get<T: 'static>(&self) -> Option<&T> {
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.registry.get()
     }
 }
