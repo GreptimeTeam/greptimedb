@@ -35,7 +35,9 @@ use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse, SinglePartitionScanner,
+};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -169,10 +171,12 @@ impl RegionEngine for MetricEngine {
 
     async fn handle_partitioned_query(
         &self,
-        _region_id: RegionId,
-        _request: ScanRequest,
+        region_id: RegionId,
+        request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        todo!()
+        let stream = self.handle_query(region_id, request).await?;
+        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        Ok(scanner)
     }
 
     /// Retrieves region's metadata.

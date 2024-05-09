@@ -202,7 +202,7 @@ impl RegionEngine for MockRegionEngine {
         _region_id: RegionId,
         _request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        todo!()
+        unimplemented!()
     }
 
     async fn get_metadata(&self, _region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {

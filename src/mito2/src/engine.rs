@@ -62,7 +62,9 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse, SinglePartitionScanner,
+};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -329,10 +331,12 @@ impl RegionEngine for MitoEngine {
     #[tracing::instrument(skip_all)]
     async fn handle_partitioned_query(
         &self,
-        _region_id: RegionId,
-        _request: ScanRequest,
+        region_id: RegionId,
+        request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        unimplemented!()
+        let stream = self.handle_query(region_id, request).await?;
+        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        Ok(scanner)
     }
 
     /// Retrieve region's metadata.
