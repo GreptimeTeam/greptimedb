@@ -39,6 +39,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::error::{self, Result};
+use crate::key::FlowId;
 use crate::table_name::TableName;
 
 #[derive(Debug, Clone)]
@@ -276,11 +277,11 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
             pid: Some(ProcedureId { key: val.key }),
             table_id: val
                 .table_id
-                .map(|table_id| api::v1::meta::TableId { id: table_id }),
+                .map(|table_id| api::v1::TableId { id: table_id }),
             table_ids: val
                 .table_ids
                 .into_iter()
-                .map(|id| api::v1::meta::TableId { id })
+                .map(|id| api::v1::TableId { id })
                 .collect(),
             ..Default::default()
         }
@@ -818,9 +819,12 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
 }
 
 /// Drop flow
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DropFlowTask {
     pub catalog_name: String,
     pub flow_name: String,
+    pub flow_id: FlowId,
+    pub drop_if_exists: bool,
 }
 
 impl TryFrom<PbDropFlowTask> for DropFlowTask {
@@ -830,12 +834,21 @@ impl TryFrom<PbDropFlowTask> for DropFlowTask {
         let DropFlowExpr {
             catalog_name,
             flow_name,
+            flow_id,
+            drop_if_exists,
         } = pb.drop_flow.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected sink_table_name",
+            err_msg: "expected drop_flow",
         })?;
+        let flow_id = flow_id
+            .context(error::InvalidProtoMsgSnafu {
+                err_msg: "expected flow_id",
+            })?
+            .id;
         Ok(DropFlowTask {
             catalog_name,
             flow_name,
+            flow_id,
+            drop_if_exists,
         })
     }
 }
@@ -845,12 +858,16 @@ impl From<DropFlowTask> for PbDropFlowTask {
         DropFlowTask {
             catalog_name,
             flow_name,
+            flow_id,
+            drop_if_exists,
         }: DropFlowTask,
     ) -> Self {
         PbDropFlowTask {
             drop_flow: Some(DropFlowExpr {
                 catalog_name,
                 flow_name,
+                flow_id: Some(api::v1::FlowId { id: flow_id }),
+                drop_if_exists,
             }),
         }
     }

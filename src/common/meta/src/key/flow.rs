@@ -23,7 +23,10 @@ use std::sync::Arc;
 use common_telemetry::info;
 use snafu::{ensure, OptionExt};
 
-use self::flow_info::FlowInfoValue;
+use self::flow_info::{FlowInfoKey, FlowInfoValue};
+use self::flow_name::FlowNameKey;
+use self::flownode_flow::FlownodeFlowKey;
+use self::table_flow::TableFlowKey;
 use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::{FlowInfoManager, FlowInfoManagerRef};
@@ -34,6 +37,7 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{FlowId, MetaKey};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::BatchDeleteRequest;
 
 /// The key of `__flow/` scope.
 #[derive(Debug, PartialEq)]
@@ -205,19 +209,66 @@ impl FlowMetadataManager {
 
         Ok(())
     }
+
+    fn flow_metadata_keys(&self, flow_id: FlowId, flow_value: &FlowInfoValue) -> Vec<Vec<u8>> {
+        let source_table_ids = flow_value.source_table_ids();
+        let mut keys =
+            Vec::with_capacity(2 + flow_value.flownode_ids.len() * (source_table_ids.len() + 1));
+        /// Builds flow name key
+        let flow_name = FlowNameKey::new(&flow_value.catalog_name, &flow_value.flow_name);
+        keys.push(flow_name.to_bytes());
+
+        /// Builds flow value key
+        let flow_info_key = FlowInfoKey::new(flow_id);
+        keys.push(flow_info_key.to_bytes());
+
+        /// Builds flownode flow keys & table flow keys
+        flow_value
+            .flownode_ids
+            .iter()
+            .for_each(|(&partition_id, &flownode_id)| {
+                keys.push(FlownodeFlowKey::new(flownode_id, flow_id, partition_id).to_bytes());
+
+                source_table_ids.iter().for_each(|&table_id| {
+                    keys.push(
+                        TableFlowKey::new(table_id, flownode_id, flow_id, partition_id).to_bytes(),
+                    );
+                })
+            });
+
+        keys
+    }
+
+    /// Deletes metadata for table **permanently**.
+    pub async fn destroy_flow_metadata(
+        &self,
+        flow_id: FlowId,
+        flow_value: &FlowInfoValue,
+    ) -> Result<()> {
+        let keys = self.flow_metadata_keys(flow_id, flow_value);
+        let _ = self
+            .kv_backend
+            .batch_delete(BatchDeleteRequest::new().with_keys(keys))
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use futures::TryStreamExt;
+    use table::metadata::TableId;
 
     use super::*;
     use crate::key::flow::table_flow::TableFlowKey;
+    use crate::key::FlowPartitionId;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::table_name::TableName;
+    use crate::FlownodeId;
 
     #[derive(Debug)]
     struct MockKey {
@@ -258,28 +309,38 @@ mod tests {
         assert_matches!(err, error::Error::MismatchPrefix { .. });
     }
 
-    #[tokio::test]
-    async fn test_create_flow_metadata() {
-        let mem_kv = Arc::new(MemoryKvBackend::default());
-        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
-        let flow_id = 10;
+    fn test_flow_info_value(
+        flow_id: FlowId,
+        flow_name: &str,
+        flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
+        source_table_ids: Vec<TableId>,
+    ) -> FlowInfoValue {
         let catalog_name = "greptime";
         let sink_table_name = TableName {
             catalog_name: catalog_name.to_string(),
             schema_name: "my_schema".to_string(),
             table_name: "sink_table".to_string(),
         };
-        let flow_value = FlowInfoValue {
+        FlowInfoValue {
             catalog_name: catalog_name.to_string(),
-            flow_name: "flow".to_string(),
-            source_table_ids: vec![1024, 1025, 1026],
+            flow_name: flow_name.to_string(),
+            source_table_ids,
             sink_table_name,
-            flownode_ids: [(0, 1u64)].into(),
+            flownode_ids,
             raw_sql: "raw".to_string(),
             expire_when: "expr".to_string(),
             comment: "hi".to_string(),
             options: Default::default(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_flow_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_id = 10;
+        let flow_value =
+            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await
@@ -315,43 +376,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_metadata_flow_exists_err() {
+    async fn test_create_flow_metadata_flow_exists_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let flow_id = 10;
         let catalog_name = "greptime";
-        let sink_table_name = TableName {
-            catalog_name: catalog_name.to_string(),
-            schema_name: "my_schema".to_string(),
-            table_name: "sink_table".to_string(),
-        };
-        let flow_value = FlowInfoValue {
-            catalog_name: "greptime".to_string(),
-            flow_name: "flow".to_string(),
-            source_table_ids: vec![1024, 1025, 1026],
-            sink_table_name: sink_table_name.clone(),
-            flownode_ids: [(0, 1u64)].into(),
-            raw_sql: "raw".to_string(),
-            expire_when: "expr".to_string(),
-            comment: "hi".to_string(),
-            options: Default::default(),
-        };
+        let flow_value =
+            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await
             .unwrap();
-        // Creates again.
-        let flow_value = FlowInfoValue {
-            catalog_name: catalog_name.to_string(),
-            flow_name: "flow".to_string(),
-            source_table_ids: vec![1024, 1025, 1026],
-            sink_table_name,
-            flownode_ids: [(0, 1u64)].into(),
-            raw_sql: "raw".to_string(),
-            expire_when: "expr".to_string(),
-            comment: "hi".to_string(),
-            options: Default::default(),
-        };
+        // Creates again
         let err = flow_metadata_manager
             .create_flow_metadata(flow_id + 1, flow_value)
             .await
@@ -360,27 +396,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_metadata_unexpected_err() {
+    async fn test_create_flow_metadata_unexpected_err() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let flow_id = 10;
         let catalog_name = "greptime";
-        let sink_table_name = TableName {
-            catalog_name: catalog_name.to_string(),
-            schema_name: "my_schema".to_string(),
-            table_name: "sink_table".to_string(),
-        };
-        let flow_value = FlowInfoValue {
-            catalog_name: "greptime".to_string(),
-            flow_name: "flow".to_string(),
-            source_table_ids: vec![1024, 1025, 1026],
-            sink_table_name: sink_table_name.clone(),
-            flownode_ids: [(0, 1u64)].into(),
-            raw_sql: "raw".to_string(),
-            expire_when: "expr".to_string(),
-            comment: "hi".to_string(),
-            options: Default::default(),
-        };
+        let flow_value =
+            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await
@@ -407,5 +429,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Reads the different value"));
+    }
+
+    #[tokio::test]
+    async fn test_destroy_flow_metadata() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_id = 10;
+        let catalog_name = "greptime";
+        let flow_value =
+            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value.clone())
+            .await
+            .unwrap();
+
+        flow_metadata_manager
+            .destroy_flow_metadata(flow_id, &flow_value)
+            .await
+            .unwrap();
+        // Destroys again
+        flow_metadata_manager
+            .destroy_flow_metadata(flow_id, &flow_value)
+            .await
+            .unwrap();
+        // Ensures all keys are deleted
+        assert!(mem_kv.is_empty())
     }
 }

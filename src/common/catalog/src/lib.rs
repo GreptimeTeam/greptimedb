@@ -28,6 +28,12 @@ pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> Strin
     format!("{catalog}.{schema}.{table}")
 }
 
+/// Formats flow fully-qualified name
+#[inline]
+pub fn format_full_flow_name(catalog: &str, flow: &str) -> String {
+    format!("{catalog}.{flow}")
+}
+
 /// Build db name from catalog and schema string
 pub fn build_db_string(catalog: &str, schema: &str) -> String {
     if catalog == DEFAULT_CATALOG_NAME {

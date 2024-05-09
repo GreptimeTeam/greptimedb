@@ -19,7 +19,7 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::DatanodeId;
+use common_meta::{ClusterId, DatanodeId};
 use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
@@ -167,7 +167,7 @@ impl RegionLeaseKeeper {
     /// and corresponding regions will be added to `non_exists` of [RenewRegionLeasesResponse].
     pub async fn renew_region_leases(
         &self,
-        _cluster_id: u64,
+        _cluster_id: ClusterId,
         datanode_id: DatanodeId,
         regions: &[(RegionId, RegionRole)],
     ) -> Result<RenewRegionLeasesResponse> {

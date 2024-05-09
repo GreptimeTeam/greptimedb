@@ -270,6 +270,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Flow not found: '{}'", flow_name))]
+    FlowNotFound {
+        flow_name: String,
+        location: Location,
+    },
+
     #[snafu(display("Schema nod found, schema: {}", table_schema))]
     SchemaNotFound {
         table_schema: String,
@@ -511,9 +517,11 @@ impl ErrorExt for Error {
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
-            | FlowAlreadyExists { .. }
             | MismatchPrefix { .. }
             | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
+
+            FlowNotFound { .. } => StatusCode::FlowNotFound,
+            FlowAlreadyExists { .. } => StatusCode::FlowAlreadyExists,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

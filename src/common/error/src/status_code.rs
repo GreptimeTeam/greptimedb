@@ -97,6 +97,11 @@ pub enum StatusCode {
     /// User is not authorized to perform the operation
     PermissionDenied = 7006,
     // ====== End of auth related status code =====
+
+    // ====== Begin of flow related status code =====
+    FlowAlreadyExists = 8000,
+    FlowNotFound = 8001,
+    // ====== End of flow related status code =====
 }
 
 impl StatusCode {
@@ -125,8 +130,10 @@ impl StatusCode {
             | StatusCode::EngineExecuteQuery
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
-            | StatusCode::RegionNotFound
             | StatusCode::RegionAlreadyExists
+            | StatusCode::RegionNotFound
+            | StatusCode::FlowAlreadyExists
+            | StatusCode::FlowNotFound
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
@@ -161,10 +168,12 @@ impl StatusCode {
             | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
+            | StatusCode::RegionAlreadyExists
             | StatusCode::RegionNotFound
+            | StatusCode::FlowAlreadyExists
+            | StatusCode::FlowNotFound
             | StatusCode::RegionNotReady
             | StatusCode::RegionBusy
-            | StatusCode::RegionAlreadyExists
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists

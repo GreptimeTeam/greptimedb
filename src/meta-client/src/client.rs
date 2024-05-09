@@ -41,6 +41,7 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
+use common_meta::ClusterId;
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
@@ -75,7 +76,7 @@ pub struct MetaClientBuilder {
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: u64, member_id: u64, role: Role) -> Self {
+    pub fn new(cluster_id: ClusterId, member_id: u64, role: Role) -> Self {
         Self {
             id: (cluster_id, member_id),
             role,
