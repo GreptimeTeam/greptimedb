@@ -68,6 +68,11 @@ where
             token_filter,
         }
     }
+
+    // Returns an approximate number of entries in this cache.
+    pub fn entry_count(&self) -> u64 {
+        self.cache.entry_count()
+    }
 }
 
 #[async_trait::async_trait]

@@ -12,10 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod container;
-mod flow;
-mod table;
-
-pub use container::{CacheContainer, Initializer, Invalidator, TokenFilter};
-pub use flow::{new_table_flownode_set_cache, TableFlownodeSetCache};
-pub use table::{new_table_name_cache, TableNameCache, TableNameCacheRef};
+mod table_name;
+pub use table_name::{new_table_name_cache, TableNameCache, TableNameCacheRef};

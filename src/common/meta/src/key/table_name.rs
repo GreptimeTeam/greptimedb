@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ use crate::rpc::store::{BatchGetRequest, RangeRequest};
 use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TableNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
@@ -155,6 +156,8 @@ impl TableNameValue {
     }
 }
 
+pub type TableNameManagerRef = Arc<TableNameManager>;
+
 #[derive(Clone)]
 pub struct TableNameManager {
     kv_backend: KvBackendRef,
@@ -205,8 +208,11 @@ impl TableNameManager {
         Ok(txn)
     }
 
-    pub async fn get(&self, key: TableNameKey<'_>) -> Result<Option<TableNameValue>> {
-        let raw_key = key.to_bytes();
+    pub async fn get<'a, T: Borrow<TableNameKey<'a>>>(
+        &self,
+        key: T,
+    ) -> Result<Option<TableNameValue>> {
+        let raw_key = key.borrow().to_bytes();
         self.kv_backend
             .get(&raw_key)
             .await?
