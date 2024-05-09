@@ -59,7 +59,7 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
     })
 }
 
-async fn invalidate_create_flow(
+async fn handle_create_flow(
     cache: &Cache<TableId, FlownodeSet>,
     CreateFlow {
         source_table_ids,
@@ -73,18 +73,18 @@ async fn invalidate_create_flow(
                 async |entry: Option<moka::Entry<u32, HashSet<u64>>>| match entry {
                     Some(entry) => {
                         let mut set = entry.into_value();
-                        set.extend(flownode_ids.clone());
+                        set.extend(flownode_ids.iter().cloned());
 
                         Op::Put(set)
                     }
-                    None => Op::Put(HashSet::from_iter(flownode_ids.clone())),
+                    None => Op::Put(HashSet::from_iter(flownode_ids.iter().cloned())),
                 },
             )
             .await;
     }
 }
 
-async fn invalidate_drop_flow(
+async fn handle_drop_flow(
     cache: &Cache<TableId, FlownodeSet>,
     DropFlow {
         source_table_ids,
@@ -120,8 +120,8 @@ fn invalidator<'a>(
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         match ident {
-            CacheIdent::CreateFlow(create_flow) => invalidate_create_flow(cache, create_flow).await,
-            CacheIdent::DropFlow(drop_flow) => invalidate_drop_flow(cache, drop_flow).await,
+            CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
+            CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
             _ => {}
         }
         Ok(())
