@@ -59,11 +59,7 @@ pub trait CatalogManager: Send + Sync {
     ) -> Result<Option<TableRef>>;
 
     /// Returns all tables with a stream by catalog and schema.
-    async fn tables<'a>(
-        &'a self,
-        catalog: &'a str,
-        schema: &'a str,
-    ) -> BoxStream<'a, Result<TableRef>>;
+    fn tables<'a>(&'a self, catalog: &'a str, schema: &'a str) -> BoxStream<'a, Result<TableRef>>;
 }
 
 pub type CatalogManagerRef = Arc<dyn CatalogManager>;
