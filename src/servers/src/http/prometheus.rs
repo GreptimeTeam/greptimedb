@@ -754,6 +754,13 @@ pub async fn label_values_query(
         .collect();
 
     let mut label_values: Vec<_> = label_values.into_iter().collect();
+
+    // sort result for consistent output in tests
+    #[cfg(test)]
+    {
+        label_values.sort_unstable();
+    }
+
     label_values.sort();
     let mut resp = PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
     resp.resp_metrics = merge_map;
