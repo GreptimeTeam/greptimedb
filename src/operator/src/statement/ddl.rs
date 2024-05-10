@@ -406,7 +406,8 @@ impl StatementExecutor {
             .encode(&optimized_plan.unwrap_df_plan())
             .context(SubstraitCodecSnafu)?;
 
-        let expr = expr_factory::to_create_view_expr(create_view, encoded_plan.to_vec(), ctx)?;
+        let expr =
+            expr_factory::to_create_view_expr(create_view, encoded_plan.to_vec(), ctx.clone())?;
 
         let view_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.view_name);
 
@@ -426,6 +427,7 @@ impl StatementExecutor {
         };
 
         let request = SubmitDdlTaskRequest {
+            query_context: ctx,
             task: DdlTask::new_create_view(expr, view_info.clone()),
         };
 
