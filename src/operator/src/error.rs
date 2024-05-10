@@ -129,6 +129,9 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
+    #[snafu(display("Flow not found: {}", flow_name))]
+    FlowNotFound { flow_name: String },
+
     #[snafu(display("Failed to join task"))]
     JoinTask {
         #[snafu(source)]
@@ -620,6 +623,7 @@ impl ErrorExt for Error {
             Error::EncodeJson { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::FlowNotFound { .. } => StatusCode::FlowNotFound,
 
             Error::JoinTask { .. } => StatusCode::Internal,
 

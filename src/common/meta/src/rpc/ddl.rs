@@ -54,11 +54,16 @@ pub enum DdlTask {
     CreateDatabase(CreateDatabaseTask),
     DropDatabase(DropDatabaseTask),
     CreateFlow(CreateFlowTask),
+    DropFlow(DropFlowTask),
 }
 
 impl DdlTask {
     pub fn new_create_flow(expr: CreateFlowTask) -> Self {
         DdlTask::CreateFlow(expr)
+    }
+
+    pub fn new_drop_flow(expr: DropFlowTask) -> Self {
+        DdlTask::DropFlow(expr)
     }
 
     pub fn new_create_table(
@@ -237,6 +242,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(task.try_into()?),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
             DdlTask::CreateFlow(task) => Task::CreateFlowTask(task.into()),
+            DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
         };
 
         Ok(Self {
@@ -819,7 +825,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
 }
 
 /// Drop flow
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropFlowTask {
     pub catalog_name: String,
     pub flow_name: String,
