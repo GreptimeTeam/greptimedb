@@ -304,9 +304,7 @@ impl FlownodeManager {
                 (primary_keys, schema)
             } else {
                 // TODO(discord9): get ts column from `RelationType` once we are done rewriting flow plan to attach ts
-                let primary_keys = vec![];
-
-                let with_ts = {
+                let (primary_keys, schema) = {
                     let node_ctx = self.node_context.lock().await;
                     let gid: GlobalId = node_ctx
                         .table_repr
@@ -320,7 +318,17 @@ impl FlownodeManager {
                             name: format!("Table name = {:?}", table_name),
                         })?
                         .clone();
-
+                    // TODO(discord9): use default key from schema
+                    let primary_keys = schema
+                        .keys
+                        .first()
+                        .map(|v| {
+                            v.column_indices
+                                .iter()
+                                .map(|i| format!("Col_{i}"))
+                                .collect_vec()
+                        })
+                        .unwrap_or_default();
                     let ts_col = ColumnSchema::new(
                         "ts",
                         ConcreteDataType::timestamp_millisecond_datatype(),
@@ -338,17 +346,18 @@ impl FlownodeManager {
                         .collect_vec();
                     let mut with_ts = wout_ts.clone();
                     with_ts.push(ts_col);
-                    with_ts
+                    (primary_keys, with_ts)
                 };
-                (primary_keys, with_ts)
+                (primary_keys, schema)
             };
 
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
 
             debug!(
-                "Sending {} writeback requests to table {}",
+                "Sending {} writeback requests to table {}, reqs={:?}",
                 reqs.len(),
-                table_name.join(".")
+                table_name.join("."),
+                reqs
             );
 
             for req in reqs {
@@ -455,6 +464,20 @@ impl FlownodeManager {
         })
     }
 
+    /// log all flow errors
+    pub async fn log_all_errors(&self) {
+        for (f_id, f_err) in self.flow_err_collectors.read().await.iter() {
+            let all_errors = f_err.get_all().await;
+            if !all_errors.is_empty() {
+                let all_errors = all_errors
+                    .into_iter()
+                    .map(|i| format!("{:?}", i))
+                    .join("\n");
+                common_telemetry::error!("Flow {} has following errors: {}", f_id, all_errors);
+            }
+        }
+    }
+
     /// Trigger dataflow running, and then send writeback request to the source sender
     ///
     /// note that this method didn't handle input mirror request, as this should be handled by grpc server
@@ -464,6 +487,7 @@ impl FlownodeManager {
             self.run_available().await;
             // TODO(discord9): error handling
             self.send_writeback_requests().await.unwrap();
+            self.log_all_errors().await;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
@@ -487,6 +511,7 @@ impl FlownodeManager {
         rows: Vec<DiffRow>,
     ) -> Result<(), Error> {
         let table_id = region_id.table_id();
+        debug!("Send {} rows to table {}", rows.len(), table_id);
         self.node_context.lock().await.send(table_id, rows)?;
         Ok(())
     }
@@ -549,7 +574,7 @@ impl FlownodeManager {
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
-        info!("Flow Plan is {:?}", flow_plan);
+        debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
         node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
 
         let expire_when = expire_when

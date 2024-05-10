@@ -120,10 +120,6 @@ pub async fn sql_to_flow_plan(
     Ok(flow_plan)
 }
 
-fn rewrite_to_prop_ts(plan: TypedPlan) -> TypedPlan {
-    todo!()
-}
-
 #[cfg(test)]
 mod test {
     use std::sync::Arc;

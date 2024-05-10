@@ -228,7 +228,7 @@ impl TypedPlan {
             return not_impl_err!("Aggregate without an input is not supported");
         };
 
-        let group_expr =
+        let group_exprs =
             TypedExpr::from_substrait_agg_grouping(ctx, &agg.groupings, &input.typ, extensions)?;
 
         let mut aggr_exprs =
@@ -236,14 +236,14 @@ impl TypedPlan {
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(
             &mut aggr_exprs,
-            &group_expr,
+            &group_exprs,
             input.typ.column_types.len(),
         )?;
 
         let output_type = {
             let mut output_types = Vec::new();
             // first append group_expr as key, then aggr_expr as value
-            for expr in &group_expr {
+            for expr in &group_exprs {
                 output_types.push(expr.typ.clone());
             }
 
@@ -252,7 +252,8 @@ impl TypedPlan {
                     aggr.func.signature().output.clone(),
                 ));
             }
-            RelationType::new(output_types)
+            // TODO(discord9): try best to get time
+            RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
         };
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
@@ -365,8 +366,8 @@ mod test {
         };
         let expected = TypedPlan {
             typ: RelationType::new(vec![
-                ColumnType::new(CDT::uint32_datatype(), true),
-                ColumnType::new(CDT::uint32_datatype(), false),
+                ColumnType::new(CDT::uint32_datatype(), true), // col sum(number)
+                ColumnType::new(CDT::uint32_datatype(), false), // col number
             ]),
             plan: Plan::Mfp {
                 input: Box::new(Plan::Reduce {

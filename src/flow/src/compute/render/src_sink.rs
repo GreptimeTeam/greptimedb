@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -70,7 +70,13 @@ impl<'referred, 'df> Context<'referred, 'df> {
                     }
                 }
                 let all = prev_avail.chain(to_send).collect_vec();
-
+                if !all.is_empty() || !to_arrange.is_empty() {
+                    debug!(
+                        "All send: {} rows, not yet send: {} rows",
+                        all.len(),
+                        to_arrange.len()
+                    );
+                }
                 err_collector.run(|| arrange_handler_inner.write().apply_updates(now, to_arrange));
                 send.give(all);
                 // always schedule source to run at next tick

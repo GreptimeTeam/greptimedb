@@ -15,7 +15,6 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{ListValue, Value};
 use hydroflow::scheduled::graph_ext::GraphExt;
@@ -81,7 +80,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
             out_send_port,
             move |_ctx, recv, send| {
                 // mfp only need to passively receive updates from recvs
-                let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+                let data = recv
+                    .take_inner()
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .collect_vec();
 
                 reduce_subgraph(
                     &reduce_arrange,
