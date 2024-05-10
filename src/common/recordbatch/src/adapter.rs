@@ -332,7 +332,7 @@ impl ExecutionPlanVisitor for MetricCollector {
     }
 
     fn post_visit(&mut self, _plan: &dyn ExecutionPlan) -> std::result::Result<bool, Self::Error> {
-        // the last miuns will underflow
+        // the last minus will underflow
         self.current_level = self.current_level.wrapping_sub(1);
         Ok(true)
     }
