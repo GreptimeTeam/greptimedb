@@ -346,6 +346,13 @@ pub enum Error {
         #[snafu(source)]
         error: toml::ser::Error,
     },
+
+    #[snafu(display("Failed to get cache: {}", name))]
+    GetCache {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -399,7 +406,7 @@ impl ErrorExt for Error {
             | Error::VectorToGrpcColumn { .. }
             | Error::InvalidRegionRequest { .. } => StatusCode::Internal,
 
-            Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
+            Error::ContextValueNotFound { .. } | Error::GetCache { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
 

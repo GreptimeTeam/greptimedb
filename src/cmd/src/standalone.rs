@@ -441,7 +441,7 @@ impl StartCommand {
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
             node_manager.clone(),
-            cache_registry,
+            cache_registry.clone(),
             table_metadata_manager,
             table_meta_allocator,
             flow_metadata_manager,
@@ -449,12 +449,17 @@ impl StartCommand {
         )
         .await?;
 
-        let mut frontend =
-            FrontendBuilder::new(kv_backend, catalog_manager, node_manager, ddl_task_executor)
-                .with_plugin(fe_plugins.clone())
-                .try_build()
-                .await
-                .context(StartFrontendSnafu)?;
+        let mut frontend = FrontendBuilder::new(
+            kv_backend,
+            cache_registry,
+            catalog_manager,
+            node_manager,
+            ddl_task_executor,
+        )
+        .with_plugin(fe_plugins.clone())
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()

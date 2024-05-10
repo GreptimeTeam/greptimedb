@@ -169,7 +169,7 @@ impl GreptimeDbStandaloneBuilder {
             DdlManager::try_new(
                 DdlContext {
                     node_manager: node_manager.clone(),
-                    cache_invalidator: cache_registry,
+                    cache_invalidator: cache_registry.clone(),
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
@@ -184,6 +184,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let instance = FrontendBuilder::new(
             kv_backend.clone(),
+            cache_registry,
             catalog_manager,
             node_manager,
             ddl_task_executor,

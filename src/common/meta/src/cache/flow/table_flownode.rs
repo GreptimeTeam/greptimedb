@@ -30,6 +30,8 @@ use crate::FlownodeId;
 
 type FlownodeSet = HashSet<FlownodeId>;
 
+pub type TableFlownodeSetCacheRef = Arc<TableFlownodeSetCache>;
+
 /// [TableFlownodeSetCache] caches the [TableId] to [FlownodeSet] mapping.
 pub type TableFlownodeSetCache = CacheContainer<TableId, FlownodeSet, CacheIdent>;
 

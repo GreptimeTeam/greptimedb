@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_meta::cache::CacheRegistryRef;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::key::flow::TableFlowManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -31,8 +31,9 @@ use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
 use servers::server::ServerHandlers;
+use snafu::OptionExt;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::{Instance, StatementExecutorRef};
@@ -41,6 +42,7 @@ use crate::script::ScriptExecutor;
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
+    cache_registry: CacheRegistryRef,
     cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
     node_manager: NodeManagerRef,
@@ -52,12 +54,14 @@ pub struct FrontendBuilder {
 impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
+        cache_registry: CacheRegistryRef,
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
+            cache_registry,
             cache_invalidator: None,
             catalog_manager,
             node_manager,
@@ -102,13 +106,14 @@ impl FrontendBuilder {
         let region_query_handler =
             FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
-        let table_flow_manager = Arc::new(TableFlowManager::new(kv_backend.clone()));
-
+        let table_flownode_cache = self.cache_registry.get().context(error::GetCacheSnafu {
+            name: "table_flownode_set_cache",
+        })?;
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
             node_manager.clone(),
-            table_flow_manager,
+            table_flownode_cache,
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),

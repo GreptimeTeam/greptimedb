@@ -274,6 +274,7 @@ impl StartCommand {
 
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
+            cache_registry.clone(),
             catalog_manager,
             Arc::new(DatanodeClients::default()),
             meta_client,
