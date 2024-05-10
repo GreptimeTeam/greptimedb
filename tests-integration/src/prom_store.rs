@@ -90,7 +90,7 @@ mod tests {
         };
 
         let db = "prometheus";
-        let mut ctx = Arc::into_inner(QueryContext::with(DEFAULT_CATALOG_NAME, db)).unwrap();
+        let mut ctx = Arc::into_inner(QueryContext::with(DEFAULT_CATALOG_NAME, db).into()).unwrap();
 
         // set physical table if provided
         if let Some(physical_table) = &physical_table {

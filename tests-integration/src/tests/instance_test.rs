@@ -20,7 +20,6 @@ use client::OutputData;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
-use common_telemetry::logging;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
@@ -1205,7 +1204,7 @@ async fn test_rename_table(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db").await.data;
     assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
     let output = execute_sql_with(
         &instance,
         "create table demo(host string, cpu double, memory double, ts timestamp, time index(ts))",
@@ -1278,7 +1277,7 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
 
     // create test table
     let table_name = "demo";
-    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db");
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db"));
     let output = execute_sql_with(
         &instance,
         &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
@@ -1482,7 +1481,7 @@ async fn test_use_database(instance: Arc<dyn MockInstance>) {
     let output = execute_sql(&instance, "create database db1").await.data;
     assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "db1");
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "db1"));
     let output = execute_sql_with(
         &instance,
         "create table tb1(col_i32 int, ts timestamp, TIME INDEX(ts))",
@@ -1629,7 +1628,9 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    use common_telemetry::info;
+
+    common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET") {
         if !bucket.is_empty() {
             let instance = instance.frontend();
@@ -1706,7 +1707,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                     "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
                     test.sql, key_id, key, region,
                 );
-                logging::info!("Running sql: {}", sql);
+                info!("Running sql: {}", sql);
 
                 let output = execute_sql(&instance, &sql).await.data;
                 assert!(matches!(output, OutputData::AffectedRows(2)));
@@ -1732,7 +1733,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
 
     // setups
@@ -1766,7 +1767,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
 
     // setups
@@ -1844,7 +1845,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";
-    let query_ctx = QueryContext::with("another_catalog", "another_schema");
+    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
     let output = execute_sql_with(&instance, sql, query_ctx.clone())
         .await
         .data;
@@ -1880,11 +1881,11 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
-    logging::init_default_ut_logging();
+    common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";
-    let query_ctx = QueryContext::with("another_catalog", "another_schema");
+    let query_ctx = Arc::new(QueryContext::with("another_catalog", "another_schema"));
     let output = execute_sql_with(&instance, sql, query_ctx.clone())
         .await
         .data;

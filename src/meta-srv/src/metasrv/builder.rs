@@ -360,6 +360,7 @@ impl MetasrvBuilder {
         Ok(Metasrv {
             state,
             started,
+            start_time_ms: common_time::util::current_time_millis() as u64,
             options,
             in_memory,
             kv_backend,

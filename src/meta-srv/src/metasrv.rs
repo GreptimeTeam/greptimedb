@@ -207,12 +207,39 @@ impl Context {
     }
 }
 
+/// The value of the leader. It is used to store the leader's address.
 pub struct LeaderValue(pub String);
 
 impl<T: AsRef<[u8]>> From<T> for LeaderValue {
     fn from(value: T) -> Self {
         let string = String::from_utf8_lossy(value.as_ref());
         Self(string.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetasrvNodeInfo {
+    // The metasrv's address
+    pub addr: String,
+    // The node build version
+    pub version: String,
+    // The node build git commit hash
+    pub git_commit: String,
+    // The node start timestamp in milliseconds
+    pub start_time_ms: u64,
+}
+
+impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
+    fn from(node_info: MetasrvNodeInfo) -> Self {
+        Self {
+            peer: Some(api::v1::meta::Peer {
+                addr: node_info.addr,
+                ..Default::default()
+            }),
+            version: node_info.version,
+            git_commit: node_info.git_commit,
+            start_time_ms: node_info.start_time_ms,
+        }
     }
 }
 
@@ -281,6 +308,7 @@ impl MetaStateHandler {
 pub struct Metasrv {
     state: StateRef,
     started: Arc<AtomicBool>,
+    start_time_ms: u64,
     options: MetasrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
@@ -315,7 +343,11 @@ impl Metasrv {
             return Ok(());
         }
 
-        self.create_default_schema_if_not_exist().await?;
+        // Creates default schema if not exists
+        self.table_metadata_manager
+            .init()
+            .await
+            .context(InitMetadataSnafu)?;
 
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
@@ -370,9 +402,10 @@ impl Metasrv {
             {
                 let election = election.clone();
                 let started = self.started.clone();
+                let node_info = self.node_info();
                 let _handle = common_runtime::spawn_bg(async move {
                     while started.load(Ordering::Relaxed) {
-                        let res = election.register_candidate().await;
+                        let res = election.register_candidate(&node_info).await;
                         if let Err(e) = res {
                             warn!("Metasrv register candidate error: {}", e);
                         }
@@ -411,14 +444,8 @@ impl Metasrv {
         }
 
         info!("Metasrv started");
-        Ok(())
-    }
 
-    async fn create_default_schema_if_not_exist(&self) -> Result<()> {
-        self.table_metadata_manager
-            .init()
-            .await
-            .context(InitMetadataSnafu)
+        Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -427,6 +454,20 @@ impl Metasrv {
             .stop()
             .await
             .context(StopProcedureManagerSnafu)
+    }
+
+    pub fn start_time_ms(&self) -> u64 {
+        self.start_time_ms
+    }
+
+    pub fn node_info(&self) -> MetasrvNodeInfo {
+        let build_info = common_version::build_info();
+        MetasrvNodeInfo {
+            addr: self.options().server_addr.clone(),
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit_short.to_string(),
+            start_time_ms: self.start_time_ms(),
+        }
     }
 
     /// Lookup a peer by peer_id, return it only when it's alive.

@@ -30,6 +30,7 @@ use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
+use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
@@ -48,7 +49,7 @@ use crate::rpc::ddl::DdlTask::{
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
-    DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -149,6 +150,15 @@ impl DdlManager {
                     Box::new(move |json: &str| {
                         let context = context.clone();
                         DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                    })
+                },
+            ),
+            (
+                DropFlowProcedure::TYPE_NAME,
+                &|context: DdlContext| -> BoxedProcedureLoader {
+                    Box::new(move |json: &str| {
+                        let context = context.clone();
+                        DropFlowProcedure::from_json(json, context).map(|p| Box::new(p) as _)
                     })
                 },
             ),
@@ -328,9 +338,10 @@ impl DdlManager {
         &self,
         cluster_id: ClusterId,
         create_flow: CreateFlowTask,
+        query_context: QueryContext,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = CreateFlowProcedure::new(cluster_id, create_flow, context);
+        let procedure = CreateFlowProcedure::new(cluster_id, create_flow, query_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -600,9 +611,10 @@ async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
     create_flow_task: CreateFlowTask,
+    query_context: QueryContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_flow_task(cluster_id, create_flow_task.clone())
+        .submit_create_flow_task(cluster_id, create_flow_task.clone(), query_context)
         .await?;
 
     let procedure_id = id.to_string();
@@ -705,7 +717,13 @@ impl ProcedureExecutor for DdlManager {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, cluster_id, create_flow_task).await
+                    handle_create_flow_task(
+                        self,
+                        cluster_id,
+                        create_flow_task,
+                        request.query_context.into(),
+                    )
+                    .await
                 }
             }
         }

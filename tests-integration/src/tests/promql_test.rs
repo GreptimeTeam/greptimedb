@@ -553,7 +553,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
 
     ins.do_query(
         AGGREGATORS_CREATE_TABLE,
-        QueryContext::with_db_name(Some("greptime_private")),
+        QueryContext::with_db_name(Some("greptime_private")).into(),
     )
     .await
     .into_iter()
@@ -562,7 +562,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
     });
     ins.do_query(
         AGGREGATORS_INSERT_DATA,
-        QueryContext::with_db_name(Some("greptime_private")),
+        QueryContext::with_db_name(Some("greptime_private")).into(),
     )
     .await
     .into_iter()
@@ -617,7 +617,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests"#,
-        QueryContext::with_db_name(Some("greptime_private")),
+        QueryContext::with_db_name(Some("greptime_private")).into(),
         start,
         end,
         interval,

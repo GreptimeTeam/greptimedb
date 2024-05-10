@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_runtime::Runtime;
-use common_telemetry::logging::{error, info};
+use common_telemetry::{error, info};
 use futures::future::{try_join_all, AbortHandle, AbortRegistration, Abortable};
 use snafu::{ensure, ResultExt};
 use tokio::sync::{Mutex, RwLock};

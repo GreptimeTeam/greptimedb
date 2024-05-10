@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use common_telemetry::logging;
+use common_telemetry::{debug, error};
 use futures::stream;
 
 use crate::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
@@ -254,9 +254,9 @@ impl ExternalSorter {
 
         let entries = values.len();
         IntermediateWriter::new(writer).write_all(values, bitmap_leading_zeros as _).await.inspect(|_|
-            logging::debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
+            debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
         ).inspect_err(|e|
-            logging::error!("Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}. Error: {e}")
+            error!("Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}. Error: {e}")
         )
     }
 

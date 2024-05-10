@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{info, logging, tracing};
+use common_telemetry::{error, info, tracing};
 use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
@@ -244,20 +244,18 @@ impl ManagerContext {
     ) -> Option<LoadedProcedure> {
         let loaders = self.loaders.lock().unwrap();
         let loader = loaders.get(&message.type_name).or_else(|| {
-            logging::error!(
+            error!(
                 "Loader not found, procedure_id: {}, type_name: {}",
-                procedure_id,
-                message.type_name
+                procedure_id, message.type_name
             );
             None
         })?;
 
         let procedure = loader(&message.data)
             .map_err(|e| {
-                logging::error!(
+                error!(
                     "Failed to load procedure data, key: {}, source: {:?}",
-                    procedure_id,
-                    e
+                    procedure_id, e
                 );
                 e
             })
@@ -488,7 +486,7 @@ impl LocalManager {
             if message.parent_id.is_none() {
                 // This is the root procedure. We only submit the root procedure as it will
                 // submit sub-procedures to the manager.
-                let Some(loaded_procedure) = self
+                let Some(mut loaded_procedure) = self
                     .manager_ctx
                     .load_one_procedure_from_message(*procedure_id, message)
                 else {
@@ -496,7 +494,7 @@ impl LocalManager {
                     continue;
                 };
 
-                logging::info!(
+                info!(
                     "Recover root procedure {}-{}, step: {}",
                     loaded_procedure.procedure.type_name(),
                     procedure_id,
@@ -515,13 +513,17 @@ impl LocalManager {
                     InitProcedureState::Running => ProcedureState::Running,
                 };
 
+                if let Err(e) = loaded_procedure.procedure.recover() {
+                    error!(e; "Failed to recover procedure {}", procedure_id);
+                }
+
                 if let Err(e) = self.submit_root(
                     *procedure_id,
                     procedure_state,
                     loaded_procedure.step,
                     loaded_procedure.procedure,
                 ) {
-                    logging::error!(e; "Failed to recover procedure {}", procedure_id);
+                    error!(e; "Failed to recover procedure {}", procedure_id);
                 }
             }
         }
@@ -529,7 +531,7 @@ impl LocalManager {
 
     /// Recovers unfinished procedures and reruns them.
     async fn recover(&self) -> Result<()> {
-        logging::info!("LocalManager start to recover");
+        info!("LocalManager start to recover");
         let recover_start = Instant::now();
 
         let (messages, rollback_messages, finished_ids) =
@@ -539,19 +541,19 @@ impl LocalManager {
         self.submit_recovered_messages(messages, InitProcedureState::Running);
 
         if !finished_ids.is_empty() {
-            logging::info!(
+            info!(
                 "LocalManager try to clean finished procedures, num: {}",
                 finished_ids.len()
             );
 
             for procedure_id in finished_ids {
                 if let Err(e) = self.procedure_store.delete_procedure(procedure_id).await {
-                    logging::error!(e; "Failed to delete procedure {}", procedure_id);
+                    error!(e; "Failed to delete procedure {}", procedure_id);
                 }
             }
         }
 
-        logging::info!(
+        info!(
             "LocalManager finish recovery, cost: {}ms",
             recover_start.elapsed().as_millis()
         );
@@ -688,6 +690,7 @@ mod tests {
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_test_util::temp_dir::create_temp_dir;
+    use tokio::time::timeout;
 
     use super::*;
     use crate::error::{self, Error};
@@ -1140,5 +1143,102 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[derive(Debug)]
+    struct ProcedureToRecover {
+        content: String,
+        lock_key: LockKey,
+        notify: Option<Arc<Notify>>,
+    }
+
+    #[async_trait]
+    impl Procedure for ProcedureToRecover {
+        fn type_name(&self) -> &str {
+            "ProcedureToRecover"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            Ok(Status::done())
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(self.content.clone())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            self.lock_key.clone()
+        }
+
+        fn recover(&mut self) -> Result<()> {
+            self.notify.as_ref().unwrap().notify_one();
+            Ok(())
+        }
+    }
+
+    impl ProcedureToRecover {
+        fn new(content: &str) -> ProcedureToRecover {
+            ProcedureToRecover {
+                content: content.to_string(),
+                lock_key: LockKey::default(),
+                notify: None,
+            }
+        }
+
+        fn loader(notify: Arc<Notify>) -> BoxedProcedureLoader {
+            let f = move |json: &str| {
+                let procedure = ProcedureToRecover {
+                    content: json.to_string(),
+                    lock_key: LockKey::default(),
+                    notify: Some(notify.clone()),
+                };
+                Ok(Box::new(procedure) as _)
+            };
+            Box::new(f)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_procedure_recover() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("procedure_recover");
+        let object_store = test_util::new_object_store(&dir);
+        let config = ManagerConfig {
+            parent_path: "data/".to_string(),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
+            ..Default::default()
+        };
+        let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
+        let manager = LocalManager::new(config, state_store);
+        manager.manager_ctx.start();
+
+        let notify = Arc::new(Notify::new());
+        manager
+            .register_loader(
+                "ProcedureToRecover",
+                ProcedureToRecover::loader(notify.clone()),
+            )
+            .unwrap();
+
+        // Prepare data
+        let procedure_store = ProcedureStore::from_object_store(object_store.clone());
+        let root: BoxedProcedure = Box::new(ProcedureToRecover::new("test procedure recovery"));
+        let root_id = ProcedureId::random();
+        // Prepare data for the root procedure.
+        for step in 0..3 {
+            let type_name = root.type_name().to_string();
+            let data = root.dump().unwrap();
+            procedure_store
+                .store_procedure(root_id, step, type_name, data, None)
+                .await
+                .unwrap();
+        }
+
+        // Recover the manager
+        manager.recover().await.unwrap();
+        timeout(Duration::from_secs(10), notify.notified())
+            .await
+            .unwrap();
     }
 }

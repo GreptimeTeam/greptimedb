@@ -514,8 +514,10 @@ pub fn check_permission(
         // These are executed by query engine, and will be checked there.
         Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
-        }
+        Statement::CreateDatabase(_)
+        | Statement::ShowDatabases(_)
+        | Statement::DropDatabase(_)
+        | Statement::DropFlow(_) => {}
 
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;

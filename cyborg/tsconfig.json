@@ -8,6 +8,7 @@
     "target": "ES6",
     "paths": {
       "@/*": ["./src/*"]
-    }
+    },
+    "resolveJsonModule": true,
   }
 }

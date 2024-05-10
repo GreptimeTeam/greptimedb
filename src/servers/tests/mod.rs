@@ -40,7 +40,6 @@ mod grpc;
 mod http;
 mod interceptor;
 mod mysql;
-mod opentsdb;
 mod postgres;
 mod py_script;
 

@@ -14,16 +14,16 @@
 
 use api::v1::meta::{
     cluster_server, BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
-    Error, MetasrvPeersRequest, MetasrvPeersResponse, Peer, RangeRequest as PbRangeRequest,
-    RangeResponse as PbRangeResponse, ResponseHeader,
+    Error, MetasrvNodeInfo, MetasrvPeersRequest, MetasrvPeersResponse,
+    RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_telemetry::warn;
 use snafu::ResultExt;
 use tonic::{Request, Response};
 
-use crate::error;
 use crate::metasrv::Metasrv;
 use crate::service::GrpcResult;
+use crate::{error, metasrv};
 
 #[async_trait::async_trait]
 impl cluster_server::Cluster for Metasrv {
@@ -88,40 +88,26 @@ impl cluster_server::Cluster for Metasrv {
             return Ok(Response::new(resp));
         }
 
+        let leader_addr = &self.options().server_addr;
         let (leader, followers) = match self.election() {
             Some(election) => {
-                let leader = election.leader().await?;
-                let peers = election.all_candidates().await?;
-                let followers = peers
+                let nodes = election.all_candidates().await?;
+                let followers = nodes
                     .into_iter()
-                    .filter(|peer| peer.0 != leader.0)
-                    .map(|peer| Peer {
-                        addr: peer.0,
-                        ..Default::default()
-                    })
+                    .filter(|node_info| &node_info.addr != leader_addr)
+                    .map(api::v1::meta::MetasrvNodeInfo::from)
                     .collect();
-                (
-                    Some(Peer {
-                        addr: leader.0,
-                        ..Default::default()
-                    }),
-                    followers,
-                )
+                (self.node_info().into(), followers)
             }
-            None => (
-                Some(Peer {
-                    addr: self.options().server_addr.clone(),
-                    ..Default::default()
-                }),
-                vec![],
-            ),
+            None => (self.make_node_info(leader_addr), vec![]),
         };
 
         let resp = MetasrvPeersResponse {
             header: Some(ResponseHeader::success(0)),
-            leader,
+            leader: Some(leader),
             followers,
         };
+
         Ok(Response::new(resp))
     }
 }
@@ -130,5 +116,16 @@ impl Metasrv {
     pub fn is_leader(&self) -> bool {
         // Returns true when there is no `election`, indicating the presence of only one `Metasrv` node, which is the leader.
         self.election().map(|x| x.is_leader()).unwrap_or(true)
+    }
+
+    fn make_node_info(&self, addr: &str) -> MetasrvNodeInfo {
+        let build_info = common_version::build_info();
+        metasrv::MetasrvNodeInfo {
+            addr: addr.to_string(),
+            version: build_info.version.to_string(),
+            git_commit: build_info.commit_short.to_string(),
+            start_time_ms: self.start_time_ms(),
+        }
+        .into()
     }
 }

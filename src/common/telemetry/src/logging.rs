@@ -32,7 +32,6 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
 use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
-pub use crate::{debug, error, info, trace, warn};
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 

@@ -112,6 +112,10 @@ where
                     let key: SchemaNameKey = (&schema_name).into();
                     self.invalidate_key(&key.to_bytes()).await;
                 }
+                CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) => {
+                    // TODO(weny): implements it
+                    unimplemented!()
+                }
             }
         }
         Ok(())

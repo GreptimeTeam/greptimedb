@@ -20,7 +20,7 @@ use common_meta::rpc::procedure::MigrateRegionRequest;
 use common_query::error::Error::ThreadJoin;
 use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use common_telemetry::logging::error;
+use common_telemetry::error;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};

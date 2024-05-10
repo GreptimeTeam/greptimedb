@@ -14,6 +14,7 @@
 
 use std::str::FromStr;
 
+use common_meta::ClusterId;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ lazy_static! {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct LeaseKey {
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     pub node_id: u64,
 }
 
@@ -132,7 +133,7 @@ impl TryFrom<LeaseValue> for Vec<u8> {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct StatKey {
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     pub node_id: u64,
 }
 
@@ -237,7 +238,7 @@ impl TryFrom<Vec<u8>> for StatValue {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct InactiveRegionKey {
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     pub node_id: u64,
     pub region_id: u64,
 }

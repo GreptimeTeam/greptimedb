@@ -436,7 +436,7 @@ jobs:
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
 
   notification:
-    if: ${{ always() }} # Not requiring successful dependent jobs, always run.
+    if: ${{ always() || github.repository == 'GreptimeTeam/greptimedb' }}
     name: Send notification to Greptime team
     needs: [
       release-images-to-dockerhub,

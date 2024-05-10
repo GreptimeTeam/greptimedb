@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_telemetry::logging::{debug, error};
+use common_telemetry::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -96,7 +96,9 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::DatabaseNotFound
             | StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound
-            | StatusCode::PlanQuery => HttpStatusCode::BAD_REQUEST,
+            | StatusCode::PlanQuery
+            | StatusCode::FlowNotFound
+            | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
 
             StatusCode::PermissionDenied
             | StatusCode::AuthHeaderNotFound

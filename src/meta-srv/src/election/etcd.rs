@@ -27,7 +27,7 @@ use tokio::sync::broadcast::Receiver;
 use crate::election::{Election, LeaderChangeMessage, CANDIDATES_ROOT, ELECTION_KEY};
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::{ElectionRef, LeaderValue};
+use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
 pub struct EtcdElection {
     leader_value: String,
@@ -131,7 +131,7 @@ impl Election for EtcdElection {
             .is_ok()
     }
 
-    async fn register_candidate(&self) -> Result<()> {
+    async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
         const CANDIDATE_LEASE_SECS: u64 = 600;
         const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
 
@@ -142,9 +142,13 @@ impl Election for EtcdElection {
             .context(error::EtcdFailedSnafu)?;
         let lease_id = res.id();
 
-        // The register info: key is the candidate key, value is its leader value.
+        // The register info: key is the candidate key, value is its node info(addr, version, git_commit).
         let key = self.candidate_key().into_bytes();
-        let value = self.leader_value.clone().into_bytes();
+        let value = serde_json::to_string(node_info)
+            .with_context(|_| error::SerializeToJsonSnafu {
+                input: format!("{node_info:?}"),
+            })?
+            .into_bytes();
         // Puts with the lease id
         self.client
             .kv_client()
@@ -175,7 +179,7 @@ impl Election for EtcdElection {
         Ok(())
     }
 
-    async fn all_candidates(&self) -> Result<Vec<LeaderValue>> {
+    async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>> {
         let key = self.candidate_root().into_bytes();
         let res = self
             .client
@@ -183,7 +187,19 @@ impl Election for EtcdElection {
             .get(key, Some(GetOptions::new().with_prefix()))
             .await
             .context(error::EtcdFailedSnafu)?;
-        res.kvs().iter().map(|kv| Ok(kv.value().into())).collect()
+
+        let mut nodes = Vec::with_capacity(res.kvs().len());
+        for kv in res.kvs() {
+            let node =
+                serde_json::from_slice::<MetasrvNodeInfo>(kv.value()).with_context(|_| {
+                    error::DeserializeFromJsonSnafu {
+                        input: String::from_utf8_lossy(kv.value()),
+                    }
+                })?;
+            nodes.push(node);
+        }
+
+        Ok(nodes)
     }
 
     async fn campaign(&self) -> Result<()> {

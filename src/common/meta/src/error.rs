@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::str::Utf8Error;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -270,6 +271,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Flow not found: '{}'", flow_name))]
+    FlowNotFound {
+        flow_name: String,
+        location: Location,
+    },
+
     #[snafu(display("Schema nod found, schema: {}", table_schema))]
     SchemaNotFound {
         table_schema: String,
@@ -447,6 +454,12 @@ pub enum Error {
         error: std::string::FromUtf8Error,
         location: Location,
     },
+
+    #[snafu(display("Value not exists"))]
+    ValueNotExist { location: Location },
+
+    #[snafu(display("Failed to get cache"))]
+    GetCache { source: Arc<Error> },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -460,7 +473,9 @@ impl ErrorExt for Error {
             | EtcdFailed { .. }
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
-            | MoveValues { .. } => StatusCode::Internal,
+            | MoveValues { .. }
+            | ValueNotExist { .. }
+            | GetCache { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | ParseOption { .. }
@@ -511,9 +526,11 @@ impl ErrorExt for Error {
             | InvalidEngineType { .. }
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
-            | FlowAlreadyExists { .. }
             | MismatchPrefix { .. }
             | DelimiterNotFound { .. } => StatusCode::InvalidArguments,
+
+            FlowNotFound { .. } => StatusCode::FlowNotFound,
+            FlowAlreadyExists { .. } => StatusCode::FlowAlreadyExists,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

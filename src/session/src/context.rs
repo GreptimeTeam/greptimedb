@@ -44,7 +44,7 @@ pub struct QueryContext {
     timezone: ArcSwap<Timezone>,
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
-    extension: HashMap<String, String>,
+    extensions: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -76,7 +76,7 @@ impl Clone for QueryContext {
             current_user: self.current_user.load().clone().into(),
             timezone: self.timezone.load().clone().into(),
             sql_dialect: self.sql_dialect.clone(),
-            extension: self.extension.clone(),
+            extensions: self.extensions.clone(),
             configuration_parameter: self.configuration_parameter.clone(),
         }
     }
@@ -84,32 +84,61 @@ impl Clone for QueryContext {
 
 impl From<&RegionRequestHeader> for QueryContext {
     fn from(value: &RegionRequestHeader) -> Self {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&value.dbname);
+        let mut builder = QueryContextBuilder::default();
+        if let Some(ctx) = &value.query_context {
+            builder = builder
+                .current_catalog(ctx.current_catalog.clone())
+                .current_schema(ctx.current_schema.clone())
+                .timezone(Arc::new(parse_timezone(Some(&ctx.timezone))))
+                .extensions(ctx.extensions.clone());
+        }
+        builder.build()
+    }
+}
+
+impl From<api::v1::QueryContext> for QueryContext {
+    fn from(ctx: api::v1::QueryContext) -> Self {
+        QueryContextBuilder::default()
+            .current_catalog(ctx.current_catalog)
+            .current_schema(ctx.current_schema)
+            .timezone(Arc::new(parse_timezone(Some(&ctx.timezone))))
+            .extensions(ctx.extensions)
+            .build()
+    }
+}
+
+impl From<QueryContext> for api::v1::QueryContext {
+    fn from(
         QueryContext {
-            current_catalog: catalog.to_string(),
-            current_schema: schema.to_string(),
-            current_user: Default::default(),
-            timezone: ArcSwap::new(Arc::new(parse_timezone(Some(&value.timezone)))),
-            sql_dialect: Arc::new(GreptimeDbDialect {}),
-            extension: Default::default(),
-            configuration_parameter: Default::default(),
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
+            ..
+        }: QueryContext,
+    ) -> Self {
+        api::v1::QueryContext {
+            current_catalog,
+            current_schema,
+            timezone: timezone.to_string(),
+            extensions,
         }
     }
 }
 
 impl QueryContext {
     pub fn arc() -> QueryContextRef {
-        QueryContextBuilder::default().build()
+        Arc::new(QueryContextBuilder::default().build())
     }
 
-    pub fn with(catalog: &str, schema: &str) -> QueryContextRef {
+    pub fn with(catalog: &str, schema: &str) -> QueryContext {
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(schema.to_string())
             .build()
     }
 
-    pub fn with_db_name(db_name: Option<&str>) -> QueryContextRef {
+    pub fn with_db_name(db_name: Option<&str>) -> QueryContext {
         let (catalog, schema) = db_name
             .map(|db| {
                 let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
@@ -162,11 +191,15 @@ impl QueryContext {
     }
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
-        self.extension.insert(key.into(), value.into());
+        self.extensions.insert(key.into(), value.into());
     }
 
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
-        self.extension.get(key.as_ref()).map(|v| v.as_str())
+        self.extensions.get(key.as_ref()).map(|v| v.as_str())
+    }
+
+    pub fn extensions(&self) -> HashMap<String, String> {
+        self.extensions.clone()
     }
 
     /// SQL like `set variable` may change timezone or other info in `QueryContext`.
@@ -195,8 +228,8 @@ impl QueryContext {
 }
 
 impl QueryContextBuilder {
-    pub fn build(self) -> QueryContextRef {
-        Arc::new(QueryContext {
+    pub fn build(self) -> QueryContext {
+        QueryContext {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
@@ -212,13 +245,13 @@ impl QueryContextBuilder {
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
-            extension: self.extension.unwrap_or_default(),
+            extensions: self.extensions.unwrap_or_default(),
             configuration_parameter: self.configuration_parameter.unwrap_or_default(),
-        })
+        }
     }
 
     pub fn set_extension(mut self, key: String, value: String) -> Self {
-        self.extension
+        self.extensions
             .get_or_insert_with(HashMap::new)
             .insert(key, value);
         self
@@ -231,7 +264,7 @@ impl QueryContextBuilder {
             current_user: Some(context.current_user.load().clone().into()),
             timezone: Some(context.timezone.load().clone().into()),
             sql_dialect: Some(context.sql_dialect.clone()),
-            extension: Some(context.extension.clone()),
+            extensions: Some(context.extensions.clone()),
             configuration_parameter: Some(context.configuration_parameter.clone()),
         }
     }

@@ -16,7 +16,8 @@ pub(crate) mod executor;
 mod metadata;
 
 use async_trait::async_trait;
-use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
+use common_error::ext::BoxedError;
+use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
@@ -35,10 +36,10 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
-use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{operating_leader_regions, RegionRoute};
+use crate::{metrics, ClusterId};
 
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
@@ -54,7 +55,7 @@ pub struct DropTableProcedure {
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub fn new(cluster_id: u64, task: DropTableTask, context: DdlContext) -> Self {
+    pub fn new(cluster_id: ClusterId, task: DropTableTask, context: DdlContext) -> Self {
         let data = DropTableData::new(cluster_id, task);
         let executor = data.build_executor();
         Self {
@@ -68,6 +69,7 @@ impl DropTableProcedure {
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
         let executor = data.build_executor();
+
         Ok(Self {
             context,
             data,
@@ -175,6 +177,23 @@ impl Procedure for DropTableProcedure {
         Self::TYPE_NAME
     }
 
+    fn recover(&mut self) -> ProcedureResult<()> {
+        // Only registers regions if the metadata is deleted.
+        let register_operating_regions = matches!(
+            self.data.state,
+            DropTableState::DeleteMetadata
+                | DropTableState::InvalidateTableCache
+                | DropTableState::DatanodeDropRegions
+        );
+        if register_operating_regions {
+            self.register_dropping_regions()
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+        }
+
+        Ok(())
+    }
+
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
         let _timer = metrics::METRIC_META_PROCEDURE_DROP_TABLE
@@ -233,14 +252,14 @@ impl Procedure for DropTableProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DropTableData {
     pub state: DropTableState,
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     pub task: DropTableTask,
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
 }
 
 impl DropTableData {
-    pub fn new(cluster_id: u64, task: DropTableTask) -> Self {
+    pub fn new(cluster_id: ClusterId, task: DropTableTask) -> Self {
         Self {
             state: DropTableState::Prepare,
             cluster_id,

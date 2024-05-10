@@ -168,6 +168,10 @@ impl StatementExecutor {
                 self.create_flow(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
+            Statement::DropFlow(_stmt) => {
+                // TODO(weny): implement it.
+                unimplemented!()
+            }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
@@ -175,13 +179,15 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name, stmt.drop_if_exists()).await
+                self.drop_table(table_name, stmt.drop_if_exists(), query_ctx)
+                    .await
             }
             Statement::DropDatabase(stmt) => {
                 self.drop_database(
                     query_ctx.current_catalog().to_string(),
                     format_raw_object_name(stmt.name()),
                     stmt.drop_if_exists(),
+                    query_ctx,
                 )
                 .await
             }
@@ -191,7 +197,7 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.truncate_table(table_name).await
+                self.truncate_table(table_name, query_ctx).await
             }
             Statement::CreateDatabase(stmt) => {
                 let options = if stmt.options.is_empty() {
@@ -200,10 +206,10 @@ impl StatementExecutor {
                     Some(stmt.options.into_map())
                 };
                 self.create_database(
-                    query_ctx.current_catalog(),
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
                     options,
+                    query_ctx,
                 )
                 .await
             }
@@ -428,7 +434,8 @@ mod tests {
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
             .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
-            .build();
+            .build()
+            .into();
         let map = OptionMap::from(
             [
                 (COPY_DATABASE_TIME_START_KEY.to_string(), start.to_string()),

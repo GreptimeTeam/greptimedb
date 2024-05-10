@@ -125,10 +125,10 @@ impl CreateExprFactory {
 //    constraint.
 pub(crate) async fn create_external_expr(
     create: CreateExternalTable,
-    query_ctx: QueryContextRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(&create.name, &query_ctx)
+        table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -187,9 +187,12 @@ pub(crate) async fn create_external_expr(
 }
 
 /// Convert `CreateTable` statement to [`CreateTableExpr`] gRPC request.
-pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Result<CreateTableExpr> {
+pub fn create_to_expr(
+    create: &CreateTable,
+    query_ctx: &QueryContextRef,
+) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(&create.name, &query_ctx)
+        table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -449,10 +452,10 @@ pub fn column_schemas_to_defs(
 
 pub(crate) fn to_alter_expr(
     alter_table: AlterTable,
-    query_ctx: QueryContextRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<AlterExpr> {
     let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(alter_table.table_name(), &query_ctx)
+        table_idents_to_full_name(alter_table.table_name(), query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -513,7 +516,7 @@ pub(crate) fn to_alter_expr(
 
 pub fn to_create_flow_task_expr(
     create_flow: CreateFlow,
-    query_ctx: QueryContextRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<CreateFlowTask> {
     // retrieve sink table name
     let sink_table_ref =
@@ -598,7 +601,7 @@ mod tests {
         let Statement::CreateTable(create_table) = stmt else {
             unreachable!()
         };
-        let expr = create_to_expr(&create_table, QueryContext::arc()).unwrap();
+        let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
         assert_eq!("3days", expr.table_options.get("ttl").unwrap());
         assert_eq!(
             "1.0MiB",
@@ -629,7 +632,7 @@ mod tests {
             let Statement::CreateTable(create_table) = stmt else {
                 unreachable!()
             };
-            create_to_expr(&create_table, QueryContext::arc()).unwrap_err();
+            create_to_expr(&create_table, &QueryContext::arc()).unwrap_err();
         }
     }
 
@@ -647,7 +650,7 @@ mod tests {
         };
 
         // query context with system timezone UTC.
-        let expr = create_to_expr(&create_table, QueryContext::arc()).unwrap();
+        let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
         let ts_column = &expr.column_defs[1];
         let constraint = assert_ts_column(ts_column);
         assert!(
@@ -658,8 +661,9 @@ mod tests {
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
             .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
-            .build();
-        let expr = create_to_expr(&create_table, ctx).unwrap();
+            .build()
+            .into();
+        let expr = create_to_expr(&create_table, &ctx).unwrap();
         let ts_column = &expr.column_defs[1];
         let constraint = assert_ts_column(ts_column);
         assert!(
@@ -693,7 +697,7 @@ mod tests {
         };
 
         // query context with system timezone UTC.
-        let expr = to_alter_expr(alter_table.clone(), QueryContext::arc()).unwrap();
+        let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
         let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
@@ -712,8 +716,9 @@ mod tests {
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
             .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
-            .build();
-        let expr = to_alter_expr(alter_table, ctx).unwrap();
+            .build()
+            .into();
+        let expr = to_alter_expr(alter_table, &ctx).unwrap();
         let kind = expr.kind.unwrap();
 
         let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
@@ -743,7 +748,7 @@ mod tests {
         };
 
         // query context with system timezone UTC.
-        let expr = to_alter_expr(alter_table.clone(), QueryContext::arc()).unwrap();
+        let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
         let Kind::ChangeColumnTypes(ChangeColumnTypes {

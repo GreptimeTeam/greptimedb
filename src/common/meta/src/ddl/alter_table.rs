@@ -45,9 +45,9 @@ use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
-use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
+use crate::{metrics, ClusterId};
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -61,7 +61,7 @@ impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
     pub fn new(
-        cluster_id: u64,
+        cluster_id: ClusterId,
         table_id: TableId,
         task: AlterTableTask,
         context: DdlContext,
@@ -269,7 +269,7 @@ enum AlterTableState {
 // The serialized data of alter table.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterTableData {
-    cluster_id: u64,
+    cluster_id: ClusterId,
     state: AlterTableState,
     task: AlterTableTask,
     table_id: TableId,

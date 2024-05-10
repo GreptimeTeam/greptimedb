@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_procedure::{
-    Context, ContextProvider, Procedure, ProcedureId, ProcedureState, ProcedureWithId, Result,
-    Status,
+    Context, ContextProvider, Output, Procedure, ProcedureId, ProcedureState, ProcedureWithId,
+    Result, Status,
 };
 
 /// A Mock [ContextProvider].
@@ -47,7 +47,7 @@ impl ContextProvider for MockContextProvider {
 ///
 /// # Panics
 /// Panics if the `procedure` has subprocedure to execute.
-pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) {
+pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) -> Option<Output> {
     let ctx = Context {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
@@ -60,7 +60,7 @@ pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) {
                 subprocedures.is_empty(),
                 "Executing subprocedure is unsupported"
             ),
-            Status::Done { .. } => break,
+            Status::Done { output } => return output,
         }
     }
 }

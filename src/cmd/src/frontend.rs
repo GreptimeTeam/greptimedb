@@ -22,7 +22,7 @@ use client::client_manager::DatanodeClients;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_telemetry::logging;
+use common_telemetry::info;
 use common_time::timezone::set_default_timezone;
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -36,7 +36,7 @@ use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
-use crate::options::{CliOptions, Options};
+use crate::options::{GlobalOptions, Options};
 use crate::App;
 
 pub struct Instance {
@@ -90,8 +90,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        self.subcmd.load_options(cli_options)
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+        self.subcmd.load_options(global_options)
     }
 }
 
@@ -107,9 +107,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(cli_options),
+            SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
     }
 }
@@ -126,8 +126,6 @@ pub struct StartCommand {
     mysql_addr: Option<String>,
     #[clap(long)]
     postgres_addr: Option<String>,
-    #[clap(long)]
-    opentsdb_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(short, long)]
@@ -149,19 +147,19 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         let mut opts: FrontendOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             FrontendOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = &cli_options.log_dir {
+        if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
 
-        if cli_options.log_level.is_some() {
-            opts.logging.level.clone_from(&cli_options.log_level);
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
         }
 
         let tls_opts = TlsOption::new(
@@ -198,11 +196,6 @@ impl StartCommand {
             opts.postgres.tls = tls_opts;
         }
 
-        if let Some(addr) = &self.opentsdb_addr {
-            opts.opentsdb.enable = true;
-            opts.opentsdb.addr.clone_from(addr);
-        }
-
         if let Some(enable) = self.influxdb_enable {
             opts.influxdb.enable = enable;
         }
@@ -226,8 +219,8 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        logging::info!("Frontend start command: {:#?}", self);
-        logging::info!("Frontend options: {:#?}", opts);
+        info!("Frontend start command: {:#?}", self);
+        info!("Frontend options: {:#?}", opts);
 
         set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
@@ -311,7 +304,7 @@ mod tests {
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::{CliOptions, ENV_VAR_SEP};
+    use crate::options::{GlobalOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_try_from_start_command() {
@@ -319,13 +312,13 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
-            opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
             disable_dashboard: Some(false),
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(&CliOptions::default()).unwrap() else {
+        let Options::Frontend(opts) = command.load_options(&GlobalOptions::default()).unwrap()
+        else {
             unreachable!()
         };
 
@@ -333,7 +326,6 @@ mod tests {
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
-        assert_eq!(opts.opentsdb.addr, "127.0.0.1:4321");
 
         let default_opts = FrontendOptions::default();
 
@@ -346,10 +338,6 @@ mod tests {
             default_opts.postgres.runtime_size
         );
         assert!(opts.opentsdb.enable);
-        assert_eq!(
-            opts.opentsdb.runtime_size,
-            default_opts.opentsdb.runtime_size
-        );
 
         assert!(!opts.influxdb.enable);
     }
@@ -365,6 +353,9 @@ mod tests {
             timeout = "30s"
             body_limit = "2GB"
 
+            [opentsdb]
+            enable = false
+
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
@@ -377,7 +368,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(&CliOptions::default()).unwrap()
+        let Options::Frontend(fe_opts) = command.load_options(&GlobalOptions::default()).unwrap()
         else {
             unreachable!()
         };
@@ -389,6 +380,7 @@ mod tests {
 
         assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
+        assert!(!fe_opts.opentsdb.enable);
     }
 
     #[tokio::test]
@@ -423,7 +415,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&CliOptions {
+            .load_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -509,7 +501,7 @@ mod tests {
                 };
 
                 let Options::Frontend(fe_opts) =
-                    command.load_options(&CliOptions::default()).unwrap()
+                    command.load_options(&GlobalOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

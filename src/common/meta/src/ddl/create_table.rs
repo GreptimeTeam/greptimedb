@@ -63,20 +63,13 @@ impl CreateTableProcedure {
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
 
-        let mut creator = TableCreator {
-            data,
-            opening_regions: vec![],
-        };
-
-        // Only registers regions if the table route is allocated.
-        if let Some(x) = &creator.data.table_route {
-            creator.opening_regions = creator
-                .register_opening_regions(&context, &x.region_routes)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-        }
-
-        Ok(CreateTableProcedure { context, creator })
+        Ok(CreateTableProcedure {
+            context,
+            creator: TableCreator {
+                data,
+                opening_regions: vec![],
+            },
+        })
     }
 
     fn table_info(&self) -> &RawTableInfo {
@@ -194,6 +187,13 @@ impl CreateTableProcedure {
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         let table_route = self.table_route()?.clone();
         let request_builder = self.new_region_request_builder(None)?;
+        // Registers opening regions
+        let guards = self
+            .creator
+            .register_opening_regions(&self.context, &table_route.region_routes)?;
+        if !guards.is_empty() {
+            self.creator.opening_regions = guards;
+        }
         self.create_regions(&table_route.region_routes, request_builder)
             .await
     }
@@ -203,14 +203,6 @@ impl CreateTableProcedure {
         region_routes: &[RegionRoute],
         request_builder: CreateRequestBuilder,
     ) -> Result<Status> {
-        // Registers opening regions
-        let guards = self
-            .creator
-            .register_opening_regions(&self.context, region_routes)?;
-        if !guards.is_empty() {
-            self.creator.opening_regions = guards;
-        }
-
         let create_table_data = &self.creator.data;
         // Safety: the region_wal_options must be allocated
         let region_wal_options = self.region_wal_options()?;
@@ -296,6 +288,19 @@ impl Procedure for CreateTableProcedure {
         Self::TYPE_NAME
     }
 
+    fn recover(&mut self) -> ProcedureResult<()> {
+        // Only registers regions if the table route is allocated.
+        if let Some(x) = &self.creator.data.table_route {
+            self.creator.opening_regions = self
+                .creator
+                .register_opening_regions(&self.context, &x.region_routes)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+        }
+
+        Ok(())
+    }
+
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.creator.data.state;
 
@@ -334,7 +339,7 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(cluster_id: u64, task: CreateTableTask) -> Self {
+    pub fn new(cluster_id: ClusterId, task: CreateTableTask) -> Self {
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,

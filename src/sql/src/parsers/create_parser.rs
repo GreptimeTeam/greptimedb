@@ -31,7 +31,7 @@ use crate::error::{
     InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu,
     UnsupportedSnafu,
 };
-use crate::parser::ParserContext;
+use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
     TIME_INDEX,
@@ -42,7 +42,6 @@ use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
-pub const FLOW: &str = "FLOW";
 pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
 pub const WHEN: &str = "WHEN";

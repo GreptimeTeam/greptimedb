@@ -15,7 +15,6 @@
 #![feature(assert_matches, let_chains)]
 
 use async_trait::async_trait;
-use clap::arg;
 use common_telemetry::{error, info};
 
 pub mod cli;
@@ -77,15 +76,6 @@ pub fn log_versions(version_string: &str, app_version: &str) {
     info!("GreptimeDB version: {}", version_string);
 
     log_env_flags();
-}
-
-pub fn greptimedb_cli() -> clap::Command {
-    let cmd = clap::Command::new("greptimedb").subcommand_required(true);
-
-    #[cfg(feature = "tokio-console")]
-    let cmd = cmd.arg(arg!(--"tokio-console-addr"[TOKIO_CONSOLE_ADDR]));
-
-    cmd.args([arg!(--"log-dir"[LOG_DIR]), arg!(--"log-level"[LOG_LEVEL])])
 }
 
 fn log_env_flags() {

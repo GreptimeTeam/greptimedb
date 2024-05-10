@@ -25,6 +25,7 @@ use crate::error::{
     InvalidRoleSnafu, ParseNumSnafu, Result,
 };
 use crate::peer::Peer;
+use crate::ClusterId;
 
 const CLUSTER_NODE_INFO_PREFIX: &str = "__meta_cluster_node_info";
 
@@ -55,7 +56,7 @@ pub trait ClusterInfo {
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfoKey {
     /// The cluster id.
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     /// The role of the node. It can be `[Role::Datanode]` or `[Role::Frontend]`.
     pub role: Role,
     /// The node id.
@@ -67,7 +68,7 @@ impl NodeInfoKey {
         format!("{}-{}-", CLUSTER_NODE_INFO_PREFIX, cluster_id)
     }
 
-    pub fn key_prefix_with_role(cluster_id: u64, role: Role) -> String {
+    pub fn key_prefix_with_role(cluster_id: ClusterId, role: Role) -> String {
         format!(
             "{}-{}-{}-",
             CLUSTER_NODE_INFO_PREFIX,

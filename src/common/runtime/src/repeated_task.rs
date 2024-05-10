@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common_error::ext::ErrorExt;
-use common_telemetry::logging;
+use common_telemetry::{debug, error};
 use snafu::{ensure, ResultExt};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -128,17 +128,16 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
                     }
                 }
                 if let Err(e) = task_fn.call().await {
-                    logging::error!(e; "Failed to run repeated task: {}", task_fn.name());
+                    error!(e; "Failed to run repeated task: {}", task_fn.name());
                 }
             }
         });
         inner.task_handle = Some(handle);
         self.started.store(true, Ordering::Relaxed);
 
-        logging::debug!(
+        debug!(
             "Repeated task {} started with interval: {:?}",
-            self.name,
-            self.interval
+            self.name, self.interval
         );
 
         Ok(())
@@ -162,7 +161,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
             .await
             .context(WaitGcTaskStopSnafu { name: &self.name })?;
 
-        logging::debug!("Repeated task {} stopped", self.name);
+        debug!("Repeated task {} stopped", self.name);
 
         Ok(())
     }

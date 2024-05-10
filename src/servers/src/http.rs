@@ -31,7 +31,7 @@ use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
-use common_telemetry::logging::{error, info};
+use common_telemetry::{error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;

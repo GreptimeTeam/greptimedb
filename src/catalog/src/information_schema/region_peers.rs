@@ -179,7 +179,6 @@ impl InformationSchemaRegionPeersBuilder {
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             let table_id_stream = catalog_manager
                 .tables(&catalog_name, &schema_name)
-                .await
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
                     if table_info.table_type == TableType::Temporary {

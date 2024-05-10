@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging::debug;
+use common_telemetry::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;

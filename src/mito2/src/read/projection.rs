@@ -241,7 +241,7 @@ fn repeated_vector_with_cache(
     num_rows: usize,
     cache_manager: &CacheManager,
 ) -> common_recordbatch::error::Result<VectorRef> {
-    if let Some(vector) = cache_manager.get_repeated_vector(value) {
+    if let Some(vector) = cache_manager.get_repeated_vector(data_type, value) {
         // Tries to get the vector from cache manager. If the vector doesn't
         // have enough length, creates a new one.
         match vector.len().cmp(&num_rows) {
@@ -366,9 +366,15 @@ mod tests {
 +---------------------+----+----+----+----+";
         assert_eq!(expect, print_record_batch(record_batch));
 
-        assert!(cache.get_repeated_vector(&Value::Int64(1)).is_some());
-        assert!(cache.get_repeated_vector(&Value::Int64(2)).is_some());
-        assert!(cache.get_repeated_vector(&Value::Int64(3)).is_none());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(1))
+            .is_some());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(2))
+            .is_some());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(3))
+            .is_none());
         let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
         assert_eq!(expect, print_record_batch(record_batch));
     }

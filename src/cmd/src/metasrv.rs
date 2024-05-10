@@ -16,13 +16,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
-use common_telemetry::logging;
+use common_telemetry::info;
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartMetaServerSnafu};
-use crate::options::{CliOptions, Options};
+use crate::options::{GlobalOptions, Options};
 use crate::App;
 
 pub struct Instance {
@@ -68,8 +68,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        self.subcmd.load_options(cli_options)
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+        self.subcmd.load_options(global_options)
     }
 }
 
@@ -85,9 +85,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(cli_options),
+            SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
     }
 }
@@ -126,19 +126,19 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
         let mut opts: MetasrvOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             MetasrvOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = &cli_options.log_dir {
+        if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
 
-        if cli_options.log_level.is_some() {
-            opts.logging.level.clone_from(&cli_options.log_level);
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
         }
 
         if let Some(addr) = &self.bind_addr {
@@ -198,8 +198,8 @@ impl StartCommand {
             .await
             .context(StartMetaServerSnafu)?;
 
-        logging::info!("Metasrv start command: {:#?}", self);
-        logging::info!("Metasrv options: {:#?}", opts);
+        info!("Metasrv start command: {:#?}", self);
+        info!("Metasrv options: {:#?}", opts);
 
         let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
             .await
@@ -235,7 +235,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
+        let Options::Metasrv(options) = cmd.load_options(&GlobalOptions::default()).unwrap() else {
             unreachable!()
         };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -270,7 +270,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
+        let Options::Metasrv(options) = cmd.load_options(&GlobalOptions::default()).unwrap() else {
             unreachable!()
         };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -315,7 +315,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&CliOptions {
+            .load_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -379,7 +379,8 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Metasrv(opts) = command.load_options(&CliOptions::default()).unwrap()
+                let Options::Metasrv(opts) =
+                    command.load_options(&GlobalOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

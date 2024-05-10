@@ -25,7 +25,7 @@ use catalog::error::CompileScriptInternalSnafu;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::OutputData;
 use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
-use common_telemetry::logging;
+use common_telemetry::{debug, info, warn};
 use common_time::util;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
@@ -127,7 +127,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             script_list.extend(part_of_scripts_list);
         }
 
-        logging::info!(
+        info!(
             "Found {} scripts in {}",
             script_list.len(),
             table_info.full_table_name()
@@ -137,16 +137,15 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             match PyScript::from_script(&script, query_engine.clone()) {
                 Ok(script) => {
                     script.register_udf().await;
-                    logging::debug!(
+                    debug!(
                         "Script in `scripts` system table re-register as UDF: {}",
                         name
                     );
                 }
                 Err(err) => {
-                    logging::warn!(
+                    warn!(
                         r#"Failed to compile script "{}"" in `scripts` table: {}"#,
-                        name,
-                        err
+                        name, err
                     );
                 }
             }
@@ -189,7 +188,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             .map_err(BoxedError::new)
             .context(InsertScriptSnafu { name })?;
 
-        logging::info!(
+        info!(
             "Inserted script: {} into scripts table: {}, output: {:?}.",
             name,
             table_info.full_table_name(),
@@ -340,6 +339,7 @@ fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
         .current_catalog(table_info.catalog_name.to_string())
         .current_schema(table_info.schema_name.to_string())
         .build()
+        .into()
 }
 
 /// Builds scripts schema, returns (time index, primary keys, column defs)

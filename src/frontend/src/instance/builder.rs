@@ -18,6 +18,7 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::key::flow::TableFlowManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -101,10 +102,13 @@ impl FrontendBuilder {
         let region_query_handler =
             FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
+        let table_flow_manager = Arc::new(TableFlowManager::new(kv_backend.clone()));
+
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
             node_manager.clone(),
+            table_flow_manager,
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),

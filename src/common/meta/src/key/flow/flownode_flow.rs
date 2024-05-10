@@ -156,6 +156,8 @@ impl<'a> MetaKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
     }
 }
 
+pub type FlownodeFlowManagerRef = Arc<FlownodeFlowManager>;
+
 /// The manager of [FlownodeFlowKey].
 pub struct FlownodeFlowManager {
     kv_backend: KvBackendRef,

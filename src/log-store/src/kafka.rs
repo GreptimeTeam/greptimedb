@@ -57,7 +57,6 @@ pub struct EntryImpl {
 
 impl Entry for EntryImpl {
     type Error = Error;
-    type Namespace = NamespaceImpl;
 
     fn data(&self) -> &[u8] {
         &self.data
@@ -65,10 +64,6 @@ impl Entry for EntryImpl {
 
     fn id(&self) -> EntryId {
         self.id
-    }
-
-    fn namespace(&self) -> Self::Namespace {
-        self.ns.clone()
     }
 
     fn estimated_size(&self) -> usize {

@@ -14,7 +14,7 @@
 
 use std::{fs, path};
 
-use common_telemetry::logging::info;
+use common_telemetry::info;
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;

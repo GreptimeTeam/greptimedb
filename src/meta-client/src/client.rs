@@ -41,6 +41,7 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
+use common_meta::ClusterId;
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
@@ -75,7 +76,7 @@ pub struct MetaClientBuilder {
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: u64, member_id: u64, role: Role) -> Self {
+    pub fn new(cluster_id: ClusterId, member_id: u64, role: Role) -> Self {
         Self {
             id: (cluster_id, member_id),
             role,
@@ -265,29 +266,24 @@ impl ClusterInfo for MetaClient {
         let mut nodes = if get_metasrv_nodes {
             let last_activity_ts = -1; // Metasrv does not provide this information.
 
-            // TODO(dennis): Get Metasrv node info
-            let git_commit = "unknown";
-            let version = "unknown";
-            let start_time_ms = 0;
-
             let (leader, followers) = cluster_client.get_metasrv_peers().await?;
             followers
                 .into_iter()
-                .map(|peer| NodeInfo {
-                    peer,
+                .map(|node| NodeInfo {
+                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
                     last_activity_ts,
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
-                    version: version.to_string(),
-                    git_commit: git_commit.to_string(),
-                    start_time_ms,
+                    version: node.version,
+                    git_commit: node.git_commit,
+                    start_time_ms: node.start_time_ms,
                 })
-                .chain(leader.into_iter().map(|leader| NodeInfo {
-                    peer: leader,
+                .chain(leader.into_iter().map(|node| NodeInfo {
+                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
                     last_activity_ts,
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
-                    version: version.to_string(),
-                    git_commit: git_commit.to_string(),
-                    start_time_ms,
+                    version: node.version,
+                    git_commit: node.git_commit,
+                    start_time_ms: node.start_time_ms,
                 }))
                 .collect::<Vec<_>>()
         } else {

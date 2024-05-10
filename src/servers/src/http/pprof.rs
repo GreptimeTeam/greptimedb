@@ -23,7 +23,7 @@ pub mod handler {
     use axum::extract::Query;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use common_telemetry::logging;
+    use common_telemetry::info;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
@@ -64,7 +64,7 @@ pub mod handler {
 
     #[axum_macros::debug_handler]
     pub async fn pprof_handler(Query(req): Query<PprofQuery>) -> Result<impl IntoResponse> {
-        logging::info!("start pprof, request: {:?}", req);
+        info!("start pprof, request: {:?}", req);
 
         let profiling = Profiling::new(Duration::from_secs(req.seconds), req.frequency.into());
         let body = match req.output {
@@ -76,7 +76,7 @@ pub mod handler {
             Output::Flamegraph => profiling.dump_flamegraph().await.context(DumpPprofSnafu)?,
         };
 
-        logging::info!("finish pprof");
+        info!("finish pprof");
 
         Ok((StatusCode::OK, body))
     }

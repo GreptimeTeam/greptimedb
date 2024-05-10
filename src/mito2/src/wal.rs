@@ -135,7 +135,7 @@ pub struct WalWriter<S: LogStore> {
 }
 
 impl<S: LogStore> WalWriter<S> {
-    /// Add an wal entry for specific region to the writer's buffer.
+    /// Add a wal entry for specific region to the writer's buffer.
     pub fn add_entry(
         &mut self,
         region_id: RegionId,
@@ -157,7 +157,7 @@ impl<S: LogStore> WalWriter<S> {
             .context(EncodeWalSnafu { region_id })?;
         let entry = self
             .store
-            .entry(&self.entry_encode_buf, entry_id, namespace);
+            .entry(&mut self.entry_encode_buf, entry_id, namespace);
 
         self.entries.push(entry);
 

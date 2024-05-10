@@ -30,7 +30,7 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
-use common_telemetry::logging;
+use common_telemetry::error;
 use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
@@ -188,7 +188,7 @@ impl Database {
                 addr: client.addr().to_string(),
                 source: BoxedError::new(ServerSnafu { code, msg }.build()),
             };
-            logging::error!(
+            error!(
                 "Failed to do Flight get, addr: {}, code: {}, source: {:?}",
                 client.addr(),
                 tonic_code,
@@ -274,7 +274,7 @@ mod tests {
     use clap::Parser;
     use client::Client;
     use cmd::error::Result as CmdResult;
-    use cmd::options::{CliOptions, Options};
+    use cmd::options::{GlobalOptions, Options};
     use cmd::{cli, standalone, App};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
@@ -313,7 +313,7 @@ mod tests {
             &*output_dir.path().to_string_lossy(),
         ]);
         let Options::Standalone(standalone_opts) =
-            standalone.load_options(&CliOptions::default())?
+            standalone.load_options(&GlobalOptions::default())?
         else {
             unreachable!()
         };

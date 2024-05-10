@@ -26,7 +26,7 @@ use common_error::ext::ErrorExt;
 use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::logging;
+use common_telemetry::debug;
 use either::Either;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
@@ -78,7 +78,7 @@ impl Repl {
 
             let history_file = history_file();
             if let Err(e) = rl.load_history(&history_file) {
-                logging::debug!(
+                debug!(
                     "failed to load history file on {}, error: {e}",
                     history_file.display()
                 );
@@ -161,7 +161,10 @@ impl Repl {
         let start = Instant::now();
 
         let output = if let Some(query_engine) = &self.query_engine {
-            let query_ctx = QueryContext::with(self.database.catalog(), self.database.schema());
+            let query_ctx = Arc::new(QueryContext::with(
+                self.database.catalog(),
+                self.database.schema(),
+            ));
 
             let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx)
                 .with_context(|_| ParseSqlSnafu { sql: sql.clone() })?;
@@ -225,7 +228,7 @@ impl Drop for Repl {
         if self.rl.helper().is_some() {
             let history_file = history_file();
             if let Err(e) = self.rl.save_history(&history_file) {
-                logging::debug!(
+                debug!(
                     "failed to save history file on {}, error: {e}",
                     history_file.display()
                 );

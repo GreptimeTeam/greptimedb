@@ -190,13 +190,6 @@ pub enum Error {
         error: hyper::Error,
     },
 
-    #[snafu(display("Invalid OpenTSDB line"))]
-    InvalidOpentsdbLine {
-        #[snafu(source)]
-        error: FromUtf8Error,
-        location: Location,
-    },
-
     #[snafu(display("Invalid OpenTSDB Json request"))]
     InvalidOpentsdbJsonRequest {
         #[snafu(source)]
@@ -312,10 +305,25 @@ pub enum Error {
     },
 
     #[snafu(display("Error accessing catalog"))]
-    CatalogError { source: catalog::error::Error },
+    CatalogError {
+        source: catalog::error::Error,
+        location: Location,
+    },
 
-    #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
-    DatabaseNotFound { catalog: String, schema: String },
+    #[snafu(display("Cannot find requested database: {}.{}", catalog, schema))]
+    DatabaseNotFound {
+        catalog: String,
+        schema: String,
+        location: Location,
+    },
+
+    #[snafu(display("Cannot find requested table: {}.{}.{}", catalog, schema, table))]
+    TableNotFound {
+        catalog: String,
+        schema: String,
+        table: String,
+        location: Location,
+    },
 
     #[cfg(feature = "mem-prof")]
     #[snafu(display("Failed to dump profile data"))]
@@ -325,10 +333,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid prepare statement: {}", err_msg))]
-    InvalidPrepareStatement { err_msg: String },
+    InvalidPrepareStatement { err_msg: String, location: Location },
 
     #[snafu(display("Invalid flush argument: {}", err_msg))]
-    InvalidFlushArgument { err_msg: String },
+    InvalidFlushArgument { err_msg: String, location: Location },
 
     #[snafu(display("Failed to build gRPC reflection service"))]
     GrpcReflectionService {
@@ -508,7 +516,6 @@ impl ErrorExt for Error {
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
             | ConnResetByPeer { .. }
-            | InvalidOpentsdbLine { .. }
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
@@ -546,6 +553,9 @@ impl ErrorExt for Error {
             | InvalidAuthHeaderInvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
+
+            TableNotFound { .. } => StatusCode::TableNotFound,
+
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
 
@@ -598,12 +608,14 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::Cancelled => Code::Cancelled,
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
-        | StatusCode::RegionAlreadyExists => Code::AlreadyExists,
+        | StatusCode::RegionAlreadyExists
+        | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
         StatusCode::TableNotFound
         | StatusCode::RegionNotFound
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
-        | StatusCode::UserNotFound => Code::NotFound,
+        | StatusCode::UserNotFound
+        | StatusCode::FlowNotFound => Code::NotFound,
         StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
         StatusCode::RuntimeResourcesExhausted
         | StatusCode::RateLimited
@@ -664,7 +676,6 @@ impl IntoResponse for Error {
             Error::InfluxdbLineProtocol { .. }
             | Error::RowWriter { .. }
             | Error::PromSeriesWrite { .. }
-            | Error::InvalidOpentsdbLine { .. }
             | Error::InvalidOpentsdbJsonRequest { .. }
             | Error::DecodePromRemoteRequest { .. }
             | Error::DecodeOtlpRequest { .. }

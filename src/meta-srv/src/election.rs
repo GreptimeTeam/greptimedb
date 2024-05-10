@@ -21,7 +21,7 @@ use etcd_client::LeaderKey;
 use tokio::sync::broadcast::Receiver;
 
 use crate::error::Result;
-use crate::metasrv::LeaderValue;
+use crate::metasrv::MetasrvNodeInfo;
 
 pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
@@ -68,10 +68,10 @@ pub trait Election: Send + Sync {
     fn in_infancy(&self) -> bool;
 
     /// Registers a candidate for the election.
-    async fn register_candidate(&self) -> Result<()>;
+    async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()>;
 
     /// Gets all candidates in the election.
-    async fn all_candidates(&self) -> Result<Vec<LeaderValue>>;
+    async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>>;
 
     /// Campaign waits to acquire leadership in an election.
     ///

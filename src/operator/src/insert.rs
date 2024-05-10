@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::region::RegionResponse;
 use api::v1::alter_expr::Kind;
 use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
 use api::v1::{
@@ -25,22 +26,25 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
+use common_meta::key::flow::TableFlowManagerRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use datatypes::schema::Schema;
-use futures_util::future;
+use futures_util::{future, TryStreamExt};
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use snafu::ResultExt;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
+use store_api::storage::{RegionId, TableId};
 use table::requests::InsertRequest as TableInsertRequest;
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -58,6 +62,7 @@ pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
+    table_flow_manager: TableFlowManagerRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -67,11 +72,13 @@ impl Inserter {
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
+        table_flow_manager: TableFlowManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
+            table_flow_manager,
         }
     }
 
@@ -187,6 +194,41 @@ impl Inserter {
 }
 
 impl Inserter {
+    fn post_request(&self, requests: RegionInsertRequests) {
+        let node_manager = self.node_manager.clone();
+        let table_flow_manager = self.table_flow_manager.clone();
+        // Spawn all tasks that do job for mirror insert requests for flownode
+        common_runtime::spawn_bg(async move {
+            match Self::mirror_flow_node_requests(table_flow_manager, requests).await {
+                Ok(flow_tasks) => {
+                    let flow_tasks = flow_tasks.into_iter().map(|(peer, inserts)| {
+                        let node_manager = node_manager.clone();
+                        common_runtime::spawn_write(async move {
+                            node_manager
+                                .flownode(&peer)
+                                .await
+                                .handle_inserts(inserts)
+                                .await
+                                .map(|flow_response| RegionResponse {
+                                    affected_rows: flow_response.affected_rows as AffectedRows,
+                                    extension: flow_response.extension,
+                                })
+                                .context(RequestInsertsSnafu)
+                        })
+                    });
+
+                    if let Err(err) = future::try_join_all(flow_tasks)
+                        .await
+                        .context(JoinTaskSnafu)
+                    {
+                        warn!(err; "Failed to insert data into flownode");
+                    }
+                }
+                Err(err) => warn!(err; "Failed to mirror request to flownode"),
+            }
+        });
+    }
+
     async fn do_request(
         &self,
         requests: RegionInsertRequests,
@@ -200,12 +242,12 @@ impl Inserter {
         });
 
         let tasks = self
-            .group_requests_by_peer(requests)
+            .group_requests_by_peer(requests.clone())
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
-                let request = request_factory.build_insert(inserts);
                 let node_manager = self.node_manager.clone();
+                let request = request_factory.build_insert(inserts);
                 common_runtime::spawn_write(async move {
                     node_manager
                         .datanode(&peer)
@@ -216,7 +258,7 @@ impl Inserter {
                 })
             });
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
-
+        self.post_request(requests);
         let affected_rows = results
             .into_iter()
             .map(|resp| resp.map(|r| r.affected_rows))
@@ -228,19 +270,92 @@ impl Inserter {
         ))
     }
 
+    /// Mirror requests for source table to flownode
+    async fn mirror_flow_node_requests(
+        table_flow_manager: TableFlowManagerRef,
+        requests: RegionInsertRequests,
+    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
+        // store partial source table requests used by flow node(only store what's used)
+        let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
+            HashMap::new();
+        for req in requests.requests {
+            match src_table_reqs.get_mut(&RegionId::from_u64(req.region_id).table_id()) {
+                Some(Some((_peers, reqs))) => reqs.requests.push(req),
+                // already know this is not source table
+                Some(None) => continue,
+                _ => {
+                    let table_id = RegionId::from_u64(req.region_id).table_id();
+                    let peers = table_flow_manager
+                        .flows(table_id)
+                        // TODO(discord9): determine where to store the flow node address in distributed mode
+                        .map_ok(|key| Peer::new(key.flownode_id(), ""))
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .map(|mut v| {
+                            v.dedup();
+                            v
+                        })
+                        .context(RequestInsertsSnafu)?;
+
+                    if !peers.is_empty() {
+                        let mut reqs = RegionInsertRequests::default();
+                        reqs.requests.push(req);
+                        src_table_reqs.insert(table_id, Some((peers, reqs)));
+                    } else {
+                        // insert a empty entry to avoid repeat query
+                        src_table_reqs.insert(table_id, None);
+                    }
+                }
+            }
+        }
+
+        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+
+        for (_table_id, (peers, reqs)) in src_table_reqs
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+        {
+            for flownode in peers {
+                inserts
+                    .entry(flownode.clone())
+                    .or_default()
+                    .requests
+                    .extend(reqs.requests.clone());
+            }
+        }
+        Ok(inserts)
+    }
+
     async fn group_requests_by_peer(
         &self,
         requests: RegionInsertRequests,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
-        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+        // group by region ids first to reduce repeatedly call `find_region_leader`
+        // TODO(discord9): determine if a addition clone is worth it
+        let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
 
         for req in requests.requests {
+            let region_id = RegionId::from_u64(req.region_id);
+            requests_per_region
+                .entry(region_id)
+                .or_default()
+                .requests
+                .push(req);
+        }
+
+        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+
+        for (region_id, reqs) in requests_per_region {
             let peer = self
                 .partition_manager
-                .find_region_leader(req.region_id.into())
+                .find_region_leader(region_id)
                 .await
                 .context(FindRegionLeaderSnafu)?;
-            inserts.entry(peer).or_default().requests.push(req);
+            inserts
+                .entry(peer)
+                .or_default()
+                .requests
+                .extend(reqs.requests);
         }
 
         Ok(inserts)
@@ -291,7 +406,7 @@ impl Inserter {
             if !alter_tables.is_empty() {
                 // Alter logical tables in batch.
                 statement_executor
-                    .alter_logical_tables(alter_tables)
+                    .alter_logical_tables(alter_tables, ctx.clone())
                     .await?;
             }
         } else {
@@ -299,7 +414,9 @@ impl Inserter {
                 self.create_table(req, ctx, statement_executor).await?;
             }
             for alter_expr in alter_tables.into_iter() {
-                statement_executor.alter_table_inner(alter_expr).await?;
+                statement_executor
+                    .alter_table_inner(alter_expr, ctx.clone())
+                    .await?;
             }
         }
 
@@ -351,7 +468,7 @@ impl Inserter {
 
         // create physical table
         let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx)
+            .create_table_inner(create_table_expr, None, ctx.clone())
             .await;
 
         match res {
@@ -423,7 +540,7 @@ impl Inserter {
 
         // TODO(weny): multiple regions table.
         let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx)
+            .create_table_inner(create_table_expr, None, ctx.clone())
             .await;
 
         match res {
@@ -474,7 +591,7 @@ impl Inserter {
             .collect::<Result<Vec<_>>>()?;
 
         let res = statement_executor
-            .create_logical_tables(&create_table_exprs)
+            .create_logical_tables(&create_table_exprs, ctx.clone())
             .await;
 
         match res {
