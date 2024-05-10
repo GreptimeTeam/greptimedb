@@ -26,6 +26,7 @@ pub enum Error {
     #[snafu(display("Invalid full table name: {}", table_name))]
     InvalidFullTableName {
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 }

@@ -26,6 +26,7 @@ pub enum TQLError {
     Parser {
         #[snafu(source)]
         error: ParserError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -33,6 +34,7 @@ pub enum TQLError {
     ConvertToLogicalExpression {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -40,6 +42,7 @@ pub enum TQLError {
     Simplification {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 

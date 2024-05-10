@@ -32,27 +32,37 @@ pub enum Error {
     External { source: BoxedError },
 
     #[snafu(display("Loader {} is already registered", name))]
-    LoaderConflict { name: String, location: Location },
+    LoaderConflict {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Procedure Manager is stopped"))]
-    ManagerNotStart { location: Location },
+    ManagerNotStart {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to serialize to json"))]
     ToJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Procedure {} already exists", procedure_id))]
     DuplicateProcedure {
         procedure_id: ProcedureId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to put state, key: '{key}'"))]
     PutState {
         key: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -67,6 +77,7 @@ pub enum Error {
     #[snafu(display("Failed to delete keys: '{keys}'"))]
     DeleteStates {
         keys: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -74,6 +85,7 @@ pub enum Error {
     #[snafu(display("Failed to list state, path: '{path}'"))]
     ListState {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -82,6 +94,7 @@ pub enum Error {
     FromJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -95,17 +108,23 @@ pub enum Error {
     WaitWatcher {
         #[snafu(source)]
         error: tokio::sync::watch::error::RecvError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to execute procedure"))]
     ProcedureExec {
         source: Arc<Error>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Rollback Procedure recovered: {error}"))]
-    RollbackProcedureRecovered { error: String, location: Location },
+    RollbackProcedureRecovered {
+        error: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
@@ -131,12 +150,14 @@ pub enum Error {
     #[snafu(display("Failed to start the remove_outdated_meta method, error"))]
     StartRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to stop the remove_outdated_meta method, error"))]
     StopRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -144,11 +165,13 @@ pub enum Error {
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
         source: Arc<Error>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to parse segment key: {key}"))]
     ParseSegmentKey {
+        #[snafu(implicit)]
         location: Location,
         key: String,
         #[snafu(source)]
@@ -156,10 +179,17 @@ pub enum Error {
     },
 
     #[snafu(display("Unexpected: {err_msg}"))]
-    Unexpected { location: Location, err_msg: String },
+    Unexpected {
+        #[snafu(implicit)]
+        location: Location,
+        err_msg: String,
+    },
 
     #[snafu(display("Not support to rollback the procedure"))]
-    RollbackNotSupported { location: Location },
+    RollbackNotSupported {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

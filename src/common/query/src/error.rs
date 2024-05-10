@@ -35,11 +35,13 @@ pub enum Error {
     PyUdf {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to create temporary recordbatch when eval Python UDF"))]
     UdfTempRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         source: RecordbatchError,
     },
@@ -48,6 +50,7 @@ pub enum Error {
     ExecuteFunction {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -55,6 +58,7 @@ pub enum Error {
     UnsupportedInputDataType {
         function: String,
         datatypes: Vec<ConcreteDataType>,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -62,23 +66,27 @@ pub enum Error {
     GenerateFunction {
         #[snafu(source)]
         error: StatsError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to cast scalar value into vector"))]
     FromScalarValue {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to cast arrow array into vector"))]
     FromArrowArray {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to cast arrow array into vector: {:?}", data_type))]
     IntoVector {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
         data_type: ArrowDatatype,
@@ -91,10 +99,15 @@ pub enum Error {
     DowncastVector { err_msg: String },
 
     #[snafu(display("Bad accumulator implementation: {}", err_msg))]
-    BadAccumulatorImpl { err_msg: String, location: Location },
+    BadAccumulatorImpl {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
         err_msg: String,
@@ -103,35 +116,48 @@ pub enum Error {
     #[snafu(display(
         "Illegal input_types status, check if DataFusion has changed its UDAF execution logic"
     ))]
-    InvalidInputState { location: Location },
+    InvalidInputState {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("unexpected: not constant column"))]
-    InvalidInputCol { location: Location },
+    InvalidInputCol {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Not expected to run ExecutionPlan more than once"))]
-    ExecuteRepeatedly { location: Location },
+    ExecuteRepeatedly {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("General DataFusion error"))]
     GeneralDataFusion {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to convert arrow schema"))]
     ConvertArrowSchema {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to execute physical plan"))]
     ExecutePhysicalPlan {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -141,6 +167,7 @@ pub enum Error {
         #[snafu(source)]
         error: ArrowError,
         typ: arrow::datatypes::DataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -148,53 +175,76 @@ pub enum Error {
     ArrowCompute {
         #[snafu(source)]
         error: ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Query engine fail to cast value"))]
     ToScalarValue {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to get scalar vector"))]
     GetScalarVector {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to execute function: {source}"))]
     Execute {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to join thread"))]
-    ThreadJoin { location: Location },
+    ThreadJoin {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to do table mutation"))]
     TableMutation {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to do procedure task"))]
     ProcedureService {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Missing TableMutationHandler, not expected"))]
-    MissingTableMutationHandler { location: Location },
+    MissingTableMutationHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing ProcedureServiceHandler, not expected"))]
-    MissingProcedureServiceHandler { location: Location },
+    MissingProcedureServiceHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid function args: {}", err_msg))]
-    InvalidFuncArgs { err_msg: String, location: Location },
+    InvalidFuncArgs {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Permission denied: {}", err_msg))]
-    PermissionDenied { err_msg: String, location: Location },
+    PermissionDenied {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

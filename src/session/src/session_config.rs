@@ -27,6 +27,7 @@ pub enum Error {
         name: String,
         value: String,
         hint: String,
+        #[snafu(implicit)]
         location: Location,
     },
 }

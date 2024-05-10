@@ -36,41 +36,72 @@ pub enum Error {
     #[snafu(display("Failed to eval stream"))]
     Eval {
         source: EvalError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table not found: {name}"))]
-    TableNotFound { name: String, location: Location },
+    TableNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Table already exist: {name}"))]
-    TableAlreadyExist { name: String, location: Location },
+    TableAlreadyExist {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to join task"))]
     JoinTask {
         #[snafu(source)]
         error: tokio::task::JoinError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid query: {reason}"))]
-    InvalidQuery { reason: String, location: Location },
+    InvalidQuery {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("No protobuf type for value: {value}"))]
-    NoProtoType { value: Value, location: Location },
+    NoProtoType {
+        value: Value,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Not implement in flow: {reason}"))]
-    NotImplemented { reason: String, location: Location },
+    NotImplemented {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Flow plan error: {reason}"))]
-    Plan { reason: String, location: Location },
+    Plan {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported temporal filter: {reason}"))]
-    UnsupportedTemporalFilter { reason: String, location: Location },
+    UnsupportedTemporalFilter {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Datatypes error: {source} with extra message: {extra}"))]
     Datatypes {
         source: datatypes::Error,
         extra: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -78,6 +109,7 @@ pub enum Error {
     Datafusion {
         raw: datafusion_common::DataFusionError,
         context: String,
+        #[snafu(implicit)]
         location: Location,
     },
 }

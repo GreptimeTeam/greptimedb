@@ -27,12 +27,17 @@ use store_api::storage::RegionId;
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Missing internal column {} in physical metric table", column))]
-    MissingInternalColumn { column: String, location: Location },
+    MissingInternalColumn {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to create mito region, region type: {}", region_type))]
     CreateMitoRegion {
         region_type: String,
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -40,6 +45,7 @@ pub enum Error {
     OpenMitoRegion {
         region_type: String,
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -47,12 +53,14 @@ pub enum Error {
     CloseMitoRegion {
         region_id: RegionId,
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region `{}` already exists", region_id))]
     RegionAlreadyExists {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -61,6 +69,7 @@ pub enum Error {
         raw: String,
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -69,6 +78,7 @@ pub enum Error {
         raw: String,
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -76,6 +86,7 @@ pub enum Error {
     SerializeColumnMetadata {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -83,6 +94,7 @@ pub enum Error {
     DecodeColumnValue {
         #[snafu(source)]
         error: base64::DecodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -91,45 +103,61 @@ pub enum Error {
         raw: String,
         #[snafu(source)]
         error: <u64 as std::str::FromStr>::Err,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Mito read operation fails"))]
     MitoReadOperation {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Mito write operation fails"))]
     MitoWriteOperation {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to collect record batch stream"))]
     CollectRecordBatchStream {
         source: common_recordbatch::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Internal column {} is reserved", column))]
-    InternalColumnOccupied { column: String, location: Location },
+    InternalColumnOccupied {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Required table option is missing"))]
-    MissingRegionOption { location: Location },
+    MissingRegionOption {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Region options are conflicted"))]
-    ConflictRegionOption { location: Location },
+    ConflictRegionOption {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Physical region {} not found", region_id))]
     PhysicalRegionNotFound {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Logical region {} not found", region_id))]
     LogicalRegionNotFound {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -137,6 +165,7 @@ pub enum Error {
     ColumnTypeMismatch {
         expect: ConcreteDataType,
         actual: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -144,15 +173,20 @@ pub enum Error {
     ColumnNotFound {
         name: String,
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Alter request to physical region is forbidden"))]
-    ForbiddenPhysicalAlter { location: Location },
+    ForbiddenPhysicalAlter {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -162,12 +196,14 @@ pub enum Error {
     ))]
     PhysicalRegionBusy {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported region request: {}", request))]
     UnsupportedRegionRequest {
         request: RegionRequest,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -175,14 +211,22 @@ pub enum Error {
     MultipleFieldColumn {
         previous: String,
         current: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Adding field column {} to physical table", name))]
-    AddingFieldColumn { name: String, location: Location },
+    AddingFieldColumn {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("No field column found"))]
-    NoFieldColumn { location: Location },
+    NoFieldColumn {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

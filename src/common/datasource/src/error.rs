@@ -29,27 +29,38 @@ pub enum Error {
     #[snafu(display("Unsupported compression type: {}", compression_type))]
     UnsupportedCompressionType {
         compression_type: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported backend protocol: {}, url: {}", protocol, url))]
     UnsupportedBackendProtocol {
         protocol: String,
+        #[snafu(implicit)]
         location: Location,
         url: String,
     },
 
     #[snafu(display("Unsupported format protocol: {}", format))]
-    UnsupportedFormat { format: String, location: Location },
+    UnsupportedFormat {
+        format: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("empty host: {}", url))]
-    EmptyHostPath { url: String, location: Location },
+    EmptyHostPath {
+        url: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid url: {}", url))]
     InvalidUrl {
         url: String,
         #[snafu(source)]
         error: ParseError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -57,11 +68,13 @@ pub enum Error {
     BuildBackend {
         #[snafu(source)]
         error: object_store::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to build orc reader"))]
     OrcReader {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: orc_rust::error::Error,
@@ -70,6 +83,7 @@ pub enum Error {
     #[snafu(display("Failed to read object from path: {}", path))]
     ReadObject {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: object_store::Error,
@@ -78,6 +92,7 @@ pub enum Error {
     #[snafu(display("Failed to write object to path: {}", path))]
     WriteObject {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: object_store::Error,
@@ -87,11 +102,13 @@ pub enum Error {
     AsyncWrite {
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to write record batch"))]
     WriteRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: ArrowError,
@@ -99,6 +116,7 @@ pub enum Error {
 
     #[snafu(display("Failed to encode record batch"))]
     EncodeRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: ParquetError,
@@ -106,6 +124,7 @@ pub enum Error {
 
     #[snafu(display("Failed to read record batch"))]
     ReadRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
@@ -113,6 +132,7 @@ pub enum Error {
 
     #[snafu(display("Failed to read parquet"))]
     ReadParquetSnafu {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: datafusion::parquet::errors::ParquetError,
@@ -120,6 +140,7 @@ pub enum Error {
 
     #[snafu(display("Failed to convert parquet to schema"))]
     ParquetToSchema {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: datafusion::parquet::errors::ParquetError,
@@ -127,6 +148,7 @@ pub enum Error {
 
     #[snafu(display("Failed to infer schema from file"))]
     InferSchema {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: arrow_schema::ArrowError,
@@ -135,16 +157,22 @@ pub enum Error {
     #[snafu(display("Failed to list object in path: {}", path))]
     ListObjects {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: object_store::Error,
     },
 
     #[snafu(display("Invalid connection: {}", msg))]
-    InvalidConnection { msg: String, location: Location },
+    InvalidConnection {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to join handle"))]
     JoinHandle {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::task::JoinError,
@@ -154,6 +182,7 @@ pub enum Error {
     ParseFormat {
         key: &'static str,
         value: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -161,15 +190,20 @@ pub enum Error {
     MergeSchema {
         #[snafu(source)]
         error: arrow_schema::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Buffered writer closed"))]
-    BufferedWriterClosed { location: Location },
+    BufferedWriterClosed {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to write parquet file, path: {}", path))]
     WriteParquet {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: parquet::errors::ParquetError,

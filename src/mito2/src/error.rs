@@ -42,6 +42,7 @@ pub enum Error {
     region_id, expected_last_entry_id, replayed_last_entry_id
     ))]
     UnexpectedReplay {
+        #[snafu(implicit)]
         location: Location,
         region_id: RegionId,
         expected_last_entry_id: u64,
@@ -50,6 +51,7 @@ pub enum Error {
 
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: object_store::Error,
@@ -73,6 +75,7 @@ pub enum Error {
 
     #[snafu(display("Failed to ser/de json object"))]
     SerdeJson {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: serde_json::Error,
@@ -82,47 +85,64 @@ pub enum Error {
     InvalidScanIndex {
         start: ManifestVersion,
         end: ManifestVersion,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid UTF-8 content"))]
     Utf8 {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: std::str::Utf8Error,
     },
 
     #[snafu(display("Cannot find RegionMetadata"))]
-    RegionMetadataNotFound { location: Location },
+    RegionMetadataNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to join handle"))]
     Join {
         #[snafu(source)]
         error: common_runtime::JoinError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Worker {} is stopped", id))]
-    WorkerStopped { id: WorkerId, location: Location },
+    WorkerStopped {
+        id: WorkerId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to recv result"))]
     Recv {
         #[snafu(source)]
         error: tokio::sync::oneshot::error::RecvError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid metadata, {}", reason))]
-    InvalidMeta { reason: String, location: Location },
+    InvalidMeta {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to create RecordBatch from vectors"))]
     NewRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: ArrowError,
@@ -130,6 +150,7 @@ pub enum Error {
 
     #[snafu(display("Failed to write to buffer"))]
     WriteBuffer {
+        #[snafu(implicit)]
         location: Location,
         source: common_datasource::error::Error,
     },
@@ -139,18 +160,21 @@ pub enum Error {
         path: String,
         #[snafu(source)]
         error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Object store not found: {}", object_store))]
     ObjectStoreNotFound {
         object_store: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -158,6 +182,7 @@ pub enum Error {
     RegionCorrupted {
         region_id: RegionId,
         reason: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -165,6 +190,7 @@ pub enum Error {
     InvalidRequest {
         region_id: RegionId,
         reason: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -175,6 +201,7 @@ pub enum Error {
     ConvertColumnDataType {
         reason: String,
         source: api::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -200,6 +227,7 @@ pub enum Error {
     #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
     EncodeWal {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: EncodeError,
@@ -207,6 +235,7 @@ pub enum Error {
 
     #[snafu(display("Failed to write WAL"))]
     WriteWal {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -214,6 +243,7 @@ pub enum Error {
     #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
     ReadWal {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -221,6 +251,7 @@ pub enum Error {
     #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
     DecodeWal {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: DecodeError,
@@ -229,6 +260,7 @@ pub enum Error {
     #[snafu(display("Failed to delete WAL, region_id: {}", region_id))]
     DeleteWal {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -244,6 +276,7 @@ pub enum Error {
     SerializeField {
         #[snafu(source)]
         error: memcomparable::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -253,6 +286,7 @@ pub enum Error {
     ))]
     NotSupportedField {
         data_type: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -260,6 +294,7 @@ pub enum Error {
     DeserializeField {
         #[snafu(source)]
         error: memcomparable::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -267,23 +302,34 @@ pub enum Error {
     InvalidParquet {
         file: String,
         reason: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid batch, {}", reason))]
-    InvalidBatch { reason: String, location: Location },
+    InvalidBatch {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid arrow record batch, {}", reason))]
-    InvalidRecordBatch { reason: String, location: Location },
+    InvalidRecordBatch {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert array to vector"))]
     ConvertVector {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to compute arrow arrays"))]
     ComputeArrow {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
@@ -291,6 +337,7 @@ pub enum Error {
 
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -299,19 +346,27 @@ pub enum Error {
     PrimaryKeyLengthMismatch {
         expect: usize,
         actual: usize,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid sender",))]
-    InvalidSender { location: Location },
+    InvalidSender {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid scheduler state"))]
-    InvalidSchedulerState { location: Location },
+    InvalidSchedulerState {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to stop scheduler"))]
     StopScheduler {
         #[snafu(source)]
         error: JoinError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -320,6 +375,7 @@ pub enum Error {
         file_id: FileId,
         #[snafu(source)]
         error: object_store::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -328,6 +384,7 @@ pub enum Error {
         file_id: FileId,
         #[snafu(source)]
         error: object_store::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -335,24 +392,28 @@ pub enum Error {
     FlushRegion {
         region_id: RegionId,
         source: Arc<Error>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region {} is dropped", region_id))]
     RegionDropped {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region {} is closed", region_id))]
     RegionClosed {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region {} is truncated", region_id))]
     RegionTruncated {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -362,6 +423,7 @@ pub enum Error {
     ))]
     RejectWrite {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -369,6 +431,7 @@ pub enum Error {
     CompactRegion {
         region_id: RegionId,
         source: Arc<Error>,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -380,12 +443,14 @@ pub enum Error {
     CompatReader {
         region_id: RegionId,
         reason: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalue region req"))]
     InvalidRegionRequest {
         source: store_api::metadata::MetadataError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -393,6 +458,7 @@ pub enum Error {
     InvalidRegionRequestSchemaVersion {
         expect: u64,
         actual: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -401,6 +467,7 @@ pub enum Error {
         region_id: RegionId,
         state: RegionState,
         expect: RegionState,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -408,6 +475,7 @@ pub enum Error {
     JsonOptions {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -419,12 +487,14 @@ pub enum Error {
     EmptyRegionDir {
         region_id: RegionId,
         region_dir: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Empty manifest directory, manifest_dir: {}", manifest_dir,))]
     EmptyManifestDir {
         manifest_dir: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -433,79 +503,98 @@ pub enum Error {
         path: String,
         #[snafu(source)]
         error: ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid file metadata"))]
     ConvertMetaData {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Column not found, column: {column}"))]
-    ColumnNotFound { column: String, location: Location },
+    ColumnNotFound {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
         source: index::inverted_index::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
         source: datatypes::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to apply index"))]
     ApplyIndex {
         source: index::inverted_index::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to push index value"))]
     PushIndexValue {
         source: index::inverted_index::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to write index completely"))]
     IndexFinish {
         source: index::inverted_index::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Operate on aborted index"))]
-    OperateAbortedIndex { location: Location },
+    OperateAbortedIndex {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
         source: puffin::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
         source: puffin::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
     PuffinBlobTypeNotFound {
         blob_type: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to write puffin completely"))]
     PuffinFinish {
         source: puffin::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to add blob to puffin file"))]
     PuffinAddBlob {
         source: puffin::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -514,11 +603,16 @@ pub enum Error {
         dir: String,
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid config, {reason}"))]
-    InvalidConfig { reason: String, location: Location },
+    InvalidConfig {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Stale log entry found during replay, region: {}, flushed: {}, replayed: {}",
@@ -544,12 +638,14 @@ pub enum Error {
         file_type: FileType,
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to filter record batch"))]
     FilterRecordBatch {
         source: common_recordbatch::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -557,16 +653,21 @@ pub enum Error {
     BiError {
         first: Box<Error>,
         second: Box<Error>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Encode null value"))]
-    IndexEncodeNull { location: Location },
+    IndexEncodeNull {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to encode memtable to Parquet bytes"))]
     EncodeMemtable {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -577,7 +678,11 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid region options, {}", reason))]
-    InvalidRegionOptions { reason: String, location: Location },
+    InvalidRegionOptions {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
     ChecksumMismatch { actual: u32, expected: u32 },
@@ -585,6 +690,7 @@ pub enum Error {
     #[snafu(display("Region {} is stopped", region_id))]
     RegionStopped {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 }

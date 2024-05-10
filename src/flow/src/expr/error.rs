@@ -31,24 +31,33 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum EvalError {
     #[snafu(display("Division by zero"))]
-    DivisionByZero { location: Location },
+    DivisionByZero {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Type mismatch: expected {expected}, actual {actual}"))]
     TypeMismatch {
         expected: ConcreteDataType,
         actual: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
     /// can't nest datatypes error because EvalError need to be store in map and serialization
     #[snafu(display("Fail to unpack from value to given type: {msg}"))]
-    TryFromValue { msg: String, location: Location },
+    TryFromValue {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Fail to cast value of type {from} to given type {to}"))]
     CastValue {
         from: ConcreteDataType,
         to: ConcreteDataType,
         source: datatypes::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -56,18 +65,34 @@ pub enum EvalError {
     DataType {
         msg: String,
         source: datatypes::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid argument: {reason}"))]
-    InvalidArgument { reason: String, location: Location },
+    InvalidArgument {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Internal error: {reason}"))]
-    Internal { reason: String, location: Location },
+    Internal {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Optimize error: {reason}"))]
-    Optimize { reason: String, location: Location },
+    Optimize {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Overflowed during evaluation"))]
-    Overflow { location: Location },
+    Overflow {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
