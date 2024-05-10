@@ -16,5 +16,7 @@ pub use client::{CachedMetaKvBackend, CachedMetaKvBackendBuilder, MetaKvBackend}
 
 mod client;
 mod manager;
+mod table_cache;
 
 pub use manager::KvBackendCatalogManager;
+pub use table_cache::{new_table_cache, TableCache, TableCacheRef};
