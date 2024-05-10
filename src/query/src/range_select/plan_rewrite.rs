@@ -112,14 +112,14 @@ fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
 /// Parse a duraion expr:
 /// 1. duration string (e.g. `'1h'`)
 /// 2. Interval expr (e.g. `INTERVAL '1 year 3 hours 20 minutes'`)
-/// 3. An expr can be evaluated at the logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
+/// 3. An interval expr can be evaluated at the logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
 fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => {
             parse_duration(str).map_err(DataFusionError::Plan)
         }
         Some(expr) => {
-            let ms = evaluate_expr_to_millisecond(args, i)?;
+            let ms = evaluate_expr_to_millisecond(args, i, true)?;
             if ms <= 0 {
                 return Err(dispose_parse_error(Some(expr)));
             }
@@ -131,13 +131,18 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 
 /// Evaluate a time calculation expr, case like:
 /// 1. `INTERVAL '1' day + INTERVAL '1 year 2 hours 3 minutes'`
-/// 2. `now() - INTERVAL '1' day`
+/// 2. `now() - INTERVAL '1' day` (when `interval_only==false`)
 ///
 /// Output a millisecond timestamp
-fn evaluate_expr_to_millisecond(args: &[Expr], i: usize) -> DFResult<i64> {
+///
+/// if `interval_only==true`, only accept expr with all interval type (case 2 will return a error)
+fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) -> DFResult<i64> {
     let Some(expr) = args.get(i) else {
         return Err(dispose_parse_error(None));
     };
+    if interval_only && !interval_only_in_expr(expr) {
+        return Err(dispose_parse_error(Some(expr)));
+    }
     let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
     let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(DFSchema::empty()));
     let interval_to_ms =
@@ -183,7 +188,7 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize) -> DFResult<i64> {
 /// 4. leave empty (as Default Option): align to unix epoch 0 (timezone aware)
 fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
     let Ok(s) = parse_str_expr(args, i) else {
-        return evaluate_expr_to_millisecond(args, i);
+        return evaluate_expr_to_millisecond(args, i, false);
     };
     let upper = s.to_uppercase();
     match upper.as_str() {
@@ -518,6 +523,25 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
     })
 }
 
+fn interval_only_in_expr(expr: &Expr) -> bool {
+    let mut all_interval = true;
+    let _ = expr.apply(&mut |expr| {
+        if !matches!(
+            expr,
+            Expr::Literal(ScalarValue::IntervalDayTime(_))
+                | Expr::Literal(ScalarValue::IntervalMonthDayNano(_))
+                | Expr::Literal(ScalarValue::IntervalYearMonth(_))
+                | Expr::BinaryExpr(_)
+        ) {
+            all_interval = false;
+            Ok(TreeNodeRecursion::Stop)
+        } else {
+            Ok(TreeNodeRecursion::Continue)
+        }
+    });
+    all_interval
+}
+
 #[cfg(test)]
 mod test {
 
@@ -762,7 +786,7 @@ mod test {
             .to_string();
         assert_eq!(
             error,
-            "Error during planning: Int64(5) is not a expr can be evaluate and use in range query"
+            "Error during planning: Illegal argument `Int64(5)` in range select query"
         )
     }
 
@@ -831,6 +855,15 @@ mod test {
         })];
         // test zero interval error
         assert!(parse_duration_expr(&args, 0).is_err());
+        // test must all be interval
+        let args = vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+            op: Operator::Minus,
+            right: Box::new(Expr::Literal(ScalarValue::Time64Microsecond(Some(0)))),
+        })];
+        assert!(parse_duration_expr(&args, 0).is_err());
     }
 
     #[test]
@@ -891,5 +924,27 @@ mod test {
             // 20 month
             20 * 30 * 24 * 60 * 60 * 1000
         );
+    }
+
+    #[test]
+    fn test_interval_only() {
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Literal(ScalarValue::DurationMillisecond(Some(20)))),
+            op: Operator::Minus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+        });
+        assert!(!interval_only_in_expr(&expr));
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+            op: Operator::Minus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalYearMonth(Some(
+                Interval::from_year_month(10).to_i32(),
+            )))),
+        });
+        assert!(interval_only_in_expr(&expr));
     }
 }
