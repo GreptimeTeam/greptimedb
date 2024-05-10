@@ -515,6 +515,7 @@ pub(crate) fn to_alter_expr(
     })
 }
 
+/// Try to cast the `[CreateViewExpr]` statement into gRPC `[CreateViewExpr]`.
 pub fn to_create_view_expr(
     stmt: CreateView,
     logical_plan: Vec<u8>,

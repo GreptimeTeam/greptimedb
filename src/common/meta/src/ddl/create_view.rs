@@ -98,8 +98,8 @@ impl CreateViewProcedure {
         if let Some(value) = view_name_value {
             ensure!(
                 expr.create_if_not_exists || expr.or_replace,
-                error::TableAlreadyExistsSnafu {
-                    table_name: self.creator.data.table_ref().to_string(),
+                error::ViewAlreadyExistsSnafu {
+                    view_name: self.creator.data.table_ref().to_string(),
                 }
             );
 
@@ -141,15 +141,14 @@ impl CreateViewProcedure {
         let manager = &self.context.table_metadata_manager;
 
         if self.need_update() {
+            // Retrieve the current view info and try to update it.
             let current_view_info = manager
                 .view_info_manager()
                 .get(view_id)
                 .await?
-                .with_context(|| error::TableNotFoundSnafu {
-                    //FIXME(dennis): view name
-                    table_name: "",
+                .with_context(|| error::ViewNotFoundSnafu {
+                    view_name: self.creator.data.table_ref().to_string(),
                 })?;
-
             let new_logical_plan = self.creator.data.task.raw_logical_plan().clone();
             manager
                 .update_view_info(view_id, &current_view_info, new_logical_plan)
@@ -204,6 +203,7 @@ impl Procedure for CreateViewProcedure {
     }
 }
 
+/// The VIEW creator
 pub struct ViewCreator {
     /// The serializable data.
     pub data: CreateViewData,

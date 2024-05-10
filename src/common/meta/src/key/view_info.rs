@@ -20,7 +20,7 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use super::VIEW_INFO_KEY_PATTERN;
-use crate::error::{InvalidTableMetadataSnafu, Result};
+use crate::error::{InvalidViewInfoSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     txn_helper, DeserializedValueWithBytes, MetaKey, TableMetaValue, VIEW_INFO_KEY_PREFIX,
@@ -29,6 +29,7 @@ use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
 
+/// The VIEW logical plan encoded bytes
 type RawViewLogicalPlan = Vec<u8>;
 
 /// The key stores the metadata of the view.
@@ -40,7 +41,7 @@ pub struct ViewInfoKey {
 }
 
 impl ViewInfoKey {
-    /// Returns a new [ViewInfoKey].
+    /// Returns a new `[ViewInfoKey]`.
     pub fn new(view_id: TableId) -> Self {
         Self { view_id }
     }
@@ -59,7 +60,7 @@ impl<'a> MetaKey<'a, ViewInfoKey> for ViewInfoKey {
 
     fn from_bytes(bytes: &[u8]) -> Result<ViewInfoKey> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
-            InvalidTableMetadataSnafu {
+            InvalidViewInfoSnafu {
                 err_msg: format!(
                     "ViewInfoKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
@@ -69,7 +70,7 @@ impl<'a> MetaKey<'a, ViewInfoKey> for ViewInfoKey {
         })?;
         let captures = VIEW_INFO_KEY_PATTERN
             .captures(key)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidViewInfoSnafu {
                 err_msg: format!("Invalid ViewInfoKey '{key}'"),
             })?;
         // Safety: pass the regex check above
@@ -78,6 +79,7 @@ impl<'a> MetaKey<'a, ViewInfoKey> for ViewInfoKey {
     }
 }
 
+/// The VIEW info value that keeps the metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewInfoValue {
     pub view_info: RawViewLogicalPlan,
@@ -100,6 +102,7 @@ impl ViewInfoValue {
     }
 }
 
+/// The `[ViewInfo]` manager
 pub struct ViewInfoManager {
     kv_backend: KvBackendRef,
 }
@@ -109,7 +112,7 @@ impl ViewInfoManager {
         Self { kv_backend }
     }
 
-    /// Builds a create table info transaction, it expected the `__view_info/{view_id}` wasn't occupied.
+    /// Builds a create view info transaction, it expected the `__view_info/{view_id}` wasn't occupied.
     pub(crate) fn build_create_txn(
         &self,
         view_id: TableId,
@@ -134,7 +137,7 @@ impl ViewInfoManager {
         ))
     }
 
-    /// Builds a update table info transaction, it expected the remote value equals the `current_current_view_info_value`.
+    /// Builds a update view info transaction, it expected the remote value equals the `current_current_view_info_value`.
     /// It retrieves the latest value if the comparing failed.
     pub(crate) fn build_update_txn(
         &self,
@@ -160,6 +163,7 @@ impl ViewInfoManager {
         ))
     }
 
+    /// Get the `[ViewInfoValue]` by the view id
     pub async fn get(
         &self,
         view_id: TableId,
@@ -173,6 +177,7 @@ impl ViewInfoManager {
             .transpose()
     }
 
+    /// Get the `[ViewInfoValue]` by the view id slice in batch
     pub async fn batch_get(&self, view_ids: &[TableId]) -> Result<HashMap<TableId, ViewInfoValue>> {
         let lookup_table = view_ids
             .iter()

@@ -320,6 +320,7 @@ pub struct CreateViewTask {
 }
 
 impl CreateViewTask {
+    /// Returns the `[TableReference]` of view.
     pub fn table_ref(&self) -> TableReference {
         TableReference {
             catalog: &self.create_view.catalog_name,
