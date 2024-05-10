@@ -19,7 +19,6 @@ use axum::extract::{Json, Query, RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Form;
-use common_telemetry::info;
 use headers::HeaderValue;
 use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
@@ -179,8 +178,6 @@ async fn test_sql_output_rows() {
 
 #[tokio::test]
 async fn test_dashboard_sql_limit() {
-    common_telemetry::init_default_ut_logging();
-
     let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
     let ctx = QueryContext::arc();
     ctx.set_current_user(Some(auth::userinfo_by_name(None)));
@@ -202,10 +199,11 @@ async fn test_dashboard_sql_limit() {
     .await;
 
     if let HttpResponse::GreptimedbV1(resp) = json {
-        let output = resp.output().get(0).unwrap();
+        let output = resp.output().first().unwrap();
+        let query_limit = ctx.configuration_parameter().dashboard_query_limit();
         match output {
             Records(records) => {
-                assert_eq!(records.num_rows(), 1000);
+                assert_eq!(records.num_rows(), query_limit);
             }
             _ => unreachable!(),
         }

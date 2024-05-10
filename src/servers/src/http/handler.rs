@@ -95,17 +95,16 @@ pub async fn sql(
         .or(form_params.epoch)
         .map(|s| s.to_lowercase())
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
-    let source = if let Some(source) = query_params.source {
-        RequestSource::parse(&source.to_lowercase())
-    } else {
-        None
-    };
+    let source = query_params
+        .source
+        .map(|s| RequestSource::parse(s.to_lowercase().as_str()))
+        .unwrap_or(None);
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
             Err((status, msg))
         } else {
-            Ok(sql_handler.do_query(sql, query_ctx).await)
+            Ok(sql_handler.do_query(sql, query_ctx.clone()).await)
         }
     } else {
         Err((
@@ -133,12 +132,12 @@ pub async fn sql(
     };
 
     if let Some(RequestSource::Dashboard) = source {
-        resp = from_dashboard(resp).await;
+        resp = from_dashboard(resp, query_ctx).await;
     }
     resp.with_execution_time(start.elapsed().as_millis() as u64)
 }
 
-pub async fn from_dashboard(resp: HttpResponse) -> HttpResponse {
+pub async fn from_dashboard(resp: HttpResponse, ctx: QueryContextRef) -> HttpResponse {
     let HttpResponse::GreptimedbV1(response) = resp else {
         return resp;
     };
@@ -147,6 +146,7 @@ pub async fn from_dashboard(resp: HttpResponse) -> HttpResponse {
         execution_time_ms,
         resp_metrics,
     } = response;
+    let query_limit = ctx.configuration_parameter().dashboard_query_limit();
 
     let mut outputs = Vec::with_capacity(output.len());
     for query_result in output {
@@ -154,8 +154,8 @@ pub async fn from_dashboard(resp: HttpResponse) -> HttpResponse {
             outputs.push(query_result);
             continue;
         };
-        if records.rows.len() > 1000 {
-            records.rows.resize(1000, vec![]);
+        if records.rows.len() > query_limit {
+            records.rows.resize(query_limit, vec![]);
         }
         outputs.push(GreptimeQueryOutput::Records(records));
     }
