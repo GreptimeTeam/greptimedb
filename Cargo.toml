@@ -154,7 +154,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
 smallvec = { version = "1", features = ["serde"] }
-snafu = "0.7"
+snafu = "0.8"
 sysinfo = "0.30"
 # on branch v0.44.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "c919990bf62ad38d2b0c0a3bc90b26ad919d51b0", features = [
