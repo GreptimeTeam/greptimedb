@@ -747,7 +747,7 @@ impl StatementExecutor {
         &self,
         database: &str,
         create_if_not_exists: bool,
-        options: Option<HashMap<String, String>>,
+        options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         let catalog = query_context.current_catalog();
@@ -793,7 +793,7 @@ impl StatementExecutor {
         catalog: String,
         database: String,
         create_if_not_exists: bool,
-        options: Option<HashMap<String, String>>,
+        options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {

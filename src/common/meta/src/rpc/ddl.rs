@@ -107,7 +107,7 @@ impl DdlTask {
         catalog: String,
         schema: String,
         create_if_not_exists: bool,
-        options: Option<HashMap<String, String>>,
+        options: HashMap<String, String>,
     ) -> Self {
         DdlTask::CreateDatabase(CreateDatabaseTask {
             catalog,
@@ -639,7 +639,7 @@ pub struct CreateDatabaseTask {
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
-    pub options: Option<HashMap<String, String>>,
+    pub options: HashMap<String, String>,
 }
 
 impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
@@ -659,7 +659,7 @@ impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
             catalog: catalog_name,
             schema: schema_name,
             create_if_not_exists,
-            options: Some(options),
+            options,
         })
     }
 }
@@ -680,7 +680,7 @@ impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
                 catalog_name: catalog,
                 schema_name: schema,
                 create_if_not_exists,
-                options: options.unwrap_or_default(),
+                options,
             }),
         })
     }

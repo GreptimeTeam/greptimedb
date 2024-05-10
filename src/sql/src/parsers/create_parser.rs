@@ -46,6 +46,12 @@ pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
 pub const WHEN: &str = "WHEN";
 
+const DB_OPT_KEY_TTL: &str = "ttl";
+
+fn validate_database_option(key: &str) -> bool {
+    [DB_OPT_KEY_TTL].contains(&key)
+}
+
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_create(&mut self) -> Result<Statement> {
@@ -770,11 +776,6 @@ fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result
     Ok(())
 }
 
-const DB_OPT_KEY_TTL: &str = "ttl";
-fn validate_database_option(key: &str) -> bool {
-    [DB_OPT_KEY_TTL].contains(&key)
-}
-
 /// Ensure all exprs are binary expr and all the columns are defined in the column list.
 fn ensure_exprs_are_binary(exprs: &[Expr], columns: &[&ColumnDef]) -> Result<()> {
     for expr in exprs {
@@ -1067,7 +1068,7 @@ mod tests {
             Statement::CreateDatabase(c) => {
                 assert_eq!(c.name.to_string(), "prometheus");
                 assert!(!c.if_not_exists);
-                assert_eq!(c.options.get("ttl"), Some(&"1h".to_string()));
+                assert_eq!(c.options.get("ttl").unwrap(), "1h");
             }
             _ => unreachable!(),
         }

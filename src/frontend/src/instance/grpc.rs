@@ -121,16 +121,11 @@ impl GrpcQueryHandler for Instance {
                             .await?
                     }
                     DdlExpr::CreateDatabase(expr) => {
-                        let options = if expr.options.is_empty() {
-                            None
-                        } else {
-                            Some(expr.options)
-                        };
                         self.statement_executor
                             .create_database(
                                 &expr.schema_name,
                                 expr.create_if_not_exists,
-                                options,
+                                expr.options,
                                 ctx.clone(),
                             )
                             .await?

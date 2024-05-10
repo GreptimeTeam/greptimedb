@@ -39,7 +39,7 @@ impl CreateDatabaseProcedure {
         catalog: String,
         schema: String,
         create_if_not_exists: bool,
-        options: Option<HashMap<String, String>>,
+        options: HashMap<String, String>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -85,19 +85,14 @@ impl CreateDatabaseProcedure {
     }
 
     pub async fn on_create_metadata(&mut self) -> Result<Status> {
-        let value: Option<SchemaNameValue> = self
-            .data
-            .options
-            .as_ref()
-            .map(|hash_map_ref| hash_map_ref.try_into())
-            .transpose()?;
+        let value: SchemaNameValue = (&self.data.options).try_into()?;
 
         self.context
             .table_metadata_manager
             .schema_manager()
             .create(
                 SchemaNameKey::new(&self.data.catalog, &self.data.schema),
-                value,
+                Some(value),
                 self.data.create_if_not_exists,
             )
             .await?;
@@ -148,5 +143,5 @@ pub struct CreateDatabaseData {
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
-    pub options: Option<HashMap<String, String>>,
+    pub options: HashMap<String, String>,
 }

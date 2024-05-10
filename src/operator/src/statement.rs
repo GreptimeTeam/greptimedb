@@ -200,15 +200,10 @@ impl StatementExecutor {
                 self.truncate_table(table_name, query_ctx).await
             }
             Statement::CreateDatabase(stmt) => {
-                let options = if stmt.options.is_empty() {
-                    None
-                } else {
-                    Some(stmt.options.into_map())
-                };
                 self.create_database(
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
-                    options,
+                    stmt.options.into_map(),
                     query_ctx,
                 )
                 .await
