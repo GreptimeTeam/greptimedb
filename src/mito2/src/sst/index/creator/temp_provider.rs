@@ -167,17 +167,14 @@ mod tests {
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"foo");
 
-        // OpenDAL might return the following error: The directory is not empty.
-        let _ = provider.cleanup().await;
+        provider.cleanup().await.unwrap();
 
-        // provider.cleanup().await.unwrap();
-
-        // assert!(provider
-        //     .manager
-        //     .store()
-        //     .list(location.dir_to_cleanup())
-        //     .await
-        //     .unwrap()
-        //     .is_empty());
+        assert!(provider
+            .manager
+            .store()
+            .list(location.dir_to_cleanup())
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
