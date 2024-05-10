@@ -193,7 +193,7 @@ impl AnalyzeOutputBuilder {
     }
 }
 
-/// Creates the ouput of AnalyzeExec as a RecordBatch
+/// Creates the output of AnalyzeExec as a RecordBatch
 fn create_output_batch(
     total_rows: usize,
     input: DfPhysicalPlanRef,
