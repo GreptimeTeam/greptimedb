@@ -23,12 +23,12 @@ use crate::adapter::error::{Error, InvalidQuerySnafu, NotImplementedSnafu, PlanS
 use crate::expr::{MapFilterProject, TypedExpr};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, RelationType};
-use crate::transform::{DataflowContext, FunctionExtensions};
+use crate::transform::{FlownodeContext, FunctionExtensions};
 
 impl TypedPlan {
     /// Convert Substrait Plan into Flow's TypedPlan
     pub fn from_substrait_plan(
-        ctx: &mut DataflowContext,
+        ctx: &mut FlownodeContext,
         plan: &SubPlan,
     ) -> Result<TypedPlan, Error> {
         // Register function extension
@@ -62,7 +62,7 @@ impl TypedPlan {
     /// Convert Substrait Rel into Flow's TypedPlan
     /// TODO: SELECT DISTINCT(does it get compile with something else?)
     pub fn from_substrait_rel(
-        ctx: &mut DataflowContext,
+        ctx: &mut FlownodeContext,
         rel: &Rel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
@@ -114,7 +114,28 @@ impl TypedPlan {
             }
             Some(RelType::Read(read)) => {
                 if let Some(ReadType::NamedTable(nt)) = &read.as_ref().read_type {
-                    let table_reference = nt.names.clone();
+                    let query_ctx = ctx.query_context.clone().unwrap();
+                    let table_reference = match nt.names.len() {
+                        1 => [
+                            query_ctx.current_catalog().to_string(),
+                            query_ctx.current_schema().to_string(),
+                            nt.names[0].clone(),
+                        ],
+                        2 => [
+                            query_ctx.current_catalog().to_string(),
+                            nt.names[0].clone(),
+                            nt.names[1].clone(),
+                        ],
+                        3 => [
+                            nt.names[0].clone(),
+                            nt.names[1].clone(),
+                            nt.names[2].clone(),
+                        ],
+                        _ => InvalidQuerySnafu {
+                            reason: "Expect table to have name",
+                        }
+                        .fail()?,
+                    };
                     let table = ctx.table(&table_reference)?;
                     let get_table = Plan::Get {
                         id: crate::expr::Id::Global(table.0),

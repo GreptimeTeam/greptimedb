@@ -80,7 +80,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
             out_send_port,
             move |_ctx, recv, send| {
                 // mfp only need to passively receive updates from recvs
-                let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+                let data = recv
+                    .take_inner()
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .collect_vec();
 
                 reduce_subgraph(
                     &reduce_arrange,
@@ -378,9 +382,8 @@ fn reduce_accum_subgraph(
 
     let mut all_updates = Vec::with_capacity(key_to_vals.len());
     let mut all_outputs = Vec::with_capacity(key_to_vals.len());
-
     // lock the arrange for write for the rest of function body
-    // so to prevent wide race condition since we are going to update the arrangement by write after read
+    // so to prevent wired race condition since we are going to update the arrangement by write after read
     // TODO(discord9): consider key-based lock
     let mut arrange = arrange.write();
     for (key, value_diffs) in key_to_vals {
@@ -395,6 +398,7 @@ fn reduce_accum_subgraph(
             }
         };
         let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
+
         let accums = accums.inner;
 
         // deser accums from offsets

@@ -16,12 +16,11 @@
 
 use std::any::Any;
 
+use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use serde::{Deserialize, Serialize};
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 
@@ -32,6 +31,11 @@ use crate::expr::EvalError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("External error"))]
+    External {
+        location: Location,
+        source: BoxedError,
+    },
     /// TODO(discord9): add detailed location of column
     #[snafu(display("Failed to eval stream"))]
     Eval {
@@ -47,6 +51,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table not found: {msg}, meta error: {source}"))]
+    TableNotFoundMeta {
+        source: common_meta::error::Error,
+        msg: String,
+        location: Location,
+    },
+
     #[snafu(display("Table already exist: {name}"))]
     TableAlreadyExist {
         name: String,
@@ -59,6 +70,24 @@ pub enum Error {
         #[snafu(source)]
         error: tokio::task::JoinError,
         #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid query plan: {source}"))]
+    InvalidQueryPlan {
+        source: query::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid query: prost can't decode substrait plan: {inner}"))]
+    InvalidQueryProst {
+        inner: api::DecodeError,
+        location: Location,
+    },
+
+    #[snafu(display("Invalid query, can't transform to substrait: {source}"))]
+    InvalidQuerySubstrait {
+        source: substrait::error::Error,
         location: Location,
     },
 
@@ -112,6 +141,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unexpected: {reason}"))]
+    Unexpected { reason: String, location: Location },
 }
 
 /// Result type for flow module
@@ -124,14 +156,20 @@ impl ErrorExt for Error {
                 StatusCode::Internal
             }
             &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
-            Self::TableNotFound { .. } => StatusCode::TableNotFound,
-            &Self::InvalidQuery { .. } | &Self::Plan { .. } | &Self::Datatypes { .. } => {
-                StatusCode::PlanQuery
+            Self::TableNotFound { .. } | Self::TableNotFoundMeta { .. } => {
+                StatusCode::TableNotFound
             }
-            Self::NoProtoType { .. } => StatusCode::Unexpected,
+            Self::InvalidQueryPlan { .. }
+            | Self::InvalidQuerySubstrait { .. }
+            | Self::InvalidQueryProst { .. }
+            | &Self::InvalidQuery { .. }
+            | &Self::Plan { .. }
+            | &Self::Datatypes { .. } => StatusCode::PlanQuery,
+            Self::NoProtoType { .. } | Self::Unexpected { .. } => StatusCode::Unexpected,
             &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
+            &Self::External { .. } => StatusCode::Unknown,
         }
     }
 

@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeMap, HashMap};
+
 use datatypes::prelude::ConcreteDataType;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::adapter::error::{InvalidQuerySnafu, Result};
+use crate::expr::MapFilterProject;
 
 /// a set of column indices that are "keys" for the collection.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
@@ -75,6 +79,12 @@ impl Key {
     }
 }
 
+impl Default for Key {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The type of a relation.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct RelationType {
@@ -96,6 +106,49 @@ pub struct RelationType {
 }
 
 impl RelationType {
+    pub fn apply_mfp(&self, mfp: &MapFilterProject, expr_typs: &[ColumnType]) -> Self {
+        let all_types = self
+            .column_types
+            .iter()
+            .chain(expr_typs.iter())
+            .cloned()
+            .collect_vec();
+        let mfp_out_types = mfp
+            .projection
+            .iter()
+            .map(|i| all_types[*i].clone())
+            .collect_vec();
+        let old_to_new_col = BTreeMap::from_iter(
+            mfp.projection
+                .clone()
+                .into_iter()
+                .enumerate()
+                .map(|(new, old)| (old, new)),
+        );
+
+        // since it's just a mfp, we also try to preserve keys&time index information, if they survive mfp transform
+        let keys = self
+            .keys
+            .iter()
+            .filter_map(|key| {
+                key.column_indices
+                    .iter()
+                    .map(|old| old_to_new_col.get(old).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|v| if v.is_empty() { None } else { Some(v) })
+                    .map(Key::from)
+            })
+            .collect_vec();
+
+        let time_index = self
+            .time_index
+            .and_then(|old| old_to_new_col.get(&old).cloned());
+        Self {
+            column_types: mfp_out_types,
+            keys,
+            time_index,
+        }
+    }
     /// Constructs a `RelationType` representing the relation with no columns and
     /// no keys.
     pub fn empty() -> Self {

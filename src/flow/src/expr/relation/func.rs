@@ -206,12 +206,16 @@ impl AggregateFunc {
                 .fail();
             }
         };
-        let input_type = arg_type.unwrap_or_else(ConcreteDataType::null_datatype);
+        let input_type = if matches!(generic_fn, GenericFn::Count) {
+            ConcreteDataType::null_datatype()
+        } else {
+            arg_type.unwrap_or_else(ConcreteDataType::null_datatype)
+        };
         rule.get(&(generic_fn, input_type.clone()))
             .cloned()
             .with_context(|| InvalidQuerySnafu {
                 reason: format!(
-                    "No specialization found for binary function {:?} with input type {:?}",
+                    "No specialization found for aggregate function {:?} with input type {:?}",
                     generic_fn, input_type
                 ),
             })

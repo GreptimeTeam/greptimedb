@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use common_telemetry::debug;
 use common_time::DateTime;
 use datafusion_expr::Operator;
 use datafusion_substrait::logical_plan::consumer::name_to_op;
@@ -206,8 +207,9 @@ impl UnaryFunc {
                         from: arg_ty,
                         to: to.clone(),
                     }
-                })?;
-                Ok(res)
+                });
+                debug!("Cast to type: {to:?}, result: {:?}", res);
+                res
             }
         }
     }

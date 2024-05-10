@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Global id's scope is in Current Worker, and is cross-dataflow
+/// Global id's scope is in Current Flow node, and is cross-dataflow
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum GlobalId {
     /// System namespace.
