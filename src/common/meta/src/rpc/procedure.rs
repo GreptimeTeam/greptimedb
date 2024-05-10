@@ -103,7 +103,6 @@ mod tests {
 
         let state = ProcedureState::Retrying {
             error: Arc::new(Error::ManagerNotStart {
-                #[snafu(implicit)]
                 location: Location::default(),
             }),
         };
@@ -113,7 +112,6 @@ mod tests {
 
         let state = ProcedureState::Failed {
             error: Arc::new(Error::ManagerNotStart {
-                #[snafu(implicit)]
                 location: Location::default(),
             }),
         };

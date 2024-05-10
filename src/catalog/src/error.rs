@@ -415,7 +415,6 @@ mod tests {
             StatusCode::TableAlreadyExists,
             Error::TableExists {
                 table: "some_table".to_string(),
-                #[snafu(implicit)]
                 location: Location::generate(),
             }
             .status_code()
@@ -430,7 +429,6 @@ mod tests {
             StatusCode::StorageUnavailable,
             Error::SystemCatalog {
                 msg: String::default(),
-                #[snafu(implicit)]
                 location: Location::generate(),
             }
             .status_code()
@@ -440,7 +438,6 @@ mod tests {
             StatusCode::Internal,
             Error::SystemCatalogTypeMismatch {
                 data_type: ConcreteDataType::binary_datatype(),
-                #[snafu(implicit)]
                 location: Location::generate(),
             }
             .status_code()
@@ -455,7 +452,6 @@ mod tests {
     pub fn test_errors_to_datafusion_error() {
         let e: DataFusionError = Error::TableExists {
             table: "test_table".to_string(),
-            #[snafu(implicit)]
             location: Location::generate(),
         }
         .into();
