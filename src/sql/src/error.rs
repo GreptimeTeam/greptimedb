@@ -124,7 +124,11 @@ pub enum Error {
     InvalidDatabaseName { name: String },
 
     #[snafu(display("Unrecognized database option key: {}", key))]
-    InvalidDatabaseOption { key: String, location: Location },
+    InvalidDatabaseOption {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid table name: {}", name))]
     InvalidTableName { name: String },
