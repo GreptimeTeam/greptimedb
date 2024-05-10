@@ -435,7 +435,6 @@ impl From<operator::error::Error> for Error {
     fn from(e: operator::error::Error) -> Error {
         Error::TableOperation {
             source: e,
-            #[snafu(implicit)]
             location: Location::default(),
         }
     }
