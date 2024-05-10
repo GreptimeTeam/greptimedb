@@ -145,11 +145,15 @@ impl<'a> ParserContext<'a> {
             .collect::<Result<Connection>>()?;
 
         let limit = if self.parser.parse_keyword(Keyword::LIMIT) {
-            Some(self.parser.parse_literal_uint().with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "maximum rows",
-                    actual: self.peek_token_as_string(),
-            })?)
+            Some(
+                self.parser
+                    .parse_literal_uint()
+                    .with_context(|_| error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: "maximum rows",
+                        actual: self.peek_token_as_string(),
+                    })?,
+            )
         } else {
             None
         };
