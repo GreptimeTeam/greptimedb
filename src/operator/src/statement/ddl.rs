@@ -45,7 +45,7 @@ use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
@@ -389,10 +389,10 @@ impl StatementExecutor {
         } else if drop_if_exists {
             Ok(Output::new_with_affected_rows(0))
         } else {
-            Err(FlowNotFoundSnafu {
+            FlowNotFoundSnafu {
                 flow_name: format_full_flow_name(&catalog_name, &flow_name),
             }
-            .into_error(snafu::NoneError))
+            .fail()
         }
     }
 
@@ -470,10 +470,10 @@ impl StatementExecutor {
             // DROP TABLE IF EXISTS meets table not found - ignored
             Ok(Output::new_with_affected_rows(0))
         } else {
-            Err(TableNotFoundSnafu {
+            TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             }
-            .into_error(snafu::NoneError))
+            .fail()
         }
     }
 
@@ -499,10 +499,10 @@ impl StatementExecutor {
             // DROP TABLE IF EXISTS meets table not found - ignored
             Ok(Output::new_with_affected_rows(0))
         } else {
-            Err(SchemaNotFoundSnafu {
+            SchemaNotFoundSnafu {
                 schema_info: schema,
             }
-            .into_error(snafu::NoneError))
+            .fail()
         }
     }
 
