@@ -729,103 +729,54 @@ pub async fn test_config_api(store_type: StorageType) {
 
     let expected_toml_str = format!(
         r#"
-[procedure]
-max_retry_times = 3
-retry_delay = "500ms"
-
-[metadata_store]
-file_size = "256MiB"
-purge_threshold = "4GiB"
-
-[frontend]
 mode = "standalone"
+enable_telemetry = true
 
-[frontend.heartbeat]
-interval = "18s"
-retry_interval = "3s"
-
-[frontend.http]
+[http]
 addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MiB"
 is_strict_mode = false
 
-[frontend.grpc]
+[grpc]
 addr = "127.0.0.1:4001"
 runtime_size = 8
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 
-[frontend.mysql]
+[mysql]
 enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
 
-[frontend.mysql.tls]
+[mysql.tls]
 mode = "disable"
 cert_path = ""
 key_path = ""
 watch = false
 
-[frontend.postgres]
+[postgres]
 enable = true
 addr = "127.0.0.1:4003"
 runtime_size = 2
 
-[frontend.postgres.tls]
+[postgres.tls]
 mode = "disable"
 cert_path = ""
 key_path = ""
 watch = false
 
-[frontend.opentsdb]
+[opentsdb]
 enable = true
 
-[frontend.influxdb]
+[influxdb]
 enable = true
 
-[frontend.prom_store]
+[prom_store]
 enable = true
 with_metric_engine = true
 
-[frontend.otlp]
-enable = true
-
-[frontend.logging]
-enable_otlp_tracing = false
-append_stdout = true
-
-[frontend.datanode.client]
-timeout = "10s"
-connect_timeout = "1s"
-tcp_nodelay = true
-
-[frontend.export_metrics]
-enable = false
-write_interval = "30s"
-
-[datanode]
-mode = "standalone"
-node_id = 0
-require_lease_before_startup = true
-init_regions_in_background = false
-rpc_addr = "127.0.0.1:3001"
-rpc_runtime_size = 8
-rpc_max_recv_message_size = "512MiB"
-rpc_max_send_message_size = "512MiB"
-enable_telemetry = true
-
-[datanode.heartbeat]
-interval = "3s"
-retry_interval = "3s"
-
-[datanode.http]
-addr = "127.0.0.1:4000"
-timeout = "30s"
-body_limit = "64MiB"
-is_strict_mode = false
-
-[datanode.wal]
+[wal]
 provider = "raft_engine"
 file_size = "256MiB"
 purge_threshold = "4GiB"
@@ -835,13 +786,25 @@ sync_write = false
 enable_log_recycle = true
 prefill_log_files = false
 
-[datanode.storage]
+[storage]
 type = "{}"
 providers = []
 
-[[datanode.region_engine]]
+[metadata_store]
+file_size = "256MiB"
+purge_threshold = "4GiB"
 
-[datanode.region_engine.mito]
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"
+
+[logging]
+enable_otlp_tracing = false
+append_stdout = true
+
+[[region_engine]]
+
+[region_engine.mito]
 worker_channel_size = 128
 worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
@@ -855,7 +818,7 @@ sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
 
-[datanode.region_engine.mito.inverted_index]
+[region_engine.mito.inverted_index]
 create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
@@ -863,29 +826,20 @@ write_buffer_size = "8MiB"
 mem_threshold_on_create = "64.0MiB"
 intermediate_path = ""
 
-[datanode.region_engine.mito.memtable]
+[region_engine.mito.memtable]
 type = "time_series"
 
-[[datanode.region_engine]]
+[[region_engine]]
 
-[datanode.region_engine.file]
+[region_engine.file]
 
-[datanode.logging]
-enable_otlp_tracing = false
-append_stdout = true
-
-[datanode.export_metrics]
+[export_metrics]
 enable = false
-write_interval = "30s"
-
-[logging]
-enable_otlp_tracing = false
-append_stdout = true
-
-[wal_meta]
-provider = "raft_engine""#,
-        store_type,
-    );
+write_interval = "30s""#,
+        store_type
+    )
+    .trim()
+    .to_string();
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
     assert_eq!(body_text, expected_toml_str);
 }

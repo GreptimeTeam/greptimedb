@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use catalog::kvbackend::KvBackendCatalogManager;
-use cmd::options::MixOptions;
+use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
@@ -32,10 +32,8 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::logging::LoggingOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
-use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
@@ -45,7 +43,7 @@ use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, Test
 
 pub struct GreptimeDbStandalone {
     pub instance: Arc<Instance>,
-    pub mix_options: MixOptions,
+    pub opts: StandaloneOptions,
     pub guard: TestGuard,
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
@@ -115,13 +113,13 @@ impl GreptimeDbStandaloneBuilder {
         &self,
         kv_backend: KvBackendRef,
         guard: TestGuard,
-        mix_options: MixOptions,
+        opts: StandaloneOptions,
         procedure_manager: ProcedureManagerRef,
         register_procedure_loaders: bool,
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
 
-        let datanode = DatanodeBuilder::new(mix_options.datanode.clone(), plugins.clone())
+        let datanode = DatanodeBuilder::new(opts.datanode_options(), plugins.clone())
             .with_kv_backend(kv_backend.clone())
             .build()
             .await
@@ -154,7 +152,7 @@ impl GreptimeDbStandaloneBuilder {
                 .build(),
         );
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            mix_options.wal_meta.clone(),
+            opts.wal.clone().into(),
             kv_backend.clone(),
         ));
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
@@ -202,7 +200,7 @@ impl GreptimeDbStandaloneBuilder {
 
         GreptimeDbStandalone {
             instance: Arc::new(instance),
-            mix_options,
+            opts,
             guard,
             kv_backend,
             procedure_manager,
@@ -231,18 +229,15 @@ impl GreptimeDbStandaloneBuilder {
         .await
         .unwrap();
 
-        let wal_meta = self.metasrv_wal_config.clone();
-        let mix_options = MixOptions {
-            data_home: opts.storage.data_home.to_string(),
+        let standalone_opts = StandaloneOptions {
+            storage: opts.storage,
             procedure: procedure_config,
             metadata_store: kv_backend_config,
-            frontend: FrontendOptions::default(),
-            datanode: opts,
-            logging: LoggingOptions::default(),
-            wal_meta,
+            wal: self.metasrv_wal_config.clone().into(),
+            ..StandaloneOptions::default()
         };
 
-        self.build_with(kv_backend, guard, mix_options, procedure_manager, true)
+        self.build_with(kv_backend, guard, standalone_opts, procedure_manager, true)
             .await
     }
 }

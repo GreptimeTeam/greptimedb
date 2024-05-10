@@ -106,7 +106,7 @@ impl MockInstanceBuilder {
                     unreachable!()
                 };
                 let GreptimeDbStandalone {
-                    mix_options,
+                    opts,
                     guard,
                     kv_backend,
                     procedure_manager,
@@ -114,7 +114,7 @@ impl MockInstanceBuilder {
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, guard, mix_options, procedure_manager, false)
+                        .build_with(kv_backend, guard, opts, procedure_manager, false)
                         .await,
                 )
             }

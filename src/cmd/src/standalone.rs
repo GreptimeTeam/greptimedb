@@ -40,6 +40,7 @@ use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
+use frontend::error::{Result as FeResult, TomlFormatSnafu};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -61,7 +62,7 @@ use crate::error::{
     Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
     StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::{GlobalOptions, MixOptions, Options};
+use crate::options::{GlobalOptions, Options};
 use crate::App;
 
 #[derive(Parser)]
@@ -71,7 +72,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: MixOptions) -> Result<Instance> {
+    pub async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
@@ -86,7 +87,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: MixOptions) -> Result<Instance> {
+    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
@@ -158,36 +159,42 @@ impl Default for StandaloneOptions {
 }
 
 impl StandaloneOptions {
-    fn frontend_options(self) -> FrontendOptions {
+    pub fn frontend_options(&self) -> FrontendOptions {
+        let cloned_opts = self.clone();
         FrontendOptions {
-            mode: self.mode,
-            default_timezone: self.default_timezone,
-            http: self.http,
-            grpc: self.grpc,
-            mysql: self.mysql,
-            postgres: self.postgres,
-            opentsdb: self.opentsdb,
-            influxdb: self.influxdb,
-            prom_store: self.prom_store,
+            mode: cloned_opts.mode,
+            default_timezone: cloned_opts.default_timezone,
+            http: cloned_opts.http,
+            grpc: cloned_opts.grpc,
+            mysql: cloned_opts.mysql,
+            postgres: cloned_opts.postgres,
+            opentsdb: cloned_opts.opentsdb,
+            influxdb: cloned_opts.influxdb,
+            prom_store: cloned_opts.prom_store,
             meta_client: None,
-            logging: self.logging,
-            user_provider: self.user_provider,
+            logging: cloned_opts.logging,
+            user_provider: cloned_opts.user_provider,
             // Handle the export metrics task run by standalone to frontend for execution
-            export_metrics: self.export_metrics,
+            export_metrics: cloned_opts.export_metrics,
             ..Default::default()
         }
     }
 
-    fn datanode_options(self) -> DatanodeOptions {
+    pub fn datanode_options(&self) -> DatanodeOptions {
+        let cloned_opts = self.clone();
         DatanodeOptions {
             node_id: Some(0),
-            enable_telemetry: self.enable_telemetry,
-            wal: self.wal.into(),
-            storage: self.storage,
-            region_engine: self.region_engine,
-            rpc_addr: self.grpc.addr,
+            enable_telemetry: cloned_opts.enable_telemetry,
+            wal: cloned_opts.wal.into(),
+            storage: cloned_opts.storage,
+            region_engine: cloned_opts.region_engine,
+            rpc_addr: cloned_opts.grpc.addr,
             ..Default::default()
         }
+    }
+
+    pub fn to_toml(&self) -> FeResult<String> {
+        toml::to_string(self).context(TomlFormatSnafu)
     }
 }
 
@@ -277,20 +284,12 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let opts: StandaloneOptions = Options::load_layered_options(
+        let mut opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             StandaloneOptions::env_list_keys(),
         )?;
 
-        self.convert_options(global_options, opts)
-    }
-
-    pub fn convert_options(
-        &self,
-        global_options: &GlobalOptions,
-        mut opts: StandaloneOptions,
-    ) -> Result<Options> {
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &global_options.log_dir {
@@ -323,8 +322,7 @@ impl StartCommand {
                     msg: format!(
                         "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
                     ),
-                }
-                .fail();
+                }.fail();
             }
             opts.grpc.addr.clone_from(addr)
         }
@@ -347,47 +345,32 @@ impl StartCommand {
 
         opts.user_provider.clone_from(&self.user_provider);
 
-        let metadata_store = opts.metadata_store.clone();
-        let procedure = opts.procedure.clone();
-        let frontend = opts.clone().frontend_options();
-        let logging = opts.logging.clone();
-        let wal_meta = opts.wal.clone().into();
-        let datanode = opts.datanode_options().clone();
-
-        Ok(Options::Standalone(Box::new(MixOptions {
-            procedure,
-            metadata_store,
-            data_home: datanode.storage.data_home.to_string(),
-            frontend,
-            datanode,
-            logging,
-            wal_meta,
-        })))
+        Ok(Options::Standalone(Box::new(opts)))
     }
 
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(self, opts: MixOptions) -> Result<Instance> {
+    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
         info!("Standalone start command: {:#?}", self);
         info!("Building standalone instance with {opts:#?}");
 
-        let mut fe_opts = opts.frontend;
+        let mut fe_opts = opts.frontend_options();
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.datanode;
+        let dn_opts = opts.datanode_options();
 
         set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
+        let data_home = &dn_opts.storage.data_home;
         // Ensure the data_home directory exists.
-        fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
-            dir: &opts.data_home,
-        })?;
+        fs::create_dir_all(path::Path::new(data_home))
+            .context(CreateDirSnafu { dir: data_home })?;
 
-        let metadata_dir = metadata_store_dir(&opts.data_home);
+        let metadata_dir = metadata_store_dir(data_home);
         let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
             opts.metadata_store.clone(),
@@ -424,7 +407,7 @@ impl StartCommand {
                 .build(),
         );
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal_meta.clone(),
+            opts.wal.into(),
             kv_backend.clone(),
         ));
         let table_metadata_manager =
@@ -621,8 +604,8 @@ mod tests {
         else {
             unreachable!()
         };
-        let fe_opts = options.frontend;
-        let dn_opts = options.datanode;
+        let fe_opts = options.frontend_options();
+        let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
@@ -759,11 +742,12 @@ mod tests {
                 assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.frontend.http.addr, "127.0.0.1:14000");
-                assert_eq!(ReadableSize::mb(64), opts.frontend.http.body_limit);
+                let fe_opts = opts.frontend_options();
+                assert_eq!(fe_opts.http.addr, "127.0.0.1:14000");
+                assert_eq!(ReadableSize::mb(64), fe_opts.http.body_limit);
 
                 // Should be default value.
-                assert_eq!(opts.frontend.grpc.addr, GrpcOptions::default().addr);
+                assert_eq!(fe_opts.grpc.addr, GrpcOptions::default().addr);
             },
         );
     }
