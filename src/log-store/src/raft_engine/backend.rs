@@ -93,7 +93,7 @@ impl TxnService for RaftEngineBackend {
         let engine = self.engine.write().unwrap();
         for cmp in compare {
             let existing_value = engine_get(&engine, &cmp.key)?.map(|kv| kv.value);
-            if !cmp.compare_with_value(existing_value.as_ref()) {
+            if !cmp.compare_value(existing_value.as_ref()) {
                 succeeded = false;
                 break;
             }

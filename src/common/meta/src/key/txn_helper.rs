@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::key::{DeserializedValueWithBytes, TableMetaValue};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
+use crate::kv_backend::txn::TxnOpResponse;
 use crate::rpc::KeyValue;
 
 /// The response set of [TxnOpResponse::ResponseGet]
@@ -66,25 +66,4 @@ impl From<&mut Vec<TxnOpResponse>> for TxnOpGetResponseSet {
             .collect::<Vec<_>>();
         TxnOpGetResponseSet(value)
     }
-}
-
-pub(crate) fn build_put_if_absent_txn(key: Vec<u8>, value: Vec<u8>) -> Txn {
-    Txn::new()
-        .when(vec![Compare::with_not_exist_value(
-            key.clone(),
-            CompareOp::Equal,
-        )])
-        .and_then(vec![TxnOp::Put(key.clone(), value)])
-        .or_else(vec![TxnOp::Get(key)])
-}
-
-pub(crate) fn build_compare_and_put_txn(key: Vec<u8>, old_value: Vec<u8>, value: Vec<u8>) -> Txn {
-    Txn::new()
-        .when(vec![Compare::with_value(
-            key.clone(),
-            CompareOp::Equal,
-            old_value,
-        )])
-        .and_then(vec![TxnOp::Put(key.clone(), value)])
-        .or_else(vec![TxnOp::Get(key)])
 }

@@ -24,9 +24,7 @@ use table::metadata::TableId;
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{
-    txn_helper, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetaKey, TableMetaValue,
-};
+use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetaKey, TableMetaValue};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::table_name::TableName;
@@ -181,7 +179,7 @@ impl FlowInfoManager {
         ) -> Result<Option<DeserializedValueWithBytes<FlowInfoValue>>>,
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
-        let txn = txn_helper::build_put_if_absent_txn(key.clone(), flow_value.try_as_raw_value()?);
+        let txn = Txn::put_if_not_exists(key.clone(), flow_value.try_as_raw_value()?);
 
         Ok((
             txn,
