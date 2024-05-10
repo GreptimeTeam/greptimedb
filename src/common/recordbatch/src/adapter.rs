@@ -366,7 +366,7 @@ impl Display for RecordBatchMetrics {
             for (label, value) in &metric.metrics {
                 write!(f, "{}: {}, ", label, value)?;
             }
-            write!(f, "]\n")?;
+            writeln!(f, "]")?;
         }
 
         Ok(())
