@@ -27,24 +27,38 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported physical plan: {}", name))]
-    UnsupportedPlan { name: String, location: Location },
+    UnsupportedPlan {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported expr: {}", name))]
-    UnsupportedExpr { name: String, location: Location },
+    UnsupportedExpr {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported concrete type: {:?}", ty))]
     UnsupportedConcreteType {
         ty: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported substrait type: {}", ty))]
-    UnsupportedSubstraitType { ty: String, location: Location },
+    UnsupportedSubstraitType {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to decode substrait relation"))]
     DecodeRel {
         #[snafu(source)]
         error: DecodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -52,40 +66,57 @@ pub enum Error {
     EncodeRel {
         #[snafu(source)]
         error: EncodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Input plan is empty"))]
-    EmptyPlan { location: Location },
+    EmptyPlan {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Input expression is empty"))]
-    EmptyExpr { location: Location },
+    EmptyExpr {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing required field in protobuf, field: {}, plan: {}", field, plan))]
     MissingField {
         field: String,
         plan: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid parameters: {}", reason))]
-    InvalidParameters { reason: String, location: Location },
+    InvalidParameters {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Internal error from DataFusion"))]
     DFInternal {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Internal error"))]
     Internal {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
-    UnknownPlan { location: Location },
+    UnknownPlan {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Schema from Substrait proto doesn't match with the schema in storage.
@@ -97,11 +128,13 @@ pub enum Error {
     SchemaNotMatch {
         substrait_schema: datafusion::arrow::datatypes::SchemaRef,
         storage_schema: datafusion::arrow::datatypes::SchemaRef,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion schema"))]
     ConvertDfSchema {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -109,6 +142,7 @@ pub enum Error {
     #[snafu(display("Unable to resolve table: {table_name}, error: "))]
     ResolveTable {
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
         source: catalog::error::Error,
     },
@@ -117,6 +151,7 @@ pub enum Error {
     EncodeDfPlan {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -124,6 +159,7 @@ pub enum Error {
     DecodeDfPlan {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 }

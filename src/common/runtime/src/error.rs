@@ -29,17 +29,23 @@ pub enum Error {
     BuildRuntime {
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Repeated task {} is already started", name))]
-    IllegalState { name: String, location: Location },
+    IllegalState {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to wait for repeated task {} to stop", name))]
     WaitGcTaskStop {
         name: String,
         #[snafu(source)]
         error: JoinError,
+        #[snafu(implicit)]
         location: Location,
     },
 }

@@ -30,6 +30,7 @@ pub enum Error {
     Seek {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -37,6 +38,7 @@ pub enum Error {
     Read {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -44,6 +46,7 @@ pub enum Error {
     Write {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -51,6 +54,7 @@ pub enum Error {
     Flush {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -58,6 +62,7 @@ pub enum Error {
     Close {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -67,6 +72,7 @@ pub enum Error {
     UnexpectedBlobSize {
         min_blob_size: u64,
         actual_blob_size: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -74,6 +80,7 @@ pub enum Error {
     UnexpectedFooterPayloadSize {
         max_payload_size: u64,
         actual_payload_size: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -86,12 +93,16 @@ pub enum Error {
     },
 
     #[snafu(display("Unexpected zero segment row count"))]
-    UnexpectedZeroSegmentRowCount { location: Location },
+    UnexpectedZeroSegmentRowCount {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to decode fst"))]
     DecodeFst {
         #[snafu(source)]
         error: fst::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -99,6 +110,7 @@ pub enum Error {
     DecodeProto {
         #[snafu(source)]
         error: prost::DecodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -107,6 +119,7 @@ pub enum Error {
         #[snafu(source)]
         error: regex::Error,
         pattern: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -114,33 +127,49 @@ pub enum Error {
     ParseDFA {
         #[snafu(source)]
         error: Box<regex_automata::dfa::dense::BuildError>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected empty predicates to construct fst applier"))]
-    EmptyPredicates { location: Location },
+    EmptyPredicates {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to construct intersection fst applier with InList predicate"))]
-    IntersectionApplierWithInList { location: Location },
+    IntersectionApplierWithInList {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to construct keys fst applier without InList predicate"))]
-    KeysApplierWithoutInList { location: Location },
+    KeysApplierWithoutInList {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Failed to construct keys fst applier with unexpected predicates: {predicates:?}"
     ))]
     KeysApplierUnexpectedPredicates {
+        #[snafu(implicit)]
         location: Location,
         predicates: Vec<Predicate>,
     },
 
     #[snafu(display("index not found, name: {name}"))]
-    IndexNotFound { name: String, location: Location },
+    IndexNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to insert value to FST"))]
     FstInsert {
         #[snafu(source)]
         error: fst::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -148,6 +177,7 @@ pub enum Error {
     FstCompile {
         #[snafu(source)]
         error: fst::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -155,11 +185,16 @@ pub enum Error {
     CommonIoError {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unknown intermediate codec magic: {magic:?}"))]
-    UnknownIntermediateCodecMagic { magic: [u8; 4], location: Location },
+    UnknownIntermediateCodecMagic {
+        magic: [u8; 4],
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Inconsistent row count, index_name: {index_name}, total_row_count: {total_row_count}, expected: {expected_row_count}"))]
     InconsistentRowCount {
@@ -171,6 +206,7 @@ pub enum Error {
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 }

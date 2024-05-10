@@ -24,10 +24,15 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Illegal delete request, reason: {reason}"))]
-    IllegalDeleteRequest { reason: String, location: Location },
+    IllegalDeleteRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
+        #[snafu(implicit)]
         location: Location,
         source: api::error::Error,
     },
@@ -40,39 +45,63 @@ pub enum Error {
     DuplicatedTimestampColumn {
         exists: String,
         duplicated: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Duplicated column name in gRPC requests, name: {}", name,))]
-    DuplicatedColumnName { name: String, location: Location },
+    DuplicatedColumnName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing timestamp column, msg: {}", msg))]
-    MissingTimestampColumn { msg: String, location: Location },
+    MissingTimestampColumn {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
-    InvalidColumnProto { err_msg: String, location: Location },
+    InvalidColumnProto {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Failed to create vector"))]
     CreateVector {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, location: Location },
+    MissingField {
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid column proto definition, column: {}", column))]
     InvalidColumnDef {
         column: String,
+        #[snafu(implicit)]
         location: Location,
         source: api::error::Error,
     },
 
     #[snafu(display("Unexpected values length, reason: {}", reason))]
-    UnexpectedValuesLength { reason: String, location: Location },
+    UnexpectedValuesLength {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unknown location type: {}", location_type))]
     UnknownLocationType {
         location_type: i32,
+        #[snafu(implicit)]
         location: Location,
     },
 }

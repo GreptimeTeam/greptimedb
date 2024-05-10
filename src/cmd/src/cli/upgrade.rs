@@ -565,11 +565,16 @@ mod v1_helper {
         #[snafu(visibility(pub))]
         pub enum Error {
             #[snafu(display("Invalid catalog info: {}", key))]
-            InvalidCatalog { key: String, location: Location },
+            InvalidCatalog {
+                key: String,
+                #[snafu(implicit)]
+                location: Location,
+            },
 
             #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
             DeserializeCatalogEntryValue {
                 raw: String,
+                #[snafu(implicit)]
                 location: Location,
                 source: serde_json::error::Error,
             },

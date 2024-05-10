@@ -32,22 +32,29 @@ pub enum Error {
     #[snafu(display("Table route manager error"))]
     TableRouteManager {
         source: common_meta::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
-    GetCache { err_msg: String, location: Location },
+    GetCache {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to find Datanode, table id: {}, region: {}", table_id, region))]
     FindDatanode {
         table_id: TableId,
         region: RegionNumber,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to find table routes for table id {}", table_id))]
     FindTableRoutes {
         table_id: TableId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -59,6 +66,7 @@ pub enum Error {
     FindRegionRoutes {
         table_id: TableId,
         region_id: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -66,6 +74,7 @@ pub enum Error {
     SerializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -73,6 +82,7 @@ pub enum Error {
     DeserializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -83,34 +93,50 @@ pub enum Error {
     RegionKeysSize {
         expect: usize,
         actual: usize,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion { reason: String, location: Location },
+    FindRegion {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to find regions by filters: {:?}", filters))]
     FindRegions {
         filters: Vec<Expr>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
-    InvalidInsertRequest { reason: String, location: Location },
+    InvalidInsertRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
-    InvalidDeleteRequest { reason: String, location: Location },
+    InvalidDeleteRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid table route data, table id: {}, msg: {}", table_id, err_msg))]
     InvalidTableRouteData {
         table_id: TableId,
         err_msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion's ScalarValue: {:?}", value))]
     ConvertScalarValue {
         value: ScalarValue,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -119,11 +145,13 @@ pub enum Error {
     FindLeader {
         table_id: TableId,
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable {
+        #[snafu(implicit)]
         location: Location,
         err_msg: String,
         source: common_meta::error::Error,
@@ -132,6 +160,7 @@ pub enum Error {
     #[snafu(display("Conjunct expr with non-expr is invalid"))]
     ConjunctExprWithNonExpr {
         expr: PartitionExpr,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -139,17 +168,23 @@ pub enum Error {
     UnclosedValue {
         value: String,
         column: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid partition expr: {:?}", expr))]
     InvalidExpr {
         expr: PartitionExpr,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Undefined column: {}", column))]
-    UndefinedColumn { column: String, location: Location },
+    UndefinedColumn {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

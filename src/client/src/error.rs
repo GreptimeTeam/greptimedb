@@ -26,7 +26,11 @@ use tonic::{Code, Status};
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Illegal Flight messages, reason: {}", reason))]
-    IllegalFlightMessages { reason: String, location: Location },
+    IllegalFlightMessages {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to do Flight get, code: {}", tonic_code))]
     FlightGet {
@@ -37,31 +41,43 @@ pub enum Error {
 
     #[snafu(display("Failure occurs during handling request"))]
     HandleRequest {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to convert FlightData"))]
     ConvertFlightData {
+        #[snafu(implicit)]
         location: Location,
         source: common_grpc::Error,
     },
 
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
+        #[snafu(implicit)]
         location: Location,
         source: api::error::Error,
     },
 
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
-    IllegalGrpcClientState { err_msg: String, location: Location },
+    IllegalGrpcClientState {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, location: Location },
+    MissingField {
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to create gRPC channel, peer address: {}", addr))]
     CreateChannel {
         addr: String,
+        #[snafu(implicit)]
         location: Location,
         source: common_grpc::error::Error,
     },
@@ -77,7 +93,11 @@ pub enum Error {
     IllegalDatabaseResponse { err_msg: String },
 
     #[snafu(display("Failed to send request with streaming: {}", err_msg))]
-    ClientStreaming { err_msg: String, location: Location },
+    ClientStreaming {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
