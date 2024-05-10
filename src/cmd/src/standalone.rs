@@ -45,6 +45,7 @@ use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
+use flow::FlownodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -426,11 +427,26 @@ impl StartCommand {
         )
         .await;
 
+        let table_metadata_manager =
+            Self::create_table_metadata_manager(kv_backend.clone()).await?;
+
+        let flow_builder = FlownodeBuilder::new(
+            Default::default(),
+            fe_plugins.clone(),
+            table_metadata_manager.clone(),
+            catalog_manager.clone(),
+        )
+        .with_kv_backend(kv_backend.clone());
+        let flownode = Arc::new(flow_builder.build().await);
+
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
         let datanode = builder.build().await.context(StartDatanodeSnafu)?;
 
-        let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+        let node_manager = Arc::new(StandaloneDatanodeManager {
+            region_server: datanode.region_server(),
+            flow_server: flownode.clone(),
+        });
 
         let table_id_sequence = Arc::new(
             SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -448,8 +464,6 @@ impl StartCommand {
             opts.wal.into(),
             kv_backend.clone(),
         ));
-        let table_metadata_manager =
-            Self::create_table_metadata_manager(kv_backend.clone()).await?;
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
@@ -481,6 +495,12 @@ impl StartCommand {
         .try_build()
         .await
         .context(StartFrontendSnafu)?;
+
+        // flow server need to be able to use frontend to write insert requests back
+        flownode
+            .set_frontend_invoker(Box::new(frontend.clone()))
+            .await;
+        let _handle = flownode.clone().run_background();
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()

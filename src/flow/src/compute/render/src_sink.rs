@@ -36,6 +36,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
         &mut self,
         mut src_recv: broadcast::Receiver<DiffRow>,
     ) -> Result<CollectionBundle, Error> {
+        debug!("Rendering Source");
         let (send_port, recv_port) = self.df.make_edge::<_, Toff>("source");
         let arrange_handler = self.compute_state.new_arrange(None);
         let arrange_handler_inner =
@@ -60,7 +61,6 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let prev_avail = arr.into_iter().map(|((k, _), t, d)| (k, t, d));
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();
-
                 // TODO(discord9): handling tokio broadcast error
                 while let Ok((r, t, d)) = src_recv.try_recv() {
                     if t <= now {
@@ -72,7 +72,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let all = prev_avail.chain(to_send).collect_vec();
                 if !all.is_empty() || !to_arrange.is_empty() {
                     debug!(
-                        "All send: {} rows, not yet send: {} rows",
+                        "Rendered Source All send: {} rows, not yet send: {} rows",
                         all.len(),
                         to_arrange.len()
                     );
