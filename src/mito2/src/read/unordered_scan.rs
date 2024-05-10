@@ -198,6 +198,14 @@ impl UnorderedScan {
     }
 }
 
+#[cfg(test)]
+impl UnorderedScan {
+    /// Returns the input.
+    pub(crate) fn input(&self) -> &ScanInput {
+        &self.input
+    }
+}
+
 /// Metrics for [UnorderedScan].
 #[derive(Debug, Default)]
 struct Metrics {
@@ -215,12 +223,4 @@ struct Metrics {
     num_batches: usize,
     /// Number of rows returned.
     num_rows: usize,
-}
-
-#[cfg(test)]
-impl UnorderedScan {
-    /// Returns the input.
-    pub(crate) fn input(&self) -> &ScanInput {
-        &self.input
-    }
 }
