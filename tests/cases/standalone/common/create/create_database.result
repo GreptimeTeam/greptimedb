@@ -1,14 +1,18 @@
+create database '㊙️database';
+
+Error: 1002(Unexpected), Unexpected, violated: Invalid database name: ㊙️database
+
 create database illegal-database;
 
 Error: 1001(Unsupported), SQL statement is not supported: create database illegal-database;, keyword: -
 
-create database 'illegal-database' with (ttl = '1h');
+create database 'illegal-database';
 
 Affected Rows: 1
 
-create database '㊙️database';
+create database mydb with (ttl = '1h');
 
-Error: 1002(Unexpected), Unexpected, violated: Invalid database name: ㊙️database
+Affected Rows: 1
 
 show databases;
 
@@ -18,10 +22,15 @@ show databases;
 | greptime_private   |
 | illegal-database   |
 | information_schema |
+| mydb               |
 | public             |
 +--------------------+
 
 drop database 'illegal-database';
+
+Affected Rows: 0
+
+drop database mydb;
 
 Affected Rows: 0
 
