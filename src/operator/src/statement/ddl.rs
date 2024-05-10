@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
-use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr};
+use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -386,7 +386,7 @@ impl StatementExecutor {
     ) -> Result<TableRef> {
         // TODO(dennis): Validate if catalog, schema or view exists
         // convert input into logical plan
-        let logical_plan = match &*create_view.input {
+        let logical_plan = match &*create_view.query {
             Statement::Query(query) => {
                 self.plan(
                     QueryStatement::Sql(Statement::Query(query.clone())),
@@ -409,6 +409,14 @@ impl StatementExecutor {
         let expr =
             expr_factory::to_create_view_expr(create_view, encoded_plan.to_vec(), ctx.clone())?;
 
+        self.create_view_by_expr(expr, ctx).await
+    }
+
+    pub async fn create_view_by_expr(
+        &self,
+        expr: CreateViewExpr,
+        ctx: QueryContextRef,
+    ) -> Result<TableRef> {
         let view_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.view_name);
 
         let mut view_info = RawTableInfo {

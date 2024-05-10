@@ -128,7 +128,7 @@ impl Display for Statement {
             Statement::ShowCollation(kind) => {
                 write!(f, "SHOW COLLATION {kind}")
             }
-            Statement::CreateView(_c) => todo!(),
+            Statement::CreateView(s) => s.fmt(f),
         }
     }
 }

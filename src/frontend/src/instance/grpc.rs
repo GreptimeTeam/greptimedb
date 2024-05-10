@@ -159,11 +159,16 @@ impl GrpcQueryHandler for Instance {
                             .drop_flow(catalog_name, flow_name, drop_if_exists, ctx.clone())
                             .await?
                     }
-                    DdlExpr::CreateView(_) => {
-                        todo!()
+                    DdlExpr::CreateView(c) => {
+                        let _ = self
+                            .statement_executor
+                            .create_view_by_expr(c, ctx.clone())
+                            .await?;
+
+                        Output::new_with_affected_rows(0)
                     }
                     DdlExpr::DropView(_) => {
-                        todo!()
+                        todo!("implemented in the following PR")
                     }
                 }
             }

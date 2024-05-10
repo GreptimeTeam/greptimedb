@@ -530,7 +530,7 @@ pub fn to_create_view_expr(
         view_name,
         logical_plan,
         create_if_not_exists: stmt.if_not_exists,
-        create_or_replace: stmt.or_replace,
+        or_replace: stmt.or_replace,
     };
 
     // FIXME(dennis): validate the expr

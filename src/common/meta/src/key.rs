@@ -494,7 +494,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let view_id = view_info.ident.table_id;
 
-        // Creates table name.
+        // Creates view name.
         let view_name = TableNameKey::new(
             &view_info.catalog_name,
             &view_info.schema_name,
@@ -536,7 +536,7 @@ impl TableMetadataManager {
 
             let remote_view_info = on_create_view_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty view info during the create table metadata",
+                    err_msg: "Reads the empty view info during the create view info",
                 })?
                 .into_inner();
 
@@ -906,7 +906,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let new_view_info_value = current_view_info_value.update(new_view_info);
 
-        // Updates table info.
+        // Updates view info.
         let (update_view_info_txn, on_update_view_info_failure) = self
             .view_info_manager()
             .build_update_txn(view_id, current_view_info_value, &new_view_info_value)?;
@@ -1948,5 +1948,61 @@ mod tests {
             .unwrap();
         let kvs = mem_kv.dump();
         assert_eq!(kvs, expected_result);
+    }
+
+    #[tokio::test]
+    async fn test_update_view_info() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv);
+        let region_route = new_test_region_route();
+        let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_id = table_info.ident.table_id;
+        // creates metadata.
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info.clone(),
+            region_routes.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut new_table_info = table_info.clone();
+        new_table_info.name = "hi".to_string();
+        let current_table_info_value =
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
+        // should be ok.
+        table_metadata_manager
+            .update_table_info(&current_table_info_value, new_table_info.clone())
+            .await
+            .unwrap();
+        // if table info was updated, it should be ok.
+        table_metadata_manager
+            .update_table_info(&current_table_info_value, new_table_info.clone())
+            .await
+            .unwrap();
+
+        // updated table_info should equal the `new_table_info`
+        let updated_table_info = table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        assert_eq!(updated_table_info.table_info, new_table_info);
+
+        let mut wrong_table_info = table_info.clone();
+        wrong_table_info.name = "wrong".to_string();
+        let wrong_table_info_value = DeserializedValueWithBytes::from_inner(
+            current_table_info_value.update(wrong_table_info),
+        );
+        // if the current_table_info_value is wrong, it should return an error.
+        // The ABA problem.
+        assert!(table_metadata_manager
+            .update_table_info(&wrong_table_info_value, new_table_info)
+            .await
+            .is_err())
     }
 }

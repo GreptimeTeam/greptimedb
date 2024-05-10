@@ -292,11 +292,26 @@ pub struct CreateView {
     pub name: ObjectName,
     /// The clause after `As` that defines the VIEW.
     /// Can only be either [Statement::Query] or [Statement::Tql].
-    pub input: Box<Statement>,
+    pub query: Box<Statement>,
     /// Whether to replace existing VIEW
     pub or_replace: bool,
     /// Create VIEW only when it doesn't exists
     pub if_not_exists: bool,
+}
+
+impl Display for CreateView {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CREATE ")?;
+        if self.or_replace {
+            write!(f, "OR REPLACE ")?;
+        }
+        write!(f, "VIEW ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{} ", &self.name)?;
+        write!(f, "AS {}", &self.query)
+    }
 }
 
 #[cfg(test)]

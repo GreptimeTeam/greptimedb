@@ -97,7 +97,7 @@ impl CreateViewProcedure {
 
         if let Some(value) = view_name_value {
             ensure!(
-                expr.create_if_not_exists || expr.create_or_replace,
+                expr.create_if_not_exists || expr.or_replace,
                 error::TableAlreadyExistsSnafu {
                     table_name: self.creator.data.table_ref().to_string(),
                 }
@@ -105,7 +105,7 @@ impl CreateViewProcedure {
 
             let exists_view_id = value.table_id();
 
-            if !expr.create_or_replace {
+            if !expr.or_replace {
                 return Ok(Status::done_with_output(exists_view_id));
             }
             view_id = Some(exists_view_id);
