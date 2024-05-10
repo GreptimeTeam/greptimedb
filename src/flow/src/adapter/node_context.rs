@@ -17,31 +17,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
+use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::repr::{DiffRow, RelationType, BROADCAST_CAP};
-
-// TODO: refactor common types for flow to a separate module
-/// FlowId is a unique identifier for a flow task
-pub type FlowId = u64;
-pub type TableName = [String; 3];
-
-pub struct TableSource {}
-
-impl TableSource {
-    pub async fn get_table_name_schema(
-        &self,
-        _table_id: &TableId,
-    ) -> Result<(TableName, RelationType), Error> {
-        todo!()
-    }
-}
 
 /// A context that holds the information of the dataflow
 #[derive(Default)]
@@ -53,7 +39,7 @@ pub struct FlownodeContext {
     /// broadcast sender for source table, any incoming write request will be sent to the source table's corresponding sender
     ///
     /// Note that we are getting insert requests with table id, so we should use table id as the key
-    pub source_sender: BTreeMap<TableId, broadcast::Sender<DiffRow>>,
+    pub source_sender: BTreeMap<TableId, SourceSender>,
     /// broadcast receiver for sink table, there should only be one receiver, and it will receive all the data from the sink table
     ///
     /// and send it back to the client, since we are mocking the sink table as a client, we should use table name as the key
@@ -74,45 +60,101 @@ pub struct FlownodeContext {
     pub query_context: Option<Arc<QueryContext>>,
 }
 
-impl FlownodeContext {
-    // return number of rows it actual send(including what's in the buffer)
-    pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        let sender = self
-            .source_sender
-            .get(&table_id)
-            .with_context(|| TableNotFoundSnafu {
-                name: table_id.to_string(),
-            })?;
-        let send_buffer = self.send_buffer.entry(table_id).or_default();
-        send_buffer.extend(rows);
+/// a simple broadcast sender with backpressure and unbound capacity
+///
+/// receiver still use tokio broadcast channel, since only sender side need to know
+/// backpressure and adjust dataflow running duration to avoid blocking
+pub struct SourceSender {
+    sender: broadcast::Sender<DiffRow>,
+    send_buf: VecDeque<DiffRow>,
+}
+
+impl Default for SourceSender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SourceSender {
+    pub fn new() -> Self {
+        Self {
+            sender: broadcast::Sender::new(BROADCAST_CAP),
+            send_buf: Default::default(),
+        }
+    }
+
+    pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
+        self.sender.subscribe()
+    }
+
+    /// send as many as possible rows from send buf
+    /// until send buf is empty or broadchannel is full
+    pub fn try_send_all(&mut self) -> Result<usize, Error> {
         let mut row_cnt = 0;
-        while let Some(row) = send_buffer.pop_front() {
-            if sender.len() >= BROADCAST_CAP {
+        loop {
+            // if inner sender channel is empty or send buf is empty, there
+            // is nothing to do for now, just break
+            if self.sender.len() >= BROADCAST_CAP || self.send_buf.is_empty() {
                 break;
             }
-            row_cnt += 1;
-            sender
-                .send(row)
-                .map_err(|err| {
-                    InternalSnafu {
-                        reason: format!(
-                            "Failed to send row to table_id = {:?}, error = {:?}",
-                            table_id, err
-                        ),
-                    }
-                    .build()
-                })
-                .with_context(|_| EvalSnafu)?;
+            if let Some(row) = self.send_buf.pop_front() {
+                self.sender
+                    .send(row)
+                    .map_err(|err| {
+                        InternalSnafu {
+                            reason: format!("Failed to send row, error = {:?}", err),
+                        }
+                        .build()
+                    })
+                    .with_context(|_| EvalSnafu)?;
+                row_cnt += 1;
+            }
         }
+        if row_cnt > 0 {
+            debug!("Send {} rows", row_cnt);
+        }
+
+        Ok(row_cnt)
+    }
+
+    /// return number of rows it actuall send(including what's in the buffer)
+    pub fn send_rows(&mut self, rows: Vec<DiffRow>) -> Result<usize, Error> {
+        self.send_buf.extend(rows);
+
+        let row_cnt = self.try_send_all()?;
 
         Ok(row_cnt)
     }
 }
 
 impl FlownodeContext {
+    /// return number of rows it actuall send(including what's in the buffer)
+    ///
+    /// TODO(discord9): make this concurrent
+    pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
+        let sender = self
+            .source_sender
+            .get_mut(&table_id)
+            .with_context(|| TableNotFoundSnafu {
+                name: table_id.to_string(),
+            })?;
+        // debug!("FlownodeContext::send: trying to send {} rows", rows.len());
+        sender.send_rows(rows)
+    }
+
+    /// flush all sender's buf
+    pub fn flush_all_sender(&mut self) -> Result<usize, Error> {
+        self.source_sender
+            .iter_mut()
+            .map(|(_table_id, src_sender)| src_sender.try_send_all())
+            .try_fold(0, |acc, x| x.map(|x| x + acc))
+    }
+}
+
+impl FlownodeContext {
     /// mapping source table to task, and sink table to task in worker context
     ///
-    /// also add their corresponding broadcast sender/receiver
+    /// also add their corrseponding broadcast sender/receiver
     pub fn register_task_src_sink(
         &mut self,
         task_id: FlowId,
@@ -120,7 +162,7 @@ impl FlownodeContext {
         sink_table_name: TableName,
     ) {
         for source_table_id in source_table_ids {
-            self.add_source_sender(*source_table_id);
+            self.add_source_sender_if_not_exist(*source_table_id);
             self.source_to_tasks
                 .entry(*source_table_id)
                 .or_default()
@@ -131,10 +173,9 @@ impl FlownodeContext {
         self.flow_to_sink.insert(task_id, sink_table_name);
     }
 
-    pub fn add_source_sender(&mut self, table_id: TableId) {
-        self.source_sender
-            .entry(table_id)
-            .or_insert_with(|| broadcast::channel(BROADCAST_CAP).0);
+    /// try add source sender, if already exist, do nothing
+    pub fn add_source_sender_if_not_exist(&mut self, table_id: TableId) {
+        let _sender = self.source_sender.entry(table_id).or_default();
     }
 
     pub fn add_sink_receiver(&mut self, table_name: TableName) {
@@ -143,10 +184,7 @@ impl FlownodeContext {
             .or_insert_with(mpsc::unbounded_channel::<DiffRow>);
     }
 
-    pub fn get_source_by_global_id(
-        &self,
-        id: &GlobalId,
-    ) -> Result<&broadcast::Sender<DiffRow>, Error> {
+    pub fn get_source_by_global_id(&self, id: &GlobalId) -> Result<&SourceSender, Error> {
         let table_id = self
             .table_repr
             .get_by_global_id(id)
@@ -215,7 +253,7 @@ impl FlownodeContext {
     ///
     /// and will try to fetch the schema from table info manager(if table exist now)
     ///
-    /// NOTE: this will not actually render the table into collection referred as GlobalId
+    /// NOTE: this will not actually render the table into collection refered as GlobalId
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,

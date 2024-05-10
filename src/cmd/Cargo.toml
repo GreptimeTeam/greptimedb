@@ -46,6 +46,7 @@ datatypes.workspace = true
 either = "1.8"
 etcd-client.workspace = true
 file-engine.workspace = true
+flow.workspace = true
 frontend.workspace = true
 futures.workspace = true
 human-panic = "1.2.2"

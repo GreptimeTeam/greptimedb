@@ -41,6 +41,7 @@ impl TypedExpr {
     }
 }
 
+/// TODO(discord9): add tumble function here
 /// A scalar expression, which can be evaluated to a value.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScalarExpr {

@@ -39,6 +39,7 @@ common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
 dotenv.workspace = true
+flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 futures-util.workspace = true

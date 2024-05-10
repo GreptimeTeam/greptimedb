@@ -30,3 +30,8 @@ mod plan;
 mod repr;
 mod transform;
 mod utils;
+
+pub use adapter::{
+    start_flow_node_with_one_worker, FlownodeBuilder, FlownodeManager, FlownodeManagerRef,
+    FlownodeOptions,
+};
