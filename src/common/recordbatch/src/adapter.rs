@@ -24,7 +24,8 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{
-    accept, ExecutionPlan, ExecutionPlanVisitor, RecordBatchStream as DfRecordBatchStream,
+    accept, displayable, ExecutionPlan, ExecutionPlanVisitor,
+    RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::DataFusionError;
@@ -304,7 +305,7 @@ impl ExecutionPlanVisitor for MetricCollector {
             .sorted_for_display()
             .timestamps_removed();
         let mut plan_metric = PlanMetrics {
-            plan: plan.name().to_string(),
+            plan: displayable(plan).one_line().to_string(),
             level: self.current_level,
             metrics: Vec::with_capacity(metric.iter().size_hint().0),
         };
@@ -351,15 +352,16 @@ pub struct RecordBatchMetrics {
     pub plan_metrics: Vec<PlanMetrics>,
 }
 
-/// Only display `plan_metrics` with ident `    ` (4 spaces).
+/// Only display `plan_metrics` with indent `  ` (2 spaces).
 impl Display for RecordBatchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for metric in &self.plan_metrics {
             write!(
                 f,
-                "{}{} metrics=[",
-                "    ".repeat(metric.level),
-                metric.plan
+                "{:indent$}{} metrics=[",
+                " ",
+                metric.plan.trim_end(),
+                indent = metric.level * 2,
             )?;
             for (label, value) in &metric.metrics {
                 write!(f, "{}: {}, ", label, value)?;

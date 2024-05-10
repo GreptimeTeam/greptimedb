@@ -44,6 +44,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
+use crate::analyze::DistAnalyzeExec;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
@@ -407,9 +408,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
                         .optimize(new_plan, config)
                         .context(DataFusionSnafu)?;
                 }
-                Arc::new(analyze_plan.clone())
-                    .with_new_children(vec![new_plan])
-                    .unwrap()
+                Arc::new(DistAnalyzeExec::new(new_plan))
             } else {
                 let mut new_plan = df_plan;
                 for optimizer in state.physical_optimizers() {

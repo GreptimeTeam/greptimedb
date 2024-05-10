@@ -49,7 +49,6 @@ impl Debug for StreamScanAdapter {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamScanAdapter")
             .field("stream", &"<SendableRecordBatchStream>")
-            .field("schema", &self.schema.arrow_schema().fields)
             .finish()
     }
 }
