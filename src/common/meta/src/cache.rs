@@ -23,4 +23,4 @@ pub use table::{
     new_table_info_cache, new_table_name_cache, new_table_route_cache, TableInfoCache,
     TableInfoCacheRef, TableNameCache, TableNameCacheRef, TableRouteCache, TableRouteCacheRef,
 };
-pub use registry::{CacheRegistry, CacheRegistryRef};
+pub use registry::{CacheRegistry, CacheRegistryBuilder, CacheRegistryRef};
