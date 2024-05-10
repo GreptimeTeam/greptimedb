@@ -23,10 +23,25 @@ use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
-use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::repr::{DiffRow, RelationType, BROADCAST_CAP};
+
+// TODO: refactor common types for flow to a separate module
+/// FlowId is a unique identifier for a flow task
+pub type FlowId = u64;
+pub type TableName = [String; 3];
+
+pub struct TableSource {}
+
+impl TableSource {
+    pub async fn get_table_name_schema(
+        &self,
+        _table_id: &TableId,
+    ) -> Result<(TableName, RelationType), Error> {
+        todo!()
+    }
+}
 
 /// A context that holds the information of the dataflow
 #[derive(Default)]
