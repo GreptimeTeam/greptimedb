@@ -17,7 +17,6 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::Role;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
@@ -312,12 +311,10 @@ impl GreptimeDbClusterBuilder {
     }
 
     async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
-        let mut meta_client = MetaClientBuilder::new(1000, opts.node_id.unwrap(), Role::Datanode)
-            .enable_router()
-            .enable_store()
-            .enable_heartbeat()
-            .channel_manager(metasrv.channel_manager)
-            .build();
+        let mut meta_client =
+            MetaClientBuilder::datanode_default_options(1000, opts.node_id.unwrap())
+                .channel_manager(metasrv.channel_manager)
+                .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
 
         let meta_backend = Arc::new(MetaKvBackend {
@@ -341,13 +338,8 @@ impl GreptimeDbClusterBuilder {
         metasrv: MockInfo,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Arc<FeInstance> {
-        let mut meta_client = MetaClientBuilder::new(1000, 0, Role::Frontend)
-            .enable_router()
-            .enable_store()
-            .enable_heartbeat()
+        let mut meta_client = MetaClientBuilder::frontend_default_options(1000)
             .channel_manager(metasrv.channel_manager)
-            .enable_procedure()
-            .enable_access_cluster_info()
             .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
