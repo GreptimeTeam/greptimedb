@@ -28,7 +28,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::table_name::TableName;
 
 /// [TableNameCache] caches the [TableName] to [TableId] mapping.
-pub type TableNameCache = CacheContainer<TableName, u32, CacheIdent>;
+pub type TableNameCache = CacheContainer<TableName, TableId, CacheIdent>;
 
 pub type TableNameCacheRef = Arc<TableNameCache>;
 
