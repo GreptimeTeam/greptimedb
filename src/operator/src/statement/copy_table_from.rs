@@ -379,11 +379,14 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
-        let max_insert_rows = req
-            .with
-            .get(MAX_INSERT_ROWS)
-            .and_then(|val| val.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_MAX_INSERT_ROWS);
+        let max_insert_rows = if let Some(num) = req.limit {
+            num as usize
+        } else {
+            req.with
+                .get(MAX_INSERT_ROWS)
+                .and_then(|val| val.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_MAX_INSERT_ROWS)
+        };
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self

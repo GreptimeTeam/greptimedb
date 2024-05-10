@@ -56,7 +56,7 @@ impl<'a> ParserContext<'a> {
             })?;
 
         let req = if self.parser.parse_keyword(Keyword::TO) {
-            let (with, connection, location) = self.parse_copy_parameters()?;
+            let (with, connection, location, _) = self.parse_copy_parameters()?;
             let argument = CopyDatabaseArgument {
                 database_name,
                 with: with.into(),
@@ -68,7 +68,7 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu)?;
-            let (with, connection, location) = self.parse_copy_parameters()?;
+            let (with, connection, location, _) = self.parse_copy_parameters()?;
             let argument = CopyDatabaseArgument {
                 database_name,
                 with: with.into(),
@@ -91,28 +91,30 @@ impl<'a> ParserContext<'a> {
         let table_name = Self::canonicalize_object_name(raw_table_name);
 
         if self.parser.parse_keyword(Keyword::TO) {
-            let (with, connection, location) = self.parse_copy_parameters()?;
+            let (with, connection, location, limit) = self.parse_copy_parameters()?;
             Ok(CopyTable::To(CopyTableArgument {
                 table_name,
                 with: with.into(),
                 connection: connection.into(),
                 location,
+                limit,
             }))
         } else {
             self.parser
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu)?;
-            let (with, connection, location) = self.parse_copy_parameters()?;
+            let (with, connection, location, limit) = self.parse_copy_parameters()?;
             Ok(CopyTable::From(CopyTableArgument {
                 table_name,
                 with: with.into(),
                 connection: connection.into(),
                 location,
+                limit,
             }))
         }
     }
 
-    fn parse_copy_parameters(&mut self) -> Result<(With, Connection, String)> {
+    fn parse_copy_parameters(&mut self) -> Result<(With, Connection, String, Option<u64>)> {
         let location =
             self.parser
                 .parse_literal_string()
@@ -142,7 +144,17 @@ impl<'a> ParserContext<'a> {
             .map(parse_option_string)
             .collect::<Result<Connection>>()?;
 
-        Ok((with, connection, location))
+        let limit = if self.parser.parse_keyword(Keyword::LIMIT) {
+            Some(self.parser.parse_literal_uint().with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "maximum rows",
+                    actual: self.peek_token_as_string(),
+            })?)
+        } else {
+            None
+        };
+
+        Ok((with, connection, location, limit))
     }
 }
 

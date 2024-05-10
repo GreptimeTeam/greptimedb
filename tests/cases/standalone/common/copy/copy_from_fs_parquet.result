@@ -109,6 +109,22 @@ select count(*) from with_limit_rows;
 | 2        |
 +----------+
 
+CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_limit_rows FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
+
+Affected Rows: 2
+
+select count(*) from with_limit_rows_segment;
+
++----------+
+| COUNT(*) |
++----------+
+| 0        |
++----------+
+
 drop table demo;
 
 Affected Rows: 0
@@ -134,6 +150,10 @@ drop table without_limit_rows;
 Affected Rows: 0
 
 drop table with_limit_rows;
+
+Affected Rows: 0
+
+drop table with_limit_rows_segment;
 
 Affected Rows: 0
 
