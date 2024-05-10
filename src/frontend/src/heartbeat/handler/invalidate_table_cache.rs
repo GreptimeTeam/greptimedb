@@ -48,7 +48,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
         // Invalidate local cache always success
         let _ = self
             .cache_invalidator
-            .invalidate(&Context::default(), caches)
+            .invalidate(&Context::default(), &caches)
             .await?;
 
         Ok(HandleControl::Done)

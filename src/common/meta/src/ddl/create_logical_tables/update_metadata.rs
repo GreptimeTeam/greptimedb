@@ -69,7 +69,7 @@ impl CreateLogicalTablesProcedure {
             .cache_invalidator
             .invalidate(
                 &Context::default(),
-                vec![
+                &[
                     CacheIdent::TableId(self.data.physical_table_id),
                     CacheIdent::TableName(physical_table_name),
                 ],

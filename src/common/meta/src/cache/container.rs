@@ -16,7 +16,7 @@ use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
+use futures::future::{join_all, BoxFuture};
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
 
@@ -68,6 +68,11 @@ where
             token_filter,
         }
     }
+
+    /// Returns the `name`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 #[async_trait::async_trait]
@@ -76,13 +81,15 @@ where
     K: Send + Sync,
     V: Send + Sync,
 {
-    async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
-        for token in caches
-            .into_iter()
+    async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
+        let tasks = caches
+            .iter()
             .filter(|token| (self.token_filter)(token))
-        {
-            (self.invalidator)(&self.cache, &token).await?;
-        }
+            .map(|token| (self.invalidator)(&self.cache, token));
+        join_all(tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 }
@@ -120,9 +127,14 @@ where
 {
     /// Invalidates cache by [CacheToken].
     pub async fn invalidate(&self, caches: &[CacheToken]) -> Result<()> {
-        for token in caches.iter().filter(|token| (self.token_filter)(token)) {
-            (self.invalidator)(&self.cache, token).await?;
-        }
+        let tasks = caches
+            .iter()
+            .filter(|token| (self.token_filter)(token))
+            .map(|token| (self.invalidator)(&self.cache, token));
+        join_all(tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 
