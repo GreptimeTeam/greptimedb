@@ -14,6 +14,7 @@
 
 //! SST in parquet format.
 
+pub(crate) mod file_range;
 mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
