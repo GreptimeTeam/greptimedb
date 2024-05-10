@@ -50,7 +50,7 @@ pub struct DistAnalyzeExec {
 }
 
 impl DistAnalyzeExec {
-    /// Create a new AnalyzeExec
+    /// Create a new DistAnalyzeExec
     pub fn new(input: DfPhysicalPlanRef) -> Self {
         let schema = SchemaRef::new(Schema::new(vec![
             Field::new(STAGE, DataType::UInt32, true),
