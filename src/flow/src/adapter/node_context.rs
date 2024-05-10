@@ -67,7 +67,7 @@ pub struct FlownodeContext {
     >,
     /// store source in buffer for each source table, in case broadcast channel is full
     pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
-    /// the schema of the table, query from metasrv or infered from TypedPlan
+    /// the schema of the table, query from metasrv or inferred from TypedPlan
     pub schema: HashMap<GlobalId, RelationType>,
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
@@ -75,7 +75,7 @@ pub struct FlownodeContext {
 }
 
 impl FlownodeContext {
-    // return number of rows it actuall send(including what's in the buffer)
+    // return number of rows it actual send(including what's in the buffer)
     pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
         let sender = self
             .source_sender
@@ -112,7 +112,7 @@ impl FlownodeContext {
 impl FlownodeContext {
     /// mapping source table to task, and sink table to task in worker context
     ///
-    /// also add their corrseponding broadcast sender/receiver
+    /// also add their corresponding broadcast sender/receiver
     pub fn register_task_src_sink(
         &mut self,
         task_id: FlowId,
@@ -215,7 +215,7 @@ impl FlownodeContext {
     ///
     /// and will try to fetch the schema from table info manager(if table exist now)
     ///
-    /// NOTE: this will not actually render the table into collection refered as GlobalId
+    /// NOTE: this will not actually render the table into collection referred as GlobalId
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,
