@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use futures::future::join_all;
+
 use crate::cache_invalidator::{CacheInvalidator, Context};
 use crate::error::Result;
 use crate::instruction::CacheIdent;
@@ -50,9 +52,14 @@ pub struct CacheRegistry {
 #[async_trait::async_trait]
 impl CacheInvalidator for Arc<CacheRegistry> {
     async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
-        for index in &self.indexes {
-            index.invalidate(ctx, caches).await?;
-        }
+        let tasks = self
+            .indexes
+            .iter()
+            .map(|invalidator| invalidator.invalidate(ctx, caches));
+        join_all(tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 }
