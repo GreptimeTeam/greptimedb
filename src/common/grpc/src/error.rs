@@ -33,6 +33,7 @@ pub enum Error {
     InvalidConfigFilePath {
         #[snafu(source)]
         error: io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -46,6 +47,7 @@ pub enum Error {
         column_name: String,
         expected: String,
         actual: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -53,30 +55,42 @@ pub enum Error {
     CreateChannel {
         #[snafu(source)]
         error: tonic::transport::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to create RecordBatch"))]
     CreateRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to convert Arrow type: {}", from))]
-    Conversion { from: String, location: Location },
+    Conversion {
+        from: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to decode FlightData"))]
     DecodeFlightData {
         #[snafu(source)]
         error: api::DecodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid FlightData, reason: {}", reason))]
-    InvalidFlightData { reason: String, location: Location },
+    InvalidFlightData {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert Arrow Schema"))]
     ConvertArrowSchema {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },

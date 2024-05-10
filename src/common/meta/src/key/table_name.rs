@@ -31,7 +31,7 @@ use crate::rpc::store::{BatchGetRequest, RangeRequest};
 use crate::rpc::KeyValue;
 use crate::table_name::TableName;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TableNameKey<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
@@ -154,6 +154,8 @@ impl TableNameValue {
         self.table_id
     }
 }
+
+pub type TableNameManagerRef = Arc<TableNameManager>;
 
 #[derive(Clone)]
 pub struct TableNameManager {

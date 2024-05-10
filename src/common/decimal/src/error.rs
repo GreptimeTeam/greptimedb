@@ -25,6 +25,7 @@ pub enum Error {
     #[snafu(display("Decimal out of range, decimal value: {}", value))]
     BigDecimalOutOfRange {
         value: BigDecimal,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -43,7 +44,11 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid precision or scale, resion: {}", reason))]
-    InvalidPrecisionOrScale { reason: String, location: Location },
+    InvalidPrecisionOrScale {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

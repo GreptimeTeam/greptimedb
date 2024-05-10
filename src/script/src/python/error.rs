@@ -38,18 +38,21 @@ pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 pub enum Error {
     #[snafu(display("Datatype error"))]
     TypeCast {
+        #[snafu(implicit)]
         location: SnafuLocation,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to query"))]
     DatabaseQuery {
+        #[snafu(implicit)]
         location: SnafuLocation,
         source: QueryError,
     },
 
     #[snafu(display("Failed to parse script"))]
     PyParse {
+        #[snafu(implicit)]
         location: SnafuLocation,
         #[snafu(source)]
         error: ParseError,
@@ -57,6 +60,7 @@ pub enum Error {
 
     #[snafu(display("Failed to compile script"))]
     PyCompile {
+        #[snafu(implicit)]
         location: SnafuLocation,
         #[snafu(source)]
         error: CodegenError,
@@ -66,11 +70,13 @@ pub enum Error {
     #[snafu(display("Python Runtime error, error: {}", msg))]
     PyRuntime {
         msg: String,
+        #[snafu(implicit)]
         location: SnafuLocation,
     },
 
     #[snafu(display("Arrow error"))]
     Arrow {
+        #[snafu(implicit)]
         location: SnafuLocation,
         #[snafu(source)]
         error: ArrowError,
@@ -78,6 +84,7 @@ pub enum Error {
 
     #[snafu(display("DataFusion error"))]
     DataFusion {
+        #[snafu(implicit)]
         location: SnafuLocation,
         #[snafu(source)]
         error: DataFusionError,
@@ -91,6 +98,7 @@ pub enum Error {
                         "".into()
                     }))]
     CoprParse {
+        #[snafu(implicit)]
         location: SnafuLocation,
         reason: String,
         // location is option because maybe errors can't give a clear location?
@@ -100,6 +108,7 @@ pub enum Error {
     /// Other types of error that isn't any of above
     #[snafu(display("Coprocessor's Internal error: {}", reason))]
     Other {
+        #[snafu(implicit)]
         location: SnafuLocation,
         reason: String,
     },
@@ -107,17 +116,20 @@ pub enum Error {
     #[snafu(display("Unsupported sql in coprocessor: {}", sql))]
     UnsupportedSql {
         sql: String,
+        #[snafu(implicit)]
         location: SnafuLocation,
     },
 
     #[snafu(display("Failed to retrieve record batches"))]
     RecordBatch {
+        #[snafu(implicit)]
         location: SnafuLocation,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to create record batch"))]
     NewRecordBatch {
+        #[snafu(implicit)]
         location: SnafuLocation,
         source: common_recordbatch::error::Error,
     },

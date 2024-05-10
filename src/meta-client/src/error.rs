@@ -24,19 +24,30 @@ use tonic::Status;
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
-    IllegalGrpcClientState { err_msg: String, location: Location },
+    IllegalGrpcClientState {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("{}", msg))]
     MetaServer { code: StatusCode, msg: String },
 
     #[snafu(display("Failed to ask leader from all endpoints"))]
-    AskLeader { location: Location },
+    AskLeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("No leader, should ask leader first"))]
-    NoLeader { location: Location },
+    NoLeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Ask leader timeout"))]
     AskLeaderTimeout {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::time::error::Elapsed,
@@ -44,33 +55,48 @@ pub enum Error {
 
     #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
+        #[snafu(implicit)]
         location: Location,
         source: common_grpc::error::Error,
     },
 
     #[snafu(display("{} not started", name))]
-    NotStarted { name: String, location: Location },
+    NotStarted {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to send heartbeat: {}", err_msg))]
-    SendHeartbeat { err_msg: String, location: Location },
+    SendHeartbeat {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed create heartbeat stream to server"))]
-    CreateHeartbeatStream { location: Location },
+    CreateHeartbeatStream {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid response header"))]
     InvalidResponseHeader {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to convert Metasrv request"))]
     ConvertMetaRequest {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to convert Metasrv response"))]
     ConvertMetaResponse {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },

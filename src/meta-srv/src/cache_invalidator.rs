@@ -63,8 +63,8 @@ impl MetasrvCacheInvalidator {
 
 #[async_trait]
 impl CacheInvalidator for MetasrvCacheInvalidator {
-    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateCaches(caches);
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> MetaResult<()> {
+        let instruction = Instruction::InvalidateCaches(caches.to_vec());
         self.broadcast(ctx, instruction).await
     }
 }

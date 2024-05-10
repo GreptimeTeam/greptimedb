@@ -24,14 +24,22 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to find column in scripts table, name: {}", name))]
-    FindColumnInScriptsTable { name: String, location: Location },
+    FindColumnInScriptsTable {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Scripts table not found"))]
-    ScriptsTableNotFound { location: Location },
+    ScriptsTableNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to insert script to scripts table, name: {}", name))]
     InsertScript {
         name: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -39,6 +47,7 @@ pub enum Error {
     #[snafu(display("Failed to compile python script, name: {}", name))]
     CompilePython {
         name: String,
+        #[snafu(implicit)]
         location: Location,
         source: crate::python::error::Error,
     },
@@ -46,32 +55,44 @@ pub enum Error {
     #[snafu(display("Failed to execute python script {}", name))]
     ExecutePython {
         name: String,
+        #[snafu(implicit)]
         location: Location,
         source: crate::python::error::Error,
     },
 
     #[snafu(display("Script not found, name: {}", name))]
-    ScriptNotFound { location: Location, name: String },
+    ScriptNotFound {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
 
     #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to cast type, msg: {}", msg))]
-    CastType { msg: String, location: Location },
+    CastType {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
         #[snafu(source)]
         error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to execute internal statement"))]
     ExecuteInternalStatement {
         source: query::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 }

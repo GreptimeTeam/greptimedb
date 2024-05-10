@@ -28,6 +28,7 @@ pub enum Error {
     CreateGuard {
         #[snafu(source)]
         error: pprof::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -35,6 +36,7 @@ pub enum Error {
     CreateReport {
         #[snafu(source)]
         error: pprof::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -42,6 +44,7 @@ pub enum Error {
     CreateFlamegraph {
         #[snafu(source)]
         error: pprof::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -49,6 +52,7 @@ pub enum Error {
     ReportPprof {
         #[snafu(source)]
         error: pprof::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 }

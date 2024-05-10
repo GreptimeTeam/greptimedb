@@ -28,6 +28,7 @@ use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
@@ -65,6 +66,7 @@ pub struct StatementExecutor {
     query_engine: QueryEngineRef,
     procedure_executor: ProcedureExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
+    flow_metadata_manager: FlowMetadataManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
@@ -84,6 +86,7 @@ impl StatementExecutor {
             query_engine,
             procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
+            flow_metadata_manager: Arc::new(FlowMetadataManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,
             inserter,

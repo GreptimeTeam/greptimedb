@@ -30,6 +30,7 @@ pub enum Error {
     #[snafu(display("Unknown proto column datatype: {}", datatype))]
     UnknownColumnDataType {
         datatype: i32,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: prost::DecodeError,
@@ -38,12 +39,14 @@ pub enum Error {
     #[snafu(display("Failed to create column datatype from {:?}", from))]
     IntoColumnDataType {
         from: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert column default constraint, column: {}", column))]
     ConvertColumnDefaultConstraint {
         column: String,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -51,6 +54,7 @@ pub enum Error {
     #[snafu(display("Invalid column default constraint, column: {}", column))]
     InvalidColumnDefaultConstraint {
         column: String,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },

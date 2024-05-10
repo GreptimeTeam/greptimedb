@@ -28,6 +28,7 @@ pub enum Error {
     Seek {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -35,6 +36,7 @@ pub enum Error {
     Read {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -42,6 +44,7 @@ pub enum Error {
     Write {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -49,6 +52,7 @@ pub enum Error {
     Flush {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -56,22 +60,28 @@ pub enum Error {
     Close {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Magic not matched"))]
-    MagicNotMatched { location: Location },
+    MagicNotMatched {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert bytes to integer"))]
     BytesToInteger {
         #[snafu(source)]
         error: std::array::TryFromSliceError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported decompression: {}", decompression))]
     UnsupportedDecompression {
         decompression: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -79,6 +89,7 @@ pub enum Error {
     SerializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -86,6 +97,7 @@ pub enum Error {
     DeserializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -93,11 +105,16 @@ pub enum Error {
     ParseStageNotMatch {
         expected: String,
         actual: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected footer payload size: {}", size))]
-    UnexpectedFooterPayloadSize { size: i32, location: Location },
+    UnexpectedFooterPayloadSize {
+        size: i32,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Unexpected puffin file size, min: {}, actual: {}",
@@ -107,14 +124,23 @@ pub enum Error {
     UnexpectedPuffinFileSize {
         min_file_size: u64,
         actual_file_size: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid blob offset: {}, location: {:?}", offset, location))]
-    InvalidBlobOffset { offset: i64, location: Location },
+    InvalidBlobOffset {
+        offset: i64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid blob area end: {}, location: {:?}", offset, location))]
-    InvalidBlobAreaEnd { offset: u64, location: Location },
+    InvalidBlobAreaEnd {
+        offset: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

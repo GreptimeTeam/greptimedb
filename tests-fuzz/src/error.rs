@@ -28,6 +28,7 @@ pub enum Error {
     #[snafu(display("Failed to create a file: {}", path))]
     CreateFile {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
@@ -36,6 +37,7 @@ pub enum Error {
     #[snafu(display("Failed to write a file: {}", path))]
     WriteFile {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
@@ -44,6 +46,7 @@ pub enum Error {
     #[snafu(display("Unexpected, violated: {violated}"))]
     Unexpected {
         violated: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -51,6 +54,7 @@ pub enum Error {
     BuildCreateTableExpr {
         #[snafu(source)]
         error: CreateTableExprBuilderError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -58,28 +62,41 @@ pub enum Error {
     BuildCreateDatabaseExpr {
         #[snafu(source)]
         error: CreateDatabaseExprBuilderError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("No droppable columns"))]
-    DroppableColumns { location: Location },
+    DroppableColumns {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to execute query: {}", sql))]
     ExecuteQuery {
         sql: String,
         #[snafu(source)]
         error: sqlx::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to assert: {}", reason))]
-    Assert { reason: String, location: Location },
+    Assert {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Child process exited unexpected"))]
-    UnexpectedExited { location: Location },
+    UnexpectedExited {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to spawn a child process"))]
     SpawnChild {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
@@ -88,6 +105,7 @@ pub enum Error {
     #[cfg(feature = "unstable")]
     #[snafu(display("Failed to kill a process, pid: {}", pid))]
     KillProcess {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: nix::Error,

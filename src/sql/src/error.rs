@@ -65,6 +65,7 @@ pub enum Error {
     Syntax {
         #[snafu(source)]
         error: ParserError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -73,6 +74,7 @@ pub enum Error {
     TQLSyntax {
         #[snafu(source)]
         error: TQLError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -130,6 +132,7 @@ pub enum Error {
     #[snafu(display("Invalid default constraint, column: {}", column))]
     InvalidDefault {
         column: String,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -138,28 +141,36 @@ pub enum Error {
     InvalidCast {
         sql_value: sqlparser::ast::Value,
         datatype: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Unrecognized table option key: {}", key))]
-    InvalidTableOption { key: String, location: Location },
+    InvalidTableOption {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unrecognized table option key: {}, value: {}", key, value))]
     InvalidTableOptionValue {
         key: Ident,
         value: Expr,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to convert data type to gRPC data type defined in proto"))]
     ConvertToGrpcDataType {
+        #[snafu(implicit)]
         location: Location,
         source: api::error::Error,
     },
@@ -180,6 +191,7 @@ pub enum Error {
     #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]
     ConvertToDfStatement {
         statement: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -187,11 +199,16 @@ pub enum Error {
     ConvertSqlValue {
         value: SqlValue,
         datatype: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unable to convert value {} to sql value", value))]
-    ConvertValue { value: Value, location: Location },
+    ConvertValue {
+        value: Value,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

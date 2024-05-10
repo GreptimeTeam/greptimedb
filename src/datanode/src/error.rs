@@ -30,12 +30,14 @@ use table::error::Error as TableError;
 pub enum Error {
     #[snafu(display("Failed to execute async task"))]
     AsyncTaskExecute {
+        #[snafu(implicit)]
         location: Location,
         source: Arc<Error>,
     },
 
     #[snafu(display("Failed to watch change"))]
     WatchAsyncTaskChange {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::sync::watch::error::RecvError,
@@ -43,39 +45,58 @@ pub enum Error {
 
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to get info from meta server"))]
     GetMetadata {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to execute logical plan"))]
     ExecuteLogicalPlan {
+        #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to decode logical plan"))]
     DecodeLogicalPlan {
+        #[snafu(implicit)]
         location: Location,
         source: substrait::error::Error,
     },
 
     #[snafu(display("Incorrect internal state: {}", state))]
-    IncorrectInternalState { state: String, location: Location },
+    IncorrectInternalState {
+        state: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Catalog not found: {}", name))]
-    CatalogNotFound { name: String, location: Location },
+    CatalogNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Schema not found: {}", name))]
-    SchemaNotFound { name: String, location: Location },
+    SchemaNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing timestamp column in request"))]
-    MissingTimestampColumn { location: Location },
+    MissingTimestampColumn {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
@@ -87,12 +108,14 @@ pub enum Error {
     #[snafu(display("Failed to delete value from table: {}", table_name))]
     Delete {
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
         source: TableError,
     },
 
     #[snafu(display("Failed to start server"))]
     StartServer {
+        #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
     },
@@ -120,6 +143,7 @@ pub enum Error {
 
     #[snafu(display("Failed to open log store"))]
     OpenLogStore {
+        #[snafu(implicit)]
         location: Location,
         source: Box<log_store::error::Error>,
     },
@@ -128,17 +152,22 @@ pub enum Error {
     InitBackend {
         #[snafu(source)]
         error: object_store::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Runtime resource error"))]
     RuntimeResource {
+        #[snafu(implicit)]
         location: Location,
         source: common_runtime::error::Error,
     },
 
     #[snafu(display("Expect KvBackend but not found"))]
-    MissingKvBackend { location: Location },
+    MissingKvBackend {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
@@ -147,22 +176,36 @@ pub enum Error {
     NotSupportSql { msg: String },
 
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
-    KeyColumnNotFound { name: String, location: Location },
+    KeyColumnNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Illegal primary keys definition: {}", msg))]
-    IllegalPrimaryKeysDef { msg: String, location: Location },
+    IllegalPrimaryKeysDef {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Schema {} already exists", name))]
-    SchemaExists { name: String, location: Location },
+    SchemaExists {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to access catalog"))]
     Catalog {
+        #[snafu(implicit)]
         location: Location,
         source: catalog::error::Error,
     },
 
     #[snafu(display("Failed to initialize meta client"))]
     MetaClientInit {
+        #[snafu(implicit)]
         location: Location,
         source: meta_client::error::Error,
     },
@@ -170,13 +213,23 @@ pub enum Error {
     #[snafu(display(
         "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
     ))]
-    TableIdProviderNotFound { location: Location },
+    TableIdProviderNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing node id in Datanode config"))]
-    MissingNodeId { location: Location },
+    MissingNodeId {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing required field: {}", name))]
-    MissingRequiredField { name: String, location: Location },
+    MissingRequiredField {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
@@ -185,35 +238,49 @@ pub enum Error {
         "No valid default value can be built automatically, column: {}",
         column,
     ))]
-    ColumnNoneDefaultValue { column: String, location: Location },
+    ColumnNoneDefaultValue {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to shutdown server"))]
     ShutdownServer {
+        #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
     },
 
     #[snafu(display("Failed to shutdown instance"))]
     ShutdownInstance {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Payload not exist"))]
-    PayloadNotExist { location: Location },
+    PayloadNotExist {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing WAL dir config"))]
-    MissingWalDirConfig { location: Location },
+    MissingWalDirConfig {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to handle request for region {}", region_id))]
     HandleRegionRequest {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -221,35 +288,48 @@ pub enum Error {
     #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region {} not ready", region_id))]
     RegionNotReady {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region {} is busy", region_id))]
     RegionBusy {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region engine {} is not registered", name))]
-    RegionEngineNotFound { name: String, location: Location },
+    RegionEngineNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported gRPC request, kind: {}", kind))]
-    UnsupportedGrpcRequest { kind: String, location: Location },
+    UnsupportedGrpcRequest {
+        kind: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to build region requests"))]
     BuildRegionRequests {
+        #[snafu(implicit)]
         location: Location,
         source: store_api::metadata::MetadataError,
     },
@@ -257,6 +337,7 @@ pub enum Error {
     #[snafu(display("Failed to stop region engine {}", name))]
     StopRegionEngine {
         name: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -268,12 +349,14 @@ pub enum Error {
     FindLogicalRegions {
         physical_region_id: RegionId,
         source: metric_engine::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to build mito engine"))]
     BuildMitoEngine {
         source: mito2::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 }

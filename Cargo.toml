@@ -116,7 +116,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "65c1364d8ee190a8d05cad5758d478b11eff2d35" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "219b2409bb701f75b43fc0ba64967d2ed8e75491" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -154,7 +154,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
 smallvec = { version = "1", features = ["serde"] }
-snafu = "0.7"
+snafu = "0.8"
 sysinfo = "0.30"
 # on branch v0.44.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "c919990bf62ad38d2b0c0a3bc90b26ad919d51b0", features = [

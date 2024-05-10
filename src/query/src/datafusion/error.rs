@@ -29,26 +29,33 @@ pub enum InnerError {
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("PhysicalPlan downcast failed"))]
-    PhysicalPlanDowncast { location: Location },
+    PhysicalPlanDowncast {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Fail to convert arrow schema"))]
     ConvertSchema {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to execute physical plan"))]
     ExecutePhysicalPlan {
+        #[snafu(implicit)]
         location: Location,
         source: common_query::error::Error,
     },
