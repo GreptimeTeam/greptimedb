@@ -119,7 +119,7 @@ impl GreptimeDbStandaloneBuilder {
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
 
-        let datanode = DatanodeBuilder::new(opts.clone().datanode_options(), plugins.clone())
+        let datanode = DatanodeBuilder::new(opts.datanode_options(), plugins.clone())
             .with_kv_backend(kv_backend.clone())
             .build()
             .await
