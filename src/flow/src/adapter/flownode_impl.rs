@@ -71,8 +71,8 @@ impl Flownode for FlownodeManager {
                     .await
                     .map_err(to_meta_err)?;
                 Ok(FlowResponse {
-                    affected_tasks: ret
-                        .map(|id| greptime_proto::v1::flow::TaskId { id: id as u32 })
+                    affected_flows: ret
+                        .map(|id| greptime_proto::v1::FlowId { id: id as u32 })
                         .into_iter()
                         .collect_vec(),
                     ..Default::default()

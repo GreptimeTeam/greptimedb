@@ -135,6 +135,7 @@ impl RelationType {
                     .iter()
                     .map(|old| old_to_new_col.get(old).cloned())
                     .collect::<Option<Vec<_>>>()
+                    .and_then(|v| if v.is_empty() { None } else { Some(v) })
                     .map(Key::from)
             })
             .collect_vec();
