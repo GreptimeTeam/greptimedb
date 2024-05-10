@@ -43,6 +43,7 @@ futures.workspace = true
 futures-util.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
+moka.workspace = true
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }

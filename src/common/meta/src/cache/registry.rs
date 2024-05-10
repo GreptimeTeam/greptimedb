@@ -50,7 +50,7 @@ pub struct CacheRegistry {
 }
 
 #[async_trait::async_trait]
-impl CacheInvalidator for Arc<CacheRegistry> {
+impl CacheInvalidator for CacheRegistry {
     async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
         let tasks = self
             .indexes

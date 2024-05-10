@@ -350,6 +350,13 @@ pub struct MetaKvBackend {
     pub client: Arc<MetaClient>,
 }
 
+impl MetaKvBackend {
+    /// Constructs a [MetaKvBackend].
+    pub fn new(client: Arc<MetaClient>) -> MetaKvBackend {
+        MetaKvBackend { client }
+    }
+}
+
 impl TxnService for MetaKvBackend {
     type Error = Error;
 }

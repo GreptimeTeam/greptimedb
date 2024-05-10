@@ -158,7 +158,7 @@ where
             .inc();
         let moved_init = self.initializer.clone();
         let moved_key = key.to_owned();
-        
+
         let init = async move {
             metrics::CACHE_CONTAINER_CACHE_MISS
                 .with_label_values(&[&self.name])

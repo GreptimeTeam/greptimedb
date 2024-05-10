@@ -52,6 +52,7 @@ lazy_static.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
 mito2.workspace = true
+moka.workspace = true
 nu-ansi-term = "0.46"
 plugins.workspace = true
 prometheus.workspace = true

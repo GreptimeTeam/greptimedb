@@ -303,6 +303,13 @@ pub enum Error {
         location: Location,
         source: common_runtime::error::Error,
     },
+
+    #[snafu(display("Failed to get cache: {}", name))]
+    GetCache {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -350,7 +357,9 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
+            Error::SerdeJson { .. } | Error::FileIo { .. } | Error::GetCache { .. } => {
+                StatusCode::Unexpected
+            }
 
             Error::Other { source, .. } => source.status_code(),
 

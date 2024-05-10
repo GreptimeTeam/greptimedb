@@ -318,15 +318,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Get null from table cache, key: {}", key))]
-    TableCacheNotGet {
-        key: String,
+    #[snafu(display("Failed to get table cache"))]
+    GetTableCache {
+        source: common_meta::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to get table cache, err: {}", err_msg))]
-    GetTableCache { err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -388,7 +385,7 @@ impl ErrorExt for Error {
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
             Error::TableMetadataManager { source, .. } => source.status_code(),
-            Error::TableCacheNotGet { .. } | Error::GetTableCache { .. } => StatusCode::Internal,
+            Error::GetTableCache { .. } => StatusCode::Internal,
         }
     }
 

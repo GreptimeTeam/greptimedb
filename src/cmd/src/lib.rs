@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use common_telemetry::{error, info};
 
+mod cache;
 pub mod cli;
 pub mod datanode;
 pub mod error;

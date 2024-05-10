@@ -20,7 +20,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
-use common_meta::cache_invalidator::{CacheInvalidatorRef, MultiCacheInvalidator};
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
@@ -54,12 +54,14 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
+use crate::cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu,
-    Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    CreateDirSnafu, GetCacheSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu,
+    InitTimezoneSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
+    StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
+    StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, MixOptions, Options};
 use crate::App;
@@ -396,14 +398,12 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
-        let catalog_manager = KvBackendCatalogManager::new(
-            dn_opts.mode,
-            None,
-            kv_backend.clone(),
-            multi_cache_invalidator.clone(),
-        )
-        .await;
+        let cache_registry = Arc::new(default_cache_registry_builder(kv_backend.clone()).build());
+        let table_cache = cache_registry.get().context(GetCacheSnafu {
+            name: TABLE_CACHE_NAME,
+        })?;
+        let catalog_manager =
+            KvBackendCatalogManager::new(dn_opts.mode, None, kv_backend.clone(), table_cache).await;
 
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
@@ -441,7 +441,7 @@ impl StartCommand {
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
             node_manager.clone(),
-            multi_cache_invalidator,
+            cache_registry,
             table_metadata_manager,
             table_meta_allocator,
             flow_metadata_manager,
