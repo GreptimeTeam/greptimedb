@@ -727,7 +727,8 @@ pub async fn test_config_api(store_type: StorageType) {
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
 
-    let expected_toml_str = r#"
+    let expected_toml_str = format!(
+        r#"
 mode = "standalone"
 enable_telemetry = true
 
@@ -786,7 +787,7 @@ enable_log_recycle = true
 prefill_log_files = false
 
 [storage]
-type = "File"
+type = "{}"
 providers = []
 
 [metadata_store]
@@ -834,9 +835,11 @@ type = "time_series"
 
 [export_metrics]
 enable = false
-write_interval = "30s""#
-        .trim()
-        .to_string();
+write_interval = "30s""#,
+        store_type
+    )
+    .trim()
+    .to_string();
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
     assert_eq!(body_text, expected_toml_str);
 }
