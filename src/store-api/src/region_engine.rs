@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::error::ExecuteRepeatedlySnafu;
 use common_recordbatch::SendableRecordBatchStream;
+use datatypes::schema::SchemaRef;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -150,9 +151,12 @@ impl ScannerProperties {
 
 /// A scanner that provides a way to scan the region concurrently.
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
-pub trait RegionScanner: Debug + Send {
+pub trait RegionScanner: Debug + Send + Sync {
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
+
+    /// Returns the schema of the record batches.
+    fn schema(&self) -> SchemaRef;
 
     /// Scans the partition and returns a stream of record batches.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
@@ -223,14 +227,17 @@ pub type RegionEngineRef = Arc<dyn RegionEngine>;
 /// A [RegionScanner] that only scans a single partition.
 pub struct SinglePartitionScanner {
     stream: std::sync::Mutex<Option<SendableRecordBatchStream>>,
+    schema: SchemaRef,
     properties: ScannerProperties,
 }
 
 impl SinglePartitionScanner {
     /// Creates a new [SinglePartitionScanner] with the given stream.
     pub fn new(stream: SendableRecordBatchStream) -> Self {
+        let schema = stream.schema();
         Self {
             stream: std::sync::Mutex::new(Some(stream)),
+            schema,
             properties: ScannerProperties::new(ScannerPartitioning::Unknown(1)),
         }
     }
@@ -247,6 +254,10 @@ impl Debug for SinglePartitionScanner {
 impl RegionScanner for SinglePartitionScanner {
     fn properties(&self) -> &ScannerProperties {
         &self.properties
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {

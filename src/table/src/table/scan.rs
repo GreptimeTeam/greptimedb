@@ -35,6 +35,7 @@ use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::OptionExt;
+use store_api::region_engine::RegionScannerRef;
 
 use crate::table::metrics::MemoryUsageMetrics;
 
@@ -128,6 +129,99 @@ impl ExecutionPlan for StreamScanAdapter {
 impl DisplayAs for StreamScanAdapter {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+/// A plan to read multiple partitions from a region of a table.
+#[derive(Debug)]
+pub struct ReadFromRegion {
+    scanner: RegionScannerRef,
+    arrow_schema: ArrowSchemaRef,
+    /// The expected output ordering for the plan.
+    output_ordering: Option<Vec<PhysicalSortExpr>>,
+    metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
+}
+
+impl ReadFromRegion {
+    pub fn new(scanner: RegionScannerRef) -> Self {
+        let arrow_schema = scanner.schema().arrow_schema().clone();
+        // TODO(yingwen): Fill plan properties with real values.
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(arrow_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
+        Self {
+            scanner,
+            arrow_schema,
+            output_ordering: None,
+            metric: ExecutionPlanMetricsSet::new(),
+            properties,
+        }
+    }
+
+    /// Set the expected output ordering for the plan.
+    pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
+        self.output_ordering = Some(output_ordering);
+        self
+    }
+}
+
+impl ExecutionPlan for ReadFromRegion {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> ArrowSchemaRef {
+        self.arrow_schema.clone()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let span =
+            tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
+
+        let stream = self
+            .scanner
+            .scan_partition(partition)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let mem_usage_metrics = MemoryUsageMetrics::new(&self.metric, partition);
+        todo!()
+        // Ok(Box::pin(StreamWithMetricWrapper {
+        //     stream,
+        //     metric: mem_usage_metrics,
+        //     span,
+        // }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metric.clone_inner())
+    }
+}
+
+impl DisplayAs for ReadFromRegion {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ReadFromRegion: [{:?}]", self.scanner)
     }
 }
 
