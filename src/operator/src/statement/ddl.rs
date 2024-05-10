@@ -20,14 +20,16 @@ use api::v1::{column_def, AlterExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::format_full_table_name;
+use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::NAME_PATTERN;
-use common_meta::rpc::ddl::{CreateFlowTask, DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use common_meta::rpc::ddl::{
+    CreateFlowTask, DdlTask, DropFlowTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
@@ -60,7 +62,7 @@ use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
-    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
+    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
     ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
@@ -351,6 +353,57 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_create_flow(expr),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn drop_flow(
+        &self,
+        catalog_name: String,
+        flow_name: String,
+        drop_if_exists: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        if let Some(flow) = self
+            .flow_metadata_manager
+            .flow_name_manager()
+            .get(&catalog_name, &flow_name)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+        {
+            let flow_id = flow.flow_id();
+            let task = DropFlowTask {
+                catalog_name,
+                flow_name,
+                flow_id,
+                drop_if_exists,
+            };
+            self.drop_flow_procedure(task, query_context).await?;
+
+            Ok(Output::new_with_affected_rows(0))
+        } else if drop_if_exists {
+            Ok(Output::new_with_affected_rows(0))
+        } else {
+            Err(FlowNotFoundSnafu {
+                flow_name: format_full_flow_name(&catalog_name, &flow_name),
+            }
+            .into_error(snafu::NoneError))
+        }
+    }
+
+    async fn drop_flow_procedure(
+        &self,
+        expr: DropFlowTask,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_drop_flow(expr),
         };
 
         self.procedure_executor

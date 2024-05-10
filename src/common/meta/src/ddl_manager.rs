@@ -45,11 +45,12 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
     AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
-    DropDatabase, DropLogicalTables, DropTable, TruncateTable,
+    DropDatabase, DropFlow, DropLogicalTables, DropTable, TruncateTable,
 };
 use crate::rpc::ddl::{
     AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
-    DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
+    DropFlowTask, DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+    TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -348,6 +349,20 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a drop flow task.
+    pub async fn submit_drop_flow_task(
+        &self,
+        cluster_id: ClusterId,
+        drop_flow: DropFlowTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = DropFlowProcedure::new(cluster_id, drop_flow, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
     /// Submits and executes a truncate table task.
     pub async fn submit_truncate_table_task(
         &self,
@@ -607,6 +622,27 @@ async fn handle_drop_database_task(
     })
 }
 
+async fn handle_drop_flow_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    drop_flow_task: DropFlowTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_drop_flow_task(cluster_id, drop_flow_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "Flow {}.{}({}) is dropped via procedure_id {id:?}",
+        drop_flow_task.catalog_name, drop_flow_task.flow_name, drop_flow_task.flow_id,
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
+    })
+}
+
 async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
@@ -724,6 +760,9 @@ impl ProcedureExecutor for DdlManager {
                         request.query_context.into(),
                     )
                     .await
+                }
+                DropFlow(drop_flow_task) => {
+                    handle_drop_flow_task(self, cluster_id, drop_flow_task).await
                 }
             }
         }
