@@ -15,6 +15,7 @@
 #![feature(let_chains)]
 #![feature(int_roundings)]
 
+mod analyze;
 pub mod dataframe;
 pub mod datafusion;
 pub mod dist_plan;

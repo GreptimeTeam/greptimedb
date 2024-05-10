@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -278,13 +279,13 @@ impl Stream for RecordBatchStreamAdapter {
 
 /// An [ExecutionPlanVisitor] to collect metrics from a [ExecutionPlan].
 #[derive(Default)]
-struct MetricCollector {
+pub struct MetricCollector {
     current_level: usize,
-    record_batch_metrics: RecordBatchMetrics,
+    pub record_batch_metrics: RecordBatchMetrics,
 }
 
 impl ExecutionPlanVisitor for MetricCollector {
-    type Error = crate::error::Error;
+    type Error = !;
 
     fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> std::result::Result<bool, Self::Error> {
         // skip if no metric available
@@ -348,6 +349,26 @@ pub struct RecordBatchMetrics {
     // Detailed per-plan metrics
     /// An ordered list of plan metrics, from top to bottom in post-order.
     pub plan_metrics: Vec<PlanMetrics>,
+}
+
+/// Only display `plan_metrics` with ident `    ` (4 spaces).
+impl Display for RecordBatchMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for metric in &self.plan_metrics {
+            write!(
+                f,
+                "{}{} metrics=[",
+                "    ".repeat(metric.level),
+                metric.plan
+            )?;
+            for (label, value) in &metric.metrics {
+                write!(f, "{}: {}, ", label, value)?;
+            }
+            write!(f, "]\n")?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
