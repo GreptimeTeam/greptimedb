@@ -126,6 +126,15 @@ where
         Ok(())
     }
 
+    /// Returns true if the cache contains a value for the key.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.cache.contains_key(key)
+    }
+
     /// Returns a _clone_ of the value corresponding to the key.
     pub async fn get_by_ref<Q>(&self, key: &Q) -> Result<Option<V>>
     where
