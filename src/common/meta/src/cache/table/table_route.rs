@@ -23,18 +23,51 @@ use crate::cache::{CacheContainer, Initializer};
 use crate::error;
 use crate::error::Result;
 use crate::instruction::CacheIdent;
-use crate::key::table_route::{TableRouteManager, TableRouteManagerRef, TableRouteValue};
+use crate::key::table_route::{
+    LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteManager, TableRouteManagerRef,
+    TableRouteValue,
+};
 use crate::kv_backend::KvBackendRef;
 
-/// [TableRouteCache] caches the [TableId] to [TableRouteValue] mapping.
-pub type TableRouteCache = CacheContainer<TableId, Arc<TableRouteValue>, CacheIdent>;
+/// [TableRoute] stores `Arc` wrapped table route.
+#[derive(Clone)]
+pub enum TableRoute {
+    Physical(Arc<PhysicalTableRouteValue>),
+    Logical(Arc<LogicalTableRouteValue>),
+}
+
+impl TableRoute {
+    /// Returns true if it's physical table.
+    pub fn is_physical(&self) -> bool {
+        matches!(self, TableRoute::Physical(_))
+    }
+
+    /// Returns [PhysicalTableRouteValue] reference if it's [TableRoute::Physical]; Otherwise it returns [None].
+    pub fn as_physical_table_route_ref(&self) -> Option<&Arc<PhysicalTableRouteValue>> {
+        match self {
+            TableRoute::Physical(table_route) => Some(table_route),
+            TableRoute::Logical(_) => None,
+        }
+    }
+
+    /// Returns [LogicalTableRouteValue] reference if it's [TableRoute::Logical]; Otherwise it returns [None].
+    pub fn as_logical_table_route_ref(&self) -> Option<&Arc<LogicalTableRouteValue>> {
+        match self {
+            TableRoute::Physical(_) => None,
+            TableRoute::Logical(table_route) => Some(table_route),
+        }
+    }
+}
+
+/// [TableRouteCache] caches the [TableId] to [TableRoute] mapping.
+pub type TableRouteCache = CacheContainer<TableId, Arc<TableRoute>, CacheIdent>;
 
 pub type TableRouteCacheRef = Arc<TableRouteCache>;
 
 /// Constructs a [TableRouteCache].
 pub fn new_table_route_cache(
     name: String,
-    cache: Cache<TableId, Arc<TableRouteValue>>,
+    cache: Cache<TableId, Arc<TableRoute>>,
     kv_backend: KvBackendRef,
 ) -> TableRouteCache {
     let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
@@ -45,7 +78,7 @@ pub fn new_table_route_cache(
 
 fn init_factory(
     table_route_manager: TableRouteManagerRef,
-) -> Initializer<TableId, Arc<TableRouteValue>> {
+) -> Initializer<TableId, Arc<TableRoute>> {
     Arc::new(move |table_id| {
         let table_route_manager = table_route_manager.clone();
         Box::pin(async move {
@@ -55,13 +88,18 @@ fn init_factory(
                 .await?
                 .context(error::ValueNotExistSnafu {})?;
 
-            Ok(Some(Arc::new(table_route_value)))
+            let table_route = match table_route_value {
+                TableRouteValue::Physical(physical) => TableRoute::Physical(Arc::new(physical)),
+                TableRouteValue::Logical(logical) => TableRoute::Logical(Arc::new(logical)),
+            };
+
+            Ok(Some(Arc::new(table_route)))
         })
     })
 }
 
 fn invalidator<'a>(
-    cache: &'a Cache<TableId, Arc<TableRouteValue>>,
+    cache: &'a Cache<TableId, Arc<TableRoute>>,
     ident: &'a CacheIdent,
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
@@ -122,7 +160,8 @@ mod tests {
         assert_eq!(
             (*table_route)
                 .clone()
-                .into_physical_table_route()
+                .as_physical_table_route_ref()
+                .unwrap()
                 .region_routes,
             region_routes
         );
