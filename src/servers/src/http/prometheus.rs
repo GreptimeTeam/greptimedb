@@ -704,10 +704,9 @@ pub async fn label_values_query(
                     );
                 }
             };
-
-        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
-            field_columns.into_iter().collect(),
-        ));
+        let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
+        field_columns.sort_unstable();
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
     }
 
     let queries = params.matches.0;
@@ -754,14 +753,7 @@ pub async fn label_values_query(
         .collect();
 
     let mut label_values: Vec<_> = label_values.into_iter().collect();
-
-    // sort result for consistent output in tests
-    #[cfg(test)]
-    {
-        label_values.sort_unstable();
-    }
-
-    label_values.sort();
+    label_values.sort_unstable();
     let mut resp = PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
     resp.resp_metrics = merge_map;
     resp
