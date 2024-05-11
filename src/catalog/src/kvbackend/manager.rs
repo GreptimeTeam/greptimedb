@@ -218,7 +218,7 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 
     async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
-        if self.system_catalog.schema_exist(schema) {
+        if self.system_catalog.schema_exists(schema) {
             return Ok(true);
         }
 
@@ -230,7 +230,7 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 
     async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
-        if self.system_catalog.table_exist(schema, table) {
+        if self.system_catalog.table_exists(schema, table) {
             return Ok(true);
         }
 
@@ -382,11 +382,11 @@ impl SystemCatalog {
         }
     }
 
-    fn schema_exist(&self, schema: &str) -> bool {
+    fn schema_exists(&self, schema: &str) -> bool {
         schema == INFORMATION_SCHEMA_NAME
     }
 
-    fn table_exist(&self, schema: &str, table: &str) -> bool {
+    fn table_exists(&self, schema: &str, table: &str) -> bool {
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
