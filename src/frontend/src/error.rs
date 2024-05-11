@@ -61,6 +61,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to convert expr"))]
+    ConvertExpr {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Runtime resource error"))]
     RuntimeResource {
         #[snafu(implicit)]
@@ -365,7 +372,8 @@ impl ErrorExt for Error {
             | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::IncompleteGrpcRequest { .. } => StatusCode::InvalidArguments,
+            | Error::IncompleteGrpcRequest { .. }
+            | Error::ConvertExpr { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

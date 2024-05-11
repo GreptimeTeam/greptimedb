@@ -341,6 +341,14 @@ impl StatementExecutor {
         // TODO(ruihang): do some verification
         let expr = expr_factory::to_create_flow_task_expr(stmt, &query_context)?;
 
+        self.create_flow_inner(expr, query_context).await
+    }
+
+    pub async fn create_flow_inner(
+        &self,
+        expr: CreateFlowTask,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         self.create_flow_procedure(expr, query_context).await?;
         Ok(Output::new_with_affected_rows(0))
     }

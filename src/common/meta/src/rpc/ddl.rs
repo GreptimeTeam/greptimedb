@@ -754,11 +754,11 @@ pub struct CreateFlowTask {
     pub flow_options: HashMap<String, String>,
 }
 
-impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
+impl TryFrom<CreateFlowExpr> for CreateFlowTask {
     type Error = error::Error;
 
-    fn try_from(pb: PbCreateFlowTask) -> Result<Self> {
-        let CreateFlowExpr {
+    fn try_from(
+        CreateFlowExpr {
             catalog_name,
             flow_name,
             source_table_names,
@@ -769,10 +769,8 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             comment,
             sql,
             flow_options,
-        } = pb.create_flow.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected create_flow",
-        })?;
-
+        }: CreateFlowExpr,
+    ) -> Result<Self> {
         Ok(CreateFlowTask {
             catalog_name,
             flow_name,
@@ -789,6 +787,18 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             sql,
             flow_options,
         })
+    }
+}
+
+impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateFlowTask) -> Result<Self> {
+        let expr = pb.create_flow.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create_flow",
+        })?;
+
+        expr.try_into()
     }
 }
 
