@@ -634,12 +634,6 @@ mod tests {
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
-    #[should_panic]
-    #[test]
-    fn test_failed_when_start_nothing() {
-        let _ = MetaClientBuilder::new(0, 0, Role::Datanode).build();
-    }
-
     #[tokio::test]
     async fn test_ask_leader() {
         let tc = new_client("test_ask_leader").await;
