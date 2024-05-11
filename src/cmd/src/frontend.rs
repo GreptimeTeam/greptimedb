@@ -280,7 +280,7 @@ impl StartCommand {
             meta_client,
         )
         .with_plugin(plugins.clone())
-        .with_cache_invalidator(cache_registry)
+        .with_local_cache_invalidator(cache_registry)
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await

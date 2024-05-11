@@ -44,7 +44,7 @@ use crate::script::ScriptExecutor;
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
     cache_registry: CacheRegistryRef,
-    cache_invalidator: Option<CacheInvalidatorRef>,
+    local_cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
@@ -63,7 +63,7 @@ impl FrontendBuilder {
         Self {
             kv_backend,
             cache_registry,
-            cache_invalidator: None,
+            local_cache_invalidator: None,
             catalog_manager,
             node_manager,
             plugins: None,
@@ -72,9 +72,9 @@ impl FrontendBuilder {
         }
     }
 
-    pub fn with_cache_invalidator(self, cache_invalidator: CacheInvalidatorRef) -> Self {
+    pub fn with_local_cache_invalidator(self, cache_invalidator: CacheInvalidatorRef) -> Self {
         Self {
-            cache_invalidator: Some(cache_invalidator),
+            local_cache_invalidator: Some(cache_invalidator),
             ..self
         }
     }
@@ -100,8 +100,8 @@ impl FrontendBuilder {
 
         let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
 
-        let cache_invalidator = self
-            .cache_invalidator
+        let local_cache_invalidator = self
+            .local_cache_invalidator
             .unwrap_or_else(|| Arc::new(DummyCacheInvalidator));
 
         let region_query_handler =
@@ -158,7 +158,7 @@ impl FrontendBuilder {
             query_engine.clone(),
             self.procedure_executor,
             kv_backend.clone(),
-            cache_invalidator,
+            local_cache_invalidator,
             inserter.clone(),
         ));
 

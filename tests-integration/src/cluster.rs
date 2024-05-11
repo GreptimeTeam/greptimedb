@@ -389,7 +389,7 @@ impl GreptimeDbClusterBuilder {
             datanode_clients,
             meta_client,
         )
-        .with_cache_invalidator(cache_registry)
+        .with_local_cache_invalidator(cache_registry)
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
