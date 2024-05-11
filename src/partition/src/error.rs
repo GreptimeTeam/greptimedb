@@ -29,6 +29,13 @@ use crate::expr::PartitionExpr;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to find table route for table id {}", table_id))]
+    TableRouteNotFound {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table route manager error"))]
     TableRouteManager {
         source: common_meta::error::Error,
@@ -206,6 +213,7 @@ impl ErrorExt for Error {
             Error::InvalidTableRouteData { .. } => StatusCode::Internal,
             Error::ConvertScalarValue { .. } => StatusCode::Internal,
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
+            Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::MissingDefaultValue { .. } => StatusCode::Internal,
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),

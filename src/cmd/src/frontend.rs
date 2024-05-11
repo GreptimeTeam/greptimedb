@@ -252,11 +252,16 @@ impl StartCommand {
         let table_cache = cache_registry.get().context(error::CacheRequiredSnafu {
             name: TABLE_CACHE_NAME,
         })?;
+        let composite_table_route_cache =
+            cache_registry.get().context(error::CacheRequiredSnafu {
+                name: TABLE_CACHE_NAME,
+            })?;
         let catalog_manager = KvBackendCatalogManager::new(
             opts.mode,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             table_cache,
+            composite_table_route_cache,
         )
         .await;
 

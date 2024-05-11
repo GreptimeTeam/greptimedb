@@ -134,6 +134,7 @@ impl GreptimeDbStandaloneBuilder {
             None,
             kv_backend.clone(),
             cache_registry.get().unwrap(),
+            cache_registry.get().unwrap(),
         )
         .await;
 

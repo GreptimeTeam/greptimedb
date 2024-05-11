@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
-use cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
+use cache::{default_cache_registry_builder, COMPOSITE_TABLE_ROUTE_CACHE, TABLE_CACHE_NAME};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -385,8 +385,17 @@ impl StartCommand {
         let table_cache = cache_registry.get().context(CacheRequiredSnafu {
             name: TABLE_CACHE_NAME,
         })?;
-        let catalog_manager =
-            KvBackendCatalogManager::new(dn_opts.mode, None, kv_backend.clone(), table_cache).await;
+        let composite_table_route_cache = cache_registry.get().context(CacheRequiredSnafu {
+            name: COMPOSITE_TABLE_ROUTE_CACHE,
+        })?;
+        let catalog_manager = KvBackendCatalogManager::new(
+            dn_opts.mode,
+            None,
+            kv_backend.clone(),
+            table_cache,
+            composite_table_route_cache,
+        )
+        .await;
 
         let builder =
             DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());

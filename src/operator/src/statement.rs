@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
+use common_meta::cache::CompositeTableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
@@ -80,6 +81,7 @@ impl StatementExecutor {
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
+        composite_table_route_cache: CompositeTableRouteCacheRef,
     ) -> Self {
         Self {
             catalog_manager,
@@ -87,7 +89,10 @@ impl StatementExecutor {
             procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             flow_metadata_manager: Arc::new(FlowMetadataManager::new(kv_backend.clone())),
-            partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
+            partition_manager: Arc::new(PartitionRuleManager::new(
+                kv_backend,
+                composite_table_route_cache,
+            )),
             cache_invalidator,
             inserter,
         }
