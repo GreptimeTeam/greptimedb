@@ -33,8 +33,9 @@ use crate::expr::EvalError;
 pub enum Error {
     #[snafu(display("External error"))]
     External {
-        location: Location,
         source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Internal error"))]
@@ -59,6 +60,7 @@ pub enum Error {
     TableNotFoundMeta {
         source: common_meta::error::Error,
         msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -80,18 +82,21 @@ pub enum Error {
     #[snafu(display("Invalid query plan: {source}"))]
     InvalidQueryPlan {
         source: query::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid query: prost can't decode substrait plan: {inner}"))]
     InvalidQueryProst {
         inner: api::DecodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid query, can't transform to substrait: {source}"))]
     InvalidQuerySubstrait {
         source: substrait::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -147,7 +152,11 @@ pub enum Error {
     },
 
     #[snafu(display("Unexpected: {reason}"))]
-    Unexpected { reason: String, location: Location },
+    Unexpected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 /// Result type for flow module
