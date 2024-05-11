@@ -191,10 +191,7 @@ impl FlowNameManager {
         let key = FlowNameKey::new(catalog_name, flow_name);
         let raw_key = key.to_bytes();
         let flow_flow_name_value = FlowNameValue::new(flow_id);
-        let txn = txn_helper::build_put_if_absent_txn(
-            raw_key.clone(),
-            flow_flow_name_value.try_as_raw_value()?,
-        );
+        let txn = Txn::put_if_not_exists(raw_key.clone(), flow_flow_name_value.try_as_raw_value()?);
 
         Ok((
             txn,

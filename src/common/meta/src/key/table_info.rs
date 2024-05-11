@@ -24,9 +24,7 @@ use table::table_reference::TableReference;
 use super::TABLE_INFO_KEY_PATTERN;
 use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{
-    txn_helper, DeserializedValueWithBytes, MetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX,
-};
+use crate::key::{DeserializedValueWithBytes, MetaKey, TableMetaValue, TABLE_INFO_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
@@ -153,10 +151,7 @@ impl TableInfoManager {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();
 
-        let txn = txn_helper::build_put_if_absent_txn(
-            raw_key.clone(),
-            table_info_value.try_as_raw_value()?,
-        );
+        let txn = Txn::put_if_not_exists(raw_key.clone(), table_info_value.try_as_raw_value()?);
 
         Ok((
             txn,
@@ -182,7 +177,7 @@ impl TableInfoManager {
         let raw_value = current_table_info_value.get_raw_bytes();
         let new_raw_value: Vec<u8> = new_table_info_value.try_as_raw_value()?;
 
-        let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
+        let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value);
 
         Ok((
             txn,

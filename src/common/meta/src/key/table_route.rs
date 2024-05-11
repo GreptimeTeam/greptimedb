@@ -27,7 +27,7 @@ use crate::error::{
 };
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    txn_helper, DeserializedValueWithBytes, MetaKey, RegionDistribution, TableMetaValue,
+    DeserializedValueWithBytes, MetaKey, RegionDistribution, TableMetaValue,
     TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
 };
 use crate::kv_backend::txn::Txn;
@@ -492,10 +492,7 @@ impl TableRouteStorage {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
 
-        let txn = txn_helper::build_put_if_absent_txn(
-            raw_key.clone(),
-            table_route_value.try_as_raw_value()?,
-        );
+        let txn = Txn::put_if_not_exists(raw_key.clone(), table_route_value.try_as_raw_value()?);
 
         Ok((
             txn,
@@ -522,7 +519,7 @@ impl TableRouteStorage {
         let raw_value = current_table_route_value.get_raw_bytes();
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
 
-        let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
+        let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value);
 
         Ok((
             txn,
