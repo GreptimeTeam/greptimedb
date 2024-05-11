@@ -56,7 +56,10 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
                 .map_ok(|key| key.flownode_id())
                 .try_collect::<HashSet<_>>()
                 .await
-                // Caches the HashSet even if it's empty, to reduce remote fetches.
+                // We must cache the `HashSet` even if it's empty,
+                // to avoid future requests to the remote storage next time;
+                // If the value is added to the remote storage,
+                // we have a corresponding cache invalidation mechanism to invalidate `(Key, EmptyHashSet)`.
                 .map(Some)
         })
     })
