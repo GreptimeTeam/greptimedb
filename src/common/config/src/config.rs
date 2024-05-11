@@ -18,9 +18,13 @@ use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu, TomlFormatSnafu};
 
+/// Separator for environment variables. For example, `DATANODE__STORAGE__MANIFEST__CHECKPOINT_MARGIN`.
 pub const ENV_VAR_SEP: &str = "__";
+
+/// Separator for list values in environment variables. For example, `localhost:3001,localhost:3002,localhost:3003`.
 pub const ENV_LIST_SEP: &str = ",";
 
+/// Configuration trait defines the common interface for configuration that can be loaded from multiple sources and serialized to TOML.
 pub trait Configurable<'de>: Serialize + Deserialize<'de> + Default + Sized {
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: config file > environment variables > default values.
@@ -77,10 +81,12 @@ pub trait Configurable<'de>: Serialize + Deserialize<'de> + Default + Sized {
         Ok(opts)
     }
 
+    /// List of toml keys that should be parsed as a list.
     fn env_list_keys() -> Option<&'static [&'static str]> {
         None
     }
 
+    /// Serialize the configuration to a TOML string.
     fn to_toml(&self) -> Result<String> {
         toml::to_string(&self).context(TomlFormatSnafu)
     }
