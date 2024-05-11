@@ -29,7 +29,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    self, Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result,
+    Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result,
     TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
@@ -144,7 +144,6 @@ impl GrpcQueryHandler for Instance {
                             .await?
                     }
                     DdlExpr::CreateFlow(expr) => {
-                        let expr = expr.try_into().context(error::ConvertExprSnafu)?;
                         self.statement_executor
                             .create_flow_inner(expr, ctx.clone())
                             .await?
