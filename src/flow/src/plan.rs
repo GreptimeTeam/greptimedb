@@ -74,7 +74,7 @@ impl TypedPlan {
         let mfp = MapFilterProject::new(input_arity)
             .map(exprs)?
             .project(input_arity..input_arity + output_arity)?;
-        let out_typ = self.typ.apply_mfp(&mfp, &expr_typs);
+        let out_typ = self.typ.apply_mfp(&mfp, &expr_typs)?;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
             Plan::Mfp {

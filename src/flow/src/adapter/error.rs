@@ -36,6 +36,10 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("Internal error"))]
+    Internal { location: Location, reason: String },
+
     /// TODO(discord9): add detailed location of column
     #[snafu(display("Failed to eval stream"))]
     Eval {
@@ -170,6 +174,7 @@ impl ErrorExt for Error {
                 StatusCode::Unsupported
             }
             &Self::External { .. } => StatusCode::Unknown,
+            Self::Internal { .. } => StatusCode::Internal,
         }
     }
 

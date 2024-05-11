@@ -19,7 +19,9 @@ use substrait::substrait_proto::proto::read_rel::ReadType;
 use substrait::substrait_proto::proto::rel::RelType;
 use substrait::substrait_proto::proto::{plan_rel, Plan as SubPlan, Rel};
 
-use crate::adapter::error::{Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu};
+use crate::adapter::error::{
+    Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
+};
 use crate::expr::{MapFilterProject, TypedExpr};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, RelationType};
@@ -114,7 +116,9 @@ impl TypedPlan {
             }
             Some(RelType::Read(read)) => {
                 if let Some(ReadType::NamedTable(nt)) = &read.as_ref().read_type {
-                    let query_ctx = ctx.query_context.clone().unwrap();
+                    let query_ctx = ctx.query_context.clone().context(UnexpectedSnafu {
+                        reason: "Query context not found",
+                    })?;
                     let table_reference = match nt.names.len() {
                         1 => [
                             query_ctx.current_catalog().to_string(),

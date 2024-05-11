@@ -17,13 +17,13 @@ use std::collections::{BTreeMap, HashMap};
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 
-use crate::adapter::error::{InvalidQuerySnafu, Result};
+use crate::adapter::error::{InvalidQuerySnafu, Result, UnexpectedSnafu};
 use crate::expr::MapFilterProject;
 
 /// a set of column indices that are "keys" for the collection.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
+#[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct Key {
     /// indicate whose column form key
     pub column_indices: Vec<usize>,
@@ -32,9 +32,7 @@ pub struct Key {
 impl Key {
     /// create a new Key
     pub fn new() -> Self {
-        Self {
-            column_indices: Vec::new(),
-        }
+        Default::default()
     }
 
     /// create a new Key from a vector of column indices
@@ -79,12 +77,6 @@ impl Key {
     }
 }
 
-impl Default for Key {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// The type of a relation.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct RelationType {
@@ -106,7 +98,20 @@ pub struct RelationType {
 }
 
 impl RelationType {
-    pub fn apply_mfp(&self, mfp: &MapFilterProject, expr_typs: &[ColumnType]) -> Self {
+    /// Trying to apply a mpf on current types, will return a new RelationType
+    /// with the new types, will also try to preserve keys&time index information
+    /// if the old key&time index columns are preserve in given mfp
+    ///
+    /// i.e. old column of size 3, with a mfp's
+    ///
+    /// project = `[2, 1]`,
+    ///
+    /// the old key = `[1]`, old time index = `[2]`,
+    ///
+    /// then new key=`[1]`, new time index=`[0]`
+    ///
+    /// note that this function will remove empty keys like key=`[]` will be removed
+    pub fn apply_mfp(&self, mfp: &MapFilterProject, expr_typs: &[ColumnType]) -> Result<Self> {
         let all_types = self
             .column_types
             .iter()
@@ -116,8 +121,16 @@ impl RelationType {
         let mfp_out_types = mfp
             .projection
             .iter()
-            .map(|i| all_types[*i].clone())
-            .collect_vec();
+            .map(|i| {
+                all_types.get(*i).cloned().with_context(|| UnexpectedSnafu {
+                    reason: format!(
+                        "MFP index out of bound, len is {}, but the index is {}",
+                        all_types.len(),
+                        *i
+                    ),
+                })
+            })
+            .try_collect()?;
         let old_to_new_col = BTreeMap::from_iter(
             mfp.projection
                 .clone()
@@ -135,6 +148,7 @@ impl RelationType {
                     .iter()
                     .map(|old| old_to_new_col.get(old).cloned())
                     .collect::<Option<Vec<_>>>()
+                    // remove empty keys
                     .and_then(|v| if v.is_empty() { None } else { Some(v) })
                     .map(Key::from)
             })
@@ -143,11 +157,11 @@ impl RelationType {
         let time_index = self
             .time_index
             .and_then(|old| old_to_new_col.get(&old).cloned());
-        Self {
+        Ok(Self {
             column_types: mfp_out_types,
             keys,
             time_index,
-        }
+        })
     }
     /// Constructs a `RelationType` representing the relation with no columns and
     /// no keys.
