@@ -15,7 +15,7 @@
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
+use api::v1::{DeleteRequests, DropFlowExpr, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
@@ -143,11 +143,20 @@ impl GrpcQueryHandler for Instance {
                             .truncate_table(table_name, ctx.clone())
                             .await?
                     }
-                    DdlExpr::CreateFlow(_) => {
-                        unimplemented!()
+                    DdlExpr::CreateFlow(expr) => {
+                        self.statement_executor
+                            .create_flow_inner(expr, ctx.clone())
+                            .await?
                     }
-                    DdlExpr::DropFlow(_) => {
-                        unimplemented!()
+                    DdlExpr::DropFlow(DropFlowExpr {
+                        catalog_name,
+                        flow_name,
+                        drop_if_exists,
+                        ..
+                    }) => {
+                        self.statement_executor
+                            .drop_flow(catalog_name, flow_name, drop_if_exists, ctx.clone())
+                            .await?
                     }
                 }
             }

@@ -137,6 +137,13 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failed to convert expr to struct"))]
+    InvalidExpr {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql {
         err_msg: String,
@@ -707,7 +714,8 @@ impl ErrorExt for Error {
             | Error::SchemaIncompatible { .. }
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
-            | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
+            | Error::ConvertIdentifier { .. }
+            | Error::InvalidExpr { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 

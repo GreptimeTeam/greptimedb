@@ -18,12 +18,11 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
-    ColumnDataTypeExtension, CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, DropColumn, DropColumns, RenameTable,
+    SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
-use common_meta::rpc::ddl::CreateFlowTask;
-use common_meta::table_name::TableName;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
@@ -517,7 +516,7 @@ pub(crate) fn to_alter_expr(
 pub fn to_create_flow_task_expr(
     create_flow: CreateFlow,
     query_ctx: &QueryContextRef,
-) -> Result<CreateFlowTask> {
+) -> Result<CreateFlowExpr> {
     // retrieve sink table name
     let sink_table_ref =
         object_name_to_table_reference(create_flow.sink_table_name.clone().into(), true)
@@ -561,11 +560,11 @@ pub fn to_create_flow_task_expr(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(CreateFlowTask {
+    Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: create_flow.flow_name.to_string(),
         source_table_names,
-        sink_table_name,
+        sink_table_name: Some(sink_table_name),
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
         expire_when: create_flow

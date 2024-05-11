@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{column_def, AlterExpr, CreateTableExpr};
+use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
+use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -341,18 +342,30 @@ impl StatementExecutor {
         // TODO(ruihang): do some verification
         let expr = expr_factory::to_create_flow_task_expr(stmt, &query_context)?;
 
+        self.create_flow_inner(expr, query_context).await
+    }
+
+    pub async fn create_flow_inner(
+        &self,
+        expr: CreateFlowExpr,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         self.create_flow_procedure(expr, query_context).await?;
         Ok(Output::new_with_affected_rows(0))
     }
 
     async fn create_flow_procedure(
         &self,
-        expr: CreateFlowTask,
+        expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
+        let task = CreateFlowTask::try_from(PbCreateFlowTask {
+            create_flow: Some(expr),
+        })
+        .context(error::InvalidExprSnafu)?;
         let request = SubmitDdlTaskRequest {
             query_context,
-            task: DdlTask::new_create_flow(expr),
+            task: DdlTask::new_create_flow(task),
         };
 
         self.procedure_executor
