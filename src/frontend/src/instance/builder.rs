@@ -107,9 +107,12 @@ impl FrontendBuilder {
         let region_query_handler =
             FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
-        let table_flownode_cache = self.cache_registry.get().context(error::GetCacheSnafu {
-            name: TABLE_FLOWNODE_SET_CACHE_NAME,
-        })?;
+        let table_flownode_cache =
+            self.cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: TABLE_FLOWNODE_SET_CACHE_NAME,
+                })?;
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),

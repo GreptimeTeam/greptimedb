@@ -249,7 +249,7 @@ impl StartCommand {
                 .add_cache(cached_meta_backend.clone())
                 .build(),
         );
-        let table_cache = cache_registry.get().context(error::GetCacheSnafu {
+        let table_cache = cache_registry.get().context(error::CacheRequiredSnafu {
             name: TABLE_CACHE_NAME,
         })?;
         let catalog_manager = KvBackendCatalogManager::new(

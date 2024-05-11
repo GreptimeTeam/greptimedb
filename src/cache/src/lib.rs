@@ -22,21 +22,21 @@ use common_meta::cache::{
 use common_meta::kv_backend::KvBackendRef;
 use moka::future::CacheBuilder;
 
-const CACHE_MAX_CAPACITY: u64 = 65536;
-const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-const CACHE_TTI: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_CACHE_MAX_CAPACITY: u64 = 65536;
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
 pub const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
 pub const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
 pub const TABLE_CACHE_NAME: &str = "table_cache";
 pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 
-// TODO(weny): Make the cache is configurable.
+// TODO(weny): Make the cache configurable.
 pub fn default_cache_registry_builder(kv_backend: KvBackendRef) -> CacheRegistryBuilder {
     // Builds table info cache
-    let cache = CacheBuilder::new(CACHE_MAX_CAPACITY)
-        .time_to_live(CACHE_TTL)
-        .time_to_idle(CACHE_TTI)
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
         .build();
     let table_info_cache = Arc::new(new_table_info_cache(
         TABLE_INFO_CACHE_NAME.to_string(),
@@ -45,9 +45,9 @@ pub fn default_cache_registry_builder(kv_backend: KvBackendRef) -> CacheRegistry
     ));
 
     // Builds table name cache
-    let cache = CacheBuilder::new(CACHE_MAX_CAPACITY)
-        .time_to_live(CACHE_TTL)
-        .time_to_idle(CACHE_TTI)
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
         .build();
     let table_name_cache = Arc::new(new_table_name_cache(
         TABLE_NAME_CACHE_NAME.to_string(),
@@ -56,9 +56,9 @@ pub fn default_cache_registry_builder(kv_backend: KvBackendRef) -> CacheRegistry
     ));
 
     // Builds table cache
-    let cache = CacheBuilder::new(CACHE_MAX_CAPACITY)
-        .time_to_live(CACHE_TTL)
-        .time_to_idle(CACHE_TTI)
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
         .build();
     let table_cache = Arc::new(new_table_cache(
         TABLE_CACHE_NAME.to_string(),
@@ -68,9 +68,9 @@ pub fn default_cache_registry_builder(kv_backend: KvBackendRef) -> CacheRegistry
     ));
 
     // Builds table flownode set cache
-    let cache = CacheBuilder::new(CACHE_MAX_CAPACITY)
-        .time_to_live(CACHE_TTL)
-        .time_to_idle(CACHE_TTI)
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
         .build();
     let table_flownode_set_cache = Arc::new(new_table_flownode_set_cache(
         TABLE_FLOWNODE_SET_CACHE_NAME.to_string(),

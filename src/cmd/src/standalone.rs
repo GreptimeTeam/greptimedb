@@ -58,7 +58,7 @@ use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    CreateDirSnafu, GetCacheSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu,
+    CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu,
     InitTimezoneSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
     StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
     StopProcedureManagerSnafu,
@@ -399,7 +399,7 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         let cache_registry = Arc::new(default_cache_registry_builder(kv_backend.clone()).build());
-        let table_cache = cache_registry.get().context(GetCacheSnafu {
+        let table_cache = cache_registry.get().context(CacheRequiredSnafu {
             name: TABLE_CACHE_NAME,
         })?;
         let catalog_manager =
