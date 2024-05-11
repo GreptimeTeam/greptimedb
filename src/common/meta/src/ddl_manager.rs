@@ -68,6 +68,28 @@ pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
 }
 
+macro_rules! procedure_loader_entry {
+    ($procedure:ident) => {
+        (
+            $procedure::TYPE_NAME,
+            &|context: DdlContext| -> BoxedProcedureLoader {
+                Box::new(move |json: &str| {
+                    let context = context.clone();
+                    $procedure::from_json(json, context).map(|p| Box::new(p) as _)
+                })
+            },
+        )
+    };
+}
+
+macro_rules! procedure_loader {
+    ($($procedure:ident),*) => {
+        vec![
+            $(procedure_loader_entry!($procedure)),*
+        ]
+    };
+}
+
 impl DdlManager {
     /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
@@ -97,100 +119,18 @@ impl DdlManager {
 
     /// Registers all Ddl loaders.
     pub fn register_loaders(&self) -> Result<()> {
-        let loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> = vec![
-            (
-                CreateTableProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        CreateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                CreateLogicalTablesProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        CreateLogicalTablesProcedure::from_json(json, context)
-                            .map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                CreateFlowProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        CreateFlowProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                AlterTableProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        AlterTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                AlterLogicalTablesProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        AlterLogicalTablesProcedure::from_json(json, context)
-                            .map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                DropTableProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        DropTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                DropFlowProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        DropFlowProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                TruncateTableProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                CreateDatabaseProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        CreateDatabaseProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-            (
-                DropDatabaseProcedure::TYPE_NAME,
-                &|context: DdlContext| -> BoxedProcedureLoader {
-                    Box::new(move |json: &str| {
-                        let context = context.clone();
-                        DropDatabaseProcedure::from_json(json, context).map(|p| Box::new(p) as _)
-                    })
-                },
-            ),
-        ];
+        let loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> = procedure_loader!(
+            CreateTableProcedure,
+            CreateLogicalTablesProcedure,
+            CreateFlowProcedure,
+            AlterTableProcedure,
+            AlterLogicalTablesProcedure,
+            DropTableProcedure,
+            DropFlowProcedure,
+            TruncateTableProcedure,
+            CreateDatabaseProcedure,
+            DropDatabaseProcedure
+        );
 
         for (type_name, loader_factory) in loaders {
             let context = self.create_context();

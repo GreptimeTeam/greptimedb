@@ -59,11 +59,11 @@ impl Compare {
         Self::new(key, cmp, Some(target))
     }
 
-    pub fn with_not_exist_value(key: Vec<u8>, cmp: CompareOp) -> Self {
+    pub fn with_value_not_exists(key: Vec<u8>, cmp: CompareOp) -> Self {
         Self::new(key, cmp, None)
     }
 
-    pub fn compare_with_value(&self, value: Option<&Vec<u8>>) -> bool {
+    pub fn compare_value(&self, value: Option<&Vec<u8>>) -> bool {
         match (value, &self.target) {
             (Some(value), Some(target)) => match self.cmp {
                 CompareOp::Equal => *value == *target,
@@ -158,6 +158,30 @@ impl Txn {
         Txn::default()
     }
 
+    /// Builds a transaction that puts a value at a key if the key does not exist.
+    pub fn put_if_not_exists(key: Vec<u8>, value: Vec<u8>) -> Self {
+        Self::new()
+            .when(vec![Compare::with_value_not_exists(
+                key.clone(),
+                CompareOp::Equal,
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), value)])
+            .or_else(vec![TxnOp::Get(key)])
+    }
+
+    /// Builds a transaction that puts a value at a key if the key exists and the value
+    /// is equal to `old_value`.
+    pub fn compare_and_put(key: Vec<u8>, old_value: Vec<u8>, value: Vec<u8>) -> Self {
+        Self::new()
+            .when(vec![Compare::with_value(
+                key.clone(),
+                CompareOp::Equal,
+                old_value,
+            )])
+            .and_then(vec![TxnOp::Put(key.clone(), value)])
+            .or_else(vec![TxnOp::Get(key)])
+    }
+
     /// Takes a list of comparison. If all comparisons passed in succeed,
     /// the operations passed into `and_then()` will be executed. Or the operations
     /// passed into `or_else()` will be executed.
@@ -223,35 +247,35 @@ mod tests {
     fn test_compare() {
         // Equal
         let compare = Compare::with_value(vec![1], CompareOp::Equal, vec![1]);
-        assert!(compare.compare_with_value(Some(&vec![1])));
-        assert!(!compare.compare_with_value(None));
-        let compare = Compare::with_not_exist_value(vec![1], CompareOp::Equal);
-        assert!(compare.compare_with_value(None));
+        assert!(compare.compare_value(Some(&vec![1])));
+        assert!(!compare.compare_value(None));
+        let compare = Compare::with_value_not_exists(vec![1], CompareOp::Equal);
+        assert!(compare.compare_value(None));
 
         // Greater
         let compare = Compare::with_value(vec![1], CompareOp::Greater, vec![1]);
-        assert!(compare.compare_with_value(Some(&vec![2])));
-        assert!(!compare.compare_with_value(None));
-        let compare = Compare::with_not_exist_value(vec![1], CompareOp::Greater);
-        assert!(!compare.compare_with_value(None));
-        assert!(compare.compare_with_value(Some(&vec![1])));
+        assert!(compare.compare_value(Some(&vec![2])));
+        assert!(!compare.compare_value(None));
+        let compare = Compare::with_value_not_exists(vec![1], CompareOp::Greater);
+        assert!(!compare.compare_value(None));
+        assert!(compare.compare_value(Some(&vec![1])));
 
         // Less
         let compare = Compare::with_value(vec![1], CompareOp::Less, vec![1]);
-        assert!(compare.compare_with_value(Some(&vec![0])));
-        assert!(compare.compare_with_value(None));
-        let compare = Compare::with_not_exist_value(vec![1], CompareOp::Less);
-        assert!(!compare.compare_with_value(None));
-        assert!(!compare.compare_with_value(Some(&vec![1])));
+        assert!(compare.compare_value(Some(&vec![0])));
+        assert!(compare.compare_value(None));
+        let compare = Compare::with_value_not_exists(vec![1], CompareOp::Less);
+        assert!(!compare.compare_value(None));
+        assert!(!compare.compare_value(Some(&vec![1])));
 
         // NotEqual
         let compare = Compare::with_value(vec![1], CompareOp::NotEqual, vec![1]);
-        assert!(!compare.compare_with_value(Some(&vec![1])));
-        assert!(compare.compare_with_value(Some(&vec![2])));
-        assert!(compare.compare_with_value(None));
-        let compare = Compare::with_not_exist_value(vec![1], CompareOp::NotEqual);
-        assert!(!compare.compare_with_value(None));
-        assert!(compare.compare_with_value(Some(&vec![1])));
+        assert!(!compare.compare_value(Some(&vec![1])));
+        assert!(compare.compare_value(Some(&vec![2])));
+        assert!(compare.compare_value(None));
+        let compare = Compare::with_value_not_exists(vec![1], CompareOp::NotEqual);
+        assert!(!compare.compare_value(None));
+        assert!(compare.compare_value(Some(&vec![1])));
     }
 
     #[test]
@@ -348,7 +372,7 @@ mod tests {
         kv_backend.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
-            .when(vec![Compare::with_not_exist_value(
+            .when(vec![Compare::with_value_not_exists(
                 key.clone(),
                 CompareOp::Equal,
             )])
@@ -379,7 +403,7 @@ mod tests {
         kv_backend.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
-            .when(vec![Compare::with_not_exist_value(
+            .when(vec![Compare::with_value_not_exists(
                 key.clone(),
                 CompareOp::Greater,
             )])
@@ -421,7 +445,7 @@ mod tests {
         kv_backend.delete(&[3], false).await.unwrap();
 
         let txn = Txn::new()
-            .when(vec![Compare::with_not_exist_value(
+            .when(vec![Compare::with_value_not_exists(
                 key.clone(),
                 CompareOp::Less,
             )])
@@ -463,7 +487,7 @@ mod tests {
         kv_backend.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
-            .when(vec![Compare::with_not_exist_value(
+            .when(vec![Compare::with_value_not_exists(
                 key.clone(),
                 CompareOp::NotEqual,
             )])

@@ -300,9 +300,7 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
         let mut kvs = self.kvs.write().unwrap();
 
-        let succeeded = compare
-            .iter()
-            .all(|x| x.compare_with_value(kvs.get(&x.key)));
+        let succeeded = compare.iter().all(|x| x.compare_value(kvs.get(&x.key)));
 
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
