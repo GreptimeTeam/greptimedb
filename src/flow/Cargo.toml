@@ -20,7 +20,6 @@ common-telemetry.workspace = true
 common-time.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion-substrait.workspace = true
 datatypes.workspace = true
 enum_dispatch = "0.3"
 futures = "0.3"

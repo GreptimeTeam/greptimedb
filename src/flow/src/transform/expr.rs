@@ -17,11 +17,11 @@
 use datatypes::data_type::ConcreteDataType as CDT;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
-use substrait::substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
-use substrait::substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait::substrait_proto::proto::expression::{IfThen, RexType, ScalarFunction};
-use substrait::substrait_proto::proto::function_argument::ArgType;
-use substrait::substrait_proto::proto::Expression;
+use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
+use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
+use substrait_proto::proto::expression::{IfThen, RexType, ScalarFunction};
+use substrait_proto::proto::function_argument::ArgType;
+use substrait_proto::proto::Expression;
 
 use crate::adapter::error::{
     DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
@@ -31,8 +31,7 @@ use crate::expr::{
 };
 use crate::repr::{ColumnType, RelationType};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
-use crate::transform::FunctionExtensions;
-
+use crate::transform::{substrait_proto, FunctionExtensions};
 // TODO: found proper place for this
 /// ref to `arrow_schema::datatype` for type name
 fn typename_to_cdt(name: &str) -> CDT {

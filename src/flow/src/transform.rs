@@ -16,23 +16,33 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType as CDT;
+use literal::{from_substrait_literal, from_substrait_type};
 use prost::Message;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
 use query::QueryEngine;
 use session::context::QueryContext;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use snafu::{OptionExt, ResultExt};
+/// note here we are using the `substrait_proto_df` crate from the `substrait` module and
+/// rename it to `substrait_proto`
+use substrait::{
+    substrait_proto_df as substrait_proto, DFLogicalSubstraitConvertor, SubstraitPlan,
+};
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::error::{
-    Error, InvalidQueryPlanSnafu, InvalidQueryProstSnafu, InvalidQuerySubstraitSnafu,
-    NotImplementedSnafu, TableNotFoundSnafu,
+    Error, ExternalSnafu, InvalidQueryPlanSnafu, InvalidQueryProstSnafu,
+    InvalidQuerySubstraitSnafu, NotImplementedSnafu, TableNotFoundSnafu,
 };
 use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::RelationType;
+
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -55,11 +65,6 @@ mod aggr;
 mod expr;
 mod literal;
 mod plan;
-
-use literal::{from_substrait_literal, from_substrait_type};
-use snafu::{OptionExt, ResultExt};
-use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait::substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 /// In Substrait, a function can be define by an u32 anchor, and the anchor can be mapped to a name
 ///
@@ -107,14 +112,11 @@ pub async fn sql_to_flow_plan(
         .await
         .context(InvalidQueryPlanSnafu)?;
     let LogicalPlan::DfPlan(plan) = plan;
+    let sub_plan = DFLogicalSubstraitConvertor {}
+        .to_sub_plan(&plan)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
 
-    // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
-    let bytes = DFLogicalSubstraitConvertor {}
-        .encode(&plan)
-        .context(InvalidQuerySubstraitSnafu)?;
-
-    let sub_plan = substrait::substrait_proto::proto::Plan::decode(bytes)
-        .map_err(|inner| InvalidQueryProstSnafu { inner }.build())?;
     let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan)?;
 
     Ok(flow_plan)
@@ -131,8 +133,8 @@ mod test {
     use query::plan::LogicalPlan;
     use query::QueryEngine;
     use session::context::QueryContext;
-    use substrait::substrait_proto::proto;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+    use substrait_proto::proto;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;

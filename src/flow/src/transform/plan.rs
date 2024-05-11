@@ -14,10 +14,10 @@
 
 use itertools::Itertools;
 use snafu::OptionExt;
-use substrait::substrait_proto::proto::expression::MaskExpression;
-use substrait::substrait_proto::proto::read_rel::ReadType;
-use substrait::substrait_proto::proto::rel::RelType;
-use substrait::substrait_proto::proto::{plan_rel, Plan as SubPlan, Rel};
+use substrait_proto::proto::expression::MaskExpression;
+use substrait_proto::proto::read_rel::ReadType;
+use substrait_proto::proto::rel::RelType;
+use substrait_proto::proto::{plan_rel, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
     Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
@@ -25,7 +25,7 @@ use crate::adapter::error::{
 use crate::expr::{MapFilterProject, TypedExpr};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, RelationType};
-use crate::transform::{FlownodeContext, FunctionExtensions};
+use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedPlan {
     /// Convert Substrait Plan into Flow's TypedPlan

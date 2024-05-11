@@ -16,11 +16,6 @@ use std::collections::HashMap;
 
 use common_decimal::Decimal128;
 use common_time::{Date, Timestamp};
-use datafusion_substrait::variation_const::{
-    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
-    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
-    UNSIGNED_INTEGER_TYPE_REF,
-};
 use datatypes::arrow::compute::kernels::window;
 use datatypes::arrow::ipc::Binary;
 use datatypes::data_type::ConcreteDataType as CDT;
@@ -28,21 +23,26 @@ use datatypes::value::Value;
 use hydroflow::futures::future::Map;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
-use substrait::substrait_proto::proto::aggregate_function::AggregationInvocation;
-use substrait::substrait_proto::proto::aggregate_rel::{Grouping, Measure};
-use substrait::substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
-use substrait::substrait_proto::proto::expression::literal::LiteralType;
-use substrait::substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait::substrait_proto::proto::expression::{
+use substrait::variation_const::{
+    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
+    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
+    UNSIGNED_INTEGER_TYPE_REF,
+};
+use substrait_proto::proto::aggregate_function::AggregationInvocation;
+use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
+use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
+use substrait_proto::proto::expression::literal::LiteralType;
+use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
+use substrait_proto::proto::expression::{
     IfThen, Literal, MaskExpression, RexType, ScalarFunction,
 };
-use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait::substrait_proto::proto::extensions::SimpleExtensionDeclaration;
-use substrait::substrait_proto::proto::function_argument::ArgType;
-use substrait::substrait_proto::proto::r#type::Kind;
-use substrait::substrait_proto::proto::read_rel::ReadType;
-use substrait::substrait_proto::proto::rel::RelType;
-use substrait::substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
+use substrait_proto::proto::function_argument::ArgType;
+use substrait_proto::proto::r#type::Kind;
+use substrait_proto::proto::read_rel::ReadType;
+use substrait_proto::proto::rel::RelType;
+use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
     DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
@@ -54,7 +54,7 @@ use crate::expr::{
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, ColumnType, RelationType};
-use crate::transform::{FlownodeContext, FunctionExtensions};
+use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
     fn from_substrait_agg_grouping(

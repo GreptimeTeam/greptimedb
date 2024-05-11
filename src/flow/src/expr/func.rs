@@ -20,7 +20,6 @@ use std::sync::OnceLock;
 use common_telemetry::debug;
 use common_time::DateTime;
 use datafusion_expr::Operator;
-use datafusion_substrait::logical_plan::consumer::name_to_op;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
@@ -29,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
+use substrait::df_logical_plan::consumer::name_to_op;
 
 use crate::adapter::error::{Error, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{

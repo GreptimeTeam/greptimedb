@@ -3812,7 +3812,6 @@ dependencies = [
  "common-time",
  "datafusion-common 37.0.0",
  "datafusion-expr 37.0.0",
- "datafusion-substrait",
  "datatypes",
  "enum_dispatch",
  "futures",
