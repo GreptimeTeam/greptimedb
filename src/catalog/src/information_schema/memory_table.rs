@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_error::ext::BoxedError;
-use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;

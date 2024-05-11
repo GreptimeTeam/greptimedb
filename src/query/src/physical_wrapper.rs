@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 
-use common_query::physical_plan::PhysicalPlan;
+use datafusion::physical_plan::ExecutionPlan;
 use session::context::QueryContextRef;
 
 /// wrap physical plan with additional layer
 /// e.g: metrics retrieving layer upon physical plan
 pub trait PhysicalPlanWrapper: Send + Sync + 'static {
-    fn wrap(&self, origin: Arc<dyn PhysicalPlan>, ctx: QueryContextRef) -> Arc<dyn PhysicalPlan>;
+    fn wrap(&self, origin: Arc<dyn ExecutionPlan>, ctx: QueryContextRef) -> Arc<dyn ExecutionPlan>;
 }
 
 pub type PhysicalPlanWrapperRef = Arc<dyn PhysicalPlanWrapper>;

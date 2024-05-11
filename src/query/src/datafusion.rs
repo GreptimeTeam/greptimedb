@@ -26,7 +26,6 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -38,6 +37,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
 use datatypes::prelude::VectorRef;
+use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -352,7 +352,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         &self,
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
-    ) -> Result<Arc<dyn PhysicalPlan>> {
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
@@ -364,17 +364,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
-                Ok(Arc::new(PhysicalPlanAdapter::new(
-                    Arc::new(
-                        physical_plan
-                            .schema()
-                            .try_into()
-                            .context(error::ConvertSchemaSnafu)
-                            .map_err(BoxedError::new)
-                            .context(QueryExecutionSnafu)?,
-                    ),
-                    physical_plan,
-                )))
+                Ok(physical_plan)
             }
         }
     }
@@ -385,44 +375,33 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
-        plan: Arc<dyn PhysicalPlan>,
-    ) -> Result<Arc<dyn PhysicalPlan>> {
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
         let state = ctx.state();
         let config = state.config_options();
-        let df_plan = plan
-            .as_any()
-            .downcast_ref::<PhysicalPlanAdapter>()
-            .context(error::PhysicalPlanDowncastSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?
-            .df_plan();
-
         // skip optimize AnalyzeExec plan
-        let optimized_plan =
-            if let Some(analyze_plan) = df_plan.as_any().downcast_ref::<AnalyzeExec>() {
-                let mut new_plan = analyze_plan.input().clone();
-                for optimizer in state.physical_optimizers() {
-                    new_plan = optimizer
-                        .optimize(new_plan, config)
-                        .context(DataFusionSnafu)?;
-                }
-                Arc::new(DistAnalyzeExec::new(new_plan))
-            } else {
-                let mut new_plan = df_plan;
-                for optimizer in state.physical_optimizers() {
-                    new_plan = optimizer
-                        .optimize(new_plan, config)
-                        .context(DataFusionSnafu)?;
-                }
-                new_plan
-            };
+        let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
+        {
+            let mut new_plan = analyze_plan.input().clone();
+            for optimizer in state.physical_optimizers() {
+                new_plan = optimizer
+                    .optimize(new_plan, config)
+                    .context(DataFusionSnafu)?;
+            }
+            Arc::new(DistAnalyzeExec::new(new_plan))
+        } else {
+            let mut new_plan = plan;
+            for optimizer in state.physical_optimizers() {
+                new_plan = optimizer
+                    .optimize(new_plan, config)
+                    .context(DataFusionSnafu)?;
+            }
+            new_plan
+        };
 
-        Ok(Arc::new(PhysicalPlanAdapter::new(
-            plan.schema(),
-            optimized_plan,
-        )))
+        Ok(optimized_plan)
     }
 }
 
@@ -431,30 +410,21 @@ impl QueryExecutor for DatafusionQueryEngine {
     fn execute_stream(
         &self,
         ctx: &QueryEngineContext,
-        plan: &Arc<dyn PhysicalPlan>,
+        plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
         match plan.properties().output_partitioning().partition_count() {
-            0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
-            1 => {
-                let stream = plan
-                    .execute(0, task_ctx)
-                    .context(error::ExecutePhysicalPlanSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-                let stream = OnDone::new(stream, move || {
-                    exec_timer.observe_duration();
-                });
-                Ok(Box::pin(stream))
+            0 => {
+                let schema = Arc::new(
+                    Schema::try_from(plan.schema())
+                        .map_err(BoxedError::new)
+                        .context(QueryExecutionSnafu)?,
+                );
+                Ok(Box::pin(EmptyRecordBatchStream::new(schema)))
             }
-            _ => {
-                let df_plan = Arc::new(DfPhysicalPlanAdapter(plan.clone()));
-                // merge into a single partition
-                let plan = CoalescePartitionsExec::new(df_plan.clone());
-                // CoalescePartitionsExec must produce a single partition
-                assert_eq!(1, plan.properties().output_partitioning().partition_count());
+            1 => {
                 let df_stream = plan
                     .execute(0, task_ctx)
                     .context(error::DatafusionSnafu)
@@ -464,7 +434,33 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
-                stream.set_metrics2(df_plan);
+                stream.set_metrics2(plan.clone());
+                let stream = OnDone::new(Box::pin(stream), move || {
+                    exec_timer.observe_duration();
+                });
+                Ok(Box::pin(stream))
+            }
+            _ => {
+                // merge into a single partition
+                let merged_plan = CoalescePartitionsExec::new(plan.clone());
+                // CoalescePartitionsExec must produce a single partition
+                assert_eq!(
+                    1,
+                    merged_plan
+                        .properties()
+                        .output_partitioning()
+                        .partition_count()
+                );
+                let df_stream = merged_plan
+                    .execute(0, task_ctx)
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+                let mut stream = RecordBatchStreamAdapter::try_new(df_stream)
+                    .context(error::ConvertDfRecordBatchStreamSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+                stream.set_metrics2(plan.clone());
                 let stream = OnDone::new(Box::pin(stream), move || {
                     exec_timer.observe_duration();
                 });

@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use arrow::array::{StringBuilder, UInt32Builder};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use common_query::{DfPhysicalPlan, DfPhysicalPlanRef};
 use common_recordbatch::adapter::{MetricCollector, RecordBatchMetrics};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::error::Result as DfResult;
@@ -29,7 +28,7 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    accept, DisplayAs, DisplayFormatType, ExecutionPlanProperties, PlanProperties,
+    accept, DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{internal_err, DataFusionError};
@@ -44,14 +43,14 @@ const PLAN: &str = "plan";
 
 #[derive(Debug)]
 pub struct DistAnalyzeExec {
-    input: DfPhysicalPlanRef,
+    input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
     properties: PlanProperties,
 }
 
 impl DistAnalyzeExec {
     /// Create a new DistAnalyzeExec
-    pub fn new(input: DfPhysicalPlanRef) -> Self {
+    pub fn new(input: Arc<dyn ExecutionPlan>) -> Self {
         let schema = SchemaRef::new(Schema::new(vec![
             Field::new(STAGE, DataType::UInt32, true),
             Field::new(NODE, DataType::UInt32, true),
@@ -66,7 +65,7 @@ impl DistAnalyzeExec {
     }
 
     /// This function creates the cache object that stores the plan properties such as schema, equivalence properties, ordering, partitioning, etc.
-    fn compute_properties(input: &DfPhysicalPlanRef, schema: SchemaRef) -> PlanProperties {
+    fn compute_properties(input: &Arc<dyn ExecutionPlan>, schema: SchemaRef) -> PlanProperties {
         let eq_properties = EquivalenceProperties::new(schema);
         let output_partitioning = Partitioning::UnknownPartitioning(1);
         let exec_mode = input.execution_mode();
@@ -84,7 +83,7 @@ impl DisplayAs for DistAnalyzeExec {
     }
 }
 
-impl DfPhysicalPlan for DistAnalyzeExec {
+impl ExecutionPlan for DistAnalyzeExec {
     fn name(&self) -> &'static str {
         "DistAnalyzeExec"
     }
@@ -98,7 +97,7 @@ impl DfPhysicalPlan for DistAnalyzeExec {
         &self.properties
     }
 
-    fn children(&self) -> Vec<DfPhysicalPlanRef> {
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
         vec![self.input.clone()]
     }
 
@@ -109,8 +108,8 @@ impl DfPhysicalPlan for DistAnalyzeExec {
 
     fn with_new_children(
         self: Arc<Self>,
-        mut children: Vec<DfPhysicalPlanRef>,
-    ) -> DfResult<DfPhysicalPlanRef> {
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(Self::new(children.pop().unwrap())))
     }
 
@@ -196,7 +195,7 @@ impl AnalyzeOutputBuilder {
 /// Creates the output of AnalyzeExec as a RecordBatch
 fn create_output_batch(
     total_rows: usize,
-    input: DfPhysicalPlanRef,
+    input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
 ) -> DfResult<DfRecordBatch> {
     let mut builder = AnalyzeOutputBuilder::new(schema);

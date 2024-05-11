@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_query::physical_plan::PhysicalPlan;
+use datafusion::physical_plan::ExecutionPlan;
 
 use crate::error::Result;
 use crate::plan::LogicalPlan;
@@ -29,5 +29,5 @@ pub trait PhysicalPlanner {
         &self,
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
-    ) -> Result<Arc<dyn PhysicalPlan>>;
+    ) -> Result<Arc<dyn ExecutionPlan>>;
 }

@@ -52,13 +52,6 @@ pub enum InnerError {
         location: Location,
         source: common_recordbatch::error::Error,
     },
-
-    #[snafu(display("Failed to execute physical plan"))]
-    ExecutePhysicalPlan {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_query::error::Error,
-    },
 }
 
 impl ErrorExt for InnerError {
@@ -70,7 +63,6 @@ impl ErrorExt for InnerError {
             Datafusion { .. } => StatusCode::EngineExecuteQuery,
             PhysicalPlanDowncast { .. } | ConvertSchema { .. } => StatusCode::Unexpected,
             ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            ExecutePhysicalPlan { source, .. } => source.status_code(),
         }
     }
 

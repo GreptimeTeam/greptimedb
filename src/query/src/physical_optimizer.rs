@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_query::physical_plan::PhysicalPlan;
+use datafusion::physical_plan::ExecutionPlan;
 
 use crate::error::Result;
 use crate::query_engine::QueryEngineContext;
@@ -23,6 +23,6 @@ pub trait PhysicalOptimizer {
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
-        plan: Arc<dyn PhysicalPlan>,
-    ) -> Result<Arc<dyn PhysicalPlan>>;
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> Result<Arc<dyn ExecutionPlan>>;
 }

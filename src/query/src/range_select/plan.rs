@@ -25,11 +25,11 @@ use std::time::Duration;
 use ahash::RandomState;
 use arrow::compute::{self, cast_with_options, CastOptions, SortColumn};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
-use common_query::DfPhysicalPlan;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::{Result as DataFusionResult, Statistics};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
+use datafusion::execution::TaskContext;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_expr;
 use datafusion::physical_plan::{
@@ -930,14 +930,14 @@ impl ExecutionPlan for RangeSelectExec {
         &self.cache
     }
 
-    fn children(&self) -> Vec<Arc<dyn DfPhysicalPlan>> {
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
         vec![self.input.clone()]
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        children: Vec<Arc<dyn DfPhysicalPlan>>,
-    ) -> datafusion_common::Result<Arc<dyn DfPhysicalPlan>> {
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         Ok(Arc::new(Self {
             input: children[0].clone(),
@@ -958,7 +958,7 @@ impl ExecutionPlan for RangeSelectExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<common_query::physical_plan::TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DfResult<DfSendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
         let input = self.input.execute(partition, context)?;
