@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::error::ExecuteRepeatedlySnafu;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, Partitioning};
 use datatypes::schema::SchemaRef;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -130,6 +131,24 @@ pub enum ScannerPartitioning {
     Unknown(usize),
 }
 
+impl ScannerPartitioning {
+    /// Returns the number of partitions.
+    pub fn num_partitions(&self) -> usize {
+        match self {
+            ScannerPartitioning::Unknown(num_partitions) => *num_partitions,
+        }
+    }
+
+    /// Converts to datafusion's [Partitioning].
+    pub fn to_df_partitioning(&self) -> Partitioning {
+        match self {
+            ScannerPartitioning::Unknown(num_partitions) => {
+                Partitioning::UnknownPartitioning(*num_partitions)
+            }
+        }
+    }
+}
+
 /// Properties of the [RegionScanner].
 #[derive(Debug)]
 pub struct ScannerProperties {
@@ -151,7 +170,7 @@ impl ScannerProperties {
 
 /// A scanner that provides a way to scan the region concurrently.
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
-pub trait RegionScanner: Debug + Send + Sync {
+pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
 
@@ -245,9 +264,7 @@ impl SinglePartitionScanner {
 
 impl Debug for SinglePartitionScanner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SinglePartitionScanner")
-            .field("stream", &"SendableRecordBatchStream")
-            .finish()
+        write!(f, "SinglePartitionScanner: <SendableRecordBatchStream>")
     }
 }
 
@@ -266,5 +283,11 @@ impl RegionScanner for SinglePartitionScanner {
             .take()
             .context(ExecuteRepeatedlySnafu)
             .map_err(|e| BoxedError::new(e))
+    }
+}
+
+impl DisplayAs for SinglePartitionScanner {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }

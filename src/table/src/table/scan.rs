@@ -146,10 +146,10 @@ pub struct ReadFromRegion {
 impl ReadFromRegion {
     pub fn new(scanner: RegionScannerRef) -> Self {
         let arrow_schema = scanner.schema().arrow_schema().clone();
-        // TODO(yingwen): Fill plan properties with real values.
+        let scanner_props = scanner.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
+            scanner_props.partitioning().to_df_partitioning(),
             ExecutionMode::Bounded,
         );
         Self {
@@ -206,12 +206,11 @@ impl ExecutionPlan for ReadFromRegion {
             .scan_partition(partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let mem_usage_metrics = MemoryUsageMetrics::new(&self.metric, partition);
-        todo!()
-        // Ok(Box::pin(StreamWithMetricWrapper {
-        //     stream,
-        //     metric: mem_usage_metrics,
-        //     span,
-        // }))
+        Ok(Box::pin(StreamWithMetricWrapper {
+            stream,
+            metric: mem_usage_metrics,
+            span,
+        }))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -221,7 +220,8 @@ impl ExecutionPlan for ReadFromRegion {
 
 impl DisplayAs for ReadFromRegion {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "ReadFromRegion: [{:?}]", self.scanner)
+        // The scanner contains all information needed to display the plan.
+        write!(f, "{:?}", self.scanner)
     }
 }
 
