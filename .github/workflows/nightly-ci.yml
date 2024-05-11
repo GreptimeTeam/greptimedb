@@ -13,24 +13,24 @@ env:
   RUST_TOOLCHAIN: nightly-2024-04-20
 
 jobs:
-  # sqlness-test:
-  #   name: Run sqlness test
-  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-  #   runs-on: ubuntu-22.04
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #       with:
-  #         fetch-depth: 0
+  sqlness-test:
+    name: Run sqlness test
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-  #     - name: Run sqlness test
-  #       uses: ./.github/actions/sqlness-test
-  #       with:
-  #         data-root: sqlness-test
-  #         aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
-  #         aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-  #         aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-  #         aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      - name: Run sqlness test
+        uses: ./.github/actions/sqlness-test
+        with:
+          data-root: sqlness-test
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
 
   sqlness-windows:
     name: Sqlness tests on Windows
@@ -65,51 +65,51 @@ jobs:
           path: /tmp/greptime-*.log
           retention-days: 3
 
-  # test-on-windows:
-  #   name: Run tests on Windows
-  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-  #   runs-on: windows-2022-8-cores
-  #   timeout-minutes: 60
-  #   steps:
-  #     - run: git config --global core.autocrlf false
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - name: Install Rust toolchain
-  #       uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #         components: llvm-tools-preview
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #     - name: Install Cargo Nextest
-  #       uses: taiki-e/install-action@nextest
-  #     - name: Install Python
-  #       uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.10'
-  #     - name: Install PyArrow Package
-  #       run: pip install pyarrow
-  #     - name: Install WSL distribution
-  #       uses: Vampire/setup-wsl@v2
-  #       with:
-  #         distribution: Ubuntu-22.04
-  #     - name: Running tests
-  #       run: cargo nextest run -F pyo3_backend,dashboard
-  #       env:
-  #         RUST_BACKTRACE: 1
-  #         CARGO_INCREMENTAL: 0
-  #         GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
-  #         GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-  #         GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-  #         GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-  #         UNITTEST_LOG_DIR: "__unittest_logs"
-  #     - name: Notify slack if failed
-  #       if: failure()
-  #       uses: slackapi/slack-github-action@v1.23.0
-  #       env:
-  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
-  #       with:
-  #         payload: |
-  #           {"text": "Nightly CI failed for cargo test"}
+  test-on-windows:
+    name: Run tests on Windows
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: windows-2022-8-cores
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install Cargo Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install PyArrow Package
+        run: pip install pyarrow
+      - name: Install WSL distribution
+        uses: Vampire/setup-wsl@v2
+        with:
+          distribution: Ubuntu-22.04
+      - name: Running tests
+        run: cargo nextest run -F pyo3_backend,dashboard
+        env:
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          UNITTEST_LOG_DIR: "__unittest_logs"
+      - name: Notify slack if failed
+        if: failure()
+        uses: slackapi/slack-github-action@v1.23.0
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+        with:
+          payload: |
+            {"text": "Nightly CI failed for cargo test"}
