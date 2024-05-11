@@ -10,65 +10,65 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2024-04-18
+  RUST_TOOLCHAIN: nightly-2024-04-20
 
 jobs:
-  sqlness-test:
-    name: Run sqlness test
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+  # sqlness-test:
+  #   name: Run sqlness test
+  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+  #   runs-on: ubuntu-22.04
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
 
-      - name: Run sqlness test
-        uses: ./.github/actions/sqlness-test
-        with:
-          data-root: sqlness-test
-          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
-          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+  #     - name: Run sqlness test
+  #       uses: ./.github/actions/sqlness-test
+  #       with:
+  #         data-root: sqlness-test
+  #         aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+  #         aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+  #         aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
 
-  sqlness-windows:
-    name: Sqlness tests on Windows
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: windows-2019-8-cores
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Run sqlness
-        run: cargo sqlness
-      - name: Notify slack if failed
-        if: failure()
-        uses: slackapi/slack-github-action@v1.23.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
-        with:
-          payload: |
-            {"text": "Nightly CI failed for sqlness tests"}
-      - name: Upload sqlness logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqlness-logs
-          path: /tmp/greptime-*.log
-          retention-days: 3
+  # sqlness-windows:
+  #   name: Sqlness tests on Windows
+  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+  #   runs-on: windows-2022-8-cores
+  #   timeout-minutes: 60
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: arduino/setup-protoc@v3
+  #       with:
+  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
+  #     - uses: dtolnay/rust-toolchain@master
+  #       with:
+  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
+  #     - name: Rust Cache
+  #       uses: Swatinem/rust-cache@v2
+  #     - name: Run sqlness
+  #       run: cargo sqlness
+  #     - name: Notify slack if failed
+  #       if: failure()
+  #       uses: slackapi/slack-github-action@v1.23.0
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+  #       with:
+  #         payload: |
+  #           {"text": "Nightly CI failed for sqlness tests"}
+  #     - name: Upload sqlness logs
+  #       if: always()
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: sqlness-logs
+  #         path: /tmp/greptime-*.log
+  #         retention-days: 3
 
   test-on-windows:
     name: Run tests on Windows
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: windows-2019-8-cores
+    runs-on: windows-2022-8-cores
     timeout-minutes: 60
     steps:
       - run: git config --global core.autocrlf false

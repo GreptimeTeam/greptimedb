@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2024-04-18
+  RUST_TOOLCHAIN: nightly-2024-04-20
 
 jobs:
   check-typos-and-docs:
@@ -57,7 +57,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-2019, ubuntu-20.04 ]
+        os: [ windows-2022, ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
