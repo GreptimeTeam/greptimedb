@@ -21,6 +21,8 @@ pub use container::{CacheContainer, Initializer, Invalidator, TokenFilter};
 pub use flow::{new_table_flownode_set_cache, TableFlownodeSetCache};
 pub use registry::{CacheRegistry, CacheRegistryBuilder, CacheRegistryRef};
 pub use table::{
-    new_table_info_cache, new_table_name_cache, new_table_route_cache, TableInfoCache,
-    TableInfoCacheRef, TableNameCache, TableNameCacheRef, TableRouteCache, TableRouteCacheRef,
+    new_composite_table_route_cache, new_table_info_cache, new_table_name_cache,
+    new_table_route_cache, CompositeTableRoute, CompositeTableRouteCache,
+    CompositeTableRouteCacheRef, TableInfoCache, TableInfoCacheRef, TableNameCache,
+    TableNameCacheRef, TableRouteCache, TableRouteCacheRef,
 };
