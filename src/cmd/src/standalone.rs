@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
+use cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -56,7 +57,6 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
 use crate::error::{
     CreateDirSnafu, GetCacheSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu,
     InitTimezoneSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,

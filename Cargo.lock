@@ -1219,6 +1219,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cache"
+version = "0.7.2"
+dependencies = [
+ "catalog",
+ "common-meta",
+ "moka",
+]
+
+[[package]]
 name = "cactus"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1592,6 +1601,7 @@ dependencies = [
  "async-trait",
  "auth",
  "base64 0.21.7",
+ "cache",
  "catalog",
  "chrono",
  "clap 4.5.4",
@@ -3582,6 +3592,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "auth",
+ "cache",
  "catalog",
  "client",
  "common-base",
@@ -10295,6 +10306,7 @@ dependencies = [
  "async-trait",
  "auth",
  "axum",
+ "cache",
  "catalog",
  "chrono",
  "clap 4.5.4",

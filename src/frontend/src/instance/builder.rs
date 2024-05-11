@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use cache::TABLE_FLOWNODE_SET_CACHE_NAME;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache::CacheRegistryRef;
@@ -107,7 +108,7 @@ impl FrontendBuilder {
             FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
         let table_flownode_cache = self.cache_registry.get().context(error::GetCacheSnafu {
-            name: "table_flownode_set_cache",
+            name: TABLE_FLOWNODE_SET_CACHE_NAME,
         })?;
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),

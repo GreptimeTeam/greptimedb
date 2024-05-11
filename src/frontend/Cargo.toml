@@ -17,6 +17,7 @@ api.workspace = true
 arc-swap = "1.0"
 async-trait = "0.1"
 auth.workspace = true
+cache.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true

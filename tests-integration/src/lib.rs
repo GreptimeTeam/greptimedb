@@ -14,7 +14,6 @@
 
 #![feature(assert_matches)]
 
-mod cache;
 pub mod cluster;
 pub mod database;
 mod grpc;

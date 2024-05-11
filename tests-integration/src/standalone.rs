@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use cache::default_cache_registry_builder;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::options::MixOptions;
 use common_base::Plugins;
@@ -40,7 +41,6 @@ use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::Mode;
 
-use crate::cache::default_cache_registry_builder;
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
 pub struct GreptimeDbStandalone {

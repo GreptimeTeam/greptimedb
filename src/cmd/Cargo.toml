@@ -19,6 +19,7 @@ workspace = true
 async-trait.workspace = true
 auth.workspace = true
 base64.workspace = true
+cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true

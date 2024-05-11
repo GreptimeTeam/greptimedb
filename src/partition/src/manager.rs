@@ -79,11 +79,11 @@ impl PartitionRuleManager {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, Vec<RegionRoute>>> {
-        let table_routes: HashMap<u32, common_meta::key::table_route::PhysicalTableRouteValue> = self
-            .table_route_manager
-            .batch_get_physical_table_routes(table_ids)
-            .await
-            .context(error::TableRouteManagerSnafu)?;
+        let table_routes: HashMap<u32, common_meta::key::table_route::PhysicalTableRouteValue> =
+            self.table_route_manager
+                .batch_get_physical_table_routes(table_ids)
+                .await
+                .context(error::TableRouteManagerSnafu)?;
 
         let mut table_region_routes = HashMap::with_capacity(table_routes.len());
 

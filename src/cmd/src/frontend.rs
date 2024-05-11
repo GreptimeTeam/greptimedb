@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
@@ -34,7 +35,6 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
 use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
 use crate::options::{GlobalOptions, Options};
 use crate::App;

@@ -20,6 +20,7 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
+use cache::default_cache_registry_builder;
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
@@ -56,7 +57,6 @@ use tonic::transport::Server;
 use tower::service_fn;
 use uuid::Uuid;
 
-use crate::cache::default_cache_registry_builder;
 use crate::test_util::{
     self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
     StorageType, PEER_PLACEHOLDER_ADDR,

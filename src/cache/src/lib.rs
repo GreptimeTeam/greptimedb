@@ -26,13 +26,13 @@ const CACHE_MAX_CAPACITY: u64 = 65536;
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
-pub(crate) const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
-pub(crate) const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
-pub(crate) const TABLE_CACHE_NAME: &str = "table_cache";
-const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
+pub const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
+pub const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
+pub const TABLE_CACHE_NAME: &str = "table_cache";
+pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 
 // TODO(weny): Make the cache is configurable.
-pub(crate) fn default_cache_registry_builder(kv_backend: KvBackendRef) -> CacheRegistryBuilder {
+pub fn default_cache_registry_builder(kv_backend: KvBackendRef) -> CacheRegistryBuilder {
     // Builds table info cache
     let cache = CacheBuilder::new(CACHE_MAX_CAPACITY)
         .time_to_live(CACHE_TTL)

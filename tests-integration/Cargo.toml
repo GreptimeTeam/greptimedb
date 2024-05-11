@@ -17,6 +17,7 @@ async-stream.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum.workspace = true
+cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true

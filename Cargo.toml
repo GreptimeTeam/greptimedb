@@ -4,6 +4,7 @@ members = [
     "src/api",
     "src/auth",
     "src/catalog",
+    "src/cache",
     "src/client",
     "src/cmd",
     "src/common/base",
@@ -173,6 +174,7 @@ zstd = "0.13"
 ## workspaces members
 api = { path = "src/api" }
 auth = { path = "src/auth" }
+cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd" }
