@@ -14,136 +14,91 @@
 
 //! Unordered scanner.
 
-use std::sync::Arc;
+use std::fmt;
 use std::time::{Duration, Instant};
 
-use async_stream::try_stream;
+use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::debug;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datatypes::schema::SchemaRef;
+use futures::StreamExt;
 use snafu::ResultExt;
-use tokio::sync::{mpsc, Semaphore};
-use tokio_stream::wrappers::ReceiverStream;
+use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
 
 use crate::cache::CacheManager;
 use crate::error::Result;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::projection::ProjectionMapper;
-use crate::read::scan_region::ScanInput;
+use crate::read::scan_region::{ScanInput, ScanPart};
 use crate::read::Source;
 
 /// Scans a region without providing any output ordering guarantee.
 ///
 /// Only an append only table should use this scanner.
 pub struct UnorderedScan {
+    /// Input memtables and files.
     input: ScanInput,
+    /// Properties of the scanner.
+    properties: ScannerProperties,
+    /// Parts to scan.
+    parts: Vec<ScanPart>,
+
+    // Metrics:
+    /// The start time of the query.
+    query_start: Instant,
+    /// Time elapsed before creating the scanner.
+    prepare_scan_cost: Duration,
+    /// Duration to build parts to scan.
+    build_parts_cost: Duration,
 }
 
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
-    pub(crate) fn new(input: ScanInput) -> Self {
-        Self { input }
+    pub(crate) async fn new(input: ScanInput) -> Result<Self> {
+        let build_start = Instant::now();
+        let query_start = input.query_start.unwrap_or(build_start);
+        let prepare_scan_cost = query_start.elapsed();
+        let parts = input.build_parts().await?;
+        let build_parts_cost = build_start.elapsed();
+
+        // Observes metrics.
+        READ_STAGE_ELAPSED
+            .with_label_values(&["prepare_scan"])
+            .observe(prepare_scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_parts"])
+            .observe(build_parts_cost.as_secs_f64());
+
+        Ok(Self {
+            input,
+            properties: ScannerProperties::new(ScannerPartitioning::Unknown(parts.len())),
+            parts,
+            query_start,
+            prepare_scan_cost,
+            build_parts_cost,
+        })
     }
 
     /// Scans the region and returns a stream.
-    pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
-        let enable_parallel = self.enable_parallel_scan();
-        if enable_parallel {
-            self.scan_in_parallel().await
-        } else {
-            self.scan_sources().await
-        }
-    }
-
-    /// Scans all sources one by one.
-    async fn scan_sources(&self) -> Result<SendableRecordBatchStream> {
-        let mut metrics = Metrics::default();
-        let build_start = Instant::now();
-        let query_start = self.input.query_start.unwrap_or(build_start);
-        metrics.prepare_scan_cost = query_start.elapsed();
-
-        // Scans all memtables and SSTs.
-        let sources = self.input.build_sources().await?;
-        metrics.build_source_cost = build_start.elapsed();
-        Self::observe_metrics_on_start(&metrics);
-
-        let mapper = self.input.mapper.clone();
-        let cache_manager = self.input.cache_manager.clone();
-        let stream = try_stream! {
-            for mut source in sources {
-                let cache = cache_manager.as_deref();
-                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
-                    metrics.num_batches += 1;
-                    metrics.num_rows += batch.num_rows();
-                    yield batch;
+    pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        let streams = (0..self.parts.len())
+            .map(|i| self.scan_partition(i))
+            .collect::<Result<Vec<_>, BoxedError>>()?;
+        let stream = stream! {
+            for mut stream in streams {
+                while let Some(rb) = stream.next().await {
+                    yield rb;
                 }
             }
-
-            metrics.total_cost = query_start.elapsed();
-            Self::observe_metrics_on_finish(&metrics);
-            debug!("Unordered scan finished, region_id: {}, metrics: {:?}", mapper.metadata().region_id, metrics);
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
+            self.schema(),
             Box::pin(stream),
         ));
-
         Ok(stream)
-    }
-
-    /// Scans all sources in parallel.
-    async fn scan_in_parallel(&self) -> Result<SendableRecordBatchStream> {
-        debug_assert!(self.input.parallelism.allow_parallel_scan());
-
-        let mut metrics = Metrics::default();
-        let build_start = Instant::now();
-        let query_start = self.input.query_start.unwrap_or(build_start);
-        metrics.prepare_scan_cost = query_start.elapsed();
-
-        // Scans all memtables and SSTs.
-        let sources = self.input.build_sources().await?;
-        metrics.build_source_cost = build_start.elapsed();
-        Self::observe_metrics_on_start(&metrics);
-
-        let (sender, receiver) = mpsc::channel(self.input.parallelism.channel_size);
-        let semaphore = Arc::new(Semaphore::new(self.input.parallelism.parallelism));
-        // Spawn a task for each source.
-        for source in sources {
-            self.input
-                .spawn_scan_task(source, semaphore.clone(), sender.clone());
-        }
-        let stream = Box::pin(ReceiverStream::new(receiver));
-
-        let mapper = self.input.mapper.clone();
-        let cache_manager = self.input.cache_manager.clone();
-        // For simplicity, we wrap the receiver into a stream to reuse code. We can use the channel directly if it
-        // becomes a bottleneck.
-        let mut source = Source::Stream(stream);
-        let stream = try_stream! {
-            let cache = cache_manager.as_deref();
-            while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
-                metrics.num_batches += 1;
-                metrics.num_rows += batch.num_rows();
-                yield batch;
-            }
-
-            metrics.total_cost = query_start.elapsed();
-            Self::observe_metrics_on_finish(&metrics);
-            debug!("Unordered scan in parallel finished, region_id: {}, metrics: {:?}", mapper.metadata().region_id, metrics);
-        };
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
-    }
-
-    /// Returns whether to scan in parallel.
-    fn enable_parallel_scan(&self) -> bool {
-        self.input.parallelism.allow_parallel_scan()
-            && (self.input.files.len() + self.input.memtables.len()) > 1
     }
 
     /// Fetch a batch from the source and convert it into a record batch.
@@ -174,15 +129,6 @@ impl UnorderedScan {
         Ok(Some(record_batch))
     }
 
-    fn observe_metrics_on_start(metrics: &Metrics) {
-        READ_STAGE_ELAPSED
-            .with_label_values(&["prepare_scan"])
-            .observe(metrics.prepare_scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_source"])
-            .observe(metrics.build_source_cost.as_secs_f64());
-    }
-
     fn observe_metrics_on_finish(metrics: &Metrics) {
         READ_STAGE_ELAPSED
             .with_label_values(&["convert_rb"])
@@ -198,6 +144,85 @@ impl UnorderedScan {
     }
 }
 
+impl RegionScanner for UnorderedScan {
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.input.mapper.output_schema()
+    }
+
+    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+        let part = &self.parts[partition];
+        let mut metrics = Metrics {
+            prepare_scan_cost: self.prepare_scan_cost,
+            build_source_cost: self.build_parts_cost,
+            ..Default::default()
+        };
+        let mapper = self.input.mapper.clone();
+        let cache_manager = self.input.cache_manager.clone();
+        let memtable_sources = part
+            .memtables
+            .iter()
+            .map(|mem| {
+                let iter = mem.iter(Some(mapper.column_ids()), self.input.predicate.clone())?;
+                Ok(Source::Iter(iter))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map_err(BoxedError::new)?;
+        let file_ranges = part.file_ranges.clone();
+        let query_start = self.query_start;
+        let stream = try_stream! {
+            let cache = cache_manager.as_deref();
+            // Scans memtables first.
+            for mut source in memtable_sources {
+                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
+                    metrics.num_batches += 1;
+                    metrics.num_rows += batch.num_rows();
+                    yield batch;
+                }
+            }
+            // Then scans file ranges.
+            for file_range in file_ranges {
+                let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                let mut source = Source::RowGroupReader(reader);
+                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
+                    metrics.num_batches += 1;
+                    metrics.num_rows += batch.num_rows();
+                    yield batch;
+                }
+            }
+
+            metrics.total_cost = query_start.elapsed();
+            Self::observe_metrics_on_finish(&metrics);
+            debug!("Unordered scan partition {} finished, region_id: {}, metrics: {:?}", partition, mapper.metadata().region_id, metrics);
+        };
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.input.mapper.output_schema(),
+            Box::pin(stream),
+        ));
+
+        Ok(stream)
+    }
+}
+
+impl DisplayAs for UnorderedScan {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "UnorderedScan: [{:?}]", self.parts)
+    }
+}
+
+impl fmt::Debug for UnorderedScan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnorderedScan")
+            .field("parts", &self.parts)
+            .field("prepare_scan_cost", &self.prepare_scan_cost)
+            .field("build_parts_cost", &self.build_parts_cost)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 impl UnorderedScan {
     /// Returns the input.
@@ -207,6 +232,8 @@ impl UnorderedScan {
 }
 
 /// Metrics for [UnorderedScan].
+// We print all fields in logs so we disable the dead_code lint.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 struct Metrics {
     /// Duration to prepare the scan task.

@@ -14,9 +14,11 @@
 
 //! Scans a region according to the scan request.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
@@ -41,6 +43,7 @@ use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::parquet::file_range::FileRange;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -51,20 +54,24 @@ pub(crate) enum Scanner {
 }
 
 impl Scanner {
-    /// Returns a [SendableRecordBatchStream] to retrieve scan results.
-    pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream> {
+    /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
+    pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
+            Scanner::Seq(seq_scan) => seq_scan.build_stream().await.map_err(BoxedError::new),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
 
     /// Returns a [RegionScanner] to scan the region.
-    pub(crate) async fn region_scanner(&self) -> Result<RegionScannerRef> {
-        let stream = self.scan().await?;
-        let scanner = SinglePartitionScanner::new(stream);
-
-        Ok(Arc::new(scanner))
+    pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
+        match self {
+            Scanner::Seq(seq_scan) => {
+                let stream = seq_scan.build_stream().await?;
+                let scanner = Arc::new(SinglePartitionScanner::new(stream));
+                Ok(scanner)
+            }
+            Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
+        }
     }
 }
 
@@ -201,11 +208,11 @@ impl ScanRegion {
     }
 
     /// Returns a [Scanner] to scan the region.
-    pub(crate) fn scanner(self) -> Result<Scanner> {
+    pub(crate) async fn scanner(self) -> Result<Scanner> {
         if self.version.options.append_mode {
             // If table uses append mode, we use unordered scan in query.
             // We still use seq scan in compaction.
-            self.unordered_scan().map(Scanner::Unordered)
+            self.unordered_scan().await.map(Scanner::Unordered)
         } else {
             self.seq_scan().map(Scanner::Seq)
         }
@@ -220,11 +227,9 @@ impl ScanRegion {
     }
 
     /// Unordered scan.
-    pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
+    pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input(true)?;
-        let scan = UnorderedScan::new(input);
-
-        Ok(scan)
+        UnorderedScan::new(input).await
     }
 
     #[cfg(test)]
@@ -386,7 +391,7 @@ pub(crate) struct ScanInput {
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
-    predicate: Option<Predicate>,
+    pub(crate) predicate: Option<Predicate>,
     /// Memtables to scan.
     pub(crate) memtables: Vec<MemtableRef>,
     /// Handles to SST files to scan.
@@ -498,7 +503,6 @@ impl ScanInput {
     }
 
     /// Sets whether to remove deletion markers during scan.
-    #[allow(unused)]
     #[must_use]
     pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
         self.filter_deleted = filter_deleted;
@@ -572,6 +576,63 @@ impl ScanInput {
         Ok(sources)
     }
 
+    /// Builds and returns parts to read.
+    pub(crate) async fn build_parts(&self) -> Result<Vec<ScanPart>> {
+        let mut file_ranges = Vec::new();
+        for file in &self.files {
+            let res = self
+                .access_layer
+                .read_sst(file.clone())
+                .predicate(self.predicate.clone())
+                .time_range(self.time_range)
+                .projection(Some(self.mapper.column_ids().to_vec()))
+                .cache(self.cache_manager.clone())
+                .index_applier(self.index_applier.clone())
+                .expected_metadata(Some(self.mapper.metadata().clone()))
+                .build_file_ranges(&mut file_ranges)
+                .await;
+            if let Err(e) = res {
+                if e.is_object_not_found() && self.ignore_file_not_found {
+                    error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+
+        READ_SST_COUNT.observe(self.files.len() as f64);
+
+        if !self.enable_parallel_scan() {
+            // Returns a single part.
+            let part = ScanPart {
+                memtables: self.memtables.clone(),
+                file_ranges,
+            };
+            return Ok(vec![part]);
+        }
+
+        // `enable_parallel_scan()` ensures parallelism > 1.
+        let parallelism = self.parallelism.parallelism;
+        debug_assert!(parallelism > 1);
+
+        let mems_per_part = (self.memtables.len() + parallelism - 1) / parallelism;
+        let ranges_per_part = (file_ranges.len() + parallelism - 1) / parallelism;
+        let mut scan_parts = self
+            .memtables
+            .chunks(mems_per_part)
+            .map(|mems| ScanPart {
+                memtables: mems.to_vec(),
+                file_ranges: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        for (ranges, part) in file_ranges.chunks(ranges_per_part).zip(&mut scan_parts) {
+            part.file_ranges = ranges.to_vec();
+        }
+
+        Ok(scan_parts)
+    }
+
     /// Scans the input source in another task and sends batches to the sender.
     pub(crate) fn spawn_scan_task(
         &self,
@@ -601,6 +662,11 @@ impl ScanInput {
             }
         });
     }
+
+    /// Returns whether to scan in parallel.
+    pub(crate) fn enable_parallel_scan(&self) -> bool {
+        self.parallelism.allow_parallel_scan() && (self.files.len() + self.memtables.len()) > 1
+    }
 }
 
 #[cfg(test)]
@@ -618,5 +684,27 @@ impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
         self.files.iter().map(|file| file.file_id()).collect()
+    }
+}
+
+/// A partition of a scanner to read.
+/// It contains memtables and file ranges to scan.
+pub(crate) struct ScanPart {
+    /// Memtables to scan.
+    /// We scan the whole memtable now. We might scan a range of the memtable in the future.
+    pub(crate) memtables: Vec<MemtableRef>,
+    /// File ranges to scan.
+    pub(crate) file_ranges: Vec<FileRange>,
+}
+
+// TODO(yingwen): impl DisplayAs for ScanPart to display more information.
+impl fmt::Debug for ScanPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ScanPart({} memtables, {} files)",
+            self.memtables.len(),
+            self.file_ranges.len()
+        )
     }
 }

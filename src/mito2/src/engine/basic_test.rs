@@ -586,7 +586,7 @@ async fn test_engine_with_write_cache() {
     flush_region(&engine, region_id, None).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
 
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

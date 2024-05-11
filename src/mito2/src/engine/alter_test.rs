@@ -36,7 +36,7 @@ use crate::test_util::{
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();

@@ -159,10 +159,9 @@ impl ParquetReaderBuilder {
     }
 
     /// Builds [FileRange]s to read and pushes them to `file_ranges`.
-    #[allow(dead_code)]
     pub async fn build_file_ranges(&self, file_ranges: &mut Vec<FileRange>) -> Result<()> {
         let (context, row_groups) = self.build_reader_input().await?;
-        file_ranges.reserve_exact(row_groups.len());
+        file_ranges.reserve(row_groups.len());
         for (row_group_idx, row_selection) in row_groups {
             let file_range = FileRange::new(context.clone(), row_group_idx, row_selection);
             file_ranges.push(file_range);
@@ -829,7 +828,7 @@ impl ParquetReader {
 }
 
 /// Reader to read a row group of a parquet file.
-pub(crate) struct RowGroupReader {
+pub struct RowGroupReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet reader.
@@ -857,7 +856,7 @@ impl RowGroupReader {
     }
 
     /// Tries to fetch next [Batch] from the reader.
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
             return Ok(Some(batch));

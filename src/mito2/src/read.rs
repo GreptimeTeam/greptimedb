@@ -50,6 +50,7 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
+use crate::sst::parquet::reader::RowGroupReader;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -699,6 +700,8 @@ pub enum Source {
     Iter(BoxedBatchIterator),
     /// Source from a [BoxedBatchStream].
     Stream(BoxedBatchStream),
+    /// Source from a [RowGroupReader].
+    RowGroupReader(RowGroupReader),
 }
 
 impl Source {
@@ -708,6 +711,7 @@ impl Source {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
             Source::Stream(stream) => stream.try_next().await,
+            Source::RowGroupReader(reader) => reader.next_batch().await,
         }
     }
 }

@@ -123,15 +123,15 @@ impl MitoEngine {
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
         self.scanner(region_id, request)
+            .await
             .map_err(BoxedError::new)?
             .scan()
             .await
-            .map_err(BoxedError::new)
     }
 
     /// Returns a scanner to scan for `request`.
-    fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
-        self.scan_region(region_id, request)?.scanner()
+    async fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.scan_region(region_id, request)?.scanner().await
     }
 
     /// Returns a region scanner to scan the region for `request`.
@@ -140,7 +140,7 @@ impl MitoEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<RegionScannerRef> {
-        let scanner = self.scanner(region_id, request)?;
+        let scanner = self.scanner(region_id, request).await?;
         scanner.region_scanner().await
     }
 

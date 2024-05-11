@@ -32,6 +32,7 @@ use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleF
 
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
+#[derive(Clone)]
 pub struct FileRange {
     /// Shared context.
     context: FileRangeContextRef,
@@ -56,7 +57,6 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
-    #[allow(dead_code)]
     pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
         let parquet_reader = self
             .context

@@ -166,7 +166,10 @@ async fn test_append_mode_compaction() {
 | b     | 1.0     | 1970-01-01T00:00:01 |
 +-------+---------+---------------------+";
     // Scans in parallel.
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(1, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     let stream = scanner.scan().await.unwrap();
