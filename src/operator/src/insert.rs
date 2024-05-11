@@ -26,7 +26,7 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
-use common_meta::key::flow::TableFlowManagerRef;
+use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
@@ -34,7 +34,7 @@ use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::Schema;
-use futures_util::{future, TryStreamExt};
+use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -62,7 +62,7 @@ pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
-    table_flow_manager: TableFlowManagerRef,
+    table_flownode_set_cache: TableFlownodeSetCacheRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -72,13 +72,13 @@ impl Inserter {
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
-        table_flow_manager: TableFlowManagerRef,
+        table_flownode_set_cache: TableFlownodeSetCacheRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
-            table_flow_manager,
+            table_flownode_set_cache,
         }
     }
 
@@ -196,10 +196,10 @@ impl Inserter {
 impl Inserter {
     fn post_request(&self, requests: RegionInsertRequests) {
         let node_manager = self.node_manager.clone();
-        let table_flow_manager = self.table_flow_manager.clone();
+        let table_flownode_set_cache = self.table_flownode_set_cache.clone();
         // Spawn all tasks that do job for mirror insert requests for flownode
         common_runtime::spawn_bg(async move {
-            match Self::mirror_flow_node_requests(table_flow_manager, requests).await {
+            match Self::mirror_flow_node_requests(table_flownode_set_cache, requests).await {
                 Ok(flow_tasks) => {
                     let flow_tasks = flow_tasks.into_iter().map(|(peer, inserts)| {
                         let node_manager = node_manager.clone();
@@ -272,7 +272,7 @@ impl Inserter {
 
     /// Mirror requests for source table to flownode
     async fn mirror_flow_node_requests(
-        table_flow_manager: TableFlowManagerRef,
+        table_flownode_set_cache: TableFlownodeSetCacheRef,
         requests: RegionInsertRequests,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // store partial source table requests used by flow node(only store what's used)
@@ -285,17 +285,15 @@ impl Inserter {
                 Some(None) => continue,
                 _ => {
                     let table_id = RegionId::from_u64(req.region_id).table_id();
-                    let peers = table_flow_manager
-                        .flows(table_id)
-                        // TODO(discord9): determine where to store the flow node address in distributed mode
-                        .map_ok(|key| Peer::new(key.flownode_id(), ""))
-                        .try_collect::<Vec<_>>()
+                    // TODO(discord9): determine where to store the flow node address in distributed mode
+                    let peers = table_flownode_set_cache
+                        .get(table_id)
                         .await
-                        .map(|mut v| {
-                            v.dedup();
-                            v
-                        })
-                        .context(RequestInsertsSnafu)?;
+                        .context(RequestInsertsSnafu)?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|id| Peer::new(id, ""))
+                        .collect::<Vec<_>>();
 
                     if !peers.is_empty() {
                         let mut reqs = RegionInsertRequests::default();

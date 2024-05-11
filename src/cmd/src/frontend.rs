@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager};
+use cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
-use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
@@ -242,22 +242,27 @@ impl StartCommand {
             .cache_tti(cache_tti)
             .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
-        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
-            cached_meta_backend.clone(),
-        ]));
+        let cache_registry_builder =
+            default_cache_registry_builder(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let cache_registry = Arc::new(
+            cache_registry_builder
+                .add_cache(cached_meta_backend.clone())
+                .build(),
+        );
+        let table_cache = cache_registry.get().context(error::CacheRequiredSnafu {
+            name: TABLE_CACHE_NAME,
+        })?;
         let catalog_manager = KvBackendCatalogManager::new(
             opts.mode,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
-            multi_cache_invalidator.clone(),
+            table_cache,
         )
         .await;
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                multi_cache_invalidator.clone(),
-            )),
+            Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -269,12 +274,13 @@ impl StartCommand {
 
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
+            cache_registry.clone(),
             catalog_manager,
             Arc::new(DatanodeClients::default()),
             meta_client,
         )
         .with_plugin(plugins.clone())
-        .with_cache_invalidator(multi_cache_invalidator)
+        .with_local_cache_invalidator(cache_registry)
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await

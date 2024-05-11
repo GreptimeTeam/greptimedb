@@ -17,6 +17,7 @@ async-stream.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum.workspace = true
+cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -43,6 +44,7 @@ futures.workspace = true
 futures-util.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
+moka.workspace = true
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }

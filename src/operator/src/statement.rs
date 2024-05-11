@@ -167,13 +167,15 @@ impl StatementExecutor {
                 let _ = self.create_external_table(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
-            Statement::CreateFlow(stmt) => {
-                self.create_flow(stmt, query_ctx).await?;
-                Ok(Output::new_with_affected_rows(0))
-            }
-            Statement::DropFlow(_stmt) => {
-                // TODO(weny): implement it.
-                unimplemented!()
+            Statement::CreateFlow(stmt) => self.create_flow(stmt, query_ctx).await,
+            Statement::DropFlow(stmt) => {
+                self.drop_flow(
+                    query_ctx.current_catalog().to_string(),
+                    format_raw_object_name(stmt.flow_name()),
+                    stmt.drop_if_exists(),
+                    query_ctx,
+                )
+                .await
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
