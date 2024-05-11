@@ -295,6 +295,7 @@ impl StartCommand {
                     self.config_file.as_deref(),
                     self.env_prefix.as_ref(),
                 )
+                .map_err(Box::new)
                 .context(LoadLayeredConfigSnafu)?,
             )?,
         )))

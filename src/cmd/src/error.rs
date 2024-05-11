@@ -209,7 +209,7 @@ pub enum Error {
     #[snafu(display("Failed to load layered config"))]
     LoadLayeredConfig {
         #[snafu(source)]
-        source: common_config::error::Error,
+        source: Box<common_config::error::Error>,
         #[snafu(implicit)]
         location: Location,
     },
