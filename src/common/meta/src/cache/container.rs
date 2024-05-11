@@ -101,9 +101,15 @@ where
 {
     /// Returns a _clone_ of the value corresponding to the key.
     pub async fn get(&self, key: K) -> Result<Option<V>> {
+        metrics::CACHE_CONTAINER_CACHE_GET
+            .with_label_values(&[&self.name])
+            .inc();
         let moved_init = self.initializer.clone();
         let moved_key = key;
         let init = async move {
+            metrics::CACHE_CONTAINER_CACHE_MISS
+                .with_label_values(&[&self.name])
+                .inc();
             moved_init(&moved_key)
                 .await
                 .transpose()
