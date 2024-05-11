@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
@@ -358,11 +359,13 @@ impl StatementExecutor {
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
+        let task = CreateFlowTask::try_from(PbCreateFlowTask {
+            create_flow: Some(expr),
+        })
+        .context(error::InvalidExprSnafu)?;
         let request = SubmitDdlTaskRequest {
             query_context,
-            task: DdlTask::new_create_flow(
-                CreateFlowTask::try_from(expr).context(error::InvalidExprSnafu)?,
-            ),
+            task: DdlTask::new_create_flow(task),
         };
 
         self.procedure_executor
