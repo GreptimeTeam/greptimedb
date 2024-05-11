@@ -27,8 +27,8 @@ use crate::instruction::CacheIdent;
 use crate::key::table_route::{LogicalTableRouteValue, PhysicalTableRouteValue};
 
 /// [CompositeTableRoute] stores all level routes of a table.
-/// - Stores [PhysicalTableRouteValue] for logical table.
-/// - Stores [LogicalTableRouteValue], [PhysicalTableRouteValue] for the logical table.
+/// - stores [PhysicalTableRouteValue] for the physical table.
+/// - stores [LogicalTableRouteValue], [PhysicalTableRouteValue] for the logical table.
 #[derive(Clone)]
 pub enum CompositeTableRoute {
     Physical(Arc<PhysicalTableRouteValue>),
