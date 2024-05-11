@@ -74,7 +74,9 @@ impl MetasrvInstance {
         let httpsrv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(opts.to_toml().context(TomlFormatSnafu)?)
+                .with_greptime_config_options(
+                    opts.to_toml().map_err(Box::new).context(TomlFormatSnafu)?,
+                )
                 .build(),
         );
         // put metasrv into plugins for later use

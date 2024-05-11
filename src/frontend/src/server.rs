@@ -172,7 +172,7 @@ where
         let opts = self.opts.clone();
         let instance = self.instance.clone();
 
-        let toml = opts.to_toml().context(TomlFormatSnafu)?;
+        let toml = opts.to_toml().map_err(Box::new).context(TomlFormatSnafu)?;
         let opts: FrontendOptions = opts.into();
 
         let handlers = ServerHandlers::default();
