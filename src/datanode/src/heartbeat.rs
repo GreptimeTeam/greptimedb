@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat, Role};
+use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -387,10 +387,7 @@ pub async fn new_metasrv_client(
             .connect_timeout(meta_config.connect_timeout),
     );
 
-    let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Datanode)
-        .enable_heartbeat()
-        .enable_router()
-        .enable_store()
+    let mut meta_client = MetaClientBuilder::datanode_default_options(cluster_id, member_id)
         .channel_manager(channel_manager)
         .heartbeat_channel_manager(heartbeat_channel_manager)
         .build();
