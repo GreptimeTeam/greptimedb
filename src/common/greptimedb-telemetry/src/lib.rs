@@ -288,7 +288,7 @@ mod tests {
     use common_test_util::ports;
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
-    use reqwest::Client;
+    use reqwest::{Client, Response};
     use tokio::spawn;
 
     use crate::{default_get_uuid, Collector, GreptimeDBTelemetry, Mode, StatisticData};
@@ -395,6 +395,21 @@ mod tests {
             }
         }
 
+        async fn get_telemetry_report(
+            mut report: GreptimeDBTelemetry,
+            url: &'static str,
+        ) -> Option<Response> {
+            report.telemetry_url = url;
+            report.report_telemetry_info().await
+        }
+
+        fn contravariance<'a>(x: &'a str) -> &'static str
+        where
+            'static: 'a,
+        {
+            unsafe { std::mem::transmute(x) }
+        }
+
         let working_home_temp = tempfile::Builder::new()
             .prefix("greptimedb_telemetry")
             .tempdir()
@@ -402,14 +417,16 @@ mod tests {
         let working_home = working_home_temp.path().to_str().unwrap().to_string();
 
         let test_statistic = Box::new(TestStatistic);
-        let mut test_report = GreptimeDBTelemetry::new(
+        let test_report = GreptimeDBTelemetry::new(
             Some(working_home.clone()),
             test_statistic,
             Arc::new(AtomicBool::new(true)),
         );
-        let url = Box::leak(format!("{}:{}", "http://localhost", port).into_boxed_str());
-        test_report.telemetry_url = url;
-        let response = test_report.report_telemetry_info().await.unwrap();
+        let url = format!("http://localhost:{}", port);
+        let response = {
+            let url = contravariance(url.as_str());
+            get_telemetry_report(test_report, url).await.unwrap()
+        };
 
         let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);
@@ -420,13 +437,15 @@ mod tests {
         assert_eq!(1, body.nodes.unwrap());
 
         let failed_statistic = Box::new(FailedStatistic);
-        let mut failed_report = GreptimeDBTelemetry::new(
+        let failed_report = GreptimeDBTelemetry::new(
             Some(working_home),
             failed_statistic,
             Arc::new(AtomicBool::new(true)),
         );
-        failed_report.telemetry_url = url;
-        let response = failed_report.report_telemetry_info().await;
+        let response = {
+            let url = contravariance(url.as_str());
+            get_telemetry_report(failed_report, url).await
+        };
         assert!(response.is_none());
 
         let client = Client::builder()

@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use api::v1::meta::HeartbeatRequest;
+use common_meta::ClusterId;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 use store_api::region_engine::RegionRole;
@@ -26,7 +27,7 @@ use crate::keys::StatKey;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
-    pub cluster_id: u64,
+    pub cluster_id: ClusterId,
     // The datanode Id.
     pub id: u64,
     // The datanode address.

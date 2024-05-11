@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
@@ -23,7 +23,7 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
 use common_meta::table_name::TableName;
 use common_plugins::GREPTIME_EXEC_READ_COST;
-use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
@@ -41,7 +41,8 @@ use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
-use greptime_proto::v1::region::{QueryContext, QueryRequest, RegionRequestHeader};
+use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
+use greptime_proto::v1::QueryContext;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
@@ -127,6 +128,8 @@ pub struct MergeScanExec {
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
     properties: PlanProperties,
+    /// Metrics from sub stages
+    sub_stage_metrics: Arc<Mutex<Vec<RecordBatchMetrics>>>,
     query_ctx: QueryContextRef,
 }
 
@@ -165,6 +168,7 @@ impl MergeScanExec {
             arrow_schema: arrow_schema_without_metadata,
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
+            sub_stage_metrics: Arc::default(),
             properties,
             query_ctx,
         })
@@ -184,6 +188,7 @@ impl MergeScanExec {
         let timezone = self.query_ctx.timezone().to_string();
         let extensions = self.query_ctx.extensions();
 
+        let sub_sgate_metrics_moved = self.sub_stage_metrics.clone();
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
             let _finish_timer = metric.finish_time().timer();
@@ -235,6 +240,8 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
+
+                // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
                     let value = read_meter!(
@@ -246,6 +253,9 @@ impl MergeScanExec {
                         }
                     );
                     metric.record_greptime_exec_cost(value as usize);
+
+                    // record metrics from sub sgates
+                    sub_sgate_metrics_moved.lock().unwrap().push(metrics);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -277,6 +287,10 @@ impl MergeScanExec {
     fn arrow_schema_to_schema(arrow_schema: ArrowSchemaRef) -> Result<SchemaRef> {
         let schema = Schema::try_from(arrow_schema).context(ConvertSchemaSnafu)?;
         Ok(Arc::new(schema))
+    }
+
+    pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
+        self.sub_stage_metrics.lock().unwrap().clone()
     }
 }
 

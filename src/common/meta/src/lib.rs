@@ -19,6 +19,7 @@
 #![feature(extract_if)]
 #![feature(hash_extract_if)]
 
+pub mod cache;
 pub mod cache_invalidator;
 pub mod cluster;
 pub mod ddl;

@@ -32,27 +32,35 @@ pub enum Error {
     NewDfRecordBatch {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Data types error"))]
     DataTypes {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("External error"))]
     External {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to create RecordBatches, reason: {}", reason))]
-    CreateRecordBatches { reason: String, location: Location },
+    CreateRecordBatches {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert Arrow schema"))]
     SchemaConversion {
         source: datatypes::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -60,6 +68,7 @@ pub enum Error {
     PollStream {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -67,6 +76,7 @@ pub enum Error {
     Format {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -75,6 +85,7 @@ pub enum Error {
         v: ScalarValue,
         #[snafu(source)]
         error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -86,6 +97,7 @@ pub enum Error {
     ProjectArrowRecordBatch {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
         schema: datatypes::schema::SchemaRef,
         projection: Vec<usize>,
@@ -95,6 +107,7 @@ pub enum Error {
     ColumnNotExists {
         column_name: String,
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -106,6 +119,7 @@ pub enum Error {
     CastVector {
         from_type: ConcreteDataType,
         to_type: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -114,11 +128,16 @@ pub enum Error {
     ArrowCompute {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported operation: {}", reason))]
-    UnsupportedOperation { reason: String, location: Location },
+    UnsupportedOperation {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

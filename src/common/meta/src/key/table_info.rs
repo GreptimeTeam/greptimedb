@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -128,6 +129,7 @@ impl TableInfoValue {
     }
 }
 
+pub type TableInfoManagerRef = Arc<TableInfoManager>;
 pub struct TableInfoManager {
     kv_backend: KvBackendRef,
 }

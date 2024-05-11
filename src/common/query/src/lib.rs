@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod columnar_value;
+pub mod error;
+mod function;
+pub mod logical_plan;
+pub mod prelude;
+mod signature;
+
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
@@ -20,13 +27,6 @@ use api::greptime_proto::v1::AddColumnLocation as Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
-
-pub mod columnar_value;
-pub mod error;
-mod function;
-pub mod logical_plan;
-pub mod prelude;
-mod signature;
 use sqlparser_derive::{Visit, VisitMut};
 
 /// new Output struct with output data(previously Output) and output meta

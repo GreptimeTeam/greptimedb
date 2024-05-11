@@ -27,17 +27,19 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, DropDatabaseExpr, DropFlowExpr,
-    DropTableExpr, TruncateTableExpr,
+    DropTableExpr, QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::error::{self, Result};
+use crate::key::FlowId;
 use crate::table_name::TableName;
 
 #[derive(Debug, Clone)]
@@ -52,11 +54,16 @@ pub enum DdlTask {
     CreateDatabase(CreateDatabaseTask),
     DropDatabase(DropDatabaseTask),
     CreateFlow(CreateFlowTask),
+    DropFlow(DropFlowTask),
 }
 
 impl DdlTask {
     pub fn new_create_flow(expr: CreateFlowTask) -> Self {
         DdlTask::CreateFlow(expr)
+    }
+
+    pub fn new_drop_flow(expr: DropFlowTask) -> Self {
+        DdlTask::DropFlow(expr)
     }
 
     pub fn new_create_table(
@@ -195,6 +202,7 @@ impl TryFrom<Task> for DdlTask {
 
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
+    pub query_context: QueryContextRef,
     pub task: DdlTask,
 }
 
@@ -234,10 +242,12 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(task.try_into()?),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
             DdlTask::CreateFlow(task) => Task::CreateFlowTask(task.into()),
+            DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
         };
 
         Ok(Self {
             header: None,
+            query_context: Some((*request.query_context).clone().into()),
             task: Some(task),
         })
     }
@@ -273,11 +283,11 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
             pid: Some(ProcedureId { key: val.key }),
             table_id: val
                 .table_id
-                .map(|table_id| api::v1::meta::TableId { id: table_id }),
+                .map(|table_id| api::v1::TableId { id: table_id }),
             table_ids: val
                 .table_ids
                 .into_iter()
-                .map(|id| api::v1::meta::TableId { id })
+                .map(|id| api::v1::TableId { id })
                 .collect(),
             ..Default::default()
         }
@@ -815,9 +825,12 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
 }
 
 /// Drop flow
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropFlowTask {
     pub catalog_name: String,
     pub flow_name: String,
+    pub flow_id: FlowId,
+    pub drop_if_exists: bool,
 }
 
 impl TryFrom<PbDropFlowTask> for DropFlowTask {
@@ -827,12 +840,21 @@ impl TryFrom<PbDropFlowTask> for DropFlowTask {
         let DropFlowExpr {
             catalog_name,
             flow_name,
+            flow_id,
+            drop_if_exists,
         } = pb.drop_flow.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected sink_table_name",
+            err_msg: "expected drop_flow",
         })?;
+        let flow_id = flow_id
+            .context(error::InvalidProtoMsgSnafu {
+                err_msg: "expected flow_id",
+            })?
+            .id;
         Ok(DropFlowTask {
             catalog_name,
             flow_name,
+            flow_id,
+            drop_if_exists,
         })
     }
 }
@@ -842,13 +864,54 @@ impl From<DropFlowTask> for PbDropFlowTask {
         DropFlowTask {
             catalog_name,
             flow_name,
+            flow_id,
+            drop_if_exists,
         }: DropFlowTask,
     ) -> Self {
         PbDropFlowTask {
             drop_flow: Some(DropFlowExpr {
                 catalog_name,
                 flow_name,
+                flow_id: Some(api::v1::FlowId { id: flow_id }),
+                drop_if_exists,
             }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryContext {
+    current_catalog: String,
+    current_schema: String,
+    timezone: String,
+    extensions: HashMap<String, String>,
+}
+
+impl From<QueryContextRef> for QueryContext {
+    fn from(query_context: QueryContextRef) -> Self {
+        QueryContext {
+            current_catalog: query_context.current_catalog().to_string(),
+            current_schema: query_context.current_schema().to_string(),
+            timezone: query_context.timezone().to_string(),
+            extensions: query_context.extensions(),
+        }
+    }
+}
+
+impl From<QueryContext> for PbQueryContext {
+    fn from(
+        QueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
+        }: QueryContext,
+    ) -> Self {
+        PbQueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
         }
     }
 }

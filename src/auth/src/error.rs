@@ -34,11 +34,13 @@ pub enum Error {
     Io {
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Auth failed"))]
     AuthBackend {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -72,7 +74,10 @@ pub enum Error {
     },
 
     #[snafu(display("User is not authorized to perform this action"))]
-    PermissionDenied { location: Location },
+    PermissionDenied {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

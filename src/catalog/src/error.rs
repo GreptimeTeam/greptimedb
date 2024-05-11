@@ -30,12 +30,14 @@ use tokio::task::JoinError;
 pub enum Error {
     #[snafu(display("Failed to list catalogs"))]
     ListCatalogs {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to list {}'s schemas", catalog))]
     ListSchemas {
+        #[snafu(implicit)]
         location: Location,
         catalog: String,
         source: BoxedError,
@@ -43,6 +45,7 @@ pub enum Error {
 
     #[snafu(display("Failed to list {}.{}'s tables", catalog, schema))]
     ListTables {
+        #[snafu(implicit)]
         location: Location,
         catalog: String,
         schema: String,
@@ -51,23 +54,27 @@ pub enum Error {
 
     #[snafu(display("Failed to list nodes in cluster: {source}"))]
     ListNodes {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to re-compile script due to internal error"))]
     CompileScriptInternal {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
     #[snafu(display("Failed to open system catalog table"))]
     OpenSystemCatalog {
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to create system catalog table"))]
     CreateSystemCatalog {
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
@@ -75,12 +82,17 @@ pub enum Error {
     #[snafu(display("Failed to create table, table info: {}", table_info))]
     CreateTable {
         table_info: String,
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("System catalog is not valid: {}", msg))]
-    SystemCatalog { msg: String, location: Location },
+    SystemCatalog {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "System catalog table type mismatch, expected: binary, found: {:?}",
@@ -88,34 +100,42 @@ pub enum Error {
     ))]
     SystemCatalogTypeMismatch {
         data_type: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid system catalog entry type: {:?}", entry_type))]
     InvalidEntryType {
         entry_type: Option<u8>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid system catalog key: {:?}", key))]
     InvalidKey {
         key: Option<String>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Catalog value is not present"))]
-    EmptyValue { location: Location },
+    EmptyValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to deserialize value"))]
     ValueDeserialize {
         #[snafu(source)]
         error: serde_json::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table engine not found: {}", engine_name))]
     TableEngineNotFound {
         engine_name: String,
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
@@ -123,6 +143,7 @@ pub enum Error {
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -130,30 +151,49 @@ pub enum Error {
     SchemaNotFound {
         catalog: String,
         schema: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table `{}` already exists", table))]
-    TableExists { table: String, location: Location },
+    TableExists {
+        table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Table not found: {}", table))]
-    TableNotExist { table: String, location: Location },
+    TableNotExist {
+        table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Schema {} already exists", schema))]
-    SchemaExists { schema: String, location: Location },
+    SchemaExists {
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Operation {} not implemented yet", operation))]
     Unimplemented {
         operation: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Operation {} not supported", op))]
-    NotSupported { op: String, location: Location },
+    NotSupported {
+        op: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to open table {table_id}"))]
     OpenTable {
         table_id: TableId,
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
@@ -167,6 +207,7 @@ pub enum Error {
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
     TableNotFound {
         table_info: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -178,57 +219,69 @@ pub enum Error {
 
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to create recordbatch"))]
     CreateRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to insert table creation record to system catalog"))]
     InsertCatalogRecord {
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to scan system catalog table"))]
     SystemCatalogTableScan {
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Internal error"))]
     Internal {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to upgrade weak catalog manager reference"))]
-    UpgradeWeakCatalogManagerRef { location: Location },
+    UpgradeWeakCatalogManagerRef {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to execute system catalog table scan"))]
     SystemCatalogTableScanExec {
+        #[snafu(implicit)]
         location: Location,
         source: common_query::error::Error,
     },
 
     #[snafu(display("Cannot parse catalog value"))]
     InvalidCatalogValue {
+        #[snafu(implicit)]
         location: Location,
         source: common_catalog::error::Error,
     },
 
     #[snafu(display("Failed to perform metasrv operation"))]
     Metasrv {
+        #[snafu(implicit)]
         location: Location,
         source: meta_client::error::Error,
     },
 
     #[snafu(display("Invalid table info in catalog"))]
     InvalidTableInfoInCatalog {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -240,26 +293,37 @@ pub enum Error {
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table schema mismatch"))]
     TableSchemaMismatch {
+        #[snafu(implicit)]
         location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("A generic error has occurred, msg: {}", msg))]
-    Generic { msg: String, location: Location },
+    Generic {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Get null from table cache, key: {}", key))]
-    TableCacheNotGet { key: String, location: Location },
+    TableCacheNotGet {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to get table cache, err: {}", err_msg))]
     GetTableCache { err_msg: String },

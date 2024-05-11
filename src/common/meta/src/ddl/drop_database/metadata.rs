@@ -68,7 +68,7 @@ impl DropMetadataBroadcast {
         cache_invalidator
             .invalidate(
                 &ctx,
-                vec![CacheIdent::SchemaName(SchemaName {
+                &[CacheIdent::SchemaName(SchemaName {
                     catalog_name: db_ctx.catalog.clone(),
                     schema_name: db_ctx.schema.clone(),
                 })],

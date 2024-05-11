@@ -256,7 +256,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: /tmp/sqlness-*
+          path: /tmp/sqlness*
           retention-days: 3
 
   sqlness-kafka-wal:
@@ -286,7 +286,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs-with-kafka-wal
-          path: /tmp/sqlness-*
+          path: /tmp/sqlness*
           retention-days: 3
 
   fmt:

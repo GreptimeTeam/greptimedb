@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -275,6 +276,8 @@ impl Display for TableRouteKey {
         write!(f, "{}/{}", TABLE_ROUTE_PREFIX, self.table_id)
     }
 }
+
+pub type TableRouteManagerRef = Arc<TableRouteManager>;
 
 pub struct TableRouteManager {
     storage: TableRouteStorage,

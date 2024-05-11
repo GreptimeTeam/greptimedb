@@ -13,51 +13,25 @@
 // limitations under the License.
 
 use clap::Parser;
-use common_config::KvBackendConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_wal::config::MetasrvWalConfig;
 use config::{Config, Environment, File, FileFormat};
-use datanode::config::{DatanodeOptions, ProcedureConfig};
-use frontend::error::{Result as FeResult, TomlFormatSnafu};
-use frontend::frontend::{FrontendOptions, TomlSerializable};
+use datanode::config::DatanodeOptions;
+use frontend::frontend::FrontendOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu};
+use crate::standalone::StandaloneOptions;
 
 pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
-
-/// Options mixed up from datanode, frontend and metasrv.
-#[derive(Serialize, Debug, Clone)]
-pub struct MixOptions {
-    pub data_home: String,
-    pub procedure: ProcedureConfig,
-    pub metadata_store: KvBackendConfig,
-    pub frontend: FrontendOptions,
-    pub datanode: DatanodeOptions,
-    pub logging: LoggingOptions,
-    pub wal_meta: MetasrvWalConfig,
-}
-
-impl From<MixOptions> for FrontendOptions {
-    fn from(value: MixOptions) -> Self {
-        value.frontend
-    }
-}
-
-impl TomlSerializable for MixOptions {
-    fn to_toml(&self) -> FeResult<String> {
-        toml::to_string(self).context(TomlFormatSnafu)
-    }
-}
 
 pub enum Options {
     Datanode(Box<DatanodeOptions>),
     Frontend(Box<FrontendOptions>),
     Metasrv(Box<MetasrvOptions>),
-    Standalone(Box<MixOptions>),
+    Standalone(Box<StandaloneOptions>),
     Cli(Box<LoggingOptions>),
 }
 
@@ -158,10 +132,9 @@ impl Options {
 
     pub fn node_id(&self) -> Option<String> {
         match self {
-            Options::Metasrv(_) | Options::Cli(_) => None,
+            Options::Metasrv(_) | Options::Cli(_) | Options::Standalone(_) => None,
             Options::Datanode(opt) => opt.node_id.map(|x| x.to_string()),
             Options::Frontend(opt) => opt.node_id.clone(),
-            Options::Standalone(opt) => opt.frontend.node_id.clone(),
         }
     }
 }

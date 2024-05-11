@@ -96,7 +96,9 @@ impl IntoResponse for ErrorResponse {
             | StatusCode::DatabaseNotFound
             | StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound
-            | StatusCode::PlanQuery => HttpStatusCode::BAD_REQUEST,
+            | StatusCode::PlanQuery
+            | StatusCode::FlowNotFound
+            | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
 
             StatusCode::PermissionDenied
             | StatusCode::AuthHeaderNotFound

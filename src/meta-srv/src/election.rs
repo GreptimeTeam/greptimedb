@@ -68,7 +68,7 @@ pub trait Election: Send + Sync {
     fn in_infancy(&self) -> bool;
 
     /// Registers a candidate for the election.
-    async fn register_candidate(&self) -> Result<()>;
+    async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()>;
 
     /// Gets all candidates in the election.
     async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>>;

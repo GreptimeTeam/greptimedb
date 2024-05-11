@@ -28,6 +28,7 @@ use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
@@ -65,6 +66,7 @@ pub struct StatementExecutor {
     query_engine: QueryEngineRef,
     procedure_executor: ProcedureExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
+    flow_metadata_manager: FlowMetadataManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
@@ -84,6 +86,7 @@ impl StatementExecutor {
             query_engine,
             procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
+            flow_metadata_manager: Arc::new(FlowMetadataManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,
             inserter,
@@ -168,6 +171,10 @@ impl StatementExecutor {
                 self.create_flow(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))
             }
+            Statement::DropFlow(_stmt) => {
+                // TODO(weny): implement it.
+                unimplemented!()
+            }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
@@ -175,13 +182,15 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name, stmt.drop_if_exists()).await
+                self.drop_table(table_name, stmt.drop_if_exists(), query_ctx)
+                    .await
             }
             Statement::DropDatabase(stmt) => {
                 self.drop_database(
                     query_ctx.current_catalog().to_string(),
                     format_raw_object_name(stmt.name()),
                     stmt.drop_if_exists(),
+                    query_ctx,
                 )
                 .await
             }
@@ -191,13 +200,13 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.truncate_table(table_name).await
+                self.truncate_table(table_name, query_ctx).await
             }
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
-                    query_ctx.current_catalog(),
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
+                    query_ctx,
                 )
                 .await
             }

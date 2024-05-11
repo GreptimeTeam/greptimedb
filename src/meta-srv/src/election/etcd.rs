@@ -131,7 +131,7 @@ impl Election for EtcdElection {
             .is_ok()
     }
 
-    async fn register_candidate(&self) -> Result<()> {
+    async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
         const CANDIDATE_LEASE_SECS: u64 = 600;
         const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
 
@@ -144,15 +144,9 @@ impl Election for EtcdElection {
 
         // The register info: key is the candidate key, value is its node info(addr, version, git_commit).
         let key = self.candidate_key().into_bytes();
-        let build_info = common_version::build_info();
-        let value = MetasrvNodeInfo {
-            addr: self.leader_value.clone(),
-            version: build_info.version.to_string(),
-            git_commit: build_info.commit_short.to_string(),
-        };
-        let value = serde_json::to_string(&value)
+        let value = serde_json::to_string(node_info)
             .with_context(|_| error::SerializeToJsonSnafu {
-                input: format!("{value:?}"),
+                input: format!("{node_info:?}"),
             })?
             .into_bytes();
         // Puts with the lease id

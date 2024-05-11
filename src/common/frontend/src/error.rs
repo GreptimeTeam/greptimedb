@@ -23,6 +23,7 @@ use snafu::{Location, Snafu};
 pub enum Error {
     #[snafu(display("External error"))]
     External {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },

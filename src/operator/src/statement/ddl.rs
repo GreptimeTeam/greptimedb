@@ -20,14 +20,16 @@ use api::v1::{column_def, AlterExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::format_full_table_name;
+use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::NAME_PATTERN;
-use common_meta::rpc::ddl::{CreateFlowTask, DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use common_meta::rpc::ddl::{
+    CreateFlowTask, DdlTask, DropFlowTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
@@ -43,7 +45,7 @@ use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
@@ -60,7 +62,7 @@ use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
-    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
+    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
     ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
@@ -79,8 +81,8 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx.clone())?;
-        self.create_table_inner(create_expr, stmt.partitions, &ctx)
+        let create_expr = &mut expr_factory::create_to_expr(&stmt, &ctx)?;
+        self.create_table_inner(create_expr, stmt.partitions, ctx)
             .await
     }
 
@@ -120,8 +122,8 @@ impl StatementExecutor {
             }
         });
 
-        let create_expr = &mut expr_factory::create_to_expr(&create_stmt, ctx.clone())?;
-        self.create_table_inner(create_expr, partitions, &ctx).await
+        let create_expr = &mut expr_factory::create_to_expr(&create_stmt, &ctx)?;
+        self.create_table_inner(create_expr, partitions, ctx).await
     }
 
     #[tracing::instrument(skip_all)]
@@ -130,8 +132,8 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let create_expr = &mut expr_factory::create_external_expr(create_expr, ctx.clone()).await?;
-        self.create_table_inner(create_expr, None, &ctx).await
+        let create_expr = &mut expr_factory::create_external_expr(create_expr, &ctx).await?;
+        self.create_table_inner(create_expr, None, ctx).await
     }
 
     #[tracing::instrument(skip_all)]
@@ -139,7 +141,7 @@ impl StatementExecutor {
         &self,
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
-        query_ctx: &QueryContextRef,
+        query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
         // Check if is creating logical table
         if create_table.engine == METRIC_ENGINE_NAME
@@ -148,7 +150,7 @@ impl StatementExecutor {
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
             return self
-                .create_logical_tables(&[create_table.clone()])
+                .create_logical_tables(&[create_table.clone()], query_ctx)
                 .await?
                 .into_iter()
                 .next()
@@ -213,14 +215,19 @@ impl StatementExecutor {
             &create_table.table_name,
         );
 
-        let (partitions, partition_cols) = parse_partitions(create_table, partitions, query_ctx)?;
+        let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)?;
 
         validate_partition_columns(create_table, &partition_cols)?;
 
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
-            .create_table_procedure(create_table.clone(), partitions, table_info.clone())
+            .create_table_procedure(
+                create_table.clone(),
+                partitions,
+                table_info.clone(),
+                query_ctx,
+            )
             .await?;
 
         let table_id = resp.table_id.context(error::UnexpectedSnafu {
@@ -242,6 +249,7 @@ impl StatementExecutor {
     pub async fn create_logical_tables(
         &self,
         create_table_exprs: &[CreateTableExpr],
+        query_context: QueryContextRef,
     ) -> Result<Vec<TableRef>> {
         let _timer = crate::metrics::DIST_CREATE_TABLES.start_timer();
         ensure!(
@@ -300,7 +308,9 @@ impl StatementExecutor {
             .zip(raw_tables_info.iter().cloned())
             .collect::<Vec<_>>();
 
-        let resp = self.create_logical_tables_procedure(tables_data).await?;
+        let resp = self
+            .create_logical_tables_procedure(tables_data, query_context)
+            .await?;
 
         let table_ids = resp.table_ids;
         ensure!(table_ids.len() == raw_tables_info.len(), CreateLogicalTablesSnafu {
@@ -326,17 +336,22 @@ impl StatementExecutor {
     pub async fn create_flow(
         &self,
         stmt: CreateFlow,
-        query_ctx: QueryContextRef,
+        query_context: QueryContextRef,
     ) -> Result<Output> {
         // TODO(ruihang): do some verification
-        let expr = expr_factory::to_create_flow_task_expr(stmt, query_ctx)?;
+        let expr = expr_factory::to_create_flow_task_expr(stmt, &query_context)?;
 
-        self.create_flow_procedure(expr).await?;
+        self.create_flow_procedure(expr, query_context).await?;
         Ok(Output::new_with_affected_rows(0))
     }
 
-    async fn create_flow_procedure(&self, expr: CreateFlowTask) -> Result<SubmitDdlTaskResponse> {
+    async fn create_flow_procedure(
+        &self,
+        expr: CreateFlowTask,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_create_flow(expr),
         };
 
@@ -347,7 +362,62 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn alter_logical_tables(&self, alter_table_exprs: Vec<AlterExpr>) -> Result<Output> {
+    pub async fn drop_flow(
+        &self,
+        catalog_name: String,
+        flow_name: String,
+        drop_if_exists: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        if let Some(flow) = self
+            .flow_metadata_manager
+            .flow_name_manager()
+            .get(&catalog_name, &flow_name)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+        {
+            let flow_id = flow.flow_id();
+            let task = DropFlowTask {
+                catalog_name,
+                flow_name,
+                flow_id,
+                drop_if_exists,
+            };
+            self.drop_flow_procedure(task, query_context).await?;
+
+            Ok(Output::new_with_affected_rows(0))
+        } else if drop_if_exists {
+            Ok(Output::new_with_affected_rows(0))
+        } else {
+            FlowNotFoundSnafu {
+                flow_name: format_full_flow_name(&catalog_name, &flow_name),
+            }
+            .fail()
+        }
+    }
+
+    async fn drop_flow_procedure(
+        &self,
+        expr: DropFlowTask,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_drop_flow(expr),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_logical_tables(
+        &self,
+        alter_table_exprs: Vec<AlterExpr>,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
         ensure!(
             !alter_table_exprs.is_empty(),
@@ -356,14 +426,19 @@ impl StatementExecutor {
             }
         );
 
-        self.alter_logical_tables_procedure(alter_table_exprs)
+        self.alter_logical_tables_procedure(alter_table_exprs, query_context)
             .await?;
 
         Ok(Output::new_with_affected_rows(0))
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn drop_table(&self, table_name: TableName, drop_if_exists: bool) -> Result<Output> {
+    pub async fn drop_table(
+        &self,
+        table_name: TableName,
+        drop_if_exists: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         if let Some(table) = self
             .catalog_manager
             .table(
@@ -375,14 +450,14 @@ impl StatementExecutor {
             .context(CatalogSnafu)?
         {
             let table_id = table.table_info().table_id();
-            self.drop_table_procedure(&table_name, table_id, drop_if_exists)
+            self.drop_table_procedure(&table_name, table_id, drop_if_exists, query_context)
                 .await?;
 
             // Invalidates local cache ASAP.
             self.cache_invalidator
                 .invalidate(
                     &Context::default(),
-                    vec![
+                    &[
                         CacheIdent::TableId(table_id),
                         CacheIdent::TableName(table_name.clone()),
                     ],
@@ -395,10 +470,10 @@ impl StatementExecutor {
             // DROP TABLE IF EXISTS meets table not found - ignored
             Ok(Output::new_with_affected_rows(0))
         } else {
-            Err(TableNotFoundSnafu {
+            TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             }
-            .into_error(snafu::NoneError))
+            .fail()
         }
     }
 
@@ -408,6 +483,7 @@ impl StatementExecutor {
         catalog: String,
         schema: String,
         drop_if_exists: bool,
+        query_context: QueryContextRef,
     ) -> Result<Output> {
         if self
             .catalog_manager
@@ -415,7 +491,7 @@ impl StatementExecutor {
             .await
             .context(CatalogSnafu)?
         {
-            self.drop_database_procedure(catalog, schema, drop_if_exists)
+            self.drop_database_procedure(catalog, schema, drop_if_exists, query_context)
                 .await?;
 
             Ok(Output::new_with_affected_rows(0))
@@ -423,15 +499,19 @@ impl StatementExecutor {
             // DROP TABLE IF EXISTS meets table not found - ignored
             Ok(Output::new_with_affected_rows(0))
         } else {
-            Err(SchemaNotFoundSnafu {
+            SchemaNotFoundSnafu {
                 schema_info: schema,
             }
-            .into_error(snafu::NoneError))
+            .fail()
         }
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
+    pub async fn truncate_table(
+        &self,
+        table_name: TableName,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         let table = self
             .catalog_manager
             .table(
@@ -445,7 +525,8 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        self.truncate_table_procedure(&table_name, table_id).await?;
+        self.truncate_table_procedure(&table_name, table_id, query_context)
+            .await?;
 
         Ok(Output::new_with_affected_rows(0))
     }
@@ -488,14 +569,18 @@ impl StatementExecutor {
     pub async fn alter_table(
         &self,
         alter_table: AlterTable,
-        query_ctx: QueryContextRef,
+        query_context: QueryContextRef,
     ) -> Result<Output> {
-        let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
-        self.alter_table_inner(expr).await
+        let expr = expr_factory::to_alter_expr(alter_table, &query_context)?;
+        self.alter_table_inner(expr, query_context).await
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn alter_table_inner(&self, expr: AlterExpr) -> Result<Output> {
+    pub async fn alter_table_inner(
+        &self,
+        expr: AlterExpr,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
         } else {
@@ -538,6 +623,7 @@ impl StatementExecutor {
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
             let req = SubmitDdlTaskRequest {
+                query_context,
                 task: DdlTask::new_alter_table(expr),
             };
 
@@ -550,6 +636,7 @@ impl StatementExecutor {
         } else {
             // This is logical table
             let req = SubmitDdlTaskRequest {
+                query_context,
                 task: DdlTask::new_alter_logical_tables(vec![expr]),
             };
 
@@ -585,7 +672,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate(&Context::default(), invalidate_keys)
+            .invalidate(&Context::default(), &invalidate_keys)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -597,10 +684,12 @@ impl StatementExecutor {
         create_table: CreateTableExpr,
         partitions: Vec<Partition>,
         table_info: RawTableInfo,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let partitions = partitions.into_iter().map(Into::into).collect();
 
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_create_table(create_table, partitions, table_info),
         };
 
@@ -613,8 +702,10 @@ impl StatementExecutor {
     async fn create_logical_tables_procedure(
         &self,
         tables_data: Vec<(CreateTableExpr, RawTableInfo)>,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_create_logical_tables(tables_data),
         };
 
@@ -627,8 +718,10 @@ impl StatementExecutor {
     async fn alter_logical_tables_procedure(
         &self,
         tables_data: Vec<AlterExpr>,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_alter_logical_tables(tables_data),
         };
 
@@ -643,8 +736,10 @@ impl StatementExecutor {
         table_name: &TableName,
         table_id: TableId,
         drop_if_exists: bool,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_drop_table(
                 table_name.catalog_name.to_string(),
                 table_name.schema_name.to_string(),
@@ -665,8 +760,10 @@ impl StatementExecutor {
         catalog: String,
         schema: String,
         drop_if_exists: bool,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         };
 
@@ -680,8 +777,10 @@ impl StatementExecutor {
         &self,
         table_name: &TableName,
         table_id: TableId,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_truncate_table(
                 table_name.catalog_name.to_string(),
                 table_name.schema_name.to_string(),
@@ -699,10 +798,11 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn create_database(
         &self,
-        catalog: &str,
         database: &str,
         create_if_not_exists: bool,
+        query_context: QueryContextRef,
     ) -> Result<Output> {
+        let catalog = query_context.current_catalog();
         ensure!(
             NAME_PATTERN_REG.is_match(catalog),
             error::UnexpectedSnafu {
@@ -727,6 +827,7 @@ impl StatementExecutor {
                 catalog.to_string(),
                 database.to_string(),
                 create_if_not_exists,
+                query_context,
             )
             .await?;
 
@@ -743,8 +844,10 @@ impl StatementExecutor {
         catalog: String,
         database: String,
         create_if_not_exists: bool,
+        query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
+            query_context,
             task: DdlTask::new_create_database(catalog, database, create_if_not_exists, None),
         };
 
@@ -1099,7 +1202,7 @@ ENGINE=mito",
             .unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();
+                    let expr = expr_factory::create_to_expr(c, &QueryContext::arc()).unwrap();
                     let (partitions, _) =
                         parse_partitions(&expr, c.partitions.clone(), &ctx).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();

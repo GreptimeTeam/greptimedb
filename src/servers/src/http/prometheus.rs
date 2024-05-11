@@ -754,6 +754,13 @@ pub async fn label_values_query(
         .collect();
 
     let mut label_values: Vec<_> = label_values.into_iter().collect();
+
+    // sort result for consistent output in tests
+    #[cfg(test)]
+    {
+        label_values.sort_unstable();
+    }
+
     label_values.sort();
     let mut resp = PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
     resp.resp_metrics = merge_map;
@@ -771,7 +778,7 @@ async fn retrieve_field_names(
 
     if matches.is_empty() {
         // query all tables if no matcher is provided
-        while let Some(table) = manager.tables(catalog, schema).await.next().await {
+        while let Some(table) = manager.tables(catalog, schema).next().await {
             let table = table.context(CatalogSnafu)?;
             for column in table.field_columns() {
                 field_columns.insert(column.name);

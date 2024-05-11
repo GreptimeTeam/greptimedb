@@ -47,7 +47,7 @@ pub struct Context {
 
 #[async_trait::async_trait]
 pub trait CacheInvalidator: Send + Sync {
-    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> Result<()>;
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()>;
 }
 
 pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;
@@ -56,7 +56,7 @@ pub struct DummyCacheInvalidator;
 
 #[async_trait::async_trait]
 impl CacheInvalidator for DummyCacheInvalidator {
-    async fn invalidate(&self, _ctx: &Context, _caches: Vec<CacheIdent>) -> Result<()> {
+    async fn invalidate(&self, _ctx: &Context, _caches: &[CacheIdent]) -> Result<()> {
         Ok(())
     }
 }
@@ -80,10 +80,10 @@ impl MultiCacheInvalidator {
 
 #[async_trait::async_trait]
 impl CacheInvalidator for MultiCacheInvalidator {
-    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
         let invalidators = self.invalidators.read().await;
         for invalidator in invalidators.iter() {
-            invalidator.invalidate(ctx, caches.clone()).await?;
+            invalidator.invalidate(ctx, caches).await?;
         }
         Ok(())
     }
@@ -94,23 +94,27 @@ impl<T> CacheInvalidator for T
 where
     T: KvCacheInvalidator,
 {
-    async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
+    async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
         for cache in caches {
             match cache {
                 CacheIdent::TableId(table_id) => {
-                    let key = TableInfoKey::new(table_id);
+                    let key = TableInfoKey::new(*table_id);
                     self.invalidate_key(&key.to_bytes()).await;
 
-                    let key = &TableRouteKey { table_id };
+                    let key = TableRouteKey::new(*table_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
                 CacheIdent::TableName(table_name) => {
-                    let key: TableNameKey = (&table_name).into();
+                    let key: TableNameKey = table_name.into();
                     self.invalidate_key(&key.to_bytes()).await
                 }
                 CacheIdent::SchemaName(schema_name) => {
-                    let key: SchemaNameKey = (&schema_name).into();
+                    let key: SchemaNameKey = schema_name.into();
                     self.invalidate_key(&key.to_bytes()).await;
+                }
+                &CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) => {
+                    // TODO(weny): implements it
+                    unimplemented!()
                 }
             }
         }
