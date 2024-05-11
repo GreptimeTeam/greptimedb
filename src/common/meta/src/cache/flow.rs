@@ -13,4 +13,6 @@
 // limitations under the License.
 
 mod table_flownode;
-pub use table_flownode::{new_table_flownode_set_cache, TableFlownodeSetCache};
+pub use table_flownode::{
+    new_table_flownode_set_cache, TableFlownodeSetCache, TableFlownodeSetCacheRef,
+};

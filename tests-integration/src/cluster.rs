@@ -19,12 +19,12 @@ use std::time::Duration;
 
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
+use cache::default_cache_registry_builder;
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -346,22 +346,25 @@ impl GreptimeDbClusterBuilder {
 
         let cached_meta_backend =
             Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
-        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
-            cached_meta_backend.clone(),
-        ]));
+        let cache_registry_builder =
+            default_cache_registry_builder(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let cache_registry = Arc::new(
+            cache_registry_builder
+                .add_cache(cached_meta_backend.clone())
+                .build(),
+        );
+        let table_cache = cache_registry.get().unwrap();
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Distributed,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
-            multi_cache_invalidator.clone(),
+            table_cache,
         )
         .await;
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                multi_cache_invalidator.clone(),
-            )),
+            Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -373,11 +376,12 @@ impl GreptimeDbClusterBuilder {
 
         let instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
+            cache_registry.clone(),
             catalog_manager,
             datanode_clients,
             meta_client,
         )
-        .with_cache_invalidator(multi_cache_invalidator)
+        .with_local_cache_invalidator(cache_registry)
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await

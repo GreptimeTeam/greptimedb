@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
@@ -96,6 +97,7 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> CreateTableExpr 
 async fn connect_mysql(addr: &str) -> Pool<MySql> {
     loop {
         match MySqlPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(30))
             .connect(&format!("mysql://{addr}/public"))
             .await
         {

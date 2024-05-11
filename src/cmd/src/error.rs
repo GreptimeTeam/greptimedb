@@ -303,6 +303,13 @@ pub enum Error {
         location: Location,
         source: common_runtime::error::Error,
     },
+
+    #[snafu(display("Failed to get cache from cache registry: {}", name))]
+    CacheRequired {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -351,6 +358,8 @@ impl ErrorExt for Error {
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
             Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
+
+            Error::CacheRequired { .. } => StatusCode::Internal,
 
             Error::Other { source, .. } => source.status_code(),
 

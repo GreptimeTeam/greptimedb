@@ -14,12 +14,12 @@
 
 use std::sync::Arc;
 
+use cache::default_cache_registry_builder;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
-use common_meta::cache_invalidator::MultiCacheInvalidator;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::DdlContext;
@@ -128,12 +128,12 @@ impl GreptimeDbStandaloneBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::default());
+        let cache_registry = Arc::new(default_cache_registry_builder(kv_backend.clone()).build());
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Standalone,
             None,
             kv_backend.clone(),
-            multi_cache_invalidator.clone(),
+            cache_registry.get().unwrap(),
         )
         .await;
 
@@ -167,7 +167,7 @@ impl GreptimeDbStandaloneBuilder {
             DdlManager::try_new(
                 DdlContext {
                     node_manager: node_manager.clone(),
-                    cache_invalidator: multi_cache_invalidator,
+                    cache_invalidator: cache_registry.clone(),
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
@@ -182,6 +182,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let instance = FrontendBuilder::new(
             kv_backend.clone(),
+            cache_registry,
             catalog_manager,
             node_manager,
             ddl_task_executor,

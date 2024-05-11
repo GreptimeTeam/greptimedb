@@ -346,6 +346,13 @@ pub enum Error {
         #[snafu(source)]
         error: toml::ser::Error,
     },
+
+    #[snafu(display("Failed to get cache from cache registry: {}", name))]
+    CacheRequired {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -397,7 +404,8 @@ impl ErrorExt for Error {
 
             Error::FindDatanode { .. }
             | Error::VectorToGrpcColumn { .. }
-            | Error::InvalidRegionRequest { .. } => StatusCode::Internal,
+            | Error::InvalidRegionRequest { .. }
+            | Error::CacheRequired { .. } => StatusCode::Internal,
 
             Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
 
