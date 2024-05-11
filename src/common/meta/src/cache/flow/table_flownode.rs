@@ -56,6 +56,7 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
                 .map_ok(|key| key.flownode_id())
                 .try_collect::<HashSet<_>>()
                 .await
+                // Caches the HashSet even if it's empty, to reduce remote fetches.
                 .map(Some)
         })
     })
