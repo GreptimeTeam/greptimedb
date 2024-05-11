@@ -31,7 +31,7 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{RegionId, ScanRequest};
-use table::table::scan::{ReadFromRegion, StreamScanAdapter};
+use table::table::scan::ReadFromRegion;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
 

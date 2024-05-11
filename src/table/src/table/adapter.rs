@@ -29,7 +29,7 @@ use datafusion_physical_expr::PhysicalSortExpr;
 use store_api::region_engine::SinglePartitionScanner;
 use store_api::storage::ScanRequest;
 
-use crate::table::scan::{ReadFromRegion, StreamScanAdapter};
+use crate::table::scan::ReadFromRegion;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
