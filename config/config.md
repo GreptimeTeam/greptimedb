@@ -127,6 +127,8 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
+| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
 
 
 ## Cluster Mode
@@ -203,6 +205,8 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
+| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
 
 
 ### Metasrv
@@ -259,6 +263,8 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
+| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
 
 
 ### Datanode
@@ -370,3 +376,5 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
+| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |

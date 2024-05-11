@@ -128,7 +128,7 @@ async fn start(cli: Command) -> Result<()> {
     let _guard = common_telemetry::init_global_logging(
         &app_name,
         opts.logging_options(),
-        cli.global_options.tracing_options(),
+        &cli.global_options.tracing_options(),
         opts.node_id(),
     );
 

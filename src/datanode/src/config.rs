@@ -20,7 +20,7 @@ use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
 pub use common_procedure::options::ProcedureConfig;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
@@ -234,6 +234,7 @@ pub struct DatanodeOptions {
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
+    pub tracing: TracingOptions,
 }
 
 impl Default for DatanodeOptions {
@@ -260,6 +261,7 @@ impl Default for DatanodeOptions {
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
+            tracing: TracingOptions::default(),
         }
     }
 }

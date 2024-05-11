@@ -35,7 +35,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
@@ -124,6 +124,7 @@ pub struct StandaloneOptions {
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub export_metrics: ExportMetricsOption,
+    pub tracing: TracingOptions,
 }
 
 impl StandaloneOptions {
@@ -156,6 +157,7 @@ impl Default for StandaloneOptions {
                 RegionEngineConfig::Mito(MitoConfig::default()),
                 RegionEngineConfig::File(FileEngineConfig::default()),
             ],
+            tracing: TracingOptions::default(),
         }
     }
 }
@@ -300,6 +302,13 @@ impl StartCommand {
 
         if global_options.log_level.is_some() {
             opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        #[cfg(feature = "tokio-console")]
+        if global_options.tokio_console_addr.is_some() {
+            opts.tracing = TracingOptions {
+                tokio_console_addr: global_options.tokio_console_addr.clone(),
+            };
         }
 
         let tls_opts = TlsOption::new(

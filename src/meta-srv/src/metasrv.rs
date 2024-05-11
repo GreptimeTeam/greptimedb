@@ -31,7 +31,7 @@ use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_meta::{distributed_time_constants, ClusterId};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
 use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
@@ -109,6 +109,8 @@ pub struct MetasrvOptions {
     /// limit the number of operations in a txn because an infinitely large txn could
     /// potentially block other operations.
     pub max_txn_ops: usize,
+    /// The tracing options.
+    pub tracing: TracingOptions,
 }
 
 impl MetasrvOptions {
@@ -146,6 +148,7 @@ impl Default for MetasrvOptions {
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
             max_txn_ops: 128,
+            tracing: TracingOptions::default(),
         }
     }
 }
