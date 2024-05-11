@@ -97,8 +97,7 @@ pub async fn sql(
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
     let source = query_params
         .source
-        .map(|s| RequestSource::parse(s.to_lowercase().as_str()))
-        .unwrap_or(None);
+        .and_then(|s| RequestSource::parse(s.as_str()));
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
@@ -155,7 +154,8 @@ pub async fn from_dashboard(resp: HttpResponse, ctx: QueryContextRef) -> HttpRes
             continue;
         };
         if records.rows.len() > query_limit {
-            records.rows.resize(query_limit, vec![]);
+            records.rows.truncate(query_limit);
+            records.total_rows = query_limit;
         }
         outputs.push(GreptimeQueryOutput::Records(records));
     }

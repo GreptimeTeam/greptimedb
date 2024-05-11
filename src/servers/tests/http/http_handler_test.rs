@@ -112,7 +112,8 @@ async fn test_sql_output_rows() {
     [
       4950
     ]
-  ]
+  ],
+  "total_rows": 1
 }"#
                     );
                 }
@@ -253,7 +254,8 @@ async fn test_sql_form() {
     [
       4950
     ]
-  ]
+  ],
+  "total_rows": 1
 }"#
                     );
                 }
@@ -427,7 +429,8 @@ def test(n) -> vector[i64]:
     [
       4
     ]
-  ]
+  ],
+  "total_rows": 5
 }"#
             );
         }
@@ -494,7 +497,8 @@ def test(n, **params)  -> vector[i64]:
     [
       46
     ]
-  ]
+  ],
+  "total_rows": 5
 }"#
             );
         }

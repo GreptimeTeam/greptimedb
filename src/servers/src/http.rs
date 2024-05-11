@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
@@ -41,6 +42,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
+use strum::EnumString;
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
@@ -190,6 +192,10 @@ impl From<SchemaRef> for OutputSchema {
 pub struct HttpRecordsOutput {
     schema: OutputSchema,
     rows: Vec<Vec<Value>>,
+    // total_rows is equal to rows.len() in most cases,
+    // the Dashboard query result may be truncated, so we need to return the total_rows.
+    #[serde(default)]
+    total_rows: usize,
 
     // plan level execution metrics
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -224,6 +230,7 @@ impl HttpRecordsOutput {
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
                 rows: vec![],
+                total_rows: 0,
                 metrics: Default::default(),
             })
         } else {
@@ -244,6 +251,7 @@ impl HttpRecordsOutput {
 
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
+                total_rows: rows.len(),
                 rows,
                 metrics: Default::default(),
             })
@@ -336,15 +344,16 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString)]
 pub enum RequestSource {
+    #[strum(ascii_case_insensitive)]
     Dashboard,
 }
 
 impl RequestSource {
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "dashboard" => Some(RequestSource::Dashboard),
+        match RequestSource::from_str(s) {
+            Ok(v) => Some(v),
             _ => None,
         }
     }
