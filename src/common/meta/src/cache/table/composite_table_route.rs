@@ -49,7 +49,7 @@ impl CompositeTableRoute {
         }
     }
 
-    /// Returns [PhysicalTableRouteValue] reference.
+    /// Returns [LogicalTableRouteValue] reference if it's [CompositeTableRoute::Logical]; Otherwise returns [None].
     pub fn as_logical_table_route_ref(&self) -> Option<&Arc<LogicalTableRouteValue>> {
         match self {
             CompositeTableRoute::Physical(_) => None,
