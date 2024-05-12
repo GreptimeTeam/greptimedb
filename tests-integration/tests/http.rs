@@ -835,7 +835,9 @@ type = "time_series"
 
 [export_metrics]
 enable = false
-write_interval = "30s""#,
+write_interval = "30s"
+
+[tracing]"#,
         store_type
     )
     .trim()
