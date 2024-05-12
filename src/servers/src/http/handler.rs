@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::str::FromStr;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -97,7 +98,7 @@ pub async fn sql(
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
     let source = query_params
         .source
-        .and_then(|s| RequestSource::parse(s.as_str()));
+        .and_then(|s| RequestSource::from_str(s.as_str()).ok());
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {

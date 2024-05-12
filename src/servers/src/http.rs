@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
@@ -348,15 +347,6 @@ impl Display for Epoch {
 pub enum RequestSource {
     #[strum(ascii_case_insensitive)]
     Dashboard,
-}
-
-impl RequestSource {
-    pub fn parse(s: &str) -> Option<Self> {
-        match RequestSource::from_str(s) {
-            Ok(v) => Some(v),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
