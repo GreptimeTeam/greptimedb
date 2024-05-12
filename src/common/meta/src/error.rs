@@ -316,6 +316,7 @@ pub enum Error {
     #[snafu(display("View already exists, view: {}", view_name))]
     ViewAlreadyExists {
         view_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -359,6 +360,7 @@ pub enum Error {
     #[snafu(display("View not found: '{}'", view_name))]
     ViewNotFound {
         view_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -391,7 +393,11 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid view info, err: {}", err_msg))]
-    InvalidViewInfo { err_msg: String, location: Location },
+    InvalidViewInfo {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to get kv cache, err: {}", err_msg))]
     GetKvCache { err_msg: String },

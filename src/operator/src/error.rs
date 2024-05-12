@@ -130,7 +130,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid statement to create view"))]
-    InvalidViewStmt { location: Location },
+    InvalidViewStmt {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
     ConvertColumnDefaultConstraint {
@@ -692,6 +695,7 @@ pub enum Error {
 
     #[snafu(display("Failed to convert between logical plan and substrait plan"))]
     SubstraitCodec {
+        #[snafu(implicit)]
         location: Location,
         source: substrait::error::Error,
     },
@@ -723,8 +727,7 @@ impl ErrorExt for Error {
             | Error::SchemaIncompatible { .. }
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
-            | Error::ConvertIdentifier { .. }
-            | Error::InvalidExpr
+            | Error::InvalidExpr { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
 
