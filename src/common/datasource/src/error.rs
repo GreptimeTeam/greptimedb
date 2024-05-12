@@ -77,7 +77,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: orc_rust::error::Error,
+        error: orc_rust::error::OrcError,
     },
 
     #[snafu(display("Failed to read object from path: {}", path))]
