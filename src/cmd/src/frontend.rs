@@ -23,7 +23,6 @@ use client::client_manager::DatanodeClients;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
-#[cfg(feature = "tokio-console")]
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
 use frontend::frontend::FrontendOptions;
@@ -164,12 +163,10 @@ impl StartCommand {
             opts.logging.level.clone_from(&global_options.log_level);
         }
 
-        #[cfg(feature = "tokio-console")]
-        if global_options.tokio_console_addr.is_some() {
-            opts.tracing = TracingOptions {
-                tokio_console_addr: global_options.tokio_console_addr.clone(),
-            };
-        }
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
 
         let tls_opts = TlsOption::new(
             self.tls_mode.clone(),
