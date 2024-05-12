@@ -130,8 +130,8 @@ pub struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
-    #[clap(long, value_delimiter = ',', num_args = 1..)]
-    metasrv_addr: Option<Vec<String>>,
+    #[clap(long, aliases = ["metasrv-addr"], value_delimiter = ',', num_args = 1..)]
+    metasrv_addrs: Option<Vec<String>>,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
     #[clap(long)]
@@ -200,7 +200,7 @@ impl StartCommand {
             opts.influxdb.enable = enable;
         }
 
-        if let Some(metasrv_addrs) = &self.metasrv_addr {
+        if let Some(metasrv_addrs) = &self.metasrv_addrs {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs

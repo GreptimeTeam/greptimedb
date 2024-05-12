@@ -114,8 +114,8 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     rpc_hostname: Option<String>,
-    #[clap(long, value_delimiter = ',', num_args = 1..)]
-    metasrv_addr: Option<Vec<String>>,
+    #[clap(long, aliases = ["metasrv-addr"], value_delimiter = ',', num_args = 1..)]
+    metasrv_addrs: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(long)]
@@ -158,7 +158,7 @@ impl StartCommand {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(metasrv_addrs) = &self.metasrv_addr {
+        if let Some(metasrv_addrs) = &self.metasrv_addrs {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
@@ -386,7 +386,7 @@ mod tests {
 
         if let Options::Datanode(opt) = (StartCommand {
             node_id: Some(42),
-            metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
+            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
         .load_options(&GlobalOptions::default())
@@ -396,7 +396,7 @@ mod tests {
         }
 
         assert!((StartCommand {
-            metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
+            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
         .load_options(&GlobalOptions::default())
