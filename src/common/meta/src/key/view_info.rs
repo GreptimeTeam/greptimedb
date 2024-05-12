@@ -236,5 +236,30 @@ impl ViewInfoManager {
 
 #[cfg(test)]
 mod tests {
-    // TODO(dennis): test
+    use super::*;
+
+    #[test]
+    fn test_key_serialization() {
+        let key = ViewInfoKey::new(42);
+        let raw_key = key.to_bytes();
+        assert_eq!(raw_key, b"__view_info/42");
+    }
+
+    #[test]
+    fn test_key_deserialization() {
+        let expected = ViewInfoKey::new(42);
+        let key = ViewInfoKey::from_bytes(b"__view_info/42").unwrap();
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn test_value_serialization() {
+        let value = ViewInfoValue {
+            view_info: vec![1, 2, 3],
+            version: 1,
+        };
+        let serialized = value.try_as_raw_value().unwrap();
+        let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();
+        assert_eq!(value, deserialized);
+    }
 }

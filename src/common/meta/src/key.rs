@@ -199,7 +199,7 @@ lazy_static! {
     static ref CATALOG_NAME_KEY_PATTERN: Regex = Regex::new(&format!(
         "^{CATALOG_NAME_KEY_PREFIX}/({NAME_PATTERN})$"
     ))
-    .unwrap();
+        .unwrap();
 }
 
 lazy_static! {
@@ -207,7 +207,7 @@ lazy_static! {
     static ref SCHEMA_NAME_KEY_PATTERN:Regex=Regex::new(&format!(
         "^{SCHEMA_NAME_KEY_PREFIX}/({NAME_PATTERN})/({NAME_PATTERN})$"
     ))
-    .unwrap();
+        .unwrap();
 }
 
 /// The key of metadata.
@@ -1193,7 +1193,7 @@ mod tests {
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
-    use crate::key::{DeserializedValueWithBytes, TableMetadataManager};
+    use crate::key::{DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
@@ -1951,58 +1951,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_view_info() {
+    async fn test_create_update_view_info() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let region_route = new_test_region_route();
-        let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let table_id = table_info.ident.table_id;
-        // creates metadata.
-        create_physical_table_metadata(
-            &table_metadata_manager,
-            table_info.clone(),
-            region_routes.clone(),
-        )
-        .await
-        .unwrap();
 
-        let mut new_table_info = table_info.clone();
-        new_table_info.name = "hi".to_string();
-        let current_table_info_value =
-            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
+        let view_info: RawTableInfo = new_test_table_info(Vec::<u32>::new().into_iter()).into();
+
+        let view_id = view_info.ident.table_id;
+
+        let logical_plan: Vec<u8> = vec![1, 2, 3];
+
+        // Create metadata
+        table_metadata_manager
+            .create_view_metadata(view_info.clone(), &logical_plan)
+            .await
+            .unwrap();
+
+        {
+            // assert view info
+            let current_view_info = table_metadata_manager
+                .view_info_manager()
+                .get(view_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_inner();
+            assert_eq!(current_view_info.view_info, logical_plan);
+            // assert table info
+            let current_table_info = table_metadata_manager
+                .table_info_manager()
+                .get(view_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_inner();
+            assert_eq!(current_table_info.table_info, view_info);
+        }
+
+        let new_logical_plan: Vec<u8> = vec![4, 5, 6];
+        let current_view_info_value =
+            DeserializedValueWithBytes::from_inner(ViewInfoValue::new(&logical_plan));
         // should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, new_table_info.clone())
+            .update_view_info(view_id, &current_view_info_value, new_logical_plan.clone())
             .await
             .unwrap();
         // if table info was updated, it should be ok.
         table_metadata_manager
-            .update_table_info(&current_table_info_value, new_table_info.clone())
+            .update_view_info(view_id, &current_view_info_value, new_logical_plan.clone())
             .await
             .unwrap();
 
-        // updated table_info should equal the `new_table_info`
-        let updated_table_info = table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
+        // updated view_info should equal the `new_logical_plan`
+        let updated_view_info = table_metadata_manager
+            .view_info_manager()
+            .get(view_id)
             .await
             .unwrap()
             .unwrap()
             .into_inner();
-        assert_eq!(updated_table_info.table_info, new_table_info);
+        assert_eq!(updated_view_info.view_info, new_logical_plan);
 
-        let mut wrong_table_info = table_info.clone();
-        wrong_table_info.name = "wrong".to_string();
-        let wrong_table_info_value = DeserializedValueWithBytes::from_inner(
-            current_table_info_value.update(wrong_table_info),
-        );
-        // if the current_table_info_value is wrong, it should return an error.
+        let wrong_view_info = logical_plan.clone();
+        let wrong_view_info_value =
+            DeserializedValueWithBytes::from_inner(current_view_info_value.update(wrong_view_info));
+        // if the current_view_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
-            .update_table_info(&wrong_table_info_value, new_table_info)
+            .update_view_info(view_id, &wrong_view_info_value, new_logical_plan.clone())
             .await
-            .is_err())
+            .is_err());
+
+        // The view_info is not changed.
+        let current_view_info = table_metadata_manager
+            .view_info_manager()
+            .get(view_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        assert_eq!(current_view_info.view_info, new_logical_plan);
     }
 }
