@@ -29,7 +29,7 @@ use crate::expr::PartitionExpr;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to find table route for table id {}", table_id))]
+    #[snafu(display("Failed to find table route: {}", table_id))]
     TableRouteNotFound {
         table_id: TableId,
         #[snafu(implicit)]

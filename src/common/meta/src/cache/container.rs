@@ -110,6 +110,9 @@ where
             metrics::CACHE_CONTAINER_CACHE_MISS
                 .with_label_values(&[&self.name])
                 .inc();
+            let _timer = metrics::CACHE_CONTAINER_LOAD_CACHE
+                .with_label_values(&[&self.name])
+                .start_timer();
             moved_init(&moved_key)
                 .await
                 .transpose()
@@ -169,6 +172,9 @@ where
             metrics::CACHE_CONTAINER_CACHE_MISS
                 .with_label_values(&[&self.name])
                 .inc();
+            let _timer = metrics::CACHE_CONTAINER_LOAD_CACHE
+                .with_label_values(&[&self.name])
+                .start_timer();
 
             moved_init(&moved_key)
                 .await
