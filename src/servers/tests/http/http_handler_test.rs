@@ -186,25 +186,35 @@ async fn test_dashboard_sql_limit() {
         sql_handler,
         script_handler: None,
     };
-    let query = create_query(
-        "greptimedb_v1",
-        "select * from numbers",
-        Some(1000),
-    );
-    let json = http_handler::sql(
-        State(api_state.clone()),
-        query,
-        axum::Extension(ctx.clone()),
-        Form(http_handler::SqlQuery::default()),
-    )
-    .await;
+    for format in ["greptimedb_v1", "csv", "table"] {
+        let query = create_query(format, "select * from numbers", Some(1000));
+        let sql_response = http_handler::sql(
+            State(api_state.clone()),
+            query,
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await;
 
-    if let HttpResponse::GreptimedbV1(resp) = json {
-        let output = resp.output().first().unwrap();
-        match output {
-            Records(records) => {
-                assert_eq!(records.num_rows(), 1000);
-            }
+        match sql_response {
+            HttpResponse::GreptimedbV1(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::Csv(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::Table(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
         }
     }
