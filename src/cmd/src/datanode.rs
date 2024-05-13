@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_telemetry::info;
+use common_telemetry::logging::TracingOptions;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -145,6 +146,11 @@ impl StartCommand {
         if global_options.log_level.is_some() {
             opts.logging.level.clone_from(&global_options.log_level);
         }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
 
         if let Some(addr) = &self.rpc_addr {
             opts.rpc_addr.clone_from(addr);

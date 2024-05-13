@@ -17,6 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_telemetry::info;
+use common_telemetry::logging::TracingOptions;
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
@@ -140,6 +141,11 @@ impl StartCommand {
         if global_options.log_level.is_some() {
             opts.logging.level.clone_from(&global_options.log_level);
         }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
 
         if let Some(addr) = &self.bind_addr {
             opts.bind_addr.clone_from(addr);

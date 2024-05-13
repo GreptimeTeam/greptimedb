@@ -72,7 +72,7 @@ impl Default for LoggingOptions {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TracingOptions {
     #[cfg(feature = "tokio-console")]
     pub tokio_console_addr: Option<String>,
@@ -104,7 +104,7 @@ pub fn init_default_ut_logging() {
         *g = Some(init_global_logging(
             "unittest",
             &opts,
-            TracingOptions::default(),
+            &TracingOptions::default(),
             None
         ));
 
@@ -121,7 +121,7 @@ const DEFAULT_LOG_TARGETS: &str = "info";
 pub fn init_global_logging(
     app_name: &str,
     opts: &LoggingOptions,
-    tracing_opts: TracingOptions,
+    tracing_opts: &TracingOptions,
     node_id: Option<String>,
 ) -> Vec<WorkerGuard> {
     let mut guards = vec![];
