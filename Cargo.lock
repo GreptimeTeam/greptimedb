@@ -2478,6 +2478,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d2301688392eb071b0bf1a37be05c469d3cc4dbbd95df672fe28ab021e6a096"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "darling"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3788,20 +3798,28 @@ name = "flow"
 version = "0.7.2"
 dependencies = [
  "api",
+ "async-trait",
  "catalog",
+ "common-base",
  "common-catalog",
  "common-decimal",
  "common-error",
+ "common-frontend",
  "common-macro",
+ "common-meta",
+ "common-runtime",
  "common-telemetry",
  "common-time",
  "datafusion-common 37.0.0",
  "datafusion-expr 37.0.0",
- "datafusion-substrait",
  "datatypes",
  "enum_dispatch",
+ "futures",
+ "greptime-proto",
  "hydroflow",
  "itertools 0.10.5",
+ "minstant",
+ "nom",
  "num-traits",
  "prost 0.12.4",
  "query",
@@ -3811,6 +3829,7 @@ dependencies = [
  "session",
  "smallvec",
  "snafu 0.8.2",
+ "store-api",
  "strum 0.25.0",
  "substrait 0.7.2",
  "table",
@@ -5688,6 +5707,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d811f3e15f28568be3407c8e7fdb6514c1cda3cb30683f15b6a1a1dc4ea14a7"
 dependencies = [
  "adler",
+]
+
+[[package]]
+name = "minstant"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fb9b5c752f145ac5046bccc3c4f62892e3c950c1d1eab80c5949cd68a2078db"
+dependencies = [
+ "ctor",
+ "web-time 1.1.0",
 ]
 
 [[package]]
@@ -11334,7 +11363,7 @@ dependencies = [
  "tracing-core",
  "tracing-log 0.2.0",
  "tracing-subscriber",
- "web-time",
+ "web-time 0.2.4",
 ]
 
 [[package]]
@@ -12087,6 +12116,16 @@ name = "web-time"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa30049b1c872b72c89866d458eae9f20380ab280ffd1b1e18df2d3e2d98cfe0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

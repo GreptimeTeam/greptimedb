@@ -16,11 +16,6 @@ use std::collections::HashMap;
 
 use common_decimal::Decimal128;
 use common_time::{Date, Timestamp};
-use datafusion_substrait::variation_const::{
-    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
-    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
-    UNSIGNED_INTEGER_TYPE_REF,
-};
 use datatypes::arrow::compute::kernels::window;
 use datatypes::arrow::ipc::Binary;
 use datatypes::data_type::ConcreteDataType as CDT;
@@ -28,21 +23,26 @@ use datatypes::value::Value;
 use hydroflow::futures::future::Map;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
-use substrait::substrait_proto::proto::aggregate_function::AggregationInvocation;
-use substrait::substrait_proto::proto::aggregate_rel::{Grouping, Measure};
-use substrait::substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
-use substrait::substrait_proto::proto::expression::literal::LiteralType;
-use substrait::substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
-use substrait::substrait_proto::proto::expression::{
+use substrait::variation_const::{
+    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
+    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
+    UNSIGNED_INTEGER_TYPE_REF,
+};
+use substrait_proto::proto::aggregate_function::AggregationInvocation;
+use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
+use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
+use substrait_proto::proto::expression::literal::LiteralType;
+use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
+use substrait_proto::proto::expression::{
     IfThen, Literal, MaskExpression, RexType, ScalarFunction,
 };
-use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait::substrait_proto::proto::extensions::SimpleExtensionDeclaration;
-use substrait::substrait_proto::proto::function_argument::ArgType;
-use substrait::substrait_proto::proto::r#type::Kind;
-use substrait::substrait_proto::proto::read_rel::ReadType;
-use substrait::substrait_proto::proto::rel::RelType;
-use substrait::substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
+use substrait_proto::proto::function_argument::ArgType;
+use substrait_proto::proto::r#type::Kind;
+use substrait_proto::proto::read_rel::ReadType;
+use substrait_proto::proto::rel::RelType;
+use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
     DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
@@ -54,11 +54,11 @@ use crate::expr::{
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, ColumnType, RelationType};
-use crate::transform::{DataflowContext, FunctionExtensions};
+use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
     fn from_substrait_agg_grouping(
-        ctx: &mut DataflowContext,
+        ctx: &mut FlownodeContext,
         groupings: &[Grouping],
         typ: &RelationType,
         extensions: &FunctionExtensions,
@@ -84,7 +84,7 @@ impl TypedExpr {
 
 impl AggregateExpr {
     fn from_substrait_agg_measures(
-        ctx: &mut DataflowContext,
+        ctx: &mut FlownodeContext,
         measures: &[Measure],
         typ: &RelationType,
         extensions: &FunctionExtensions,
@@ -218,7 +218,7 @@ impl KeyValPlan {
 impl TypedPlan {
     /// Convert AggregateRel into Flow's TypedPlan
     pub fn from_substrait_agg_rel(
-        ctx: &mut DataflowContext,
+        ctx: &mut FlownodeContext,
         agg: &proto::AggregateRel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
@@ -228,7 +228,7 @@ impl TypedPlan {
             return not_impl_err!("Aggregate without an input is not supported");
         };
 
-        let group_expr =
+        let group_exprs =
             TypedExpr::from_substrait_agg_grouping(ctx, &agg.groupings, &input.typ, extensions)?;
 
         let mut aggr_exprs =
@@ -236,14 +236,14 @@ impl TypedPlan {
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(
             &mut aggr_exprs,
-            &group_expr,
+            &group_exprs,
             input.typ.column_types.len(),
         )?;
 
         let output_type = {
             let mut output_types = Vec::new();
             // first append group_expr as key, then aggr_expr as value
-            for expr in &group_expr {
+            for expr in &group_exprs {
                 output_types.push(expr.typ.clone());
             }
 
@@ -252,7 +252,8 @@ impl TypedPlan {
                     aggr.func.signature().output.clone(),
                 ));
             }
-            RelationType::new(output_types)
+            // TODO(discord9): try best to get time
+            RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
         };
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
@@ -365,8 +366,8 @@ mod test {
         };
         let expected = TypedPlan {
             typ: RelationType::new(vec![
-                ColumnType::new(CDT::uint32_datatype(), true),
-                ColumnType::new(CDT::uint32_datatype(), false),
+                ColumnType::new(CDT::uint32_datatype(), true), // col sum(number)
+                ColumnType::new(CDT::uint32_datatype(), false), // col number
             ]),
             plan: Plan::Mfp {
                 input: Box::new(Plan::Reduce {

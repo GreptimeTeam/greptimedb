@@ -23,11 +23,14 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::catalog::CatalogProviderList;
 use datafusion::execution::context::SessionState;
+/// Re-export the Substrait module of datafusion,
+/// note this is a different version of the `substrait_proto` crate
+pub use datafusion_substrait::substrait as substrait_proto_df;
+pub use datafusion_substrait::{logical_plan as df_logical_plan, variation_const};
 use session::context::QueryContextRef;
 pub use substrait_proto;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
-
 #[async_trait]
 pub trait SubstraitPlan {
     type Error: std::error::Error;

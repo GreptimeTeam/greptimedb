@@ -27,7 +27,7 @@ use datatypes::types::cast;
 use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
 use itertools::Itertools;
-pub(crate) use relation::{ColumnType, RelationDesc, RelationType};
+pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -50,6 +50,9 @@ pub type DiffRow = (Row, Timestamp, Diff);
 
 /// Row with key-value pair, timestamp and diff
 pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
+
+/// broadcast channel capacity
+pub const BROADCAST_CAP: usize = 1024;
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 ///
@@ -102,6 +105,11 @@ impl Row {
     /// Create an empty row
     pub fn empty() -> Self {
         Self { inner: vec![] }
+    }
+
+    /// Returns true if the Row contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 
     /// Create a row from a vector of values

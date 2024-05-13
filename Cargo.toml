@@ -206,6 +206,7 @@ common-wal = { path = "src/common/wal" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }
+flow = { path = "src/flow" }
 frontend = { path = "src/frontend" }
 index = { path = "src/index" }
 log-store = { path = "src/log-store" }
