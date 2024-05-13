@@ -16,10 +16,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cache::{default_cache_registry_builder, COMPOSITE_TABLE_ROUTE_CACHE, TABLE_CACHE_NAME};
+use cache::{
+    build_fundamental_cache_registry, with_default_composite_cache_registry,
+    COMPOSITE_TABLE_ROUTE_CACHE, TABLE_CACHE_NAME,
+};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
+use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
@@ -242,20 +246,34 @@ impl StartCommand {
             .cache_tti(cache_tti)
             .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
-        let cache_registry_builder =
-            default_cache_registry_builder(Arc::new(MetaKvBackend::new(meta_client.clone())));
-        let cache_registry = Arc::new(
-            cache_registry_builder
+
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_layer(
+            CacheRegistryBuilder::default()
                 .add_cache(cached_meta_backend.clone())
                 .build(),
         );
-        let table_cache = cache_registry.get().context(error::CacheRequiredSnafu {
-            name: TABLE_CACHE_NAME,
-        })?;
-        let composite_table_route_cache =
-            cache_registry.get().context(error::CacheRequiredSnafu {
-                name: COMPOSITE_TABLE_ROUTE_CACHE,
+        let fundamental_cache_registry =
+            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let layered_cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_layer(fundamental_cache_registry),
+            )
+            .context(error::BuildCacheRegistrySnafu)?
+            .build(),
+        );
+
+        let table_cache = layered_cache_registry
+            .get()
+            .context(error::CacheRequiredSnafu {
+                name: TABLE_CACHE_NAME,
             })?;
+        let composite_table_route_cache =
+            layered_cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: COMPOSITE_TABLE_ROUTE_CACHE,
+                })?;
         let catalog_manager = KvBackendCatalogManager::new(
             opts.mode,
             Some(meta_client.clone()),
@@ -267,7 +285,9 @@ impl StartCommand {
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
+            Arc::new(InvalidateTableCacheHandler::new(
+                layered_cache_registry.clone(),
+            )),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
@@ -279,13 +299,13 @@ impl StartCommand {
 
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
-            cache_registry.clone(),
+            layered_cache_registry.clone(),
             catalog_manager,
             Arc::new(DatanodeClients::default()),
             meta_client,
         )
         .with_plugin(plugins.clone())
-        .with_local_cache_invalidator(cache_registry)
+        .with_local_cache_invalidator(layered_cache_registry)
         .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await

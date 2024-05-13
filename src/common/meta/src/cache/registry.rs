@@ -31,12 +31,19 @@ pub struct LayeredCacheRegistryBuilder {
 }
 
 impl LayeredCacheRegistryBuilder {
+    /// Adds cache layer
     pub fn add_cache_layer(mut self, registry: CacheRegistry) -> Self {
         self.registry.layers.push(registry);
 
         self
     }
 
+    /// Returns __cloned__ the value stored in the collection for the type `T`, if it exists.
+    pub fn get<T: Send + Sync + Clone + 'static>(&self) -> Option<T> {
+        self.registry.get()
+    }
+
+    /// Builds the [LayeredCacheRegistry]
     pub fn build(self) -> LayeredCacheRegistry {
         self.registry
     }
@@ -82,11 +89,13 @@ pub struct CacheRegistryBuilder {
 }
 
 impl CacheRegistryBuilder {
+    /// Adds the cache.
     pub fn add_cache<T: CacheInvalidator + 'static>(mut self, cache: Arc<T>) -> Self {
         self.registry.register(cache);
         self
     }
 
+    /// Builds [CacheRegistry].
     pub fn build(self) -> CacheRegistry {
         self.registry
     }

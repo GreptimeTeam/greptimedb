@@ -1223,8 +1223,11 @@ name = "cache"
 version = "0.7.2"
 dependencies = [
  "catalog",
+ "common-error",
+ "common-macro",
  "common-meta",
  "moka",
+ "snafu 0.8.2",
 ]
 
 [[package]]

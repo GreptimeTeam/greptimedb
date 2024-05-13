@@ -16,11 +16,15 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
-use cache::{default_cache_registry_builder, COMPOSITE_TABLE_ROUTE_CACHE, TABLE_CACHE_NAME};
+use cache::{
+    build_fundamental_cache_registry, with_default_composite_cache_registry,
+    COMPOSITE_TABLE_ROUTE_CACHE, TABLE_CACHE_NAME,
+};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, KvBackendConfig};
+use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -59,10 +63,10 @@ use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu,
-    InitTimezoneSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
-    StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
-    StopProcedureManagerSnafu,
+    BuildCacheRegistrySnafu, CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu,
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, Options};
 use crate::App;
@@ -381,13 +385,24 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let cache_registry = Arc::new(default_cache_registry_builder(kv_backend.clone()).build());
-        let table_cache = cache_registry.get().context(CacheRequiredSnafu {
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
+        let layered_cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_layer(fundamental_cache_registry),
+            )
+            .context(BuildCacheRegistrySnafu)?
+            .build(),
+        );
+
+        let table_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
             name: TABLE_CACHE_NAME,
         })?;
-        let composite_table_route_cache = cache_registry.get().context(CacheRequiredSnafu {
-            name: COMPOSITE_TABLE_ROUTE_CACHE,
-        })?;
+        let composite_table_route_cache =
+            layered_cache_registry.get().context(CacheRequiredSnafu {
+                name: COMPOSITE_TABLE_ROUTE_CACHE,
+            })?;
         let catalog_manager = KvBackendCatalogManager::new(
             dn_opts.mode,
             None,
@@ -433,7 +448,7 @@ impl StartCommand {
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
             node_manager.clone(),
-            cache_registry.clone(),
+            layered_cache_registry.clone(),
             table_metadata_manager,
             table_meta_allocator,
             flow_metadata_manager,
@@ -443,7 +458,7 @@ impl StartCommand {
 
         let mut frontend = FrontendBuilder::new(
             kv_backend,
-            cache_registry,
+            layered_cache_registry,
             catalog_manager,
             node_manager,
             ddl_task_executor,

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use cache::{COMPOSITE_TABLE_ROUTE_CACHE, TABLE_FLOWNODE_SET_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_meta::cache::{CacheRegistryRef, CompositeTableRouteCacheRef};
+use common_meta::cache::{CompositeTableRouteCacheRef, LayeredCacheRegistryRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
@@ -43,7 +43,7 @@ use crate::script::ScriptExecutor;
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
-    cache_registry: CacheRegistryRef,
+    layered_cache_registry: LayeredCacheRegistryRef,
     local_cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
     node_manager: NodeManagerRef,
@@ -55,14 +55,14 @@ pub struct FrontendBuilder {
 impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
-        cache_registry: CacheRegistryRef,
+        layered_cache_registry: LayeredCacheRegistryRef,
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
-            cache_registry,
+            layered_cache_registry,
             local_cache_invalidator: None,
             catalog_manager,
             node_manager,
@@ -99,7 +99,7 @@ impl FrontendBuilder {
         let plugins = self.plugins.unwrap_or_default();
 
         let composite_table_route_cache: CompositeTableRouteCacheRef = self
-            .cache_registry
+            .layered_cache_registry
             .get()
             .context(error::CacheRequiredSnafu {
                 name: COMPOSITE_TABLE_ROUTE_CACHE,
@@ -117,7 +117,7 @@ impl FrontendBuilder {
             FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
         let table_flownode_cache =
-            self.cache_registry
+            self.layered_cache_registry
                 .get()
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,

@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
-use cache::default_cache_registry_builder;
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
+use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::DdlContext;
@@ -128,7 +129,17 @@ impl GreptimeDbStandaloneBuilder {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let cache_registry = Arc::new(default_cache_registry_builder(kv_backend.clone()).build());
+
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
+        let cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_layer(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Standalone,
             None,
