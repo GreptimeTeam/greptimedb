@@ -19,7 +19,10 @@ mod table;
 
 pub use container::{CacheContainer, Initializer, Invalidator, TokenFilter};
 pub use flow::{new_table_flownode_set_cache, TableFlownodeSetCache, TableFlownodeSetCacheRef};
-pub use registry::{CacheRegistry, CacheRegistryBuilder, CacheRegistryRef};
+pub use registry::{
+    CacheRegistry, CacheRegistryBuilder, CacheRegistryRef, LayeredCacheRegistry,
+    LayeredCacheRegistryBuilder, LayeredCacheRegistryRef,
+};
 pub use table::{
     new_composite_table_route_cache, new_table_info_cache, new_table_name_cache,
     new_table_route_cache, CompositeTableRoute, CompositeTableRouteCache,

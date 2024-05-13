@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use anymap2::SendSyncAnyMap;
 use futures::future::join_all;
 
 use crate::cache_invalidator::{CacheInvalidator, Context};
@@ -21,6 +22,56 @@ use crate::error::Result;
 use crate::instruction::CacheIdent;
 
 pub type CacheRegistryRef = Arc<CacheRegistry>;
+pub type LayeredCacheRegistryRef = Arc<LayeredCacheRegistry>;
+
+/// [LayeredCacheRegistry] Builder.
+#[derive(Default)]
+pub struct LayeredCacheRegistryBuilder {
+    registry: LayeredCacheRegistry,
+}
+
+impl LayeredCacheRegistryBuilder {
+    pub fn add_cache_layer(mut self, registry: CacheRegistry) -> Self {
+        self.registry.layers.push(registry);
+
+        self
+    }
+
+    pub fn build(self) -> LayeredCacheRegistry {
+        self.registry
+    }
+}
+
+/// [LayeredCacheRegistry] invalidates cache respecting the level of [CacheRegistry].
+#[derive(Default)]
+pub struct LayeredCacheRegistry {
+    layers: Vec<CacheRegistry>,
+}
+
+#[async_trait::async_trait]
+impl CacheInvalidator for LayeredCacheRegistry {
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
+        let mut results = Vec::with_capacity(self.layers.len());
+        for registry in &self.layers {
+            results.push(registry.invalidate(ctx, caches).await);
+        }
+        results.into_iter().collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+}
+
+impl LayeredCacheRegistry {
+    /// Returns __cloned__ the value stored in the collection for the type `T`, if it exists.
+    pub fn get<T: Send + Sync + Clone + 'static>(&self) -> Option<T> {
+        for registry in &self.layers {
+            if let Some(cache) = registry.get::<T>() {
+                return Some(cache);
+            }
+        }
+
+        None
+    }
+}
 
 /// [CacheRegistryBuilder] provides ability of
 /// - Register the `cache` which implements the [CacheInvalidator] trait into [CacheRegistry].
@@ -46,7 +97,7 @@ impl CacheRegistryBuilder {
 #[derive(Default)]
 pub struct CacheRegistry {
     indexes: Vec<Arc<dyn CacheInvalidator>>,
-    registry: anymap2::SendSyncAnyMap,
+    registry: SendSyncAnyMap,
 }
 
 #[async_trait::async_trait]
@@ -80,7 +131,7 @@ impl CacheRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use std::sync::Arc;
 
     use moka::future::{Cache, CacheBuilder};
@@ -89,7 +140,10 @@ mod tests {
     use crate::cache::*;
     use crate::instruction::CacheIdent;
 
-    fn test_cache(name: &str) -> CacheContainer<String, String, CacheIdent> {
+    fn test_cache(
+        name: &str,
+        invalidator: Invalidator<String, String, CacheIdent>,
+    ) -> CacheContainer<String, String, CacheIdent> {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
         let filter: TokenFilter<CacheIdent> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
@@ -98,13 +152,14 @@ mod tests {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let invalidator: Invalidator<String, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
 
         CacheContainer::new(name.to_string(), cache, invalidator, init, filter)
     }
 
-    fn test_i32_cache(name: &str) -> CacheContainer<i32, String, CacheIdent> {
+    fn test_i32_cache(
+        name: &str,
+        invalidator: Invalidator<i32, String, CacheIdent>,
+    ) -> CacheContainer<i32, String, CacheIdent> {
         let cache: Cache<i32, String> = CacheBuilder::new(128).build();
         let filter: TokenFilter<CacheIdent> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
@@ -113,8 +168,6 @@ mod tests {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("foo".to_string())) })
         });
-        let invalidator: Invalidator<i32, String, CacheIdent> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
 
         CacheContainer::new(name.to_string(), cache, invalidator, init, filter)
     }
@@ -122,8 +175,12 @@ mod tests {
     #[tokio::test]
     async fn test_register() {
         let builder = CacheRegistryBuilder::default();
-        let i32_cache = Arc::new(test_i32_cache("i32_cache"));
-        let cache = Arc::new(test_cache("string_cache"));
+        let invalidator: Invalidator<_, String, CacheIdent> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+        let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
+        let invalidator: Invalidator<_, String, CacheIdent> =
+            Box::new(|_, _| Box::pin(async { Ok(()) }));
+        let cache = Arc::new(test_cache("string_cache", invalidator));
         let registry = builder.add_cache(i32_cache).add_cache(cache).build();
 
         let cache = registry
@@ -131,6 +188,47 @@ mod tests {
             .unwrap();
         assert_eq!(cache.name(), "i32_cache");
 
+        let cache = registry
+            .get::<Arc<CacheContainer<String, String, CacheIdent>>>()
+            .unwrap();
+        assert_eq!(cache.name(), "string_cache");
+    }
+
+    #[tokio::test]
+    async fn test_layered_registry() {
+        let builder = LayeredCacheRegistryBuilder::default();
+        // 1st layer
+        let counter = Arc::new(AtomicBool::new(false));
+        let moved_counter = counter.clone();
+        let invalidator: Invalidator<String, String, CacheIdent> = Box::new(move |_, _| {
+            let counter = moved_counter.clone();
+            Box::pin(async move {
+                assert!(!counter.load(Ordering::Relaxed));
+                counter.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+        });
+        let cache = Arc::new(test_cache("string_cache", invalidator));
+        let builder =
+            builder.add_cache_layer(CacheRegistryBuilder::default().add_cache(cache).build());
+        // 2nd layer
+        let moved_counter = counter.clone();
+        let invalidator: Invalidator<i32, String, CacheIdent> = Box::new(move |_, _| {
+            let counter = moved_counter.clone();
+            Box::pin(async move {
+                assert!(counter.load(Ordering::Relaxed));
+                Ok(())
+            })
+        });
+        let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
+        let builder =
+            builder.add_cache_layer(CacheRegistryBuilder::default().add_cache(i32_cache).build());
+
+        let registry = builder.build();
+        let cache = registry
+            .get::<Arc<CacheContainer<i32, String, CacheIdent>>>()
+            .unwrap();
+        assert_eq!(cache.name(), "i32_cache");
         let cache = registry
             .get::<Arc<CacheContainer<String, String, CacheIdent>>>()
             .unwrap();
