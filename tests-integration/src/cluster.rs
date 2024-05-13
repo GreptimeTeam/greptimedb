@@ -19,12 +19,13 @@ use std::time::Duration;
 
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use cache::default_cache_registry_builder;
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -346,19 +347,30 @@ impl GreptimeDbClusterBuilder {
 
         let cached_meta_backend =
             Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
-        let cache_registry_builder =
-            default_cache_registry_builder(Arc::new(MetaKvBackend::new(meta_client.clone())));
-        let cache_registry = Arc::new(
-            cache_registry_builder
+
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
+            CacheRegistryBuilder::default()
                 .add_cache(cached_meta_backend.clone())
                 .build(),
         );
+        let fundamental_cache_registry =
+            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
         let table_cache = cache_registry.get().unwrap();
+        let table_route_cache = cache_registry.get().unwrap();
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Distributed,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             table_cache,
+            table_route_cache,
         )
         .await;
 

@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
+use common_meta::cache::{new_table_route_cache, TableRouteCacheRef};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -28,6 +29,7 @@ use datafusion_expr::{lit, Operator};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use meta_client::client::MetaClient;
+use moka::future::CacheBuilder;
 use partition::columns::RangeColumnsPartitionRule;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -81,6 +83,15 @@ fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumb
     HashMap::default()
 }
 
+fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
+    let cache = CacheBuilder::new(128).build();
+    Arc::new(new_table_route_cache(
+        "table_route_cache".to_string(),
+        cache,
+        kv_backend.clone(),
+    ))
+}
+
 /// Create a partition rule manager with two tables, one is partitioned by single column, and
 /// the other one is two. The tables are under default catalog and schema.
 ///
@@ -101,7 +112,8 @@ pub(crate) async fn create_partition_rule_manager(
     kv_backend: KvBackendRef,
 ) -> PartitionRuleManagerRef {
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
-    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
 
     let regions = vec![1u32, 2, 3];
     let region_wal_options = new_test_region_wal_options(regions.clone());
@@ -244,10 +256,11 @@ async fn test_find_partition_rule() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_find_regions() {
-    let kv_backend = MetaKvBackend {
+    let kv_backend = Arc::new(MetaKvBackend {
         client: Arc::new(MetaClient::default()),
-    };
-    let partition_manager = Arc::new(PartitionRuleManager::new(Arc::new(kv_backend)));
+    });
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
 
     // PARTITION BY RANGE (a) (
     //   PARTITION r1 VALUES LESS THAN (10),

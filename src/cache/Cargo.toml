@@ -6,5 +6,8 @@ license.workspace = true
 
 [dependencies]
 catalog.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
 common-meta.workspace = true
 moka.workspace = true
+snafu.workspace = true

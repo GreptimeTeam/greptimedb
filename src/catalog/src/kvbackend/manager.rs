@@ -22,6 +22,7 @@ use common_catalog::consts::{
 };
 use common_config::Mode;
 use common_error::ext::BoxedError;
+use common_meta::cache::TableRouteCacheRef;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoValue;
@@ -71,11 +72,15 @@ impl KvBackendCatalogManager {
         meta_client: Option<Arc<MetaClient>>,
         backend: KvBackendRef,
         table_cache: TableCacheRef,
+        table_route_cache: TableRouteCacheRef,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             mode,
             meta_client,
-            partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
+            partition_manager: Arc::new(PartitionRuleManager::new(
+                backend.clone(),
+                table_route_cache,
+            )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),

@@ -29,6 +29,13 @@ use crate::expr::PartitionExpr;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to find table route: {}", table_id))]
+    TableRouteNotFound {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table route manager error"))]
     TableRouteManager {
         source: common_meta::error::Error,
@@ -185,6 +192,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unexpected: {err_msg}"))]
+    Unexpected {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -203,9 +217,11 @@ impl ErrorExt for Error {
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
             Error::SerializeJson { .. } | Error::DeserializeJson { .. } => StatusCode::Internal,
+            Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::InvalidTableRouteData { .. } => StatusCode::Internal,
             Error::ConvertScalarValue { .. } => StatusCode::Internal,
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
+            Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::MissingDefaultValue { .. } => StatusCode::Internal,
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),

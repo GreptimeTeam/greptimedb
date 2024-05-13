@@ -89,4 +89,11 @@ lazy_static! {
         &["name"]
     )
     .unwrap();
+    /// Cache container load cache timer
+    pub static ref CACHE_CONTAINER_LOAD_CACHE: HistogramVec = register_histogram_vec!(
+        "greptime_meta_cache_container_load_cache",
+        "cache container load cache",
+        &["name"]
+    )
+    .unwrap();
 }
