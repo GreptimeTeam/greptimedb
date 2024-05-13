@@ -65,7 +65,7 @@ impl CacheInvalidator for LayeredCacheRegistry {
         for registry in &self.layers {
             results.push(registry.invalidate(ctx, caches).await);
         }
-        results.into_iter().collect::<Result<Vec<_>>>().map(())
+        results.into_iter().collect::<Result<Vec<_>>>().map(|_| ())
     }
 }
 
