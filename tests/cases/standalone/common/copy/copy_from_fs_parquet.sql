@@ -42,9 +42,11 @@ select count(*) from with_limit_rows;
 
 CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts timestamp time index);
 
-Copy with_limit_rows FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
 
 select count(*) from with_limit_rows_segment;
+
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT -1;
 
 drop table demo;
 

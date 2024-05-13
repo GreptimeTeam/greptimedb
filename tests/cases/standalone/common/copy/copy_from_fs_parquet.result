@@ -113,7 +113,7 @@ CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts 
 
 Affected Rows: 0
 
-Copy with_limit_rows FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
 
 Affected Rows: 2
 
@@ -122,8 +122,12 @@ select count(*) from with_limit_rows_segment;
 +----------+
 | COUNT(*) |
 +----------+
-| 0        |
+| 2        |
 +----------+
+
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT -1;
+
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT -1;, expected: 'maximum rows', found: 1: sql parser error: Expected literal int, found: - at Line: 1, Column 75
 
 drop table demo;
 
