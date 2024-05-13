@@ -168,6 +168,8 @@ async fn run_test<R: Rng + 'static>(
                     err_msg: err.to_string(),
                 }
             );
+            created_table.insert(table_name);
+            return Ok(());
         }
     }
 
