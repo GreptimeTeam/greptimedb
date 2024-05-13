@@ -2641,7 +2641,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
- "async-compression 0.4.9",
+ "async-compression 0.4.10",
  "async-trait",
  "bytes",
  "bzip2",
