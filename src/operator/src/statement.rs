@@ -208,6 +208,7 @@ impl StatementExecutor {
                 self.create_database(
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
+                    stmt.options.into_map(),
                     query_ctx,
                 )
                 .await

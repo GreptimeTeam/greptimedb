@@ -18,12 +18,15 @@
 mod join;
 mod reduce;
 
+use std::collections::BTreeSet;
+
 use datatypes::arrow::ipc::Map;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::error::Error;
 use crate::expr::{
-    AggregateExpr, EvalError, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr,
+    AggregateExpr, EvalError, GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
+    TypedExpr,
 };
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
@@ -71,6 +74,7 @@ impl TypedPlan {
         let mfp = MapFilterProject::new(input_arity)
             .map(exprs)?
             .project(input_arity..input_arity + output_arity)?;
+        let out_typ = self.typ.apply_mfp(&mfp, &expr_typs)?;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
             Plan::Mfp {
@@ -85,8 +89,7 @@ impl TypedPlan {
                 mfp,
             },
         };
-        let typ = RelationType::new(expr_typs);
-        Ok(TypedPlan { typ, plan })
+        Ok(TypedPlan { typ: out_typ, plan })
     }
 
     /// Add a new filter to the plan, will filter out the records that do not satisfy the filter
@@ -181,4 +184,46 @@ pub enum Plan {
         /// Whether to consolidate the output, e.g., cancel negated records.
         consolidate_output: bool,
     },
+}
+
+impl Plan {
+    /// Find all the used collection in the plan
+    pub fn find_used_collection(&self) -> BTreeSet<GlobalId> {
+        fn recur_find_use(plan: &Plan, used: &mut BTreeSet<GlobalId>) {
+            match plan {
+                Plan::Get { id } => {
+                    match id {
+                        Id::Local(_) => (),
+                        Id::Global(g) => {
+                            used.insert(*g);
+                        }
+                    };
+                }
+                Plan::Let { value, body, .. } => {
+                    recur_find_use(value, used);
+                    recur_find_use(body, used);
+                }
+                Plan::Mfp { input, .. } => {
+                    recur_find_use(input, used);
+                }
+                Plan::Reduce { input, .. } => {
+                    recur_find_use(input, used);
+                }
+                Plan::Join { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(input, used);
+                    }
+                }
+                Plan::Union { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(input, used);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut ret = Default::default();
+        recur_find_use(self, &mut ret);
+        ret
+    }
 }

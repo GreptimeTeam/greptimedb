@@ -69,14 +69,21 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
     fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
+
+        let substrait_plan = self.to_sub_plan(plan)?;
+        substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
+
+        Ok(buf.freeze())
+    }
+}
+
+impl DFLogicalSubstraitConvertor {
+    pub fn to_sub_plan(&self, plan: &LogicalPlan) -> Result<Box<Plan>, Error> {
         let session_state =
             SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
                 .with_serializer_registry(Arc::new(ExtensionSerializer));
         let context = SessionContext::new_with_state(session_state);
 
-        let substrait_plan = to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)?;
-        substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
-
-        Ok(buf.freeze())
+        to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)
     }
 }

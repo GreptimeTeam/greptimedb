@@ -25,7 +25,7 @@ use crate::utils::{ArrangeHandler, Arrangement};
 
 /// input/output of a dataflow
 /// One `ComputeState` manage the input/output/schedule of one `Hydroflow`
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DataflowState {
     /// it is important to use a deque to maintain the order of subgraph here
     /// TODO(discord9): consider dedup? Also not necessary for hydroflow itself also do dedup when schedule

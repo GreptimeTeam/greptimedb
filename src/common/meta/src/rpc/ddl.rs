@@ -33,6 +33,7 @@ use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnNull};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
@@ -112,7 +113,7 @@ impl DdlTask {
         catalog: String,
         schema: String,
         create_if_not_exists: bool,
-        options: Option<HashMap<String, String>>,
+        options: HashMap<String, String>,
     ) -> Self {
         DdlTask::CreateDatabase(CreateDatabaseTask {
             catalog,
@@ -640,12 +641,14 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
     }
 }
 
+#[serde_as]
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct CreateDatabaseTask {
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
-    pub options: Option<HashMap<String, String>>,
+    #[serde_as(deserialize_as = "DefaultOnNull")]
+    pub options: HashMap<String, String>,
 }
 
 impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
@@ -665,7 +668,7 @@ impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
             catalog: catalog_name,
             schema: schema_name,
             create_if_not_exists,
-            options: Some(options),
+            options,
         })
     }
 }
@@ -686,7 +689,7 @@ impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
                 catalog_name: catalog,
                 schema_name: schema,
                 create_if_not_exists,
-                options: options.unwrap_or_default(),
+                options,
             }),
         })
     }

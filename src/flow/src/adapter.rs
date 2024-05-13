@@ -16,3 +16,6 @@
 //! and communicating with other parts of the database
 
 pub(crate) mod error;
+pub(crate) mod node_context;
+
+pub(crate) use node_context::FlownodeContext;

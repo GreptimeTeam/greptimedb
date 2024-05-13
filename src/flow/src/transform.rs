@@ -14,12 +14,35 @@
 
 //! Transform Substrait into execution plan
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use common_error::ext::BoxedError;
+use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType as CDT;
+use literal::{from_substrait_literal, from_substrait_type};
+use prost::Message;
+use query::parser::QueryLanguageParser;
+use query::plan::LogicalPlan;
+use query::QueryEngine;
+use session::context::QueryContext;
+use snafu::{OptionExt, ResultExt};
+/// note here we are using the `substrait_proto_df` crate from the `substrait` module and
+/// rename it to `substrait_proto`
+use substrait::{
+    substrait_proto_df as substrait_proto, DFLogicalSubstraitConvertor, SubstraitPlan,
+};
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
+use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
-use crate::adapter::error::{Error, NotImplementedSnafu, TableNotFoundSnafu};
+use crate::adapter::error::{
+    Error, ExternalSnafu, InvalidQueryPlanSnafu, InvalidQueryProstSnafu,
+    InvalidQuerySubstraitSnafu, NotImplementedSnafu, TableNotFoundSnafu, UnexpectedSnafu,
+};
+use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
+use crate::plan::TypedPlan;
 use crate::repr::RelationType;
+
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -42,11 +65,6 @@ mod aggr;
 mod expr;
 mod literal;
 mod plan;
-
-use literal::{from_substrait_literal, from_substrait_type};
-use snafu::OptionExt;
-use substrait::substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
-use substrait::substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 /// In Substrait, a function can be define by an u32 anchor, and the anchor can be mapped to a name
 ///
@@ -79,38 +97,34 @@ impl FunctionExtensions {
     }
 }
 
-/// A context that holds the information of the dataflow
-pub struct DataflowContext {
-    /// `id` refer to any source table in the dataflow, and `name` is the name of the table
-    /// which is a `Vec<String>` in substrait
-    id_to_name: HashMap<GlobalId, Vec<String>>,
-    /// see `id_to_name`
-    name_to_id: HashMap<Vec<String>, GlobalId>,
-    /// the schema of the table
-    schema: HashMap<GlobalId, RelationType>,
-}
+/// To reuse existing code for parse sql, the sql is first parsed into a datafusion logical plan,
+/// then to a substrait plan, and finally to a flow plan.
+pub async fn sql_to_flow_plan(
+    ctx: &mut FlownodeContext,
+    engine: &Arc<dyn QueryEngine>,
+    sql: &str,
+) -> Result<TypedPlan, Error> {
+    let query_ctx = ctx.query_context.clone().ok_or_else(|| {
+        UnexpectedSnafu {
+            reason: "Query context is missing",
+        }
+        .build()
+    })?;
+    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).context(InvalidQueryPlanSnafu)?;
+    let plan = engine
+        .planner()
+        .plan(stmt, query_ctx)
+        .await
+        .context(InvalidQueryPlanSnafu)?;
+    let LogicalPlan::DfPlan(plan) = plan;
+    let sub_plan = DFLogicalSubstraitConvertor {}
+        .to_sub_plan(&plan)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
 
-impl DataflowContext {
-    /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
-    ///
-    /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &Vec<String>) -> Result<(GlobalId, RelationType), Error> {
-        let id = self
-            .name_to_id
-            .get(name)
-            .copied()
-            .with_context(|| TableNotFoundSnafu {
-                name: name.join("."),
-            })?;
-        let schema = self
-            .schema
-            .get(&id)
-            .cloned()
-            .with_context(|| TableNotFoundSnafu {
-                name: name.join("."),
-            })?;
-        Ok((id, schema))
-    }
+    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan)?;
+
+    Ok(flow_plan)
 }
 
 #[cfg(test)]
@@ -124,22 +138,29 @@ mod test {
     use query::plan::LogicalPlan;
     use query::QueryEngine;
     use session::context::QueryContext;
-    use substrait::substrait_proto::proto;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+    use substrait_proto::proto;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
+    use crate::adapter::node_context::IdToNameMap;
     use crate::repr::ColumnType;
 
-    pub fn create_test_ctx() -> DataflowContext {
+    pub fn create_test_ctx() -> FlownodeContext {
         let gid = GlobalId::User(0);
-        let name = vec!["numbers".to_string()];
+        let name = [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers".to_string(),
+        ];
         let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-
-        DataflowContext {
-            id_to_name: HashMap::from([(gid, name.clone())]),
-            name_to_id: HashMap::from([(name.clone(), gid)]),
+        let mut tri_map = IdToNameMap::new();
+        tri_map.insert(Some(name.clone()), Some(0), gid);
+        FlownodeContext {
             schema: HashMap::from([(gid, schema)]),
+            table_repr: tri_map,
+            query_context: Some(Arc::new(QueryContext::with("greptime", "public"))),
+            ..Default::default()
         }
     }
 

@@ -14,18 +14,19 @@
 
 use common_decimal::Decimal128;
 use common_time::{Date, Timestamp};
-use datafusion_substrait::variation_const::{
+use datatypes::data_type::ConcreteDataType as CDT;
+use datatypes::value::Value;
+use substrait::variation_const::{
     DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
     TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
     UNSIGNED_INTEGER_TYPE_REF,
 };
-use datatypes::data_type::ConcreteDataType as CDT;
-use datatypes::value::Value;
-use substrait::substrait_proto::proto::expression::literal::LiteralType;
-use substrait::substrait_proto::proto::expression::Literal;
-use substrait::substrait_proto::proto::r#type::Kind;
+use substrait_proto::proto::expression::literal::LiteralType;
+use substrait_proto::proto::expression::Literal;
+use substrait_proto::proto::r#type::Kind;
 
 use crate::adapter::error::{Error, NotImplementedSnafu, PlanSnafu};
+use crate::transform::substrait_proto;
 
 /// Convert a Substrait literal into a Value and its ConcreteDataType (So that we can know type even if the value is null)
 pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Error> {
@@ -109,9 +110,7 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
 }
 
 /// convert a Substrait type into a ConcreteDataType
-pub fn from_substrait_type(
-    null_type: &substrait::substrait_proto::proto::Type,
-) -> Result<CDT, Error> {
+pub fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<CDT, Error> {
     if let Some(kind) = &null_type.kind {
         match kind {
             Kind::Bool(_) => Ok(CDT::boolean_datatype()),
