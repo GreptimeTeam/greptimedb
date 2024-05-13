@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::{Query, State};
+use axum::Router;
 use bare::process::{Pid, ProcessManager};
 use common_telemetry::{info, warn};
 use nix::sys::signal::Signal;
@@ -39,13 +42,56 @@ mod bare;
 mod error;
 mod utils;
 
+use axum::routing::get;
+use prometheus::{Encoder, TextEncoder};
+
 use crate::error::Result;
 use crate::utils::{generate_create_table_expr, get_conf_path, path_to_stdio, render_config_file};
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
+#[derive(Copy, Clone)]
+pub struct MetricsHandler;
+
+impl MetricsHandler {
+    pub fn render(&self) -> String {
+        let mut buffer = Vec::new();
+        let encoder = TextEncoder::new();
+        // Gather the metrics.
+        let metric_families = prometheus::gather();
+        // Encode them to send.
+        match encoder.encode(&metric_families, &mut buffer) {
+            Ok(_) => match String::from_utf8(buffer) {
+                Ok(s) => s,
+                Err(e) => e.to_string(),
+            },
+            Err(e) => e.to_string(),
+        }
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn metrics(
+    State(state): State<MetricsHandler>,
+    Query(_params): Query<HashMap<String, String>>,
+) -> String {
+    state.render()
+}
+
 #[tokio::main]
 async fn main() {
     common_telemetry::init_default_ut_logging();
+
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route("/metric", get(metrics))
+            .with_state(MetricsHandler);
+        // run our app with hyper, listening globally on port 3000
+        let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+        axum::Server::bind(&addr)
+            .serve(app.into_make_service())
+            .await
+            .unwrap(); 
+    });
 
     let state = Arc::new(TestState {
         killed: AtomicBool::new(false),

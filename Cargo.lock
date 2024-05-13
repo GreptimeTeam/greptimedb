@@ -10065,11 +10065,14 @@ checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 name = "tests-chaos"
 version = "0.7.2"
 dependencies = [
+ "axum",
+ "axum-macros",
  "common-error",
  "common-macro",
  "common-telemetry",
  "common-time",
  "nix 0.26.4",
+ "prometheus",
  "rand",
  "rand_chacha",
  "reqwest",
