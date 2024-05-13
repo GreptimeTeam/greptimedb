@@ -241,8 +241,8 @@ pub async fn metasrv_builder(
 
 async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
     let etcd_endpoints = opts
-        .store_addr
-        .split(',')
+        .store_addrs
+        .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
