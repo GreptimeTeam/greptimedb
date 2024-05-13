@@ -195,7 +195,7 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::DropDatabase(drop_database.try_into()?))
             }
             Task::CreateFlowTask(create_flow) => Ok(DdlTask::CreateFlow(create_flow.try_into()?)),
-            Task::DropFlowTask(_) => unimplemented!(),
+            Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
         }
     }
 }
