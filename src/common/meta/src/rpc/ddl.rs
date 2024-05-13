@@ -33,6 +33,7 @@ use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnNull};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
@@ -640,11 +641,13 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
     }
 }
 
+#[serde_as]
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct CreateDatabaseTask {
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
+    #[serde_as(deserialize_as = "DefaultOnNull")]
     pub options: HashMap<String, String>,
 }
 

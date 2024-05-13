@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnNull};
 use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
@@ -137,11 +138,13 @@ pub enum CreateDatabaseState {
     CreateMetadata,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateDatabaseData {
     pub state: CreateDatabaseState,
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
+    #[serde_as(deserialize_as = "DefaultOnNull")]
     pub options: HashMap<String, String>,
 }
