@@ -49,7 +49,7 @@ impl LayeredCacheRegistryBuilder {
     }
 }
 
-/// [LayeredCacheRegistry] invalidates cache respecting the level of [CacheRegistry].
+/// [LayeredCacheRegistry] invalidate caches sequentially from the first layer.
 #[derive(Default)]
 pub struct LayeredCacheRegistry {
     layers: Vec<CacheRegistry>,
