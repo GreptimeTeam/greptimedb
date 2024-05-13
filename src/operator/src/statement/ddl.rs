@@ -813,6 +813,7 @@ impl StatementExecutor {
         &self,
         database: &str,
         create_if_not_exists: bool,
+        options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         let catalog = query_context.current_catalog();
@@ -840,6 +841,7 @@ impl StatementExecutor {
                 catalog.to_string(),
                 database.to_string(),
                 create_if_not_exists,
+                options,
                 query_context,
             )
             .await?;
@@ -857,11 +859,12 @@ impl StatementExecutor {
         catalog: String,
         database: String,
         create_if_not_exists: bool,
+        options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
             query_context,
-            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, None),
+            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
         };
 
         self.procedure_executor

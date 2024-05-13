@@ -123,6 +123,13 @@ pub enum Error {
     #[snafu(display("Invalid database name: {}", name))]
     InvalidDatabaseName { name: String },
 
+    #[snafu(display("Unrecognized database option key: {}", key))]
+    InvalidDatabaseOption {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid table name: {}", name))]
     InvalidTableName { name: String },
 
@@ -228,6 +235,7 @@ impl ErrorExt for Error {
             InvalidColumnOption { .. }
             | InvalidTableOptionValue { .. }
             | InvalidDatabaseName { .. }
+            | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
             | InvalidSqlValue { .. }

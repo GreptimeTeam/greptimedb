@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnNull};
 use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
@@ -39,7 +40,7 @@ impl CreateDatabaseProcedure {
         catalog: String,
         schema: String,
         create_if_not_exists: bool,
-        options: Option<HashMap<String, String>>,
+        options: HashMap<String, String>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -85,19 +86,14 @@ impl CreateDatabaseProcedure {
     }
 
     pub async fn on_create_metadata(&mut self) -> Result<Status> {
-        let value: Option<SchemaNameValue> = self
-            .data
-            .options
-            .as_ref()
-            .map(|hash_map_ref| hash_map_ref.try_into())
-            .transpose()?;
+        let value: SchemaNameValue = (&self.data.options).try_into()?;
 
         self.context
             .table_metadata_manager
             .schema_manager()
             .create(
                 SchemaNameKey::new(&self.data.catalog, &self.data.schema),
-                value,
+                Some(value),
                 self.data.create_if_not_exists,
             )
             .await?;
@@ -142,11 +138,13 @@ pub enum CreateDatabaseState {
     CreateMetadata,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateDatabaseData {
     pub state: CreateDatabaseState,
     pub catalog: String,
     pub schema: String,
     pub create_if_not_exists: bool,
-    pub options: Option<HashMap<String, String>>,
+    #[serde_as(deserialize_as = "DefaultOnNull")]
+    pub options: HashMap<String, String>,
 }

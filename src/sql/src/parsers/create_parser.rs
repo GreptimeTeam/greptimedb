@@ -27,8 +27,9 @@ use table::requests::validate_table_option;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu,
-    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidTableOptionSnafu,
+    InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu,
+    UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
@@ -44,6 +45,12 @@ pub const MAXVALUE: &str = "MAXVALUE";
 pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
 pub const WHEN: &str = "WHEN";
+
+const DB_OPT_KEY_TTL: &str = "ttl";
+
+fn validate_database_option(key: &str) -> bool {
+    [DB_OPT_KEY_TTL].contains(&key)
+}
 
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
@@ -124,9 +131,28 @@ impl<'a> ParserContext<'a> {
             actual: self.peek_token_as_string(),
         })?;
         let database_name = Self::canonicalize_object_name(database_name);
+
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
+
+        for key in options.keys() {
+            ensure!(
+                validate_database_option(key),
+                InvalidDatabaseOptionSnafu {
+                    key: key.to_string()
+                }
+            );
+        }
+
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,
             if_not_exists,
+            options: options.into(),
         }))
     }
 
@@ -1025,14 +1051,27 @@ mod tests {
         let sql = "CREATE DATABASE `fOo`";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        let mut stmts = result.unwrap();
-        assert_eq!(
-            stmts.pop().unwrap(),
-            Statement::CreateDatabase(CreateDatabase::new(
-                ObjectName(vec![Ident::with_quote('`', "fOo"),]),
-                false
-            ))
-        );
+        let stmts = result.unwrap();
+        match &stmts.last().unwrap() {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name, ObjectName(vec![Ident::with_quote('`', "fOo")]));
+                assert!(!c.if_not_exists);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "CREATE DATABASE prometheus with (ttl='1h');";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        match &stmts[0] {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name.to_string(), "prometheus");
+                assert!(!c.if_not_exists);
+                assert_eq!(c.options.get("ttl").unwrap(), "1h");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

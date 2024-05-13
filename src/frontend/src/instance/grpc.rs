@@ -125,6 +125,7 @@ impl GrpcQueryHandler for Instance {
                             .create_database(
                                 &expr.schema_name,
                                 expr.create_if_not_exists,
+                                expr.options,
                                 ctx.clone(),
                             )
                             .await?
