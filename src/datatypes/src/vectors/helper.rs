@@ -278,7 +278,7 @@ impl Helper {
             ArrowDataType::LargeUtf8 => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
-                Arc::new(BinaryVector::try_from_arrow_array(array)?)
+                Arc::new(StringVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
