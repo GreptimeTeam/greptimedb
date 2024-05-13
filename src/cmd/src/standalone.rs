@@ -17,8 +17,8 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{
-    build_fundamental_cache_registry, with_default_composite_cache_registry,
-    COMPOSITE_TABLE_ROUTE_CACHE, TABLE_CACHE_NAME,
+    build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
+    TABLE_ROUTE_CACHE_NAME,
 };
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
@@ -399,16 +399,15 @@ impl StartCommand {
         let table_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
             name: TABLE_CACHE_NAME,
         })?;
-        let composite_table_route_cache =
-            layered_cache_registry.get().context(CacheRequiredSnafu {
-                name: COMPOSITE_TABLE_ROUTE_CACHE,
-            })?;
+        let table_route_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
+            name: TABLE_ROUTE_CACHE_NAME,
+        })?;
         let catalog_manager = KvBackendCatalogManager::new(
             dn_opts.mode,
             None,
             kv_backend.clone(),
             table_cache,
-            composite_table_route_cache,
+            table_route_cache,
         )
         .await;
 

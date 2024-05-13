@@ -16,12 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
-use common_meta::cache::CompositeTableRouteCacheRef;
+use common_meta::cache::{TableRoute, TableRouteCacheRef};
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router;
-use common_meta::rpc::router::RegionRoute;
+use common_meta::rpc::router::{self, RegionRoute};
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
@@ -52,7 +51,7 @@ pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 /// - filters (in case of select, deletion and update)
 pub struct PartitionRuleManager {
     table_route_manager: TableRouteManager,
-    composite_table_route_cache: CompositeTableRouteCacheRef,
+    table_route_cache: TableRouteCacheRef,
 }
 
 #[derive(Debug)]
@@ -62,29 +61,46 @@ pub struct PartitionInfo {
 }
 
 impl PartitionRuleManager {
-    pub fn new(
-        kv_backend: KvBackendRef,
-        composite_table_route_cache: CompositeTableRouteCacheRef,
-    ) -> Self {
+    pub fn new(kv_backend: KvBackendRef, table_route_cache: TableRouteCacheRef) -> Self {
         Self {
             table_route_manager: TableRouteManager::new(kv_backend),
-            composite_table_route_cache,
+            table_route_cache,
         }
     }
 
-    pub async fn find_table_route(
+    pub async fn find_physical_table_route(
         &self,
         table_id: TableId,
     ) -> Result<Arc<PhysicalTableRouteValue>> {
-        let table_route = self
-            .composite_table_route_cache
+        match self
+            .table_route_cache
             .get(table_id)
             .await
             .context(error::TableRouteManagerSnafu)?
-            .context(error::TableRouteNotFoundSnafu { table_id })?;
+            .context(error::TableRouteNotFoundSnafu { table_id })?
+            .as_ref()
+        {
+            TableRoute::Physical(physical_table_route) => Ok(physical_table_route.clone()),
+            TableRoute::Logical(logical_table_route) => {
+                let physical_table_id = logical_table_route.physical_table_id();
+                let physical_table_route = self
+                    .table_route_cache
+                    .get(physical_table_id)
+                    .await
+                    .context(error::TableRouteManagerSnafu)?
+                    .context(error::TableRouteNotFoundSnafu { table_id })?;
 
-        let table_route = table_route.as_physical_table_route_ref().clone();
-        Ok(table_route)
+                let physical_table_route = physical_table_route
+                    .as_physical_table_route_ref()
+                    .context(error::UnexpectedSnafu{
+                        err_msg: format!(
+                            "Expected the physical table route, but got logical table route, table: {table_id}"
+                        ),
+                    })?;
+
+                Ok(physical_table_route.clone())
+            }
+        }
     }
 
     pub async fn batch_find_region_routes(
@@ -108,7 +124,10 @@ impl PartitionRuleManager {
     }
 
     pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
-        let region_routes = &self.find_table_route(table_id).await?.region_routes;
+        let region_routes = &self
+            .find_physical_table_route(table_id)
+            .await?
+            .region_routes;
         ensure!(
             !region_routes.is_empty(),
             error::FindTableRoutesSnafu { table_id }
@@ -241,7 +260,7 @@ impl PartitionRuleManager {
 
     pub async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
         let region_routes = &self
-            .find_table_route(region_id.table_id())
+            .find_physical_table_route(region_id.table_id())
             .await?
             .region_routes;
 

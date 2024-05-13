@@ -16,9 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
-use common_meta::cache::{
-    new_composite_table_route_cache, new_table_route_cache, CompositeTableRouteCacheRef,
-};
+use common_meta::cache::{new_table_route_cache, TableRouteCacheRef};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -85,18 +83,12 @@ fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumb
     HashMap::default()
 }
 
-fn test_new_composite_table_route_cache(kv_backend: KvBackendRef) -> CompositeTableRouteCacheRef {
+fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
     let cache = CacheBuilder::new(128).build();
-    let table_route_cache = Arc::new(new_table_route_cache(
+    Arc::new(new_table_route_cache(
         "table_route_cache".to_string(),
         cache,
         kv_backend.clone(),
-    ));
-    let cache = CacheBuilder::new(128).build();
-    Arc::new(new_composite_table_route_cache(
-        "composite_table_route_cache".to_string(),
-        cache,
-        table_route_cache,
     ))
 }
 
@@ -120,11 +112,8 @@ pub(crate) async fn create_partition_rule_manager(
     kv_backend: KvBackendRef,
 ) -> PartitionRuleManagerRef {
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
-    let composite_table_route_cache = test_new_composite_table_route_cache(kv_backend.clone());
-    let partition_manager = Arc::new(PartitionRuleManager::new(
-        kv_backend,
-        composite_table_route_cache,
-    ));
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
 
     let regions = vec![1u32, 2, 3];
     let region_wal_options = new_test_region_wal_options(regions.clone());
@@ -270,11 +259,8 @@ async fn test_find_regions() {
     let kv_backend = Arc::new(MetaKvBackend {
         client: Arc::new(MetaClient::default()),
     });
-    let composite_table_route_cache = test_new_composite_table_route_cache(kv_backend.clone());
-    let partition_manager = Arc::new(PartitionRuleManager::new(
-        kv_backend,
-        composite_table_route_cache,
-    ));
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
 
     // PARTITION BY RANGE (a) (
     //   PARTITION r1 VALUES LESS THAN (10),

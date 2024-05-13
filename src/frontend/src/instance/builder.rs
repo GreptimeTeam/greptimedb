@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use cache::{COMPOSITE_TABLE_ROUTE_CACHE, TABLE_FLOWNODE_SET_CACHE_NAME};
+use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_meta::cache::{CompositeTableRouteCacheRef, LayeredCacheRegistryRef};
+use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
@@ -98,15 +98,15 @@ impl FrontendBuilder {
         let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
 
-        let composite_table_route_cache: CompositeTableRouteCacheRef = self
-            .layered_cache_registry
-            .get()
-            .context(error::CacheRequiredSnafu {
-                name: COMPOSITE_TABLE_ROUTE_CACHE,
-            })?;
+        let table_route_cache: TableRouteCacheRef =
+            self.layered_cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: TABLE_ROUTE_CACHE_NAME,
+                })?;
         let partition_manager = Arc::new(PartitionRuleManager::new(
             kv_backend.clone(),
-            composite_table_route_cache.clone(),
+            table_route_cache.clone(),
         ));
 
         let local_cache_invalidator = self
@@ -169,7 +169,7 @@ impl FrontendBuilder {
             kv_backend.clone(),
             local_cache_invalidator,
             inserter.clone(),
-            composite_table_route_cache,
+            table_route_cache,
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());

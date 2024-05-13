@@ -364,13 +364,13 @@ impl GreptimeDbClusterBuilder {
         );
 
         let table_cache = cache_registry.get().unwrap();
-        let composite_table_route_cache = cache_registry.get().unwrap();
+        let table_route_cache = cache_registry.get().unwrap();
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Distributed,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             table_cache,
-            composite_table_route_cache,
+            table_route_cache,
         )
         .await;
 
