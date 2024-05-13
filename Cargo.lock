@@ -10071,6 +10071,7 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
+ "lazy_static",
  "nix 0.26.4",
  "prometheus",
  "rand",

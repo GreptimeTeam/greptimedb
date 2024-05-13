@@ -43,7 +43,7 @@ mod error;
 mod utils;
 
 use axum::routing::get;
-use prometheus::{Encoder, TextEncoder};
+use prometheus::{register_int_counter, Encoder, IntCounter, TextEncoder};
 
 use crate::error::Result;
 use crate::utils::{generate_create_table_expr, get_conf_path, path_to_stdio, render_config_file};
@@ -77,6 +77,10 @@ pub async fn metrics(
     state.render()
 }
 
+lazy_static::lazy_static! {
+    static ref UP_COUNTER: IntCounter = register_int_counter!("up", "up counter").unwrap();
+}
+
 #[tokio::main]
 async fn main() {
     common_telemetry::init_default_ut_logging();
@@ -85,12 +89,11 @@ async fn main() {
         let app = Router::new()
             .route("/metric", get(metrics))
             .with_state(MetricsHandler);
-        // run our app with hyper, listening globally on port 3000
-        let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+        let addr = SocketAddr::from(([0, 0, 0, 0], 30000));
         axum::Server::bind(&addr)
             .serve(app.into_make_service())
             .await
-            .unwrap(); 
+            .unwrap();
     });
 
     let state = Arc::new(TestState {
@@ -102,6 +105,7 @@ async fn main() {
         let mut rng = ChaChaRng::seed_from_u64(0);
         loop {
             warn!("Staring");
+            UP_COUNTER.inc();
             let pid = start_database().await.expect("Failed to start database");
             let secs = rng.gen_range(100..300);
             moved_state.killed.store(false, Ordering::Relaxed);
@@ -150,11 +154,12 @@ async fn run_test<R: Rng + 'static>(
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&expr).unwrap();
     let result = sqlx::query(&sql).execute(client).await;
+
     match result {
         Ok(result) => {
-            created_table.insert(table_name);
             validate_mysql(client, state, &table_ctx).await;
             info!("Create table: {sql}, result: {result:?}");
+            created_table.insert(table_name);
         }
         Err(err) => {
             ensure!(
@@ -163,7 +168,6 @@ async fn run_test<R: Rng + 'static>(
                     err_msg: err.to_string(),
                 }
             );
-            created_table.insert(table_name);
         }
     }
 
@@ -193,6 +197,9 @@ async fn run_test<R: Rng + 'static>(
                 created_table.insert(table_name);
             }
             Err(err) => {
+                table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
+                let table_name = table_ctx.name.to_string();
+                created_table.insert(table_name);
                 ensure!(
                     state.killed.load(Ordering::Relaxed),
                     error::UnexpectedSnafu {
