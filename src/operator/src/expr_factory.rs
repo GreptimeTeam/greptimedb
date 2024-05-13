@@ -534,7 +534,6 @@ pub fn to_create_view_expr(
         or_replace: stmt.or_replace,
     };
 
-    // FIXME(dennis): validate the expr
     Ok(expr)
 }
 
@@ -791,5 +790,55 @@ mod tests {
             change_column_type.target_type
         );
         assert!(change_column_type.target_type_extension.is_none());
+    }
+
+    #[test]
+    fn test_to_create_view_expr() {
+        let sql = "CREATE VIEW test AS SELECT * FROM NUMBERS";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateView(stmt) = stmt else {
+            unreachable!()
+        };
+
+        let logical_plan = vec![1, 2, 3];
+
+        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!("public", expr.schema_name);
+        assert_eq!("test", expr.view_name);
+        assert!(!expr.create_if_not_exists);
+        assert!(!expr.or_replace);
+        assert_eq!(logical_plan, expr.logical_plan);
+    }
+
+    #[test]
+    fn test_to_create_view_expr_complex() {
+        let sql = "CREATE OR REPLACE VIEW IF NOT EXISTS test.test_view AS SELECT * FROM NUMBERS";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateView(stmt) = stmt else {
+            unreachable!()
+        };
+
+        let logical_plan = vec![1, 2, 3];
+
+        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!("test", expr.schema_name);
+        assert_eq!("test_view", expr.view_name);
+        assert!(expr.create_if_not_exists);
+        assert!(expr.or_replace);
+        assert_eq!(logical_plan, expr.logical_plan);
     }
 }

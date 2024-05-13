@@ -35,6 +35,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("View already exists: `{name}`"))]
+    ViewAlreadyExists {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         #[snafu(implicit)]
@@ -643,6 +650,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid view name: {name}"))]
+    InvalidViewName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
     DdlWithMultiCatalogs {
         ddl_name: String,
@@ -727,11 +741,14 @@ impl ErrorExt for Error {
             | Error::SchemaIncompatible { .. }
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
+            | Error::InvalidViewName { .. }
             | Error::InvalidExpr { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
 
-            Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+            Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
+                StatusCode::TableAlreadyExists
+            }
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

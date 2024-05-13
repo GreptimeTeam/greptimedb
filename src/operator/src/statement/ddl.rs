@@ -68,9 +68,9 @@ use crate::error::{
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
     DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaNotFoundSnafu,
+    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -384,7 +384,6 @@ impl StatementExecutor {
         create_view: CreateView,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        // TODO(dennis): Validate if catalog, schema or view exists
         // convert input into logical plan
         let logical_plan = match &*create_view.query {
             Statement::Query(query) => {
@@ -417,6 +416,68 @@ impl StatementExecutor {
         expr: CreateViewExpr,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        let _timer = crate::metrics::DIST_CREATE_VIEW.start_timer();
+
+        let schema = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey::new(&expr.catalog_name, &expr.schema_name))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        ensure!(
+            schema.is_some(),
+            SchemaNotFoundSnafu {
+                schema_info: &expr.schema_name,
+            }
+        );
+
+        // if view or table exists.
+        if let Some(table) = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.view_name)
+            .await
+            .context(CatalogSnafu)?
+        {
+            let table_type = table.table_info().table_type;
+
+            match (table_type, expr.create_if_not_exists, expr.or_replace) {
+                (TableType::View, true, false) => {
+                    return Ok(table);
+                }
+                (TableType::View, false, false) => {
+                    return ViewAlreadyExistsSnafu {
+                        name: format_full_table_name(
+                            &expr.catalog_name,
+                            &expr.schema_name,
+                            &expr.view_name,
+                        ),
+                    }
+                    .fail();
+                }
+                (TableType::View, _, true) => {
+                    // Try to replace an exists view
+                }
+                _ => {
+                    return TableAlreadyExistsSnafu {
+                        table: format_full_table_name(
+                            &expr.catalog_name,
+                            &expr.schema_name,
+                            &expr.view_name,
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        ensure!(
+            NAME_PATTERN_REG.is_match(&expr.view_name),
+            InvalidViewNameSnafu {
+                name: expr.view_name.clone(),
+            }
+        );
+
         let view_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.view_name);
 
         let mut view_info = RawTableInfo {
@@ -454,6 +515,18 @@ impl StatementExecutor {
             violated: "expected table_id",
         })?;
         info!("Successfully created view '{view_name}' with view id {view_id}");
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(
+                &Context::default(),
+                &[
+                    CacheIdent::TableId(view_id),
+                    CacheIdent::TableName(view_name.clone()),
+                ],
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
 
         view_info.ident.table_id = view_id;
 

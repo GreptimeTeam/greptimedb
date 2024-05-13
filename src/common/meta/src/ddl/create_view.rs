@@ -91,8 +91,11 @@ impl CreateViewProcedure {
             ))
             .await?;
 
-        // If view_id is None, creating the new view,
-        // otherwise replacing the exists one.
+        // If `view_id` is None, creating the new view,
+        // otherwise:
+        // - replaces the exists one when `or_replace` is true.
+        // - returns the exists one when `create_if_not_exists` is true.
+        // - throws the `[ViewAlreadyExistsSnafu]` error.
         let mut view_id = None;
 
         if let Some(value) = view_name_value {
@@ -115,7 +118,6 @@ impl CreateViewProcedure {
             self.creator.set_allocated_metadata(view_id, true);
         } else {
             // Allocate the new `view_id`.
-            self.creator.data.state = CreateViewState::CreateMetadata;
             let TableMetadata { table_id, .. } = self
                 .context
                 .table_metadata_allocator
@@ -129,6 +131,8 @@ impl CreateViewProcedure {
             self.creator.set_allocated_metadata(table_id, false);
         }
 
+        self.creator.data.state = CreateViewState::CreateMetadata;
+
         Ok(Status::executing(true))
     }
 
@@ -136,7 +140,7 @@ impl CreateViewProcedure {
     ///
     /// Abort(not-retry):
     /// - Failed to create view metadata.
-    async fn on_create_metadata(&mut self) -> Result<Status> {
+    async fn on_create_metadata(&mut self, ctx: &ProcedureContext) -> Result<Status> {
         let view_id = self.view_id();
         let manager = &self.context.table_metadata_manager;
 
@@ -161,7 +165,10 @@ impl CreateViewProcedure {
                 .create_view_metadata(raw_view_info, self.creator.data.task.raw_logical_plan())
                 .await?;
 
-            info!("Created view metadata for view {view_id}");
+            info!(
+                "Created view metadata for view {view_id} with procedure: {}",
+                ctx.procedure_id
+            );
         }
 
         Ok(Status::done_with_output(view_id))
@@ -174,7 +181,7 @@ impl Procedure for CreateViewProcedure {
         Self::TYPE_NAME
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.creator.data.state;
 
         let _timer = metrics::METRIC_META_PROCEDURE_CREATE_VIEW
@@ -183,7 +190,7 @@ impl Procedure for CreateViewProcedure {
 
         match state {
             CreateViewState::Prepare => self.on_prepare().await,
-            CreateViewState::CreateMetadata => self.on_create_metadata().await,
+            CreateViewState::CreateMetadata => self.on_create_metadata(ctx).await,
         }
         .map_err(handle_retry_error)
     }
