@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::str::FromStr;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -42,7 +41,7 @@ use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::table_result::TableResponse;
 use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
-    HttpResponse, RequestSource, ResponseFormat,
+    HttpResponse, ResponseFormat,
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -63,8 +62,7 @@ pub struct SqlQuery {
     // specified time precision. Maybe greptimedb format can support this
     // param too.
     pub epoch: Option<String>,
-    // request source, ["dashboard"]
-    pub source: Option<String>,
+    pub limit: Option<usize>,
 }
 
 /// Handler to execute sql
@@ -96,9 +94,6 @@ pub async fn sql(
         .or(form_params.epoch)
         .map(|s| s.to_lowercase())
         .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
-    let source = query_params
-        .source
-        .and_then(|s| RequestSource::from_str(s.as_str()).ok());
 
     let result = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
@@ -131,40 +126,10 @@ pub async fn sql(
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
     };
 
-    if let Some(RequestSource::Dashboard) = source {
-        resp = from_dashboard(resp, query_ctx).await;
+    if let Some(limit) = query_params.limit {
+        resp = resp.with_limit(limit);
     }
     resp.with_execution_time(start.elapsed().as_millis() as u64)
-}
-
-pub async fn from_dashboard(resp: HttpResponse, ctx: QueryContextRef) -> HttpResponse {
-    let HttpResponse::GreptimedbV1(response) = resp else {
-        return resp;
-    };
-    let GreptimedbV1Response {
-        output,
-        execution_time_ms,
-        resp_metrics,
-    } = response;
-    let query_limit = ctx.configuration_parameter().dashboard_query_limit();
-
-    let mut outputs = Vec::with_capacity(output.len());
-    for query_result in output {
-        let GreptimeQueryOutput::Records(mut records) = query_result else {
-            outputs.push(query_result);
-            continue;
-        };
-        if records.rows.len() > query_limit {
-            records.rows.truncate(query_limit);
-            records.total_rows = query_limit;
-        }
-        outputs.push(GreptimeQueryOutput::Records(records));
-    }
-    HttpResponse::GreptimedbV1(GreptimedbV1Response {
-        output: outputs,
-        execution_time_ms,
-        resp_metrics,
-    })
 }
 
 /// Create a response from query result

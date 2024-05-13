@@ -176,18 +176,3 @@ impl TryFrom<&Value> for PGDateTimeStyle {
         }
     }
 }
-
-#[derive(Copy, Clone, Debug)]
-pub struct DashboardQueryLimit(usize);
-
-impl Default for DashboardQueryLimit {
-    fn default() -> Self {
-        Self(1000)
-    }
-}
-
-impl DashboardQueryLimit {
-    pub fn get(&self) -> usize {
-        self.0
-    }
-}

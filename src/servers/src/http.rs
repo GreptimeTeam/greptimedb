@@ -41,7 +41,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
-use strum::EnumString;
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
@@ -343,12 +342,6 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString)]
-pub enum RequestSource {
-    #[strum(ascii_case_insensitive)]
-    Dashboard,
-}
-
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub enum HttpResponse {
     Arrow(ArrowResponse),
@@ -370,6 +363,34 @@ impl HttpResponse {
             HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
         }
     }
+
+    pub fn with_limit(self, limit: usize) -> Self {
+        match self {
+            HttpResponse::Csv(resp) => resp.with_limit(limit).into(),
+            HttpResponse::Table(resp) => resp.with_limit(limit).into(),
+            HttpResponse::GreptimedbV1(resp) => resp.with_limit(limit).into(),
+            _ => self,
+        }
+    }
+}
+
+pub fn process_with_limit(
+    mut outputs: Vec<GreptimeQueryOutput>,
+    limit: usize,
+) -> Vec<GreptimeQueryOutput> {
+    outputs
+        .drain(..)
+        .map(|data| match data {
+            GreptimeQueryOutput::Records(mut records) => {
+                if records.rows.len() > limit {
+                    records.rows.truncate(limit);
+                    records.total_rows = limit;
+                }
+                GreptimeQueryOutput::Records(records)
+            }
+            _ => data,
+        })
+        .collect()
 }
 
 impl IntoResponse for HttpResponse {

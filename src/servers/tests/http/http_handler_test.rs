@@ -189,7 +189,7 @@ async fn test_dashboard_sql_limit() {
     let query = create_query(
         "greptimedb_v1",
         "select * from numbers",
-        Some("dashboard".to_string()),
+        Some(1000),
     );
     let json = http_handler::sql(
         State(api_state.clone()),
@@ -201,10 +201,9 @@ async fn test_dashboard_sql_limit() {
 
     if let HttpResponse::GreptimedbV1(resp) = json {
         let output = resp.output().first().unwrap();
-        let query_limit = ctx.configuration_parameter().dashboard_query_limit();
         match output {
             Records(records) => {
-                assert_eq!(records.num_rows(), query_limit);
+                assert_eq!(records.num_rows(), 1000);
             }
             _ => unreachable!(),
         }
@@ -522,11 +521,11 @@ fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
     })
 }
 
-fn create_query(format: &str, sql: &str, source: Option<String>) -> Query<http_handler::SqlQuery> {
+fn create_query(format: &str, sql: &str, limit: Option<usize>) -> Query<http_handler::SqlQuery> {
     Query(http_handler::SqlQuery {
         sql: Some(sql.to_string()),
         format: Some(format.to_string()),
-        source,
+        limit,
         ..Default::default()
     })
 }

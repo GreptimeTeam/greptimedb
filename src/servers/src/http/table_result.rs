@@ -24,6 +24,7 @@ use mime_guess::mime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::process_with_limit;
 use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::{handler, GreptimeQueryOutput, HttpResponse, ResponseFormat};
@@ -65,6 +66,11 @@ impl TableResponse {
 
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.output = process_with_limit(self.output, limit);
+        self
     }
 }
 

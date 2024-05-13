@@ -27,9 +27,7 @@ use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-use crate::session_config::{
-    DashboardQueryLimit, PGByteaOutputValue, PGDateOrder, PGDateTimeStyle,
-};
+use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
 use crate::SessionRef;
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -329,7 +327,6 @@ impl Display for Channel {
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
-    dashboard_query_limit: ArcSwap<DashboardQueryLimit>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -337,7 +334,6 @@ impl Clone for ConfigurationVariables {
         Self {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
-            dashboard_query_limit: ArcSwap::new(self.dashboard_query_limit.load().clone()),
         }
     }
 }
@@ -361,10 +357,6 @@ impl ConfigurationVariables {
 
     pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
         self.pg_datestyle_format.swap(Arc::new((style, order)));
-    }
-
-    pub fn dashboard_query_limit(&self) -> usize {
-        self.dashboard_query_limit.load().get()
     }
 }
 
