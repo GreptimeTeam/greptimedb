@@ -14,7 +14,7 @@
 
 //! Builder of a shard.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -71,12 +71,15 @@ impl ShardBuilder {
     /// Write a key value with its encoded primary key.
     pub fn write_with_key(
         &mut self,
-        primary_key: &[u8],
+        full_primary_key: &[u8],
+        sparse_key: Option<&[u8]>,
         key_value: &KeyValue,
         metrics: &mut WriteMetrics,
     ) -> PkId {
         // Safety: we check whether the builder need to freeze before.
-        let pk_index = self.dict_builder.insert_key(primary_key, metrics);
+        let pk_index = self
+            .dict_builder
+            .insert_key(full_primary_key, sparse_key, metrics);
         self.data_buffer.write_row(pk_index, key_value);
         PkId {
             shard_id: self.current_shard_id,
@@ -106,10 +109,8 @@ impl ShardBuilder {
             return Ok(None);
         }
 
-        let mut pk_to_index = BTreeMap::new();
-        let key_dict = self.dict_builder.finish(&mut pk_to_index);
-        let data_part = match &key_dict {
-            Some(dict) => {
+        let (data_part, key_dict) = match self.dict_builder.finish() {
+            Some((dict, pk_to_index)) => {
                 // Adds mapping to the map.
                 pk_to_pk_id.reserve(pk_to_index.len());
                 for (k, pk_index) in pk_to_index {
@@ -123,11 +124,12 @@ impl ShardBuilder {
                 }
 
                 let pk_weights = dict.pk_weights_to_sort_data();
-                self.data_buffer.freeze(Some(&pk_weights), true)?
+                let part = self.data_buffer.freeze(Some(&pk_weights), true)?;
+                (part, Some(dict))
             }
             None => {
                 let pk_weights = [0];
-                self.data_buffer.freeze(Some(&pk_weights), true)?
+                (self.data_buffer.freeze(Some(&pk_weights), true)?, None)
             }
         };
 
@@ -367,7 +369,7 @@ mod tests {
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, &kv, &mut metrics);
+                shard_builder.write_with_key(&key, None, &kv, &mut metrics);
             }
         }
         let shard = shard_builder
@@ -389,7 +391,7 @@ mod tests {
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, &kv, &mut metrics);
+                shard_builder.write_with_key(&key, None, &kv, &mut metrics);
             }
         }
 
