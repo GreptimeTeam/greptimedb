@@ -29,8 +29,11 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
 use super::utils::{add_peer_context_if_needed, handle_retry_error};
+use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
+use crate::flow_name::FlowName;
+use crate::instruction::{CacheIdent, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::lock_key::{CatalogLock, FlowLock};
 use crate::peer::Peer;
@@ -145,7 +148,29 @@ impl DropFlowProcedure {
     }
 
     async fn on_broadcast(&mut self) -> Result<Status> {
-        // TODO(weny): invalidates cache.
+        let flow_id = self.data.task.flow_id;
+        let ctx = Context {
+            subject: Some("Invalidate flow cache by dropping flow".to_string()),
+        };
+        let flow_info_value = self.data.flow_info_value.as_ref().unwrap();
+
+        self.context
+            .cache_invalidator
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::FlowId(flow_id),
+                    CacheIdent::FlowName(FlowName {
+                        catalog_name: flow_info_value.catalog_name.to_string(),
+                        flow_name: flow_info_value.flow_name.to_string(),
+                    }),
+                    CacheIdent::DropFlow(DropFlow {
+                        source_table_ids: flow_info_value.source_table_ids.clone(),
+                        flownode_ids: flow_info_value.flownode_ids.values().cloned().collect(),
+                    }),
+                ],
+            )
+            .await?;
         self.data.state = DropFlowState::DropFlows;
         Ok(Status::executing(true))
     }
