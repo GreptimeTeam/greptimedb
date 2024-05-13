@@ -19,7 +19,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
 use crate::ddl::utils::handle_retry_error;
@@ -115,6 +115,24 @@ impl CreateViewProcedure {
         }
 
         if let Some(view_id) = view_id {
+            let view_info_value = self
+                .context
+                .table_metadata_manager
+                .table_info_manager()
+                .get(view_id)
+                .await?
+                .with_context(|| error::TableInfoNotFoundSnafu {
+                    table: self.creator.data.table_ref().to_string(),
+                })?;
+
+            // Ensure the exists one is view, we can't replace a table.
+            ensure!(
+                view_info_value.table_info.table_type == TableType::View,
+                error::TableAlreadyExistsSnafu {
+                    table_name: self.creator.data.table_ref().to_string(),
+                }
+            );
+
             self.creator.set_allocated_metadata(view_id, true);
         } else {
             // Allocate the new `view_id`.

@@ -23,8 +23,10 @@ use common_procedure_test::MockContextProvider;
 use table::metadata;
 use table::metadata::{RawTableInfo, RawTableMeta, TableType};
 
+use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+use crate::ddl::tests::create_table::test_create_table_task;
 use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
@@ -125,7 +127,6 @@ async fn test_on_create_metadata() {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
     };
-    procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to create view metadata
     let status = procedure.execute(&ctx).await.unwrap();
     let view_id = status.downcast_output_ref::<u32>().unwrap();
@@ -146,7 +147,6 @@ async fn test_replace_view_metadata() {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
     };
-    procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to create view metadata
     let status = procedure.execute(&ctx).await.unwrap();
     let view_id = status.downcast_output_ref::<u32>().unwrap();
@@ -181,7 +181,6 @@ async fn test_replace_view_metadata() {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
     };
-    procedure.execute(&ctx).await.unwrap();
     // Triggers procedure to replace view metadata, but the view_id is unchanged.
     let status = procedure.execute(&ctx).await.unwrap();
     let view_id = status.downcast_output_ref::<u32>().unwrap();
@@ -196,4 +195,33 @@ async fn test_replace_view_metadata() {
         .unwrap();
 
     assert_eq!(current_view_info.view_info, vec![4, 5, 6]);
+}
+
+#[tokio::test]
+async fn test_replace_table() {
+    common_telemetry::init_default_ut_logging();
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager.clone());
+    let cluster_id = 1;
+
+    {
+        // Create a `foo` table.
+        let task = test_create_table_task("foo");
+        let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context.clone());
+        procedure.on_prepare().await.unwrap();
+        let ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+        };
+        procedure.execute(&ctx).await.unwrap();
+        procedure.execute(&ctx).await.unwrap();
+    }
+
+    // Try to replace a view named `foo` too.
+    let mut task = test_create_view_task("foo");
+    task.create_view.or_replace = true;
+    let mut procedure = CreateViewProcedure::new(cluster_id, task.clone(), ddl_context.clone());
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, Error::TableAlreadyExists { .. });
+    assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
 }

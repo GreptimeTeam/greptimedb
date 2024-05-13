@@ -40,7 +40,7 @@ use crate::kv_backend::memory::MemoryKvBackend;
 use crate::rpc::ddl::CreateTableTask;
 use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDatanodeManager};
 
-fn test_create_table_task(name: &str) -> CreateTableTask {
+pub(crate) fn test_create_table_task(name: &str) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
             TestColumnDefBuilder::default()
