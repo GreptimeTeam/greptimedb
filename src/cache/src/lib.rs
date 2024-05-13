@@ -135,5 +135,5 @@ pub fn with_default_composite_cache_registry(
         .add_cache(composite_table_route_cache)
         .build();
 
-    Ok(builder.add_cache_layer(registry))
+    Ok(builder.add_cache_registry(registry))
 }

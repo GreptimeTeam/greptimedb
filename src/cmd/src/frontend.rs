@@ -248,7 +248,7 @@ impl StartCommand {
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
-        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_layer(
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
             CacheRegistryBuilder::default()
                 .add_cache(cached_meta_backend.clone())
                 .build(),
@@ -257,7 +257,7 @@ impl StartCommand {
             build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
-                layered_cache_builder.add_cache_layer(fundamental_cache_registry),
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
             )
             .context(error::BuildCacheRegistrySnafu)?
             .build(),

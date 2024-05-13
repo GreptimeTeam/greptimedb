@@ -31,8 +31,11 @@ pub struct LayeredCacheRegistryBuilder {
 }
 
 impl LayeredCacheRegistryBuilder {
-    /// Adds cache layer
-    pub fn add_cache_layer(mut self, registry: CacheRegistry) -> Self {
+    /// Adds [CacheRegistry] into the next layer.
+    /// 
+    /// During cache invalidation, [LayeredCacheRegistry] ensures sequential invalidation
+    /// of each layer (after the previous layer).
+    pub fn add_cache_registry(mut self, registry: CacheRegistry) -> Self {
         self.registry.layers.push(registry);
 
         self
@@ -219,7 +222,7 @@ mod tests {
         });
         let cache = Arc::new(test_cache("string_cache", invalidator));
         let builder =
-            builder.add_cache_layer(CacheRegistryBuilder::default().add_cache(cache).build());
+            builder.add_cache_registry(CacheRegistryBuilder::default().add_cache(cache).build());
         // 2nd layer
         let moved_counter = counter.clone();
         let invalidator: Invalidator<i32, String, CacheIdent> = Box::new(move |_, _| {
@@ -230,8 +233,8 @@ mod tests {
             })
         });
         let i32_cache = Arc::new(test_i32_cache("i32_cache", invalidator));
-        let builder =
-            builder.add_cache_layer(CacheRegistryBuilder::default().add_cache(i32_cache).build());
+        let builder = builder
+            .add_cache_registry(CacheRegistryBuilder::default().add_cache(i32_cache).build());
 
         let registry = builder.build();
         let cache = registry

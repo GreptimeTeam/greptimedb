@@ -390,7 +390,7 @@ impl StartCommand {
         let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
-                layered_cache_builder.add_cache_layer(fundamental_cache_registry),
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
             )
             .context(BuildCacheRegistrySnafu)?
             .build(),
