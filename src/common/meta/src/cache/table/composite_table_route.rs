@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use store_api::storage::TableId;
+use tokio::sync::RwLock;
 
 use crate::cache::table::{TableRoute, TableRouteCacheRef};
-use crate::cache::{CacheContainer, Initializer};
+use crate::cache::{CacheContainer, Initializer, Invalidator};
 use crate::error;
-use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_route::{LogicalTableRouteValue, PhysicalTableRouteValue};
 
@@ -69,16 +69,19 @@ pub fn new_composite_table_route_cache(
     cache: Cache<TableId, Arc<CompositeTableRoute>>,
     table_route_cache: TableRouteCacheRef,
 ) -> CompositeTableRouteCache {
-    let init = init_factory(table_route_cache);
-
+    let physical_table_to_logical_tables = Arc::new(RwLock::new(Default::default()));
+    let init = init_factory(table_route_cache, physical_table_to_logical_tables.clone());
+    let invalidator = invalidator_factory(physical_table_to_logical_tables);
     CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
 }
 
 fn init_factory(
     table_route_cache: TableRouteCacheRef,
+    physical_table_to_logical_tables: Arc<RwLock<HashMap<TableId, Vec<TableId>>>>,
 ) -> Initializer<TableId, Arc<CompositeTableRoute>> {
     Arc::new(move |table_id| {
         let table_route_cache = table_route_cache.clone();
+        let physical_table_to_logical_tables = physical_table_to_logical_tables.clone();
         Box::pin(async move {
             let table_route_value = table_route_cache
                 .get(*table_id)
@@ -102,6 +105,12 @@ fn init_factory(
                                 "Expected the physical table route, but got logical table route, table: {table_id}"
                             ),
                         })?;
+                    physical_table_to_logical_tables
+                        .write()
+                        .await
+                        .entry(physical_table_id)
+                        .or_default()
+                        .push(*table_id);
 
                     Ok(Some(Arc::new(CompositeTableRoute::Logical(
                         logical_table_route.clone(),
@@ -113,15 +122,26 @@ fn init_factory(
     })
 }
 
-fn invalidator<'a>(
-    cache: &'a Cache<TableId, Arc<CompositeTableRoute>>,
-    ident: &'a CacheIdent,
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        if let CacheIdent::TableId(table_id) = ident {
-            cache.invalidate(table_id).await
-        }
-        Ok(())
+fn invalidator_factory(
+    physical_table_to_logical_tables: Arc<RwLock<HashMap<TableId, Vec<TableId>>>>,
+) -> Invalidator<TableId, Arc<CompositeTableRoute>, CacheIdent> {
+    Box::new(move |cache, ident| {
+        let physical_table_to_logical_tables = physical_table_to_logical_tables.clone();
+        Box::pin(async move {
+            if let CacheIdent::TableId(table_id) = ident {
+                cache.invalidate(table_id).await;
+                if let Some(logical_table_ids) = physical_table_to_logical_tables
+                    .write()
+                    .await
+                    .remove(table_id)
+                {
+                    for logical_table_id in logical_table_ids {
+                        cache.invalidate(&logical_table_id).await;
+                    }
+                }
+            }
+            Ok(())
+        })
     })
 }
 
@@ -242,6 +262,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(!cache.contains_key(&1025));
         // Gets logical table route
         let table_route = cache.get(1025).await.unwrap().unwrap();
         assert_eq!(
@@ -266,9 +287,10 @@ mod tests {
         assert!(table_route.is_physical());
 
         cache
-            .invalidate(&[CacheIdent::TableId(1025)])
+            .invalidate(&[CacheIdent::TableId(1024)])
             .await
             .unwrap();
+        assert!(!cache.contains_key(&1024));
         assert!(!cache.contains_key(&1025));
     }
 }
