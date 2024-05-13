@@ -30,7 +30,7 @@ derive_builder.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
-orc-rust = { git = "https://github.com/MichaelScofield/orc-rs.git", rev = "17347f5f084ac937863317df882218055c4ea8c1" }
+orc-rust = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "502217315726314c4008808fe169764529640599" }
 parquet.workspace = true
 paste = "1.0"
 regex = "1.7"

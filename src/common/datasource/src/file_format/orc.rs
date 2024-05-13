@@ -21,9 +21,8 @@ use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener
 use datafusion::error::{DataFusionError, Result as DfResult};
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
-use orc_rust::arrow_reader::{create_arrow_schema, Cursor};
+use orc_rust::arrow_reader::ArrowReaderBuilder;
 use orc_rust::async_arrow_reader::ArrowStreamReader;
-use orc_rust::reader::Reader;
 use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncSeek};
 
@@ -33,28 +32,20 @@ use crate::file_format::FileFormat;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrcFormat;
 
-pub async fn new_orc_cursor<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
-    reader: R,
-) -> Result<Cursor<R>> {
-    let reader = Reader::new_async(reader)
-        .await
-        .context(error::OrcReaderSnafu)?;
-    let cursor = Cursor::root(reader).context(error::OrcReaderSnafu)?;
-    Ok(cursor)
-}
-
 pub async fn new_orc_stream_reader<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
     reader: R,
 ) -> Result<ArrowStreamReader<R>> {
-    let cursor = new_orc_cursor(reader).await?;
-    Ok(ArrowStreamReader::new(cursor, None))
+    let reader_build = ArrowReaderBuilder::try_new_async(reader)
+        .await
+        .context(error::OrcReaderSnafu)?;
+    Ok(reader_build.build_async())
 }
 
 pub async fn infer_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
     reader: R,
 ) -> Result<Schema> {
-    let cursor = new_orc_cursor(reader).await?;
-    Ok(create_arrow_schema(&cursor))
+    let reader = new_orc_stream_reader(reader).await?;
+    Ok(reader.schema().as_ref().clone())
 }
 
 #[async_trait]
