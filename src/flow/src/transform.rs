@@ -36,7 +36,7 @@ use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::error::{
     Error, ExternalSnafu, InvalidQueryPlanSnafu, InvalidQueryProstSnafu,
-    InvalidQuerySubstraitSnafu, NotImplementedSnafu, TableNotFoundSnafu,
+    InvalidQuerySubstraitSnafu, NotImplementedSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
@@ -104,7 +104,12 @@ pub async fn sql_to_flow_plan(
     engine: &Arc<dyn QueryEngine>,
     sql: &str,
 ) -> Result<TypedPlan, Error> {
-    let query_ctx = ctx.query_context.clone().unwrap();
+    let query_ctx = ctx.query_context.clone().ok_or_else(|| {
+        UnexpectedSnafu {
+            reason: "Query context is missing",
+        }
+        .build()
+    })?;
     let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).context(InvalidQueryPlanSnafu)?;
     let plan = engine
         .planner()
