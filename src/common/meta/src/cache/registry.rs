@@ -32,7 +32,7 @@ pub struct LayeredCacheRegistryBuilder {
 
 impl LayeredCacheRegistryBuilder {
     /// Adds [CacheRegistry] into the next layer.
-    /// 
+    ///
     /// During cache invalidation, [LayeredCacheRegistry] ensures sequential invalidation
     /// of each layer (after the previous layer).
     pub fn add_cache_registry(mut self, registry: CacheRegistry) -> Self {
