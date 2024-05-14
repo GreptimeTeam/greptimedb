@@ -648,8 +648,8 @@ impl ScanInput {
         let parallelism = self.parallelism.parallelism;
         debug_assert!(parallelism > 1);
 
-        let mems_per_part = (self.memtables.len() + parallelism - 1) / parallelism;
-        let ranges_per_part = (file_ranges.len() + parallelism - 1) / parallelism;
+        let mems_per_part = ((self.memtables.len() + parallelism - 1) / parallelism).max(1);
+        let ranges_per_part = ((file_ranges.len() + parallelism - 1) / parallelism).max(1);
         common_telemetry::debug!(
             "Parallel scan is enabled, {} ({}, {}), mems_per_part: {}, ranges_per_part: {}",
             self.parallelism.parallelism,
