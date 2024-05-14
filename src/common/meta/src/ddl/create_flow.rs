@@ -34,9 +34,11 @@ use strum::AsRefStr;
 use table::metadata::TableId;
 
 use super::utils::add_peer_context_if_needed;
+use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
+use crate::instruction::{CacheIdent, CreateFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::FlowId;
@@ -173,6 +175,28 @@ impl CreateFlowProcedure {
             .create_flow_metadata(flow_id, (&self.data).into())
             .await?;
         info!("Created flow metadata for flow {flow_id}");
+        self.data.state = CreateFlowState::InvalidateFlowCache;
+        Ok(Status::executing(true))
+    }
+
+    async fn on_broadcast(&mut self) -> Result<Status> {
+        // Safety: The flow id must be allocated.
+        let flow_id = self.data.flow_id.unwrap();
+        let ctx = Context {
+            subject: Some("Invalidate flow cache by creating flow".to_string()),
+        };
+
+        self.context
+            .cache_invalidator
+            .invalidate(
+                &ctx,
+                &[CacheIdent::CreateFlow(CreateFlow {
+                    source_table_ids: self.data.source_table_ids.clone(),
+                    flownode_ids: self.data.peers.iter().map(|peer| peer.id).collect(),
+                })],
+            )
+            .await?;
+
         Ok(Status::done_with_output(flow_id))
     }
 }
@@ -194,6 +218,7 @@ impl Procedure for CreateFlowProcedure {
             CreateFlowState::Prepare => self.on_prepare().await,
             CreateFlowState::CreateFlows => self.on_flownode_create_flows().await,
             CreateFlowState::CreateMetadata => self.on_create_metadata().await,
+            CreateFlowState::InvalidateFlowCache => self.on_broadcast().await,
         }
         .map_err(handle_retry_error)
     }
@@ -227,6 +252,8 @@ pub enum CreateFlowState {
     Prepare,
     /// Creates flows on the flownode.
     CreateFlows,
+    /// Invalidate flow cache.
+    InvalidateFlowCache,
     /// Create metadata.
     CreateMetadata,
 }
