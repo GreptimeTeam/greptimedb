@@ -39,7 +39,7 @@ use crate::expr::error::{DataTypeSnafu, InternalSnafu};
 use crate::expr::{
     self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
 };
-use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan};
+use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, Arrangement};
 
@@ -101,8 +101,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
     /// Interpret and execute plan
     ///
     /// return the output of this plan
-    pub fn render_plan(&mut self, plan: Plan) -> Result<CollectionBundle, Error> {
-        match plan {
+    pub fn render_plan(&mut self, plan: TypedPlan) -> Result<CollectionBundle, Error> {
+        match plan.plan {
             Plan::Constant { rows } => Ok(self.render_constant(rows)),
             Plan::Get { id } => self.get_by_id(id),
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
@@ -193,8 +193,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
     pub fn eval_let(
         &mut self,
         id: LocalId,
-        value: Box<Plan>,
-        body: Box<Plan>,
+        value: Box<TypedPlan>,
+        body: Box<TypedPlan>,
     ) -> Result<CollectionBundle, Error> {
         let value = self.render_plan(*value)?;
 
