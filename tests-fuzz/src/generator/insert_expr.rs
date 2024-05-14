@@ -94,11 +94,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
 
         Ok(InsertIntoExpr {
             table_name: self.table_ctx.name.to_string(),
-            columns: if omit_column_list {
-                vec![]
-            } else {
-                values_columns
-            },
+            columns: values_columns,
             values_list,
         })
     }

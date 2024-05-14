@@ -12,6 +12,7 @@ common-macro.workspace = true
 common-telemetry.workspace = true
 common-time = { workspace = true }
 lazy_static.workspace = true
+mysql = "25.0"
 nix = { version = "0.26", features = ["process"] }
 prometheus.workspace = true
 rand = { workspace = true }

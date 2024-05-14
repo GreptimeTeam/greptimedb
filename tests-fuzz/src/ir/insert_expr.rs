@@ -18,6 +18,7 @@ use datatypes::value::Value;
 
 use crate::ir::Column;
 
+#[derive(Debug)]
 pub struct InsertIntoExpr {
     pub table_name: String,
     pub columns: Vec<Column>,
@@ -26,6 +27,7 @@ pub struct InsertIntoExpr {
 
 pub type RowValues = Vec<RowValue>;
 
+#[derive(Debug)]
 pub enum RowValue {
     Value(Value),
     Default,

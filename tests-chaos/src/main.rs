@@ -22,6 +22,7 @@ use axum::extract::{Query, State};
 use axum::Router;
 use bare::process::{Pid, ProcessManager};
 use common_telemetry::{info, warn};
+use mysql::prelude::Queryable;
 use nix::sys::signal::Signal;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -29,10 +30,15 @@ use serde::Serialize;
 use snafu::{ensure, ResultExt};
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
-use tests_fuzz::context::TableContext;
+use tests_fuzz::context::{Rows, TableContext};
+use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
+use tests_fuzz::generator::Generator;
+use tests_fuzz::ir::select_expr::{Direction, SelectExpr};
 use tests_fuzz::ir::AlterTableOperation;
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
+use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
+use tests_fuzz::translator::mysql::select_expr::SelectExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::validator;
 use tokio::fs::File;
@@ -45,7 +51,7 @@ mod utils;
 use axum::routing::get;
 use prometheus::{register_int_counter, Encoder, IntCounter, TextEncoder};
 
-use crate::error::Result;
+use crate::error::{Error, RequestMysqlSnafu, Result};
 use crate::utils::{generate_create_table_expr, get_conf_path, path_to_stdio, render_config_file};
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
@@ -81,6 +87,7 @@ lazy_static::lazy_static! {
     static ref UP_COUNTER: IntCounter = register_int_counter!("up", "up counter").unwrap();
 }
 
+// cargo run --package tests-chaos --bin tests-chaos
 #[tokio::main]
 async fn main() {
     common_telemetry::init_default_ut_logging();
@@ -96,6 +103,14 @@ async fn main() {
             .unwrap();
     });
 
+    let test_dir = "/home/lfc/test-cuckoo/";
+    // Remove everything in the test directory, to make sure we have a clean start.
+    match std::fs::remove_dir_all(test_dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("{e:?}"),
+        _ => {}
+    }
+    std::fs::create_dir_all(test_dir).unwrap();
+
     let state = Arc::new(TestState {
         killed: AtomicBool::new(false),
     });
@@ -106,30 +121,90 @@ async fn main() {
         loop {
             warn!("Staring");
             UP_COUNTER.inc();
-            let pid = start_database().await.expect("Failed to start database");
+            let pid = start_database(test_dir).await.unwrap();
             let secs = rng.gen_range(100..300);
             moved_state.killed.store(false, Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(secs)).await;
             warn!("After {secs}ms, Killing pid: {pid}");
             moved_state.killed.store(true, Ordering::Relaxed);
+
+            // Flush the database before restarting it. Because cuckoo does not enable WAL,
+            // data may not survive the restart if not flush them.
+            flush_db().await;
+
             ProcessManager::kill(pid, Signal::SIGKILL).expect("Failed to kill");
         }
     });
     let mut rng = ChaChaRng::seed_from_u64(0);
-    let client = connect_db("127.0.0.1:4002").await;
+    let mut sqlx = sqlx_connections().await;
+    let mut mysql = mysql_connections().await;
     let mut created_table = HashSet::new();
+
+    // Runs maximum 10000 times.
+    for _i in 0..10000 {
+        if let Err(e) = run_test(&sqlx, &mysql, &mut created_table, &state, &mut rng).await {
+            if matches!(e, Error::ExecuteQuery { .. } | Error::RequestMysql { .. })
+                && state.killed.load(Ordering::Relaxed)
+            {
+                // If the query error is caused by restarting the database
+                // (which is an intended action), reconnect.
+                sqlx = sqlx_connections().await;
+                mysql = mysql_connections().await;
+            } else {
+                panic!("{e:?}");
+            }
+        }
+    }
+    info!("Successfully runs DDL chaos testing for cuckoo!");
+}
+
+async fn flush_db() {
+    info!("Start flushing the database ...");
+    let _ = reqwest::get("http://127.0.0.1:4000/v1/admin/flush?db=public")
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+}
+
+async fn mysql_connections() -> mysql::Pool {
+    let mut max_retry = 10;
     loop {
-        run_test(&client, &mut created_table, &state, &mut rng)
-            .await
-            .unwrap();
+        match mysql::Pool::new("mysql://127.0.0.1:4002/public") {
+            Ok(x) => return x,
+            Err(e) => {
+                max_retry -= 1;
+                if max_retry == 0 {
+                    panic!("{e:?}")
+                } else {
+                    info!("GreptimeDB is not connectable, maybe during restart. Wait 1 second to retry");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
     }
 }
 
-async fn connect_db(addr: &str) -> Pool<MySql> {
-    MySqlPoolOptions::new()
-        .connect(&format!("mysql://{addr}/public"))
-        .await
-        .unwrap()
+async fn sqlx_connections() -> Pool<MySql> {
+    let mut max_retry = 10;
+    loop {
+        match MySqlPoolOptions::new()
+            .connect("mysql://127.0.0.1:4002/public")
+            .await
+        {
+            Ok(x) => return x,
+            Err(e) => {
+                max_retry -= 1;
+                if max_retry == 0 {
+                    panic!("{e:?}")
+                } else {
+                    info!("GreptimeDB is not connectable, maybe during restart. Wait 1 second to retry");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
 }
 
 struct TestState {
@@ -138,19 +213,21 @@ struct TestState {
 
 async fn run_test<R: Rng + 'static>(
     client: &Pool<MySql>,
+    pool: &mysql::Pool,
     created_table: &mut HashSet<String>,
     state: &Arc<TestState>,
     rng: &mut R,
 ) -> Result<()> {
     let expr = generate_create_table_expr(rng);
     let table_name = expr.table_name.to_string();
-    if created_table.contains(&table_name) {
+    if !created_table.insert(table_name.clone()) {
         warn!("ignores same name table: {table_name}");
         // ignores.
         return Ok(());
     }
 
-    let mut table_ctx = Arc::new(TableContext::from(&expr));
+    let mut table_ctx = TableContext::from(&expr);
+
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&expr).unwrap();
     let result = sqlx::query(&sql).execute(client).await;
@@ -159,7 +236,6 @@ async fn run_test<R: Rng + 'static>(
         Ok(result) => {
             validate_mysql(client, state, &table_ctx).await;
             info!("Create table: {sql}, result: {result:?}");
-            created_table.insert(table_name);
         }
         Err(err) => {
             ensure!(
@@ -176,7 +252,7 @@ async fn run_test<R: Rng + 'static>(
     let actions = rng.gen_range(1..20);
 
     for _ in 0..actions {
-        let expr = generate_alter_table_expr(table_ctx.clone(), rng);
+        let expr = generate_alter_table_expr(Arc::new(table_ctx.clone()), rng);
         if let AlterTableOperation::RenameTable { new_table_name } = &expr.alter_options {
             let table_name = new_table_name.to_string();
             if created_table.contains(&table_name) {
@@ -184,6 +260,8 @@ async fn run_test<R: Rng + 'static>(
                 continue;
             }
         };
+
+        insert_rows(pool, &mut table_ctx, rng)?;
 
         let translator = AlterTableExprTranslator;
         let sql = translator.translate(&expr).unwrap();
@@ -193,13 +271,13 @@ async fn run_test<R: Rng + 'static>(
                 info!("alter table: {sql}, result: {result:?}");
                 let table_name = table_ctx.name.to_string();
                 created_table.remove(&table_name);
-                table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
+                table_ctx.alter(expr)?;
                 validate_mysql(client, state, &table_ctx).await;
                 let table_name = table_ctx.name.to_string();
                 created_table.insert(table_name);
             }
             Err(err) => {
-                table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
+                table_ctx.alter(expr)?;
                 let table_name = table_ctx.name.to_string();
                 created_table.insert(table_name);
                 ensure!(
@@ -211,9 +289,88 @@ async fn run_test<R: Rng + 'static>(
                 break;
             }
         }
+
+        let actual_rows = fetch_all_rows(&table_ctx, pool)?;
+        info!("fetch all rows after alter: {actual_rows}");
+        if actual_rows.empty() && state.killed.load(Ordering::Relaxed) {
+            // Cuckoo does not have WAL enabled; therefore the data could be cleared across restart.
+            // When that happened, clear the saved data that are used for comparison, too.
+            table_ctx.clear_data();
+        } else {
+            assert_eq!(
+                &table_ctx.rows, &actual_rows,
+                r#"rows not equal:
+expect: {}
+actual: {}"#,
+                &table_ctx.rows, &actual_rows
+            )
+        }
     }
 
     Ok(())
+}
+
+fn insert_rows<R: Rng + 'static>(
+    pool: &mysql::Pool,
+    table_ctx: &mut TableContext,
+    rng: &mut R,
+) -> Result<()> {
+    let insert_expr = InsertExprGeneratorBuilder::default()
+        .table_ctx(Arc::new(table_ctx.clone()))
+        .build()
+        .unwrap()
+        .generate(rng)
+        .unwrap();
+    let sql = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
+    info!("executing insertion: {sql}");
+
+    let mut conn = pool.get_conn().context(RequestMysqlSnafu {
+        err_msg: "get connection",
+    })?;
+    conn.query_drop(&sql).with_context(|_| RequestMysqlSnafu {
+        err_msg: format!("executing sql '{}'", sql),
+    })?;
+
+    if conn.affected_rows() > 0 {
+        table_ctx.insert(insert_expr)?;
+    }
+    Ok(())
+}
+
+// Sqlx treats all queries as prepared, we have to switch to another mysql client library here.
+// There's a error when trying to query GreptimeDB with prepared statement:
+// "tried to use [50, 48, ..., 56] as MYSQL_TYPE_TIMESTAMP"
+// Besides, sqlx is suited for cases where table schema is known (and representable in codes),
+// definitely not here.
+fn fetch_all_rows(table_ctx: &TableContext, pool: &mysql::Pool) -> Result<Rows> {
+    let select_expr = SelectExpr {
+        table_name: table_ctx.name.to_string(),
+        columns: table_ctx.columns.clone(),
+        order_by: vec![table_ctx
+            .columns
+            .iter()
+            .find_map(|c| {
+                if c.is_time_index() {
+                    Some(c.name.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap()],
+        direction: Direction::Asc,
+        limit: usize::MAX,
+    };
+    let sql = SelectExprTranslator.translate(&select_expr).unwrap();
+    info!("executing selection: {sql}");
+
+    let mut conn = pool.get_conn().context(RequestMysqlSnafu {
+        err_msg: "get connection",
+    })?;
+    let rows: Vec<mysql::Row> = conn.query(&sql).with_context(|_| RequestMysqlSnafu {
+        err_msg: format!("executing sql: {}", sql),
+    })?;
+
+    Ok(Rows::fill(rows))
 }
 
 async fn validate_mysql(client: &Pool<MySql>, _state: &Arc<TestState>, table_ctx: &TableContext) {
@@ -240,9 +397,8 @@ async fn validate_mysql(client: &Pool<MySql>, _state: &Arc<TestState>, table_ctx
     }
 }
 
-async fn start_database() -> Result<Pid> {
-    let binary_path = "/home/weny/Projects/greptimedb-cuckoo/target/debug/greptime";
-    let test_dir = "/tmp/greptimedb-cuckoo/";
+async fn start_database(test_dir: &str) -> Result<Pid> {
+    let binary_path = "/home/lfc/greptimedb-cuckoo/target/debug/greptime";
     let template_filename = "standalone-v0.3.2.toml.template";
     let health_url = "http://127.0.0.1:4000/health";
 

@@ -15,9 +15,9 @@
 //! The intermediate representation
 
 pub(crate) mod alter_expr;
-pub(crate) mod create_expr;
-pub(crate) mod insert_expr;
-pub(crate) mod select_expr;
+pub mod create_expr;
+pub mod insert_expr;
+pub mod select_expr;
 
 use core::fmt;
 

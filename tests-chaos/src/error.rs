@@ -1,5 +1,5 @@
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu};
+use snafu::{location, Location, Snafu};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -55,6 +55,23 @@ pub enum Error {
         error: sqlx::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to request mysql, error: {}", err_msg))]
+    RequestMysql {
+        err_msg: String,
+        #[snafu(source)]
+        error: mysql::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<tests_fuzz::error::Error> for Error {
+    fn from(e: tests_fuzz::error::Error) -> Self {
+        Self::Unexpected {
+            err_msg: e.to_string(),
+            location: location!(),
+        }
+    }
+}

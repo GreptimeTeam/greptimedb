@@ -155,7 +155,9 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
         info!("Alter table: {sql}, result: {result:?}");
         // Applies changes
-        table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
+        let mut t = Arc::unwrap_or_clone(table_ctx);
+        t.alter(expr).unwrap();
+        table_ctx = Arc::new(t);
 
         // Validates columns
         let mut column_entries = validator::column::fetch_columns_via_mysql(

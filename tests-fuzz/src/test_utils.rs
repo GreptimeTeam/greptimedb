@@ -14,7 +14,7 @@
 
 use datatypes::data_type::ConcreteDataType;
 
-use crate::context::TableContext;
+use crate::context::{Rows, TableContext};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::Column;
 
@@ -53,6 +53,7 @@ pub fn new_test_ctx() -> TableContext {
                 options: vec![ColumnOption::TimeIndex],
             },
         ],
+        rows: Rows::new(),
         partition: None,
         primary_keys: vec![],
     }
