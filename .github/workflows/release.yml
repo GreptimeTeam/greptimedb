@@ -82,7 +82,7 @@ on:
 # Use env variables to control all the release process.
 env:
   # The arguments of building greptime.
-  RUST_TOOLCHAIN: nightly-2024-04-18
+  RUST_TOOLCHAIN: nightly-2024-04-20
   CARGO_PROFILE: nightly
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
@@ -102,7 +102,7 @@ jobs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
       macos-runner: ${{ inputs.macos_runner || vars.DEFAULT_MACOS_RUNNER }}
-      windows-runner: windows-latest-8-cores
+      windows-runner: windows-2022-8-cores
 
       # The following EC2 resource id will be used for resource releasing.
       linux-amd64-ec2-runner-label: ${{ steps.start-linux-amd64-runner.outputs.label }}
