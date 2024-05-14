@@ -197,7 +197,6 @@ impl RelationType {
 
     /// Adds new keys for the relation. Also sorts the key indices.
     ///
-    ///
     /// will ignore empty keys
     pub fn with_keys(mut self, keys: Vec<Vec<usize>>) -> Self {
         for key in keys {

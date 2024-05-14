@@ -84,15 +84,11 @@ pub enum ScalarExpr {
 
 impl ScalarExpr {
     /// try to determine the type of the expression
-    pub fn typ(&self, input_types: &[ColumnType]) -> Result<ColumnType, Error> {
+    pub fn typ(&self, context: &[ColumnType]) -> Result<ColumnType, Error> {
         match self {
-            ScalarExpr::Column(i) => input_types.get(*i).cloned().ok_or_else(|| {
+            ScalarExpr::Column(i) => context.get(*i).cloned().ok_or_else(|| {
                 UnexpectedSnafu {
-                    reason: format!(
-                        "column index {} out of range of len={}",
-                        i,
-                        input_types.len()
-                    ),
+                    reason: format!("column index {} out of range of len={}", i, context.len()),
                 }
                 .build()
             }),
@@ -109,7 +105,7 @@ impl ScalarExpr {
             ScalarExpr::CallVariadic { func, .. } => {
                 Ok(ColumnType::new_nullable(func.signature().output))
             }
-            ScalarExpr::If { then, .. } => then.typ(input_types),
+            ScalarExpr::If { then, .. } => then.typ(context),
         }
     }
 }
