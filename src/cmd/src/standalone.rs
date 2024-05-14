@@ -22,9 +22,8 @@ use cache::{
 };
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
-use common_config::Configurable;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_config::{metadata_store_dir, KvBackendConfig};
+use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
@@ -64,9 +63,9 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     BuildCacheRegistrySnafu, CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu,
-    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, Result, ShutdownDatanodeSnafu,
-    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
-    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,LoadLayeredConfigSnafu
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result,
+    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, Options};
 use crate::App;
@@ -295,7 +294,6 @@ impl StartCommand {
                     self.config_file.as_deref(),
                     self.env_prefix.as_ref(),
                 )
-                .map_err(Box::new)
                 .context(LoadLayeredConfigSnafu)?,
             )?,
         )))

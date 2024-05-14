@@ -364,6 +364,7 @@ pub enum Error {
     TomlFormat {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
         source: Box<common_config::error::Error>,
     },
 }

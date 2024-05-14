@@ -76,12 +76,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
         if self.enable_http_service {
             let http_server = HttpServerBuilder::new(self.opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(
-                    self.opts
-                        .to_toml()
-                        .map_err(Box::new)
-                        .context(TomlFormatSnafu)?,
-                )
+                .with_greptime_config_options(self.opts.to_toml().context(TomlFormatSnafu)?)
                 .build();
             let addr: SocketAddr = self.opts.http.addr.parse().context(ParseAddrSnafu {
                 addr: &self.opts.http.addr,
