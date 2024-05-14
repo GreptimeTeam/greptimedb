@@ -233,7 +233,7 @@ impl FlownodeManager {
         (zelf, worker)
     }
 
-    /// add a worker handler to manager, meaning this corrseponding worker is under it's manage
+    /// add a worker handler to manager, meaning this corresponding worker is under it's manage
     pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
         self.worker_handles.push(Mutex::new(handle));
     }

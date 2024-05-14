@@ -21,7 +21,7 @@ use snafu::ResultExt;
 
 use crate::adapter::error::{Error, ExternalSnafu};
 
-/// convert `ColumnSchema` lists to it's corrsponding proto type
+/// convert `ColumnSchema` lists to it's corresponding proto type
 pub fn column_schemas_to_proto(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],

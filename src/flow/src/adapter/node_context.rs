@@ -117,7 +117,7 @@ impl SourceSender {
         Ok(row_cnt)
     }
 
-    /// return number of rows it actuall send(including what's in the buffer)
+    /// return number of rows it actual send(including what's in the buffer)
     pub fn send_rows(&mut self, rows: Vec<DiffRow>) -> Result<usize, Error> {
         self.send_buf.extend(rows);
 
@@ -128,7 +128,7 @@ impl SourceSender {
 }
 
 impl FlownodeContext {
-    /// return number of rows it actuall send(including what's in the buffer)
+    /// return number of rows it actual send(including what's in the buffer)
     ///
     /// TODO(discord9): make this concurrent
     pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
@@ -154,7 +154,7 @@ impl FlownodeContext {
 impl FlownodeContext {
     /// mapping source table to task, and sink table to task in worker context
     ///
-    /// also add their corrseponding broadcast sender/receiver
+    /// also add their corresponding broadcast sender/receiver
     pub fn register_task_src_sink(
         &mut self,
         task_id: FlowId,
@@ -253,7 +253,7 @@ impl FlownodeContext {
     ///
     /// and will try to fetch the schema from table info manager(if table exist now)
     ///
-    /// NOTE: this will not actually render the table into collection refered as GlobalId
+    /// NOTE: this will not actually render the table into collection referred as GlobalId
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,
