@@ -457,9 +457,8 @@ mod tests {
     use common_meta::kv_backend::{KvBackend, TxnService};
     use common_meta::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
-        BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-        DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest,
-        RangeResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
     };
     use common_meta::rpc::KeyValue;
     use dashmap::DashMap;
@@ -516,13 +515,6 @@ mod tests {
         }
 
         async fn batch_put(&self, _req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
-            unimplemented!()
-        }
-
-        async fn compare_and_put(
-            &self,
-            _req: CompareAndPutRequest,
-        ) -> Result<CompareAndPutResponse, Self::Error> {
             unimplemented!()
         }
 

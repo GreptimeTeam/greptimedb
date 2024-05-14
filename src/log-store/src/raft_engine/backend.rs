@@ -25,8 +25,8 @@ use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnRes
 use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
@@ -277,42 +277,6 @@ impl KvBackend for RaftEngineBackend {
         Ok(response)
     }
 
-    async fn compare_and_put(
-        &self,
-        req: CompareAndPutRequest,
-    ) -> Result<CompareAndPutResponse, Self::Error> {
-        let CompareAndPutRequest { key, expect, value } = req;
-
-        let mut batch = LogBatch::with_capacity(1);
-        let engine = self.engine.write().unwrap();
-        let existing = engine_get(&engine, &key)?;
-        let eq = existing
-            .as_ref()
-            .map(|kv| kv.value == expect)
-            .unwrap_or_else(|| {
-                // if the associated value of key does not exist and expect is empty,
-                // then we still consider them as equal.
-                expect.is_empty()
-            });
-
-        if eq {
-            batch
-                .put(SYSTEM_NAMESPACE, key, value)
-                .context(RaftEngineSnafu)
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)?;
-            engine
-                .write(&mut batch, false)
-                .context(RaftEngineSnafu)
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)?;
-        }
-        Ok(CompareAndPutResponse {
-            success: eq,
-            prev_kv: existing,
-        })
-    }
-
     async fn delete_range(
         &self,
         req: DeleteRangeRequest,
@@ -436,6 +400,7 @@ mod tests {
         prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
         test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
     };
+    use common_meta::rpc::store::{CompareAndPutRequest, CompareAndPutResponse};
     use common_test_util::temp_dir::create_temp_dir;
     use raft_engine::{Config, ReadableSize, RecoveryMode};
 
