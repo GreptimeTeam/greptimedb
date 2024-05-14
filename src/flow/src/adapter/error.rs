@@ -24,6 +24,7 @@ use datatypes::value::Value;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 
+use crate::adapter::FlowId;
 use crate::expr::EvalError;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
@@ -39,7 +40,11 @@ pub enum Error {
     },
 
     #[snafu(display("Internal error"))]
-    Internal { location: Location, reason: String },
+    Internal {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     /// TODO(discord9): add detailed location of column
     #[snafu(display("Failed to eval stream"))]
@@ -67,6 +72,20 @@ pub enum Error {
     #[snafu(display("Table already exist: {name}"))]
     TableAlreadyExist {
         name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Flow not found, id={id}"))]
+    FlowNotFound {
+        id: FlowId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Flow already exist, id={id}"))]
+    FlowAlreadyExist {
+        id: FlowId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -168,10 +187,12 @@ impl ErrorExt for Error {
             Self::Eval { .. } | &Self::JoinTask { .. } | &Self::Datafusion { .. } => {
                 StatusCode::Internal
             }
-            &Self::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
-            Self::TableNotFound { .. } | Self::TableNotFoundMeta { .. } => {
-                StatusCode::TableNotFound
+            &Self::TableAlreadyExist { .. } | Self::FlowAlreadyExist { .. } => {
+                StatusCode::TableAlreadyExists
             }
+            Self::TableNotFound { .. }
+            | Self::TableNotFoundMeta { .. }
+            | Self::FlowNotFound { .. } => StatusCode::TableNotFound,
             Self::InvalidQueryPlan { .. }
             | Self::InvalidQuerySubstrait { .. }
             | Self::InvalidQueryProst { .. }
