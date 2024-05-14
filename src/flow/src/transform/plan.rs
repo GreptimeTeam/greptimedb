@@ -180,6 +180,8 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use datatypes::prelude::ConcreteDataType;
+
     use super::*;
     use crate::expr::{GlobalId, ScalarExpr};
     use crate::plan::{Plan, TypedPlan};
@@ -199,9 +201,15 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Get {
-                    id: crate::expr::Id::Global(GlobalId::User(0)),
-                }),
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(RelationType::new(vec![ColumnType::new(
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    )])),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)])
                     .unwrap()

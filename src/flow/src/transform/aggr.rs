@@ -285,7 +285,7 @@ impl TypedPlan {
             distinct_aggrs,
         };
         let plan = Plan::Reduce {
-            input: Box::new(input.plan),
+            input: Box::new(input),
             key_val_plan,
             reduce_plan: ReducePlan::Accumulable(accum_plan),
         };
@@ -298,6 +298,9 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use datatypes::prelude::ConcreteDataType;
+    use pretty_assertions::{assert_eq, assert_ne};
+
     use super::*;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
@@ -311,7 +314,10 @@ mod test {
 
         let mut ctx = create_test_ctx();
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
-
+        let typ = RelationType::new(vec![ColumnType::new(
+            ConcreteDataType::uint32_datatype(),
+            true,
+        )]);
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
             expr: ScalarExpr::Column(0),
@@ -320,26 +326,34 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Reduce {
-                    input: Box::new(Plan::Get {
-                        id: crate::expr::Id::Global(GlobalId::User(0)),
-                    }),
-                    key_val_plan: KeyValPlan {
-                        key_plan: MapFilterProject::new(1)
-                            .project(vec![])
-                            .unwrap()
-                            .into_safe(),
-                        val_plan: MapFilterProject::new(1)
-                            .project(vec![0])
-                            .unwrap()
-                            .into_safe(),
-                    },
-                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                        full_aggrs: vec![aggr_expr.clone()],
-                        simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                        distinct_aggrs: vec![],
-                    }),
-                }),
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(0)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(1)
+                                .project(vec![])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(1)
+                                .project(vec![0])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(typ),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)])
                     .unwrap()
@@ -370,28 +384,42 @@ mod test {
                 ColumnType::new(CDT::uint32_datatype(), false), // col number
             ]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Reduce {
-                    input: Box::new(Plan::Get {
-                        id: crate::expr::Id::Global(GlobalId::User(0)),
-                    }),
-                    key_val_plan: KeyValPlan {
-                        key_plan: MapFilterProject::new(1)
-                            .map(vec![ScalarExpr::Column(0)])
-                            .unwrap()
-                            .project(vec![1])
-                            .unwrap()
-                            .into_safe(),
-                        val_plan: MapFilterProject::new(1)
-                            .project(vec![0])
-                            .unwrap()
-                            .into_safe(),
-                    },
-                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                        full_aggrs: vec![aggr_expr.clone()],
-                        simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                        distinct_aggrs: vec![],
-                    }),
-                }),
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(0)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(1)
+                                .map(vec![ScalarExpr::Column(0)])
+                                .unwrap()
+                                .project(vec![1])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(1)
+                                .project(vec![0])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::uint32_datatype(), false), // col number
+                            ColumnType::new(CDT::uint32_datatype(), true),  // col sum(number)
+                        ])
+                        .with_key(vec![0]),
+                    ),
+                ),
                 mfp: MapFilterProject::new(2)
                     .map(vec![ScalarExpr::Column(1), ScalarExpr::Column(0)])
                     .unwrap()
@@ -420,29 +448,40 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Reduce {
-                    input: Box::new(Plan::Get {
-                        id: crate::expr::Id::Global(GlobalId::User(0)),
-                    }),
-                    key_val_plan: KeyValPlan {
-                        key_plan: MapFilterProject::new(1)
-                            .project(vec![])
-                            .unwrap()
-                            .into_safe(),
-                        val_plan: MapFilterProject::new(1)
-                            .map(vec![ScalarExpr::Column(0)
-                                .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
-                            .unwrap()
-                            .project(vec![1])
-                            .unwrap()
-                            .into_safe(),
-                    },
-                    reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                        full_aggrs: vec![aggr_expr.clone()],
-                        simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                        distinct_aggrs: vec![],
-                    }),
-                }),
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(0)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(1)
+                                .project(vec![])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(1)
+                                .map(vec![ScalarExpr::Column(0)
+                                    .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
+                                .unwrap()
+                                .project(vec![1])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(RelationType::new(vec![ColumnType::new(
+                        CDT::uint32_datatype(),
+                        true,
+                    )])),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)])
                     .unwrap()
