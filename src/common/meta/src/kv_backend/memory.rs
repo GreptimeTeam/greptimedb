@@ -268,18 +268,15 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
-                kvs.insert(key.clone(), value);
+                kvs.insert(key, value);
                 TxnOpResponse::ResponsePut(PutResponse { prev_kv: None })
             }
 
             TxnOp::Get(key) => {
-                let value = kvs.get(&key);
+                let value = kvs.get(&key).cloned();
                 let kvs = value
+                    .map(|value| KeyValue { key, value })
                     .into_iter()
-                    .map(|value| KeyValue {
-                        key: key.clone(),
-                        value: value.clone(),
-                    })
                     .collect();
                 TxnOpResponse::ResponseGet(RangeResponse { kvs, more: false })
             }
