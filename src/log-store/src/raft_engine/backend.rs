@@ -365,7 +365,6 @@ impl KvBackend for RaftEngineBackend {
             }
             batch.delete(SYSTEM_NAMESPACE, key);
         }
-        let engine = self.engine.read().unwrap();
         engine
             .write(&mut batch, false)
             .context(RaftEngineSnafu)
