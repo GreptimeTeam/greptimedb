@@ -226,7 +226,7 @@ impl<'s> Worker<'s> {
                 ctx.insert_global(*source_id, bundle);
             }
 
-            let rendered = ctx.render_plan(plan.plan)?;
+            let rendered = ctx.render_plan(plan)?;
             ctx.render_unbounded_sink(rendered, sink_sender);
         }
         self.task_states.insert(flow_id, cur_task_state);

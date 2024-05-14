@@ -113,11 +113,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 reduce_plan,
             } => self.render_reduce(input, key_val_plan, reduce_plan),
             Plan::Join { .. } => NotImplementedSnafu {
-                reason: "Join is still WIP".to_string(),
+                reason: "Join is still WIP",
             }
             .fail(),
             Plan::Union { .. } => NotImplementedSnafu {
-                reason: "Union is still WIP".to_string(),
+                reason: "Union is still WIP",
             }
             .fail(),
         }
