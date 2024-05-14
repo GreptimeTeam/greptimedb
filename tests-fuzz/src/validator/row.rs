@@ -27,6 +27,7 @@ use crate::ir::insert_expr::{RowValue, RowValues};
 
 /// Asserts fetched_rows are equal to rows
 pub fn assert_eq<'a, DB>(
+    columns: &[crate::ir::Column],
     fetched_rows: &'a [<DB as Database>::Row],
     rows: &[RowValues],
 ) -> Result<()>
@@ -115,9 +116,17 @@ where
                 }
             };
 
-            // println!("Expected value: {:?}, got: {:?}", value, fetched_value);
+            let value = match value {
+                // In MySQL, boolean is stored as TINYINT(1)
+                RowValue::Value(Value::Boolean(v)) => RowValue::Value(Value::Int8(*v as i8)),
+                RowValue::Default => match columns[idx].default_value().unwrap().clone() {
+                    Value::Boolean(v) => RowValue::Value(Value::Int8(v as i8)),
+                    default_value => RowValue::Value(default_value),
+                },
+                _ => value.clone(),
+            };
             ensure!(
-                value == &fetched_value,
+                value == fetched_value,
                 error::AssertSnafu {
                     reason: format!("Expected value: {:?}, got: {:?}", value, fetched_value)
                 }

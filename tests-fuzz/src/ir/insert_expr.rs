@@ -27,7 +27,7 @@ pub struct InsertIntoExpr {
 
 pub type RowValues = Vec<RowValue>;
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq, PartialOrd, Clone)]
 pub enum RowValue {
     Value(Value),
     Default,

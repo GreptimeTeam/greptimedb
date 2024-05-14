@@ -22,7 +22,7 @@ use rand::Rng;
 use crate::context::TableContextRef;
 use crate::error::{Error, Result};
 use crate::fake::WordGenerator;
-use crate::generator::{Generator, Random};
+use crate::generator::{Generator, Random, ValueGenerator};
 use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
 use crate::ir::{generate_random_value, Ident};
 
@@ -37,6 +37,8 @@ pub struct InsertExprGenerator<R: Rng + 'static> {
     rows: usize,
     #[builder(default = "Box::new(WordGenerator)")]
     word_generator: Box<dyn Random<Ident, R>>,
+    #[builder(default = "Box::new(generate_random_value)")]
+    value_generator: ValueGenerator<R>,
     #[builder(default)]
     _phantom: PhantomData<R>,
 }
@@ -81,7 +83,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
                     continue;
                 }
 
-                row.push(RowValue::Value(generate_random_value(
+                row.push(RowValue::Value((self.value_generator)(
                     rng,
                     &column.column_type,
                     Some(self.word_generator.as_ref()),
