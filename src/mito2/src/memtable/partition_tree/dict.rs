@@ -120,7 +120,7 @@ impl KeyDictBuilder {
                 .sum::<usize>()
     }
 
-    /// Finishes the builder.
+    /// Finishes the builder. The key of the second BTreeMap is sparse-encoded bytes.
     pub fn finish(&mut self) -> Option<(KeyDict, BTreeMap<Vec<u8>, PkIndex>)> {
         if self.key_buffer.is_empty() {
             return None;

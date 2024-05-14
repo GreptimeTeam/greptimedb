@@ -587,7 +587,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "__ts_id",
+                    "__tsid",
                     ConcreteDataType::uint64_datatype(),
                     false,
                 ),
