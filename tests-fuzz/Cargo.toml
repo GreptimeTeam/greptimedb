@@ -23,6 +23,7 @@ common-query = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 common-time = { workspace = true }
+chrono = { workspace = true }
 datatypes = { workspace = true }
 derive_builder = { workspace = true }
 dotenv = "0.15"

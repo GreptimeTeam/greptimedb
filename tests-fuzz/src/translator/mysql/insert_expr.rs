@@ -33,7 +33,7 @@ impl DslTranslator<InsertIntoExpr, String> for InsertIntoExprTranslator {
 
 impl InsertIntoExprTranslator {
     fn format_columns(input: &InsertIntoExpr) -> String {
-        if input.columns.is_empty() {
+        if input.omit_column_list {
             "".to_string()
         } else {
             let list = input
