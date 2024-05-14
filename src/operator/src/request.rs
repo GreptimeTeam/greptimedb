@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::region::region_request::Body as RegionRequestBody;
-use api::v1::region::{CompactRequest, FlushRequest, RegionRequestHeader};
+use api::v1::region::{CompactRequest, CompactType, FlushRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
@@ -104,11 +104,13 @@ impl Requester {
             )
             .await?;
 
+        let compact_type = CompactType::from(&request.compact_type);
         let requests = partitions
             .into_iter()
             .map(|partition| {
                 RegionRequestBody::Compact(CompactRequest {
                     region_id: partition.id.into(),
+                    compact_type: Some(compact_type.clone()),
                 })
             })
             .collect();
@@ -145,6 +147,7 @@ impl Requester {
     ) -> Result<AffectedRows> {
         let request = RegionRequestBody::Compact(CompactRequest {
             region_id: region_id.into(),
+            compact_type: None, // todo(hl): maybe also support parameters in region compaction.
         });
 
         info!("Handle region manual compaction request: {region_id}");

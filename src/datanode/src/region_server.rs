@@ -219,6 +219,7 @@ impl RegionServerHandler for RegionServer {
             .context(BuildRegionRequestsSnafu)
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
+
         let tracing_context = TracingContext::from_current_span();
 
         let results = if is_parallel {

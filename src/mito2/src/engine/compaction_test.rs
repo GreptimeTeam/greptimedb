@@ -131,7 +131,12 @@ async fn test_compaction_region() {
     put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
 
     let result = engine
-        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                compact_type: Default::default(),
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(result.affected_rows, 0);
@@ -179,7 +184,12 @@ async fn test_compaction_region_with_overlapping() {
     delete_and_flush(&engine, region_id, &column_schemas, 0..3600).await; // window 3600
 
     let result = engine
-        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                compact_type: Default::default(),
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(result.affected_rows, 0);
@@ -227,7 +237,12 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     delete_and_flush(&engine, region_id, &column_schemas, 0..10800).await; // window 10800
 
     let result = engine
-        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                compact_type: Default::default(),
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(result.affected_rows, 0);

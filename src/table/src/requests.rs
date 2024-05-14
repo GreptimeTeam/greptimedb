@@ -25,6 +25,8 @@ use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
+use greptime_proto::v1::region::compact_type::Ty;
+use greptime_proto::v1::region::{Regular, StrictWindow};
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
@@ -256,6 +258,20 @@ pub struct CompactTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub compact_type: CompactType,
+}
+
+impl From<&CompactType> for greptime_proto::v1::region::CompactType {
+    fn from(value: &CompactType) -> Self {
+        let compact_type = match value {
+            CompactType::Regular => Ty::Regular(Regular::default()),
+            CompactType::StrictWindow(window) => Ty::StrictWindow(StrictWindow {
+                window: window.window_size.unwrap_or(0),
+            }),
+        };
+        greptime_proto::v1::region::CompactType {
+            ty: Some(compact_type),
+        }
+    }
 }
 
 /// Truncate table request

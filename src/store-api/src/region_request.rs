@@ -19,8 +19,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{
     alter_request, region_request, AlterRequest, AlterRequests, CloseRequest, CompactRequest,
-    CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest,
-    InsertRequests, OpenRequest, TruncateRequest,
+    CompactType, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{self, Rows, SemanticType};
 pub use common_base::AffectedRows;
@@ -199,9 +199,10 @@ fn make_region_flush(flush: FlushRequest) -> Result<Vec<(RegionId, RegionRequest
 
 fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = compact.region_id.into();
+    let compact_type = compact.compact_type.unwrap_or_default();
     Ok(vec![(
         region_id,
-        RegionRequest::Compact(RegionCompactRequest {}),
+        RegionRequest::Compact(RegionCompactRequest { compact_type }),
     )])
 }
 
@@ -642,7 +643,9 @@ pub struct RegionFlushRequest {
 }
 
 #[derive(Debug)]
-pub struct RegionCompactRequest {}
+pub struct RegionCompactRequest {
+    pub compact_type: CompactType,
+}
 
 /// Truncate region request.
 #[derive(Debug)]

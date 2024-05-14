@@ -29,6 +29,7 @@ datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
+greptime-proto.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 paste = "1.0"
