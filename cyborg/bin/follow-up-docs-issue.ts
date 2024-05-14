@@ -56,7 +56,7 @@ async function main() {
             owner, repo, issue_number: number, labels: [labelDocsRequired],
         })
         await docsClient.rest.issues.create({
-            owner: 'GreptimeDB',
+            owner: 'GreptimeTeam',
             repo: 'docs',
             title: `Update docs for ${title}`,
             body: `A document change request is generated from ${html_url}`,
