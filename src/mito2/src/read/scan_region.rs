@@ -602,11 +602,6 @@ impl ScanInput {
                     }
                 }
             };
-            common_telemetry::debug!(
-                "Build parts for file {}, row_groups: {}",
-                file.file_id(),
-                row_groups.len()
-            );
             if !compat::has_same_columns(
                 self.mapper.metadata(),
                 file_range_ctx.read_format().metadata(),
@@ -631,11 +626,7 @@ impl ScanInput {
 
         READ_SST_COUNT.observe(self.files.len() as f64);
 
-        if !self.enable_parallel_scan() {
-            common_telemetry::debug!(
-                "Parallel scan is disabled, {}",
-                self.parallelism.parallelism
-            );
+        if !self.parallelism.allow_parallel_scan() {
             // Returns a single part.
             let part = ScanPart {
                 memtables: self.memtables.clone(),
@@ -651,7 +642,7 @@ impl ScanInput {
         let mems_per_part = ((self.memtables.len() + parallelism - 1) / parallelism).max(1);
         let ranges_per_part = ((file_ranges.len() + parallelism - 1) / parallelism).max(1);
         common_telemetry::debug!(
-            "Parallel scan is enabled, {} ({}, {}), mems_per_part: {}, ranges_per_part: {}",
+            "Parallel scan is enabled, parallelism: {}, {} memtables, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
             self.parallelism.parallelism,
             self.memtables.len(),
             file_ranges.len(),
@@ -708,11 +699,6 @@ impl ScanInput {
                 }
             }
         });
-    }
-
-    /// Returns whether to scan in parallel.
-    pub(crate) fn enable_parallel_scan(&self) -> bool {
-        self.parallelism.allow_parallel_scan() && (self.files.len() + self.memtables.len()) > 1
     }
 }
 

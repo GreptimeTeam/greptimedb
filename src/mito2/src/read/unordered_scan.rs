@@ -184,7 +184,6 @@ impl RegionScanner for UnorderedScan {
         let query_start = self.query_start;
         let stream = try_stream! {
             let cache = cache_manager.as_deref();
-            common_telemetry::debug!("memtables num: {}", memtable_sources.len());
             // Scans memtables first.
             for mut source in memtable_sources {
                 while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, None, &mut metrics).await? {
@@ -193,7 +192,7 @@ impl RegionScanner for UnorderedScan {
                     yield batch;
                 }
             }
-            common_telemetry::debug!("memtables batches: {}, rows: {}", metrics.num_batches, metrics.num_rows);
+            // TODO(yingwen): metrics.
             // Then scans file ranges.
             for file_range in file_ranges {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
