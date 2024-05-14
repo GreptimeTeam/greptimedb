@@ -475,7 +475,8 @@ mod tests {
             .await
             .unwrap();
         assert!(success);
-        assert_eq!(b"word".as_slice(), &prev_kv.unwrap().value);
+        // Do not return prev_kv on success
+        assert!(prev_kv.is_none());
 
         assert_eq!(
             b"world".as_slice(),
