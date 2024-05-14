@@ -26,6 +26,8 @@ use crate::metrics::MEMTABLE_DICT_BYTES;
 /// Maximum keys in a [DictBlock].
 const MAX_KEYS_PER_BLOCK: u16 = 256;
 
+/// The key is mcmp-encoded primary keys, while the values are the pk index and
+/// optionally sparsely encoded primary keys.
 type PkIndexMap = BTreeMap<Vec<u8>, (PkIndex, Option<Vec<u8>>)>;
 
 /// Builder to build a key dictionary.
