@@ -423,7 +423,6 @@ impl Node for ShardNode {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use super::*;
@@ -488,10 +487,10 @@ mod tests {
             encode_keys(&metadata, kvs, &mut keys);
         }
         for key in &keys {
-            dict_builder.insert_key(key, &mut metrics);
+            dict_builder.insert_key(key, None, &mut metrics);
         }
 
-        let dict = dict_builder.finish(&mut BTreeMap::new()).unwrap();
+        let (dict, _) = dict_builder.finish().unwrap();
         let data_parts = DataParts::new(metadata, DATA_INIT_CAP, true);
 
         Shard::new(
