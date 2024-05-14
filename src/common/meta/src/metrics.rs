@@ -39,6 +39,12 @@ lazy_static! {
         &["step"]
     )
     .unwrap();
+    pub static ref METRIC_META_PROCEDURE_CREATE_VIEW: HistogramVec = register_histogram_vec!(
+        "greptime_meta_procedure_create_view",
+        "meta procedure create view",
+        &["step"]
+    )
+    .unwrap();
     pub static ref METRIC_META_PROCEDURE_CREATE_FLOW: HistogramVec = register_histogram_vec!(
         "greptime_meta_procedure_create_flow",
         "meta procedure create flow",

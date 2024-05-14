@@ -87,6 +87,13 @@ impl LogicalPlan {
             .context(DataFusionSnafu)
             .map(LogicalPlan::DfPlan)
     }
+
+    /// Unwrap the logical plan into a DataFusion logical plan
+    pub fn unwrap_df_plan(self) -> DfLogicalPlan {
+        match self {
+            LogicalPlan::DfPlan(plan) => plan,
+        }
+    }
 }
 
 impl From<DfLogicalPlan> for LogicalPlan {

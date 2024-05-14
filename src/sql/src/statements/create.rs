@@ -20,6 +20,7 @@ use sqlparser::ast::{Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, TableConstraint, Value as SqlValue};
+use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
@@ -280,6 +281,35 @@ impl Display for CreateFlow {
         if let Some(comment) = &self.comment {
             write!(f, "COMMENT '{}' ", comment)?;
         }
+        write!(f, "AS {}", &self.query)
+    }
+}
+
+/// Create SQL view statement.
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+pub struct CreateView {
+    /// View name
+    pub name: ObjectName,
+    /// The clause after `As` that defines the VIEW.
+    /// Can only be either [Statement::Query] or [Statement::Tql].
+    pub query: Box<Statement>,
+    /// Whether to replace existing VIEW
+    pub or_replace: bool,
+    /// Create VIEW only when it doesn't exists
+    pub if_not_exists: bool,
+}
+
+impl Display for CreateView {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CREATE ")?;
+        if self.or_replace {
+            write!(f, "OR REPLACE ")?;
+        }
+        write!(f, "VIEW ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{} ", &self.name)?;
         write!(f, "AS {}", &self.query)
     }
 }

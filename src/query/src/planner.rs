@@ -42,6 +42,8 @@ use crate::{DfContextProviderAdapter, QueryEngineContext};
 pub trait LogicalPlanner: Send + Sync {
     async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
 
+    fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan>;
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -145,6 +147,14 @@ impl DfLogicalPlanner {
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
     }
+
+    #[tracing::instrument(skip_all)]
+    fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        self.engine_state
+            .optimize_logical_plan(plan.unwrap_df_plan())
+            .context(DataFusionSnafu)
+            .map(Into::into)
+    }
 }
 
 #[async_trait]
@@ -155,6 +165,10 @@ impl LogicalPlanner for DfLogicalPlanner {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
             QueryStatement::Promql(stmt) => self.plan_pql(stmt, query_ctx).await,
         }
+    }
+
+    fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        self.optimize_logical_plan(plan)
     }
 
     fn as_any(&self) -> &dyn Any {

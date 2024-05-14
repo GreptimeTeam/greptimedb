@@ -157,6 +157,11 @@ impl QueryEngineState {
             })
     }
 
+    /// Run the full logical plan optimize phase for the given plan.
+    pub fn optimize_logical_plan(&self, plan: DfLogicalPlan) -> DfResult<DfLogicalPlan> {
+        self.session_state().optimize(&plan)
+    }
+
     /// Register an udf function.
     /// Will override if the function with same name is already registered.
     pub fn register_function(&self, func: FunctionRef) {

@@ -33,8 +33,8 @@ use crate::error::{
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
-    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
-    TIME_INDEX,
+    CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
+    Partitions, TIME_INDEX,
 };
 use crate::statements::statement::Statement;
 use crate::statements::{get_data_type_by_alias_name, OptionMap};
@@ -70,6 +70,7 @@ impl<'a> ParserContext<'a> {
                         .context(SyntaxSnafu)?;
                     match self.parser.next_token().token {
                         Token::Word(w) => match w.keyword {
+                            Keyword::VIEW => self.parse_create_view(true),
                             Keyword::NoKeyword => {
                                 let uppercase = w.value.to_uppercase();
                                 match uppercase.as_str() {
@@ -83,6 +84,11 @@ impl<'a> ParserContext<'a> {
                     }
                 }
 
+                Keyword::VIEW => {
+                    let _ = self.parser.next_token();
+                    self.parse_create_view(false)
+                }
+
                 Keyword::NoKeyword => {
                     let _ = self.parser.next_token();
                     let uppercase = w.value.to_uppercase();
@@ -91,11 +97,29 @@ impl<'a> ParserContext<'a> {
                         _ => self.unsupported(w.to_string()),
                     }
                 }
-
                 _ => self.unsupported(w.to_string()),
             },
             unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    /// Parse `CREAVE VIEW` statement.
+    fn parse_create_view(&mut self, or_replace: bool) -> Result<Statement> {
+        let if_not_exists = self.parse_if_not_exist()?;
+        let view_name = self.intern_parse_table_name()?;
+
+        self.parser
+            .expect_keyword(Keyword::AS)
+            .context(SyntaxSnafu)?;
+
+        let query = self.parse_query()?;
+
+        Ok(Statement::CreateView(CreateView {
+            name: view_name,
+            or_replace,
+            query: Box::new(query),
+            if_not_exists,
+        }))
     }
 
     fn parse_create_external_table(&mut self) -> Result<Statement> {
@@ -1769,5 +1793,47 @@ non TIMESTAMP(6) TIME INDEX,
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_create_view() {
+        let sql = "CREATE VIEW test AS SELECT * FROM NUMBERS";
+
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), sql);
+                assert!(!c.or_replace);
+                assert!(!c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "CREATE OR REPLACE VIEW IF NOT EXISTS test AS SELECT * FROM NUMBERS";
+
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        match &result[0] {
+            Statement::CreateView(c) => {
+                assert_eq!(c.to_string(), sql);
+                assert!(c.or_replace);
+                assert!(c.if_not_exists);
+                assert_eq!("test", c.name.to_string());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_view_invalid_query() {
+        let sql = "CREATE VIEW test AS DELETE from demo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert_matches!(result, Err(crate::error::Error::Syntax { .. }));
     }
 }
