@@ -19,7 +19,6 @@ use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
-use common_telemetry::debug;
 use itertools::Itertools;
 use snafu::ResultExt;
 

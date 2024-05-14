@@ -16,7 +16,6 @@
 //! and communicating with other parts of the database
 #![warn(unused_imports)]
 
-use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

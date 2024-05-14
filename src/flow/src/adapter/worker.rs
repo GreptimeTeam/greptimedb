@@ -17,7 +17,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use common_telemetry::debug;
 use hydroflow::scheduled::graph::Hydroflow;
 use snafu::ResultExt;
 use tokio::sync::{broadcast, mpsc, Mutex};
