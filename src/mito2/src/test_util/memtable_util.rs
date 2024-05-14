@@ -115,7 +115,7 @@ pub fn metadata_with_primary_key(
     enable_table_id: bool,
 ) -> RegionMetadataRef {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
-    let maybe_table_id = if enable_table_id { "table_id" } else { "k1" };
+    let maybe_table_id = if enable_table_id { "__table_id" } else { "k1" };
     builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),

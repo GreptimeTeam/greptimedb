@@ -321,6 +321,7 @@ impl TypedExpr {
 
 #[cfg(test)]
 mod test {
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
 
     use super::*;
@@ -359,9 +360,15 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Get {
-                    id: crate::expr::Id::Global(GlobalId::User(0)),
-                }),
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(RelationType::new(vec![ColumnType::new(
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    )])),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)])
                     .unwrap()
@@ -411,9 +418,15 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Get {
-                    id: crate::expr::Id::Global(GlobalId::User(0)),
-                }),
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(RelationType::new(vec![ColumnType::new(
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    )])),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0).call_binary(
                         ScalarExpr::Literal(Value::from(1u32), CDT::uint32_datatype()),
@@ -439,9 +452,15 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Get {
-                    id: crate::expr::Id::Global(GlobalId::User(0)),
-                }),
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(RelationType::new(vec![ColumnType::new(
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    )])),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Literal(
                         Value::Int64(1),
@@ -468,9 +487,15 @@ mod test {
         let expected = TypedPlan {
             typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
             plan: Plan::Mfp {
-                input: Box::new(Plan::Get {
-                    id: crate::expr::Id::Global(GlobalId::User(0)),
-                }),
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(RelationType::new(vec![ColumnType::new(
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    )])),
+                ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)
                         .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])

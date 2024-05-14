@@ -181,7 +181,12 @@ impl RelationType {
     }
 
     /// Adds a new key for the relation. Also sorts the key indices.
+    ///
+    /// will ignore empty key
     pub fn with_key(mut self, mut indices: Vec<usize>) -> Self {
+        if indices.is_empty() {
+            return self;
+        }
         indices.sort_unstable();
         let key = Key::from(indices);
         if !self.keys.contains(&key) {
@@ -191,6 +196,8 @@ impl RelationType {
     }
 
     /// Adds new keys for the relation. Also sorts the key indices.
+    ///
+    /// will ignore empty keys
     pub fn with_keys(mut self, keys: Vec<Vec<usize>>) -> Self {
         for key in keys {
             self = self.with_key(key)

@@ -21,7 +21,9 @@ use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
-use crate::adapter::error::{Error, InvalidQuerySnafu, UnsupportedTemporalFilterSnafu};
+use crate::adapter::error::{
+    Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
+};
 use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::repr::ColumnType;
@@ -78,6 +80,34 @@ pub enum ScalarExpr {
         then: Box<ScalarExpr>,
         els: Box<ScalarExpr>,
     },
+}
+
+impl ScalarExpr {
+    /// try to determine the type of the expression
+    pub fn typ(&self, context: &[ColumnType]) -> Result<ColumnType, Error> {
+        match self {
+            ScalarExpr::Column(i) => context.get(*i).cloned().ok_or_else(|| {
+                UnexpectedSnafu {
+                    reason: format!("column index {} out of range of len={}", i, context.len()),
+                }
+                .build()
+            }),
+            ScalarExpr::Literal(_, typ) => Ok(ColumnType::new_nullable(typ.clone())),
+            ScalarExpr::CallUnmaterializable(func) => {
+                Ok(ColumnType::new_nullable(func.signature().output))
+            }
+            ScalarExpr::CallUnary { func, .. } => {
+                Ok(ColumnType::new_nullable(func.signature().output))
+            }
+            ScalarExpr::CallBinary { func, .. } => {
+                Ok(ColumnType::new_nullable(func.signature().output))
+            }
+            ScalarExpr::CallVariadic { func, .. } => {
+                Ok(ColumnType::new_nullable(func.signature().output))
+            }
+            ScalarExpr::If { then, .. } => then.typ(context),
+        }
+    }
 }
 
 impl ScalarExpr {

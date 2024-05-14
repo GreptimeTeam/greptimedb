@@ -103,7 +103,7 @@ impl TxnService for RaftEngineBackend {
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
                 batch
-                    .put(SYSTEM_NAMESPACE, key.clone(), value)
+                    .put(SYSTEM_NAMESPACE, key, value)
                     .context(RaftEngineSnafu)
                     .map_err(BoxedError::new)
                     .context(meta_error::ExternalSnafu)?;
@@ -113,11 +113,8 @@ impl TxnService for RaftEngineBackend {
             TxnOp::Get(key) => {
                 let value = engine_get(&engine, &key)?.map(|kv| kv.value);
                 let kvs = value
+                    .map(|value| KeyValue { key, value })
                     .into_iter()
-                    .map(|value| KeyValue {
-                        key: key.clone(),
-                        value,
-                    })
                     .collect();
                 Ok(TxnOpResponse::ResponseGet(RangeResponse {
                     kvs,
