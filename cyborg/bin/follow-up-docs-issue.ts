@@ -14,9 +14,12 @@
  * limitations under the License.
  */
 
+import * as core from '@actions/core'
 import {handleError, obtainClient} from "@/common";
 import {context} from "@actions/github";
 import {PullRequestEditedEvent, PullRequestEvent, PullRequestOpenedEvent} from "@octokit/webhooks-types";
+// @ts-expect-error moduleResolution:nodenext issue 54523
+import {RequestError} from "@octokit/request-error";
 
 const needFollowUpDocs = "[x] This PR requires documentation updates."
 
@@ -40,6 +43,12 @@ async function main() {
     if (followUpDocs) {
         await client.rest.issues.removeLabel({
             owner, repo, issue_number: number, name: 'docs-not-need',
+        }).catch((e: RequestError) => {
+            if (e.status != 404) {
+                throw e;
+            } else {
+                core.debug("Labels to be removed do not exist.")
+            }
         })
         await client.rest.issues.addLabels({
             owner, repo, issue_number: number, labels: ['docs-required'],
@@ -54,6 +63,12 @@ async function main() {
     } else {
         await client.rest.issues.removeLabel({
             owner, repo, issue_number: number, name: 'docs-required'
+        }).catch((e: RequestError) => {
+            if (e.status != 404) {
+                throw e;
+            } else {
+                core.debug("Labels to be removed do not exist.")
+            }
         })
         await client.rest.issues.addLabels({
             owner, repo, issue_number: number, labels: ['docs-not-need'],

@@ -11,6 +11,9 @@ dependencies:
   '@actions/github':
     specifier: ^6.0.0
     version: 6.0.0
+  '@octokit/request-error':
+    specifier: ^6.1.1
+    version: 6.1.1
   '@octokit/webhooks-types':
     specifier: ^7.5.1
     version: 7.5.1
@@ -357,6 +360,13 @@ packages:
       '@octokit/types': 13.5.0
       deprecation: 2.3.1
       once: 1.4.0
+    dev: false
+
+  /@octokit/request-error@6.1.1:
+    resolution: {integrity: sha512-1mw1gqT3fR/WFvnoVpY/zUM2o/XkMs/2AszUUG9I69xn0JFLv6PGkPhNk5lbfvROs79wiS0bqiJNxfCZcRJJdg==}
+    engines: {node: '>= 18'}
+    dependencies:
+      '@octokit/types': 13.5.0
     dev: false
 
   /@octokit/request@8.4.0:
