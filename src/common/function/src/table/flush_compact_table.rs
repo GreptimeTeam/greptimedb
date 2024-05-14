@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::str::FromStr;
 
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
@@ -22,88 +23,156 @@ use common_query::error::{
     UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use datatypes::prelude::*;
 use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
 use snafu::{ensure, Location, OptionExt, ResultExt};
-use table::requests::{CompactTableRequest, FlushTableRequest};
+use table::requests::{CompactTableRequest, CompactType, FlushTableRequest, StrictWindowOptions};
 
 use crate::ensure_greptime;
 use crate::function::{Function, FunctionContext};
 use crate::handlers::TableMutationHandlerRef;
 
-macro_rules! define_table_function {
-    ($name: expr, $display_name_str: expr, $display_name: ident, $func: ident, $request: ident) => {
-        /// A function to $func table, such as `$display_name(table_name)`.
-        #[admin_fn(name = $name, display_name = $display_name_str, sig_fn = "signature", ret = "uint64")]
-        pub(crate) async fn $display_name(
-            table_mutation_handler: &TableMutationHandlerRef,
-            query_ctx: &QueryContextRef,
-            params: &[ValueRef<'_>],
-        ) -> Result<Value> {
-            ensure!(
-                params.len() == 1,
-                InvalidFuncArgsSnafu {
-                    err_msg: format!(
-                        "The length of the args is not correct, expect 1, have: {}",
-                        params.len()
-                    ),
-                }
-            );
-
-            let ValueRef::String(table_name) = params[0] else {
-                return UnsupportedInputDataTypeSnafu {
-                    function: $display_name_str,
-                    datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
-                }
-                .fail();
-            };
-
-            let (catalog_name, schema_name, table_name) =
-                table_name_to_full_name(table_name, &query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(TableMutationSnafu)?;
-
-            let affected_rows = table_mutation_handler
-                .$func(
-                    $request {
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                    },
-                    query_ctx.clone(),
-                )
-                .await?;
-
-            Ok(Value::from(affected_rows as u64))
+#[admin_fn(
+    name = "FlushTableFunction",
+    display_name = "flush_table",
+    sig_fn = "flush_signature",
+    ret = "uint64"
+)]
+pub(crate) async fn flush_table(
+    table_mutation_handler: &TableMutationHandlerRef,
+    query_ctx: &QueryContextRef,
+    params: &[ValueRef<'_>],
+) -> Result<Value> {
+    ensure!(
+        params.len() == 1,
+        InvalidFuncArgsSnafu {
+            err_msg: format!(
+                "The length of the args is not correct, expect 1, have: {}",
+                params.len()
+            ),
         }
+    );
+
+    let ValueRef::String(table_name) = params[0] else {
+        return UnsupportedInputDataTypeSnafu {
+            function: "flush_table",
+            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+        }
+        .fail();
     };
+
+    let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, &query_ctx)
+        .map_err(BoxedError::new)
+        .context(TableMutationSnafu)?;
+
+    let affected_rows = table_mutation_handler
+        .flush(
+            FlushTableRequest {
+                catalog_name,
+                schema_name,
+                table_name,
+            },
+            query_ctx.clone(),
+        )
+        .await?;
+
+    Ok(Value::from(affected_rows as u64))
 }
 
-define_table_function!(
-    "FlushTableFunction",
-    "flush_table",
-    flush_table,
-    flush,
-    FlushTableRequest
-);
+#[admin_fn(
+    name = "CompactTableFunction",
+    display_name = "compact_table",
+    sig_fn = "compact_signature",
+    ret = "uint64"
+)]
+pub(crate) async fn compact_table(
+    table_mutation_handler: &TableMutationHandlerRef,
+    query_ctx: &QueryContextRef,
+    params: &[ValueRef<'_>],
+) -> Result<Value> {
+    let request = parse_compact_params(params, query_ctx)?;
+    info!("Compact table request: {:?}", request);
 
-define_table_function!(
-    "CompactTableFunction",
-    "compact_table",
-    compact_table,
-    compact,
-    CompactTableRequest
-);
+    let affected_rows = table_mutation_handler
+        .compact(request, query_ctx.clone())
+        .await?;
 
-fn signature() -> Signature {
+    Ok(Value::from(affected_rows as u64))
+}
+
+fn flush_signature() -> Signature {
     Signature::uniform(
         1,
         vec![ConcreteDataType::string_datatype()],
         Volatility::Immutable,
     )
+}
+
+fn compact_signature() -> Signature {
+    Signature::variadic(
+        vec![ConcreteDataType::string_datatype()],
+        Volatility::Immutable,
+    )
+}
+
+fn parse_compact_params(
+    params: &[ValueRef<'_>],
+    query_ctx: &QueryContextRef,
+) -> Result<CompactTableRequest> {
+    ensure!(
+        params.len() >= 1,
+        InvalidFuncArgsSnafu {
+            err_msg: "The length of the args is not correct, expect at least 1",
+        }
+    );
+
+    let ValueRef::String(table_name) = params[0] else {
+        return UnsupportedInputDataTypeSnafu {
+            function: "compact_table",
+            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+        }
+        .fail();
+    };
+
+    let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, &query_ctx)
+        .map_err(BoxedError::new)
+        .context(TableMutationSnafu)?;
+
+    let ty = if params.len() > 1 {
+        let ValueRef::String(compact_ty_str) = params[1] else {
+            return UnsupportedInputDataTypeSnafu {
+                function: "compact_table",
+                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+            }
+            .fail();
+        };
+        if compact_ty_str.eq_ignore_ascii_case("strict_window") {
+            let window = params.get(2).and_then(|v| {
+                if let ValueRef::String(window_str) = v {
+                    i64::from_str(window_str).ok()
+                } else {
+                    None
+                }
+            });
+            CompactType::StrictWindow(StrictWindowOptions {
+                window_size: window,
+            })
+        } else {
+            CompactType::Regular
+        }
+    } else {
+        CompactType::Regular
+    };
+
+    Ok(CompactTableRequest {
+        catalog_name,
+        schema_name,
+        table_name,
+        compact_type: ty,
+    })
 }
 
 #[cfg(test)]

@@ -239,10 +239,23 @@ pub struct FlushTableRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+pub enum CompactType {
+    #[default]
+    Regular,
+    StrictWindow(StrictWindowOptions),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StrictWindowOptions {
+    pub window_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub compact_type: CompactType,
 }
 
 /// Truncate table request
