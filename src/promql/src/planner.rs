@@ -35,7 +35,8 @@ use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datafusion_expr::utils::conjunction;
-use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
@@ -910,9 +911,65 @@ impl PromPlanner {
             .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?;
-        // Safety: `scan_filters` is not empty.
-        let result = LogicalPlanBuilder::scan(table_ref, provider, None)
+        let table_schema = provider
+            .as_any()
+            .downcast_ref::<DefaultTableSource>()
+            .context(UnknownTableSnafu)?
+            .table_provider
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()
+            .context(UnknownTableSnafu)?
+            .table()
+            .schema();
+
+        let time_index_type = &table_schema
+            .timestamp_column()
+            .with_context(|| TimeIndexNotFoundSnafu {
+                table: table_ref.to_quoted_string(),
+            })?
+            .data_type;
+
+        let is_time_index_ms = *time_index_type == ConcreteDataType::time_millisecond_datatype()
+            || *time_index_type == ConcreteDataType::timestamp_millisecond_datatype();
+
+        let mut scan_plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)
             .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        if !is_time_index_ms {
+            // cast to ms if time_index not in Millisecond precision
+            let expr: Vec<_> = self
+                .ctx
+                .field_columns
+                .iter()
+                .map(|col| DfExpr::Column(Column::new(Some(table_ref.clone()), col.clone())))
+                .chain(self.create_tag_column_exprs()?)
+                .chain(Some(DfExpr::Alias(Alias {
+                    expr: Box::new(DfExpr::Cast(Cast {
+                        expr: Box::new(self.create_time_index_column_expr()?),
+                        data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    })),
+                    relation: Some(table_ref.clone()),
+                    name: self
+                        .ctx
+                        .time_index_column
+                        .as_ref()
+                        .with_context(|| TimeIndexNotFoundSnafu {
+                            table: table_ref.to_quoted_string(),
+                        })?
+                        .clone(),
+                })))
+                .collect::<Vec<_>>();
+            scan_plan = LogicalPlanBuilder::from(scan_plan)
+                .project(expr)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
+
+        // Safety: `scan_filters` is not empty.
+        let result = LogicalPlanBuilder::from(scan_plan)
             .filter(conjunction(filter).unwrap())
             .context(DataFusionPlanningSnafu)?
             .build()

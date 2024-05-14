@@ -342,12 +342,14 @@ impl InstantManipulateStream {
     // and the function `vectorSelectorSingle`
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let mut take_indices = vec![];
-        // TODO(ruihang): maybe the input is not timestamp millisecond array
+
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or(DataFusionError::Execution(
+                "Time index Column downcast to TimestampMillisecondArray failed".into(),
+            ))?;
 
         // field column for staleness check
         let field_column = self
