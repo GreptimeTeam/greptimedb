@@ -19,7 +19,7 @@ use std::fmt;
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::{GlobalOptions, Options};
-use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, start_app, App};
+use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, App};
 use common_version::{short_version, version};
 
 #[derive(Parser)]
@@ -134,9 +134,7 @@ async fn start(cli: Command) -> Result<()> {
 
     log_versions(version!(), short_version!());
 
-    let app = subcmd.build(opts).await?;
-
-    start_app(app).await
+    subcmd.build(opts).await?.run().await
 }
 
 fn setup_human_panic() {
