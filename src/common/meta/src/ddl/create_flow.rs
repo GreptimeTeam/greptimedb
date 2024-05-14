@@ -253,7 +253,7 @@ pub enum CreateFlowState {
     /// Creates flows on the flownode.
     CreateFlows,
     /// Invalidate flow cache.
-    InvalidateFlowCache = 2,
+    InvalidateFlowCache,
     /// Create metadata.
     CreateMetadata,
 }
