@@ -673,6 +673,7 @@ mod tests {
         };
         KeyValues::new(metadata.as_ref(), mutation).unwrap()
     }
+
     #[test]
     fn test_write_freeze() {
         let metadata = metadata_for_metric_engine();
