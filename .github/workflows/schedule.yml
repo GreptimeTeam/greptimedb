@@ -16,16 +16,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: pnpm/action-setup@v3
-        with:
-          package_json_file: 'cyborg/package.json'
-          run_install: true
-      - name: Describe the Environment
-        working-directory: cyborg
-        run: pnpm tsx -v
+      - uses: ./.github/actions/setup-cyborg
       - name: Do Maintenance
         working-directory: cyborg
         run: pnpm tsx bin/schedule.ts
