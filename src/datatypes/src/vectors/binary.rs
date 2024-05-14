@@ -52,6 +52,14 @@ impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
     }
 }
 
+impl From<Vec<&[u8]>> for BinaryVector {
+    fn from(data: Vec<&[u8]>) -> Self {
+        Self {
+            array: BinaryArray::from_iter_values(data),
+        }
+    }
+}
+
 impl Vector for BinaryVector {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::binary_datatype()

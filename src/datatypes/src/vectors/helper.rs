@@ -258,9 +258,8 @@ impl Helper {
         Ok(match array.as_ref().data_type() {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeBinary
-            | ArrowDataType::FixedSizeBinary(_)
-            | ArrowDataType::Binary => {
+            ArrowDataType::Binary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
+            ArrowDataType::LargeBinary | ArrowDataType::FixedSizeBinary(_) => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Binary)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
@@ -397,14 +396,15 @@ impl Helper {
 #[cfg(test)]
 mod tests {
     use arrow::array::{
-        ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array,
-        Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray,
+        ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
+        Int32Array, Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray,
         Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
+    use arrow::buffer::Buffer;
     use arrow::datatypes::Int32Type;
-    use arrow_array::DictionaryArray;
+    use arrow_array::{BinaryArray, DictionaryArray, FixedSizeBinaryArray, LargeStringArray};
     use arrow_schema::DataType;
     use common_decimal::Decimal128;
     use common_time::time::Time;
@@ -575,23 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn test_try_binary_array_into_vector() {
-        let input_vec = vec!["hello".as_bytes(), "world".as_bytes()];
-
-        let input_large_binary_array: ArrayRef =
-            Arc::new(LargeBinaryArray::from(input_vec.clone()));
-        let assertion_array: ArrayRef = Arc::new(BinaryArray::from(input_vec));
-        let vector = Helper::try_into_vector(input_large_binary_array.clone()).unwrap();
-
-        assert_eq!(2, vector.len());
-        assert_eq!(0, vector.null_count());
-
-        let output_arrow_array: ArrayRef = vector.to_arrow_array();
-        assert_eq!(&DataType::Binary, output_arrow_array.data_type());
-        assert_eq!(&assertion_array, &output_arrow_array);
-    }
-
-    #[test]
     fn test_try_into_vector() {
         check_try_into_vector(NullArray::new(2));
         check_try_into_vector(BooleanArray::from(vec![true, false]));
@@ -624,6 +607,52 @@ mod tests {
         let keys = Int8Array::from_iter_values([0, 0, 1, 2]);
         let array: ArrayRef = Arc::new(DictionaryArray::try_new(keys, Arc::new(values)).unwrap());
         Helper::try_into_vector(array).unwrap_err();
+    }
+
+    #[test]
+    fn test_try_binary_array_into_vector() {
+        let input_vec: Vec<&[u8]> = vec!["hello".as_bytes(), "world".as_bytes()];
+        let assertion_vector = BinaryVector::from(input_vec.clone());
+
+        let input_arrays: Vec<ArrayRef> = vec![
+            Arc::new(LargeBinaryArray::from(input_vec.clone())) as ArrayRef,
+            Arc::new(BinaryArray::from(input_vec.clone())) as ArrayRef,
+            Arc::new(FixedSizeBinaryArray::new(
+                5,
+                Buffer::from_vec("helloworld".as_bytes().to_vec()),
+                None,
+            )) as ArrayRef,
+        ];
+
+        for input_array in input_arrays {
+            let vector = Helper::try_into_vector(input_array).unwrap();
+
+            assert_eq!(2, vector.len());
+            assert_eq!(0, vector.null_count());
+
+            let output_arrow_array: ArrayRef = vector.to_arrow_array();
+            assert_eq!(&DataType::Binary, output_arrow_array.data_type());
+            assert_eq!(&assertion_vector.to_arrow_array(), &output_arrow_array);
+        }
+    }
+
+    #[test]
+    fn test_large_string_array_into_vector() {
+        let input_vec = vec!["a", "b"];
+        let assertion_array = StringArray::from(input_vec.clone());
+
+        let large_string_array: ArrayRef = Arc::new(LargeStringArray::from(input_vec));
+        let vector = Helper::try_into_vector(large_string_array).unwrap();
+        assert_eq!(2, vector.len());
+        assert_eq!(0, vector.null_count());
+
+        let output_arrow_array: StringArray = vector
+            .to_arrow_array()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone();
+        assert_eq!(&assertion_array, &output_arrow_array);
     }
 
     #[test]
