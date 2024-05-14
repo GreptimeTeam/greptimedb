@@ -101,6 +101,10 @@ impl MemTable {
     /// Creates a 1 column 100 rows table, with table name "numbers", column name "uint32s" and
     /// column type "uint32". Column data increased from 0 to 100.
     pub fn default_numbers_table() -> TableRef {
+        Self::specified_numbers_table(100)
+    }
+
+    pub fn specified_numbers_table(rows: u32) -> TableRef {
         let column_schemas = vec![ColumnSchema::new(
             "uint32s",
             ConcreteDataType::uint32_datatype(),
@@ -108,7 +112,7 @@ impl MemTable {
         )];
         let schema = Arc::new(Schema::new(column_schemas));
         let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(
-            (0..100).collect::<Vec<_>>(),
+            (0..rows).collect::<Vec<_>>(),
         ))];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
         MemTable::table("numbers", recordbatch)

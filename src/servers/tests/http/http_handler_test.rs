@@ -23,6 +23,7 @@ use headers::HeaderValue;
 use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
 use mime_guess::mime;
+use servers::http::GreptimeQueryOutput::Records;
 use servers::http::{
     handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
     GreptimeQueryOutput, HttpResponse,
@@ -48,10 +49,8 @@ async fn test_sql_not_provided() {
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let query = http_handler::SqlQuery {
-            db: None,
-            sql: None,
             format: Some(format.to_string()),
-            epoch: None,
+            ..Default::default()
         };
 
         let HttpResponse::Error(resp) = http_handler::sql(
@@ -82,8 +81,9 @@ async fn test_sql_output_rows() {
         script_handler: None,
     };
 
+    let query_sql = "select sum(uint32s) from numbers limit 20";
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
-        let query = create_query(format);
+        let query = create_query(format, query_sql, None);
         let json = http_handler::sql(
             State(api_state.clone()),
             query,
@@ -112,7 +112,8 @@ async fn test_sql_output_rows() {
     [
       4950
     ]
-  ]
+  ],
+  "total_rows": 1
 }"#
                     );
                 }
@@ -177,6 +178,49 @@ async fn test_sql_output_rows() {
 }
 
 #[tokio::test]
+async fn test_dashboard_sql_limit() {
+    let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
+    let ctx = QueryContext::arc();
+    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+    let api_state = ApiState {
+        sql_handler,
+        script_handler: None,
+    };
+    for format in ["greptimedb_v1", "csv", "table"] {
+        let query = create_query(format, "select * from numbers", Some(1000));
+        let sql_response = http_handler::sql(
+            State(api_state.clone()),
+            query,
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await;
+
+        match sql_response {
+            HttpResponse::GreptimedbV1(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::Csv(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::Table(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_sql_form() {
     common_telemetry::init_default_ut_logging();
 
@@ -219,7 +263,8 @@ async fn test_sql_form() {
     [
       4950
     ]
-  ]
+  ],
+  "total_rows": 1
 }"#
                     );
                 }
@@ -393,7 +438,8 @@ def test(n) -> vector[i64]:
     [
       4
     ]
-  ]
+  ],
+  "total_rows": 5
 }"#
             );
         }
@@ -460,7 +506,8 @@ def test(n, **params)  -> vector[i64]:
     [
       46
     ]
-  ]
+  ],
+  "total_rows": 5
 }"#
             );
         }
@@ -484,21 +531,20 @@ fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
     })
 }
 
-fn create_query(format: &str) -> Query<http_handler::SqlQuery> {
+fn create_query(format: &str, sql: &str, limit: Option<usize>) -> Query<http_handler::SqlQuery> {
     Query(http_handler::SqlQuery {
-        sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
-        db: None,
+        sql: Some(sql.to_string()),
         format: Some(format.to_string()),
-        epoch: None,
+        limit,
+        ..Default::default()
     })
 }
 
 fn create_form(format: &str) -> Form<http_handler::SqlQuery> {
     Form(http_handler::SqlQuery {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
-        db: None,
         format: Some(format.to_string()),
-        epoch: None,
+        ..Default::default()
     })
 }
 
