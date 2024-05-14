@@ -25,6 +25,7 @@ use parquet::arrow::arrow_reader::RowSelection;
 use snafu::ResultExt;
 
 use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
+use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::parquet::format::ReadFormat;
@@ -66,6 +67,11 @@ impl FileRange {
 
         Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
     }
+
+    /// Returns the helper to compat batches.
+    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+        self.context.compat_batch()
+    }
 }
 
 /// Context shared by ranges of the same parquet SST.
@@ -78,6 +84,8 @@ pub(crate) struct FileRangeContext {
     read_format: ReadFormat,
     /// Decoder for primary keys
     codec: McmpRowCodec,
+    /// Optional helper to compat batches.
+    compat_batch: Option<CompatBatch>,
 }
 
 pub(crate) type FileRangeContextRef = Arc<FileRangeContext>;
@@ -95,6 +103,7 @@ impl FileRangeContext {
             filters,
             read_format,
             codec,
+            compat_batch: None,
         }
     }
 
@@ -116,6 +125,16 @@ impl FileRangeContext {
     /// Returns the reader builder.
     pub(crate) fn reader_builder(&self) -> &RowGroupReaderBuilder {
         &self.reader_builder
+    }
+
+    /// Returns the helper to compat batches.
+    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+        self.compat_batch.as_ref()
+    }
+
+    /// Sets the `CompatBatch` to the context.
+    pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
+        self.compat_batch = compat;
     }
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.

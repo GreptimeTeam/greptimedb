@@ -32,10 +32,8 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 pub struct CompatReader<R> {
     /// Underlying reader.
     reader: R,
-    /// Optional primary key adapter.
-    compat_pk: Option<CompatPrimaryKey>,
-    /// Optional fields adapter.
-    compat_fields: Option<CompatFields>,
+    /// Helper to compat batches.
+    compat: CompatBatch,
 }
 
 impl<R> CompatReader<R> {
@@ -48,13 +46,9 @@ impl<R> CompatReader<R> {
         reader_meta: RegionMetadataRef,
         reader: R,
     ) -> Result<CompatReader<R>> {
-        let compat_pk = may_compat_primary_key(mapper.metadata(), &reader_meta)?;
-        let compat_fields = may_compat_fields(mapper, &reader_meta)?;
-
         Ok(CompatReader {
             reader,
-            compat_pk,
-            compat_fields,
+            compat: CompatBatch::new(mapper, reader_meta)?,
         })
     }
 }
@@ -66,6 +60,36 @@ impl<R: BatchReader> BatchReader for CompatReader<R> {
             return Ok(None);
         };
 
+        batch = self.compat.compat_batch(batch)?;
+
+        Ok(Some(batch))
+    }
+}
+
+/// A helper struct to adapt schema of the batch to an expected schema.
+pub(crate) struct CompatBatch {
+    /// Optional primary key adapter.
+    compat_pk: Option<CompatPrimaryKey>,
+    /// Optional fields adapter.
+    compat_fields: Option<CompatFields>,
+}
+
+impl CompatBatch {
+    /// Creates a new [CompatBatch].
+    /// - `mapper` is built from the metadata users expect to see.
+    /// - `reader_meta` is the metadata of the input reader.
+    pub(crate) fn new(mapper: &ProjectionMapper, reader_meta: RegionMetadataRef) -> Result<Self> {
+        let compat_pk = may_compat_primary_key(mapper.metadata(), &reader_meta)?;
+        let compat_fields = may_compat_fields(mapper, &reader_meta)?;
+
+        Ok(Self {
+            compat_pk,
+            compat_fields,
+        })
+    }
+
+    /// Adapts the `batch` to the expected schema.
+    pub(crate) fn compat_batch(&self, mut batch: Batch) -> Result<Batch> {
         if let Some(compat_pk) = &self.compat_pk {
             batch = compat_pk.compat(batch)?;
         }
@@ -73,7 +97,7 @@ impl<R: BatchReader> BatchReader for CompatReader<R> {
             batch = compat_fields.compat(batch);
         }
 
-        Ok(Some(batch))
+        Ok(batch)
     }
 }
 

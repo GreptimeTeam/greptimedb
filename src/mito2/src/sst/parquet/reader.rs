@@ -53,7 +53,7 @@ use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
-use crate::sst::parquet::file_range::{FileRange, FileRangeContext, FileRangeContextRef};
+use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
@@ -155,24 +155,13 @@ impl ParquetReaderBuilder {
     /// This needs to perform IO operation.
     pub async fn build(&self) -> Result<ParquetReader> {
         let (context, row_groups) = self.build_reader_input().await?;
-        ParquetReader::new(context, row_groups).await
-    }
-
-    /// Builds [FileRange]s to read and pushes them to `file_ranges`.
-    pub async fn build_file_ranges(&self, file_ranges: &mut Vec<FileRange>) -> Result<()> {
-        let (context, row_groups) = self.build_reader_input().await?;
-        file_ranges.reserve(row_groups.len());
-        for (row_group_idx, row_selection) in row_groups {
-            let file_range = FileRange::new(context.clone(), row_group_idx, row_selection);
-            file_ranges.push(file_range);
-        }
-        Ok(())
+        ParquetReader::new(Arc::new(context), row_groups).await
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
-    async fn build_reader_input(&self) -> Result<(FileRangeContextRef, RowGroupMap)> {
+    pub(crate) async fn build_reader_input(&self) -> Result<(FileRangeContext, RowGroupMap)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -257,7 +246,7 @@ impl ParquetReaderBuilder {
         );
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
-        Ok((Arc::new(context), row_groups))
+        Ok((context, row_groups))
     }
 
     /// Decodes region metadata from key value.

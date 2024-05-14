@@ -31,6 +31,7 @@ use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProper
 use crate::cache::CacheManager;
 use crate::error::Result;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
+use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{ScanInput, ScanPart};
 use crate::read::Source;
@@ -106,11 +107,12 @@ impl UnorderedScan {
         source: &mut Source,
         mapper: &ProjectionMapper,
         cache: Option<&CacheManager>,
+        compat_batch: Option<&CompatBatch>,
         metrics: &mut Metrics,
     ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
         let start = Instant::now();
 
-        let Some(batch) = source
+        let Some(mut batch) = source
             .next_batch()
             .await
             .map_err(BoxedError::new)
@@ -120,6 +122,13 @@ impl UnorderedScan {
 
             return Ok(None);
         };
+
+        if let Some(compat) = compat_batch {
+            batch = compat
+                .compat_batch(batch)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+        }
 
         let convert_start = Instant::now();
         let record_batch = mapper.convert(&batch, cache)?;
@@ -177,7 +186,7 @@ impl RegionScanner for UnorderedScan {
             let cache = cache_manager.as_deref();
             // Scans memtables first.
             for mut source in memtable_sources {
-                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
+                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, None, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
                     yield batch;
@@ -186,8 +195,9 @@ impl RegionScanner for UnorderedScan {
             // Then scans file ranges.
             for file_range in file_ranges {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                let compat_batch = file_range.compat_batch();
                 let mut source = Source::RowGroupReader(reader);
-                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, &mut metrics).await? {
+                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, compat_batch, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
                     yield batch;

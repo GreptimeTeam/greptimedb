@@ -34,7 +34,7 @@ use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::CompatReader;
+use crate::read::compat::{CompatBatch, CompatReader};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
@@ -589,15 +589,38 @@ impl ScanInput {
                 .cache(self.cache_manager.clone())
                 .index_applier(self.index_applier.clone())
                 .expected_metadata(Some(self.mapper.metadata().clone()))
-                .build_file_ranges(&mut file_ranges)
+                .build_reader_input()
                 .await;
-            if let Err(e) = res {
-                if e.is_object_not_found() && self.ignore_file_not_found {
-                    error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
-                    continue;
-                } else {
-                    return Err(e);
+            let (mut file_range_ctx, row_groups) = match res {
+                Ok(x) => x,
+                Err(e) => {
+                    if e.is_object_not_found() && self.ignore_file_not_found {
+                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
                 }
+            };
+            if !compat::has_same_columns(
+                self.mapper.metadata(),
+                file_range_ctx.read_format().metadata(),
+            ) {
+                // They have different schema. We need to adapt the batch first so the
+                // mapper can convert it.
+                let compat = CompatBatch::new(
+                    &self.mapper,
+                    file_range_ctx.read_format().metadata().clone(),
+                )?;
+                file_range_ctx.set_compat_batch(Some(compat));
+            }
+            // Build ranges from row groups.
+            let file_range_ctx = Arc::new(file_range_ctx);
+            file_ranges.reserve(row_groups.len());
+            for (row_group_idx, row_selection) in row_groups {
+                let file_range =
+                    FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection);
+                file_ranges.push(file_range);
             }
         }
 
