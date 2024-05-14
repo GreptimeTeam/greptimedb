@@ -22,6 +22,8 @@ import {PullRequestEditedEvent, PullRequestEvent, PullRequestOpenedEvent} from "
 import {RequestError} from "@octokit/request-error";
 
 const needFollowUpDocs = "[x] This PR requires documentation updates."
+const labelDocsNotRequired = "docs-not-required"
+const labelDocsRequired = "docs-required"
 
 async function main() {
     if (!context.payload.pull_request) {
@@ -41,17 +43,17 @@ async function main() {
     }
     const followUpDocs = checkPullRequestEvent(payload)
     if (followUpDocs) {
+        core.info("Follow up docs.")
         await client.rest.issues.removeLabel({
-            owner, repo, issue_number: number, name: 'docs-not-need',
+            owner, repo, issue_number: number, name: labelDocsNotRequired,
         }).catch((e: RequestError) => {
             if (e.status != 404) {
                 throw e;
-            } else {
-                core.debug("Labels to be removed do not exist.")
             }
+            core.debug(`Label ${labelDocsNotRequired} not exist.`)
         })
         await client.rest.issues.addLabels({
-            owner, repo, issue_number: number, labels: ['docs-required'],
+            owner, repo, issue_number: number, labels: [labelDocsRequired],
         })
         await docsClient.rest.issues.create({
             owner: 'GreptimeDB',
@@ -59,19 +61,21 @@ async function main() {
             title: `Update docs for ${title}`,
             body: `A document change request is generated from ${html_url}`,
             assignee: actor,
+        }).then((res) => {
+            core.info(`Created issue ${res.data}`)
         })
     } else {
+        core.info("No need to follow up docs.")
         await client.rest.issues.removeLabel({
-            owner, repo, issue_number: number, name: 'docs-required'
+            owner, repo, issue_number: number, name: labelDocsRequired
         }).catch((e: RequestError) => {
             if (e.status != 404) {
                 throw e;
-            } else {
-                core.debug("Labels to be removed do not exist.")
             }
+            core.debug(`Label ${labelDocsRequired} not exist.`)
         })
         await client.rest.issues.addLabels({
-            owner, repo, issue_number: number, labels: ['docs-not-need'],
+            owner, repo, issue_number: number, labels: [labelDocsNotRequired],
         })
     }
 }
