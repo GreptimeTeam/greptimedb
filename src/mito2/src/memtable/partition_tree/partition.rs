@@ -89,15 +89,18 @@ impl Partition {
             let sparse_key = primary_key.clone();
             primary_key.clear();
             row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
-            let pk_id = inner
-                .shard_builder
-                .write_with_key(primary_key, &key_value, metrics);
+            let pk_id = inner.shard_builder.write_with_key(
+                primary_key,
+                Some(&sparse_key),
+                &key_value,
+                metrics,
+            );
             inner.pk_to_pk_id.insert(sparse_key, pk_id);
         } else {
             // `primary_key` is already the full primary key.
             let pk_id = inner
                 .shard_builder
-                .write_with_key(primary_key, &key_value, metrics);
+                .write_with_key(primary_key, None, &key_value, metrics);
             inner.pk_to_pk_id.insert(std::mem::take(primary_key), pk_id);
         };
 

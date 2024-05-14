@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
-use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr};
+use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -34,7 +34,7 @@ use common_meta::rpc::ddl::{
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::{info, tracing};
+use common_telemetry::{debug, info, tracing};
 use common_time::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
@@ -42,6 +42,7 @@ use datatypes::value::Value;
 use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
+use query::parser::QueryStatement;
 use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
@@ -49,11 +50,13 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{
-    CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, Partitions,
+    CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::sql_value_to_value;
+use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions};
@@ -65,8 +68,9 @@ use crate::error::{
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
     DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    ParseSqlValueSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaNotFoundSnafu,
+    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -372,6 +376,165 @@ impl StatementExecutor {
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn create_view(
+        &self,
+        create_view: CreateView,
+        ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        // convert input into logical plan
+        let logical_plan = match &*create_view.query {
+            Statement::Query(query) => {
+                self.plan(
+                    QueryStatement::Sql(Statement::Query(query.clone())),
+                    ctx.clone(),
+                )
+                .await?
+            }
+            Statement::Tql(query) => self.plan_tql(query.clone(), &ctx).await?,
+            _ => {
+                return InvalidViewStmtSnafu {}.fail();
+            }
+        };
+        let optimized_plan = self.optimize_logical_plan(logical_plan)?;
+
+        // encode logical plan
+        let encoded_plan = DFLogicalSubstraitConvertor
+            .encode(&optimized_plan.unwrap_df_plan())
+            .context(SubstraitCodecSnafu)?;
+
+        let expr =
+            expr_factory::to_create_view_expr(create_view, encoded_plan.to_vec(), ctx.clone())?;
+
+        self.create_view_by_expr(expr, ctx).await
+    }
+
+    pub async fn create_view_by_expr(
+        &self,
+        expr: CreateViewExpr,
+        ctx: QueryContextRef,
+    ) -> Result<TableRef> {
+        let _timer = crate::metrics::DIST_CREATE_VIEW.start_timer();
+
+        let schema_exists = self
+            .table_metadata_manager
+            .schema_manager()
+            .exists(SchemaNameKey::new(&expr.catalog_name, &expr.schema_name))
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        ensure!(
+            schema_exists,
+            SchemaNotFoundSnafu {
+                schema_info: &expr.schema_name,
+            }
+        );
+
+        // if view or table exists.
+        if let Some(table) = self
+            .catalog_manager
+            .table(&expr.catalog_name, &expr.schema_name, &expr.view_name)
+            .await
+            .context(CatalogSnafu)?
+        {
+            let table_type = table.table_info().table_type;
+
+            match (table_type, expr.create_if_not_exists, expr.or_replace) {
+                (TableType::View, true, false) => {
+                    return Ok(table);
+                }
+                (TableType::View, false, false) => {
+                    return ViewAlreadyExistsSnafu {
+                        name: format_full_table_name(
+                            &expr.catalog_name,
+                            &expr.schema_name,
+                            &expr.view_name,
+                        ),
+                    }
+                    .fail();
+                }
+                (TableType::View, _, true) => {
+                    // Try to replace an exists view
+                }
+                _ => {
+                    return TableAlreadyExistsSnafu {
+                        table: format_full_table_name(
+                            &expr.catalog_name,
+                            &expr.schema_name,
+                            &expr.view_name,
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        ensure!(
+            NAME_PATTERN_REG.is_match(&expr.view_name),
+            InvalidViewNameSnafu {
+                name: expr.view_name.clone(),
+            }
+        );
+
+        let view_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.view_name);
+
+        let mut view_info = RawTableInfo {
+            ident: metadata::TableIdent {
+                // The view id of distributed table is assigned by Meta, set "0" here as a placeholder.
+                table_id: 0,
+                version: 0,
+            },
+            name: expr.view_name.clone(),
+            desc: None,
+            catalog_name: expr.catalog_name.clone(),
+            schema_name: expr.schema_name.clone(),
+            // The meta doesn't make sense for views, so using a default one.
+            meta: RawTableMeta::default(),
+            table_type: TableType::View,
+        };
+
+        let request = SubmitDdlTaskRequest {
+            query_context: ctx,
+            task: DdlTask::new_create_view(expr, view_info.clone()),
+        };
+
+        let resp = self
+            .procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)?;
+
+        debug!(
+            "Submit creating view '{view_name}' task response: {:?}",
+            resp
+        );
+
+        let view_id = resp.table_id.context(error::UnexpectedSnafu {
+            violated: "expected table_id",
+        })?;
+        info!("Successfully created view '{view_name}' with view id {view_id}");
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(
+                &Context::default(),
+                &[
+                    CacheIdent::TableId(view_id),
+                    CacheIdent::TableName(view_name.clone()),
+                ],
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        view_info.ident.table_id = view_id;
+
+        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
+
+        let table = DistTable::table(view_info);
+
+        Ok(table)
     }
 
     #[tracing::instrument(skip_all)]
@@ -813,6 +976,7 @@ impl StatementExecutor {
         &self,
         database: &str,
         create_if_not_exists: bool,
+        options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         let catalog = query_context.current_catalog();
@@ -840,6 +1004,7 @@ impl StatementExecutor {
                 catalog.to_string(),
                 database.to_string(),
                 create_if_not_exists,
+                options,
                 query_context,
             )
             .await?;
@@ -857,11 +1022,12 @@ impl StatementExecutor {
         catalog: String,
         database: String,
         create_if_not_exists: bool,
+        options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
             query_context,
-            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, None),
+            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
         };
 
         self.procedure_executor
@@ -1172,7 +1338,7 @@ mod test {
                 .unwrap_err()
                 .to_string(),
             "Invalid partition columns when creating table 'my_table', \
-            reason: partition column must belongs to primary keys or equals to time index",
+             reason: partition column must belongs to primary keys or equals to time index",
         );
     }
 

@@ -56,7 +56,7 @@ pub enum TableRouteValue {
     Logical(LogicalTableRouteValue),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct PhysicalTableRouteValue {
     pub region_routes: Vec<RegionRoute>,
     version: u64,

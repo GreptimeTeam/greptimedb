@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
@@ -29,8 +28,8 @@ use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -190,41 +189,6 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         Ok(BatchGetResponse { kvs })
     }
 
-    async fn compare_and_put(
-        &self,
-        req: CompareAndPutRequest,
-    ) -> Result<CompareAndPutResponse, Self::Error> {
-        let CompareAndPutRequest { key, expect, value } = req;
-
-        let mut kvs = self.kvs.write().unwrap();
-
-        let existed = kvs.entry(key);
-        let (success, prev_kv) = match existed {
-            Entry::Vacant(e) => {
-                let expected = expect.is_empty();
-                if expected {
-                    let _ = e.insert(value);
-                }
-                (expected, None)
-            }
-            Entry::Occupied(mut existed) => {
-                let expected = existed.get() == &expect;
-                let prev_kv = if expected {
-                    let _ = existed.insert(value);
-                    None
-                } else {
-                    Some(KeyValue {
-                        key: existed.key().clone(),
-                        value: existed.get().clone(),
-                    })
-                };
-                (expected, prev_kv)
-            }
-        };
-
-        Ok(CompareAndPutResponse { success, prev_kv })
-    }
-
     async fn delete_range(
         &self,
         req: DeleteRangeRequest,
@@ -304,18 +268,15 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
-                kvs.insert(key.clone(), value);
+                kvs.insert(key, value);
                 TxnOpResponse::ResponsePut(PutResponse { prev_kv: None })
             }
 
             TxnOp::Get(key) => {
-                let value = kvs.get(&key);
+                let value = kvs.get(&key).cloned();
                 let kvs = value
+                    .map(|value| KeyValue { key, value })
                     .into_iter()
-                    .map(|value| KeyValue {
-                        key: key.clone(),
-                        value: value.clone(),
-                    })
                     .collect();
                 TxnOpResponse::ResponseGet(RangeResponse { kvs, more: false })
             }

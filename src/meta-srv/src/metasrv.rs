@@ -70,7 +70,7 @@ pub struct MetasrvOptions {
     /// The address the server advertises to the clients.
     pub server_addr: String,
     /// The address of the store, e.g., etcd.
-    pub store_addr: String,
+    pub store_addrs: Vec<String>,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -124,7 +124,7 @@ impl Default for MetasrvOptions {
         Self {
             bind_addr: "127.0.0.1:3002".to_string(),
             server_addr: "127.0.0.1:3002".to_string(),
-            store_addr: "127.0.0.1:2379".to_string(),
+            store_addrs: vec!["127.0.0.1:2379".to_string()],
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,

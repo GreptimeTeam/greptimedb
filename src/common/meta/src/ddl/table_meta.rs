@@ -62,8 +62,11 @@ impl TableMetadataAllocator {
         }
     }
 
-    pub(crate) async fn allocate_table_id(&self, task: &CreateTableTask) -> Result<TableId> {
-        let table_id = if let Some(table_id) = &task.create_table.table_id {
+    pub(crate) async fn allocate_table_id(
+        &self,
+        table_id: &Option<api::v1::TableId>,
+    ) -> Result<TableId> {
+        let table_id = if let Some(table_id) = table_id {
             let table_id = table_id.id;
 
             ensure!(
@@ -143,12 +146,26 @@ impl TableMetadataAllocator {
         Ok(PhysicalTableRouteValue::new(region_routes))
     }
 
+    /// Create VIEW metadata
+    pub async fn create_view(
+        &self,
+        _ctx: &TableMetadataAllocatorContext,
+        table_id: &Option<api::v1::TableId>,
+    ) -> Result<TableMetadata> {
+        let table_id = self.allocate_table_id(table_id).await?;
+
+        Ok(TableMetadata {
+            table_id,
+            ..Default::default()
+        })
+    }
+
     pub async fn create(
         &self,
         ctx: &TableMetadataAllocatorContext,
         task: &CreateTableTask,
     ) -> Result<TableMetadata> {
-        let table_id = self.allocate_table_id(task).await?;
+        let table_id = self.allocate_table_id(&task.create_table.table_id).await?;
         let table_route = self.create_table_route(ctx, table_id, task).await?;
         let region_wal_options = self.create_wal_options(&table_route)?;
 

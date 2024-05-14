@@ -99,8 +99,8 @@ struct StartCommand {
     bind_addr: Option<String>,
     #[clap(long)]
     server_addr: Option<String>,
-    #[clap(long)]
-    store_addr: Option<String>,
+    #[clap(long, aliases = ["store-addr"], value_delimiter = ',', num_args = 1..)]
+    store_addrs: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
     #[clap(short, long)]
@@ -155,8 +155,8 @@ impl StartCommand {
             opts.server_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.store_addr {
-            opts.store_addr.clone_from(addr);
+        if let Some(addrs) = &self.store_addrs {
+            opts.store_addrs.clone_from(addrs);
         }
 
         if let Some(selector_type) = &self.selector {
@@ -236,7 +236,7 @@ mod tests {
         let cmd = StartCommand {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
-            store_addr: Some("127.0.0.1:2380".to_string()),
+            store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
             selector: Some("LoadBased".to_string()),
             ..Default::default()
         };
@@ -245,7 +245,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-        assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
+        assert_eq!(vec!["127.0.0.1:2380".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LoadBased, options.selector);
     }
 
@@ -281,7 +281,7 @@ mod tests {
         };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
-        assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
+        assert_eq!(vec!["127.0.0.1:2379".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LeaseBased, options.selector);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
@@ -315,7 +315,7 @@ mod tests {
         let cmd = StartCommand {
             bind_addr: Some("127.0.0.1:3002".to_string()),
             server_addr: Some("127.0.0.1:3002".to_string()),
-            store_addr: Some("127.0.0.1:2380".to_string()),
+            store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
             selector: Some("LoadBased".to_string()),
             ..Default::default()
         };
@@ -401,7 +401,7 @@ mod tests {
                 assert_eq!(opts.http.addr, "127.0.0.1:14000");
 
                 // Should be default value.
-                assert_eq!(opts.store_addr, "127.0.0.1:2379");
+                assert_eq!(opts.store_addrs, vec!["127.0.0.1:2379".to_string()]);
             },
         );
     }

@@ -24,7 +24,7 @@ use crate::compute::render::Context;
 use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::expr::{EvalError, MapFilterProject, MfpPlan, ScalarExpr};
-use crate::plan::Plan;
+use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::ArrangeHandler;
 
@@ -38,7 +38,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
     #[allow(clippy::mutable_key_type)]
     pub fn render_mfp(
         &mut self,
-        input: Box<Plan>,
+        input: Box<TypedPlan>,
         mfp: MapFilterProject,
     ) -> Result<CollectionBundle, Error> {
         let input = self.render_plan(*input)?;
@@ -153,7 +153,7 @@ fn eval_mfp_core(
 ) -> Vec<KeyValDiffRow> {
     let mut all_updates = Vec::new();
     for (mut row, _sys_time, diff) in input.into_iter() {
-        // this updates is expected to be only zero to two rows
+        // this updates is expected to be only zero, one or two rows
         let updates = mfp_plan.evaluate::<EvalError>(&mut row.inner, now, diff);
         // TODO(discord9): refactor error handling
         // Expect error in a single row to not interrupt the whole evaluation
@@ -184,6 +184,7 @@ mod test {
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
     use crate::expr::{self, BinaryFunc, GlobalId};
+    use crate::repr::{ColumnType, RelationType};
 
     /// test if temporal filter works properly
     /// namely: if mfp operator can schedule a delete at the correct time
@@ -203,6 +204,9 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         // temporal filter: now <= col(0) < now + 4
         let mfp = MapFilterProject::new(1)
             .filter(vec![
@@ -225,7 +229,9 @@ mod test {
             ])
             .unwrap();
 
-        let bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
+        let bundle = ctx
+            .render_mfp(Box::new(input_plan.with_types(typ)), mfp)
+            .unwrap();
         let output = get_output_handle(&mut ctx, bundle);
         // drop ctx here to simulate actual process of compile first, run later scenario
         drop(ctx);
@@ -273,6 +279,9 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         // filter: col(0)>1
         let mfp = MapFilterProject::new(1)
             .filter(vec![ScalarExpr::Column(0).call_binary(
@@ -280,7 +289,9 @@ mod test {
                 BinaryFunc::Gt,
             )])
             .unwrap();
-        let bundle = ctx.render_mfp(Box::new(input_plan), mfp).unwrap();
+        let bundle = ctx
+            .render_mfp(Box::new(input_plan.with_types(typ)), mfp)
+            .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
         drop(ctx);

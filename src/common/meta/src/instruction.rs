@@ -21,7 +21,9 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
 
+use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
+use crate::key::FlowId;
 use crate::table_name::TableName;
 use crate::{ClusterId, DatanodeId, FlownodeId};
 
@@ -155,6 +157,8 @@ pub struct UpgradeRegion {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// The identifier of cache.
 pub enum CacheIdent {
+    FlowId(FlowId),
+    FlowName(FlowName),
     TableId(TableId),
     TableName(TableName),
     SchemaName(SchemaName),

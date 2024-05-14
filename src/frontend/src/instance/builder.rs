@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use cache::TABLE_FLOWNODE_SET_CACHE_NAME;
+use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_meta::cache::CacheRegistryRef;
+use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManager;
@@ -43,7 +43,7 @@ use crate::script::ScriptExecutor;
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
     kv_backend: KvBackendRef,
-    cache_registry: CacheRegistryRef,
+    layered_cache_registry: LayeredCacheRegistryRef,
     local_cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
     node_manager: NodeManagerRef,
@@ -55,14 +55,14 @@ pub struct FrontendBuilder {
 impl FrontendBuilder {
     pub fn new(
         kv_backend: KvBackendRef,
-        cache_registry: CacheRegistryRef,
+        layered_cache_registry: LayeredCacheRegistryRef,
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
             kv_backend,
-            cache_registry,
+            layered_cache_registry,
             local_cache_invalidator: None,
             catalog_manager,
             node_manager,
@@ -98,7 +98,16 @@ impl FrontendBuilder {
         let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
 
-        let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
+        let table_route_cache: TableRouteCacheRef =
+            self.layered_cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: TABLE_ROUTE_CACHE_NAME,
+                })?;
+        let partition_manager = Arc::new(PartitionRuleManager::new(
+            kv_backend.clone(),
+            table_route_cache.clone(),
+        ));
 
         let local_cache_invalidator = self
             .local_cache_invalidator
@@ -108,7 +117,7 @@ impl FrontendBuilder {
             FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
 
         let table_flownode_cache =
-            self.cache_registry
+            self.layered_cache_registry
                 .get()
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
@@ -160,6 +169,7 @@ impl FrontendBuilder {
             kv_backend.clone(),
             local_cache_invalidator,
             inserter.clone(),
+            table_route_cache,
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());

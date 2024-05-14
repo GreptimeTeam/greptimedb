@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::prelude::ConcreteDataType;
-use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::adapter::error::{InvalidQuerySnafu, Result};
+use datatypes::prelude::ConcreteDataType;
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use snafu::{ensure, OptionExt};
+
+use crate::adapter::error::{InvalidQuerySnafu, Result, UnexpectedSnafu};
+use crate::expr::MapFilterProject;
 
 /// a set of column indices that are "keys" for the collection.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
+#[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct Key {
     /// indicate whose column form key
     pub column_indices: Vec<usize>,
@@ -28,9 +32,7 @@ pub struct Key {
 impl Key {
     /// create a new Key
     pub fn new() -> Self {
-        Self {
-            column_indices: Vec::new(),
-        }
+        Default::default()
     }
 
     /// create a new Key from a vector of column indices
@@ -96,6 +98,71 @@ pub struct RelationType {
 }
 
 impl RelationType {
+    /// Trying to apply a mpf on current types, will return a new RelationType
+    /// with the new types, will also try to preserve keys&time index information
+    /// if the old key&time index columns are preserve in given mfp
+    ///
+    /// i.e. old column of size 3, with a mfp's
+    ///
+    /// project = `[2, 1]`,
+    ///
+    /// the old key = `[1]`, old time index = `[2]`,
+    ///
+    /// then new key=`[1]`, new time index=`[0]`
+    ///
+    /// note that this function will remove empty keys like key=`[]` will be removed
+    pub fn apply_mfp(&self, mfp: &MapFilterProject, expr_typs: &[ColumnType]) -> Result<Self> {
+        let all_types = self
+            .column_types
+            .iter()
+            .chain(expr_typs.iter())
+            .cloned()
+            .collect_vec();
+        let mfp_out_types = mfp
+            .projection
+            .iter()
+            .map(|i| {
+                all_types.get(*i).cloned().with_context(|| UnexpectedSnafu {
+                    reason: format!(
+                        "MFP index out of bound, len is {}, but the index is {}",
+                        all_types.len(),
+                        *i
+                    ),
+                })
+            })
+            .try_collect()?;
+        let old_to_new_col = BTreeMap::from_iter(
+            mfp.projection
+                .clone()
+                .into_iter()
+                .enumerate()
+                .map(|(new, old)| (old, new)),
+        );
+
+        // since it's just a mfp, we also try to preserve keys&time index information, if they survive mfp transform
+        let keys = self
+            .keys
+            .iter()
+            .filter_map(|key| {
+                key.column_indices
+                    .iter()
+                    .map(|old| old_to_new_col.get(old).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    // remove empty keys
+                    .and_then(|v| if v.is_empty() { None } else { Some(v) })
+                    .map(Key::from)
+            })
+            .collect_vec();
+
+        let time_index = self
+            .time_index
+            .and_then(|old| old_to_new_col.get(&old).cloned());
+        Ok(Self {
+            column_types: mfp_out_types,
+            keys,
+            time_index,
+        })
+    }
     /// Constructs a `RelationType` representing the relation with no columns and
     /// no keys.
     pub fn empty() -> Self {
@@ -114,7 +181,12 @@ impl RelationType {
     }
 
     /// Adds a new key for the relation. Also sorts the key indices.
+    ///
+    /// will ignore empty key
     pub fn with_key(mut self, mut indices: Vec<usize>) -> Self {
+        if indices.is_empty() {
+            return self;
+        }
         indices.sort_unstable();
         let key = Key::from(indices);
         if !self.keys.contains(&key) {
@@ -124,6 +196,8 @@ impl RelationType {
     }
 
     /// Adds new keys for the relation. Also sorts the key indices.
+    ///
+    /// will ignore empty keys
     pub fn with_keys(mut self, keys: Vec<Vec<usize>>) -> Self {
         for key in keys {
             self = self.with_key(key)

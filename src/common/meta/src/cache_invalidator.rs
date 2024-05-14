@@ -15,7 +15,10 @@
 use std::sync::Arc;
 
 use crate::error::Result;
+use crate::flow_name::FlowName;
 use crate::instruction::CacheIdent;
+use crate::key::flow::flow_info::FlowInfoKey;
+use crate::key::flow::flow_name::FlowNameKey;
 use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
@@ -82,9 +85,19 @@ where
                     let key: SchemaNameKey = schema_name.into();
                     self.invalidate_key(&key.to_bytes()).await;
                 }
-                &CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) => {
-                    // TODO(weny): implements it
-                    unimplemented!()
+                CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) => {
+                    // Do nothing
+                }
+                CacheIdent::FlowName(FlowName {
+                    catalog_name,
+                    flow_name,
+                }) => {
+                    let key = FlowNameKey::new(catalog_name, flow_name);
+                    self.invalidate_key(&key.to_bytes()).await
+                }
+                CacheIdent::FlowId(flow_id) => {
+                    let key = FlowInfoKey::new(*flow_id);
+                    self.invalidate_key(&key.to_bytes()).await;
                 }
             }
         }

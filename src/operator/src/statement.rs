@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
+use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
@@ -80,6 +81,7 @@ impl StatementExecutor {
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
+        table_route_cache: TableRouteCacheRef,
     ) -> Self {
         Self {
             catalog_manager,
@@ -87,7 +89,7 @@ impl StatementExecutor {
             procedure_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             flow_metadata_manager: Arc::new(FlowMetadataManager::new(kv_backend.clone())),
-            partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
+            partition_manager: Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache)),
             cache_invalidator,
             inserter,
         }
@@ -177,6 +179,10 @@ impl StatementExecutor {
                 )
                 .await
             }
+            Statement::CreateView(stmt) => {
+                let _ = self.create_view(stmt, query_ctx).await?;
+                Ok(Output::new_with_affected_rows(0))
+            }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
@@ -208,6 +214,7 @@ impl StatementExecutor {
                 self.create_database(
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
+                    stmt.options.into_map(),
                     query_ctx,
                 )
                 .await
@@ -268,6 +275,13 @@ impl StatementExecutor {
             .planner()
             .plan(stmt, query_ctx)
             .await
+            .context(PlanStatementSnafu)
+    }
+
+    pub fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        self.query_engine
+            .planner()
+            .optimize(plan)
             .context(PlanStatementSnafu)
     }
 

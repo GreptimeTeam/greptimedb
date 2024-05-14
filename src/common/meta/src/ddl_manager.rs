@@ -29,6 +29,7 @@ use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
+use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
@@ -45,12 +46,12 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
     AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
-    DropDatabase, DropFlow, DropLogicalTables, DropTable, TruncateTable,
+    CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView, TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, DropDatabaseTask,
-    DropFlowTask, DropTableTask, QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TruncateTableTask,
+    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, CreateViewTask,
+    DropDatabaseTask, DropFlowTask, DropTableTask, QueryContext, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -122,6 +123,7 @@ impl DdlManager {
         let loaders: Vec<(&str, &BoxedProcedureLoaderFactory)> = procedure_loader!(
             CreateTableProcedure,
             CreateLogicalTablesProcedure,
+            CreateViewProcedure,
             CreateFlowProcedure,
             AlterTableProcedure,
             AlterLogicalTablesProcedure,
@@ -142,8 +144,8 @@ impl DdlManager {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes an alter table task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_alter_table_task(
         &self,
         cluster_id: ClusterId,
@@ -159,8 +161,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a create table task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_create_table_task(
         &self,
         cluster_id: ClusterId,
@@ -175,8 +177,24 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    /// Submits and executes a `[CreateViewTask]`.
     #[tracing::instrument(skip_all)]
+    pub async fn submit_create_view_task(
+        &self,
+        cluster_id: ClusterId,
+        create_view_task: CreateViewTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+
+        let procedure = CreateViewProcedure::new(cluster_id, create_view_task, context);
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
     /// Submits and executes a create multiple logical table tasks.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_create_logical_table_tasks(
         &self,
         cluster_id: ClusterId,
@@ -197,8 +215,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes alter multiple table tasks.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_alter_logical_table_tasks(
         &self,
         cluster_id: ClusterId,
@@ -219,8 +237,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a drop table task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_drop_table_task(
         &self,
         cluster_id: ClusterId,
@@ -235,8 +253,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a create database task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_create_database(
         &self,
         _cluster_id: ClusterId,
@@ -255,8 +273,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a drop table task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_drop_database(
         &self,
         _cluster_id: ClusterId,
@@ -273,8 +291,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a create flow task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_create_flow_task(
         &self,
         cluster_id: ClusterId,
@@ -302,8 +320,8 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
-    #[tracing::instrument(skip_all)]
     /// Submits and executes a truncate table task.
+    #[tracing::instrument(skip_all)]
     pub async fn submit_truncate_table_task(
         &self,
         cluster_id: ClusterId,
@@ -649,6 +667,34 @@ async fn handle_alter_logical_table_tasks(
     })
 }
 
+/// Handle the `[CreateViewTask]` and returns the DDL response when success.
+async fn handle_create_view_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    create_view_task: CreateViewTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, output) = ddl_manager
+        .submit_create_view_task(cluster_id, create_view_task)
+        .await?;
+
+    let procedure_id = id.to_string();
+    let output = output.context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "empty output",
+    })?;
+    let view_id = *(output.downcast_ref::<u32>().context(ProcedureOutputSnafu {
+        procedure_id: &procedure_id,
+        err_msg: "downcast to `u32`",
+    })?);
+    info!("View: {view_id} is created via procedure_id {id:?}");
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        table_id: Some(view_id),
+        ..Default::default()
+    })
+}
+
 /// TODO(dennis): let [`DdlManager`] implement [`ProcedureExecutor`] looks weird, find some way to refactor it.
 #[async_trait::async_trait]
 impl ProcedureExecutor for DdlManager {
@@ -703,6 +749,12 @@ impl ProcedureExecutor for DdlManager {
                 }
                 DropFlow(drop_flow_task) => {
                     handle_drop_flow_task(self, cluster_id, drop_flow_task).await
+                }
+                CreateView(create_view_task) => {
+                    handle_create_view_task(self, cluster_id, create_view_task).await
+                }
+                DropView(_create_view_task) => {
+                    todo!("implemented in the following PR");
                 }
             }
         }

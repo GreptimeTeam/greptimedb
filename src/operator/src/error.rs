@@ -35,6 +35,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("View already exists: `{name}`"))]
+    ViewAlreadyExists {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         #[snafu(implicit)]
@@ -127,6 +134,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: api::error::Error,
+    },
+
+    #[snafu(display("Invalid statement to create view"))]
+    InvalidViewStmt {
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
@@ -637,6 +650,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid view name: {name}"))]
+    InvalidViewName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
     DdlWithMultiCatalogs {
         ddl_name: String,
@@ -686,6 +706,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert between logical plan and substrait plan"))]
+    SubstraitCodec {
+        #[snafu(implicit)]
+        location: Location,
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -714,10 +741,14 @@ impl ErrorExt for Error {
             | Error::SchemaIncompatible { .. }
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
-            | Error::ConvertIdentifier { .. }
-            | Error::InvalidExpr { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidViewName { .. }
+            | Error::InvalidExpr { .. }
+            | Error::InvalidViewStmt { .. }
+            | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
 
-            Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+            Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
+                StatusCode::TableAlreadyExists
+            }
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -744,6 +775,7 @@ impl ErrorExt for Error {
             Error::RequestInserts { source, .. } => source.status_code(),
             Error::RequestRegion { source, .. } => source.status_code(),
             Error::RequestDeletes { source, .. } => source.status_code(),
+            Error::SubstraitCodec { source, .. } => source.status_code(),
 
             Error::ColumnDataType { source, .. } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()

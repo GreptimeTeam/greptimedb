@@ -190,6 +190,10 @@ impl From<SchemaRef> for OutputSchema {
 pub struct HttpRecordsOutput {
     schema: OutputSchema,
     rows: Vec<Vec<Value>>,
+    // total_rows is equal to rows.len() in most cases,
+    // the Dashboard query result may be truncated, so we need to return the total_rows.
+    #[serde(default)]
+    total_rows: usize,
 
     // plan level execution metrics
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -224,6 +228,7 @@ impl HttpRecordsOutput {
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
                 rows: vec![],
+                total_rows: 0,
                 metrics: Default::default(),
             })
         } else {
@@ -244,6 +249,7 @@ impl HttpRecordsOutput {
 
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
+                total_rows: rows.len(),
                 rows,
                 metrics: Default::default(),
             })
@@ -357,6 +363,34 @@ impl HttpResponse {
             HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
         }
     }
+
+    pub fn with_limit(self, limit: usize) -> Self {
+        match self {
+            HttpResponse::Csv(resp) => resp.with_limit(limit).into(),
+            HttpResponse::Table(resp) => resp.with_limit(limit).into(),
+            HttpResponse::GreptimedbV1(resp) => resp.with_limit(limit).into(),
+            _ => self,
+        }
+    }
+}
+
+pub fn process_with_limit(
+    mut outputs: Vec<GreptimeQueryOutput>,
+    limit: usize,
+) -> Vec<GreptimeQueryOutput> {
+    outputs
+        .drain(..)
+        .map(|data| match data {
+            GreptimeQueryOutput::Records(mut records) => {
+                if records.rows.len() > limit {
+                    records.rows.truncate(limit);
+                    records.total_rows = limit;
+                }
+                GreptimeQueryOutput::Records(records)
+            }
+            _ => data,
+        })
+        .collect()
 }
 
 impl IntoResponse for HttpResponse {

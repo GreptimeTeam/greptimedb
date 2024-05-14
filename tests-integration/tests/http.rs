@@ -147,7 +147,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records" :{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}
+            "records" :{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]],"total_rows":10}
         })).unwrap()
     );
 
@@ -189,7 +189,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -207,7 +207,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -224,7 +224,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -241,13 +241,13 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]],"total_rows":1}
         })).unwrap()
     );
     assert_eq!(
         outputs[1],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"rows":[], "schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]}}
+            "records":{"rows":[], "schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]}, "total_rows":0}
         }))
         .unwrap()
     );
@@ -276,7 +276,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -302,7 +302,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -673,7 +673,7 @@ def test(n) -> vector[f64]:
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}
+            "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]],"total_rows": 10}
         })).unwrap()
     );
 

@@ -41,4 +41,9 @@ lazy_static! {
         "table operator delete rows"
     )
     .unwrap();
+    pub static ref DIST_CREATE_VIEW: Histogram = register_histogram!(
+        "greptime_ddl_operator_create_view",
+        "DDL operator create view"
+    )
+    .unwrap();
 }

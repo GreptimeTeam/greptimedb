@@ -39,12 +39,13 @@ use crate::expr::error::{DataTypeSnafu, InternalSnafu};
 use crate::expr::{
     self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
 };
-use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan};
+use crate::plan::{AccumulablePlan, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, Arrangement};
 
 mod map;
 mod reduce;
+mod src_sink;
 
 /// The Context for build a Operator with id of `GlobalId`
 pub struct Context<'referred, 'df> {
@@ -52,13 +53,15 @@ pub struct Context<'referred, 'df> {
     pub df: &'referred mut Hydroflow<'df>,
     pub compute_state: &'referred mut DataflowState,
     /// a list of all collections being used in the operator
+    ///
+    /// TODO(discord9): remove extra clone by counting usage and remove it on last usage?
     pub input_collection: BTreeMap<GlobalId, CollectionBundle>,
     /// used by `Get`/`Let` Plan for getting/setting local variables
     ///
     /// TODO(discord9): consider if use Vec<(LocalId, CollectionBundle)> instead
-    local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
+    pub local_scope: Vec<BTreeMap<LocalId, CollectionBundle>>,
     // Collect all errors in this operator's evaluation
-    err_collector: ErrCollector,
+    pub err_collector: ErrCollector,
 }
 
 impl<'referred, 'df> Drop for Context<'referred, 'df> {
@@ -98,8 +101,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
     /// Interpret and execute plan
     ///
     /// return the output of this plan
-    pub fn render_plan(&mut self, plan: Plan) -> Result<CollectionBundle, Error> {
-        match plan {
+    pub fn render_plan(&mut self, plan: TypedPlan) -> Result<CollectionBundle, Error> {
+        match plan.plan {
             Plan::Constant { rows } => Ok(self.render_constant(rows)),
             Plan::Get { id } => self.get_by_id(id),
             Plan::Let { id, value, body } => self.eval_let(id, value, body),
@@ -110,11 +113,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 reduce_plan,
             } => self.render_reduce(input, key_val_plan, reduce_plan),
             Plan::Join { .. } => NotImplementedSnafu {
-                reason: "Join is still WIP".to_string(),
+                reason: "Join is still WIP",
             }
             .fail(),
             Plan::Union { .. } => NotImplementedSnafu {
-                reason: "Union is still WIP".to_string(),
+                reason: "Union is still WIP",
             }
             .fail(),
         }
@@ -190,8 +193,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
     pub fn eval_let(
         &mut self,
         id: LocalId,
-        value: Box<Plan>,
-        body: Box<Plan>,
+        value: Box<TypedPlan>,
+        body: Box<TypedPlan>,
     ) -> Result<CollectionBundle, Error> {
         let value = self.render_plan(*value)?;
 
@@ -235,7 +238,7 @@ mod test {
         for now in time_range {
             state.set_current_ts(now);
             state.run_available_with_schedule(df);
-            assert!(state.get_err_collector().inner.borrow().is_empty());
+            assert!(state.get_err_collector().is_empty());
             if let Some(expected) = expected.get(&now) {
                 assert_eq!(*output.borrow(), *expected, "at ts={}", now);
             } else {

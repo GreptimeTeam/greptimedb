@@ -62,6 +62,7 @@ pub struct SqlQuery {
     // specified time precision. Maybe greptimedb format can support this
     // param too.
     pub epoch: Option<String>,
+    pub limit: Option<usize>,
 }
 
 /// Handler to execute sql
@@ -98,7 +99,7 @@ pub async fn sql(
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
             Err((status, msg))
         } else {
-            Ok(sql_handler.do_query(sql, query_ctx).await)
+            Ok(sql_handler.do_query(sql, query_ctx.clone()).await)
         }
     } else {
         Err((
@@ -117,7 +118,7 @@ pub async fn sql(
         Ok(outputs) => outputs,
     };
 
-    let resp = match format {
+    let mut resp = match format {
         ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
         ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
         ResponseFormat::Table => TableResponse::from_output(outputs).await,
@@ -125,6 +126,9 @@ pub async fn sql(
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
     };
 
+    if let Some(limit) = query_params.limit {
+        resp = resp.with_limit(limit);
+    }
     resp.with_execution_time(start.elapsed().as_millis() as u64)
 }
 

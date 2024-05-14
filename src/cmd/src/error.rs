@@ -310,6 +310,13 @@ pub enum Error {
         location: Location,
         name: String,
     },
+
+    #[snafu(display("Failed to build cache registry"))]
+    BuildCacheRegistry {
+        #[snafu(implicit)]
+        location: Location,
+        source: cache::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -359,7 +366,7 @@ impl ErrorExt for Error {
 
             Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
 
-            Error::CacheRequired { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
 
             Error::Other { source, .. } => source.status_code(),
 

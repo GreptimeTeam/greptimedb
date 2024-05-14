@@ -28,7 +28,7 @@ use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::expr::error::{DataTypeSnafu, InternalSnafu};
 use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
-use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan};
+use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter};
 
@@ -39,7 +39,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
     #[allow(clippy::mutable_key_type)]
     pub fn render_reduce(
         &mut self,
-        input: Box<Plan>,
+        input: Box<TypedPlan>,
         key_val_plan: KeyValPlan,
         reduce_plan: ReducePlan,
     ) -> Result<CollectionBundle, Error> {
@@ -80,7 +80,11 @@ impl<'referred, 'df> Context<'referred, 'df> {
             out_send_port,
             move |_ctx, recv, send| {
                 // mfp only need to passively receive updates from recvs
-                let data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+                let data = recv
+                    .take_inner()
+                    .into_iter()
+                    .flat_map(|v| v.into_iter())
+                    .collect_vec();
 
                 reduce_subgraph(
                     &reduce_arrange,
@@ -378,9 +382,8 @@ fn reduce_accum_subgraph(
 
     let mut all_updates = Vec::with_capacity(key_to_vals.len());
     let mut all_outputs = Vec::with_capacity(key_to_vals.len());
-
     // lock the arrange for write for the rest of function body
-    // so to prevent wide race condition since we are going to update the arrangement by write after read
+    // so to prevent wired race condition since we are going to update the arrangement by write after read
     // TODO(discord9): consider key-based lock
     let mut arrange = arrange.write();
     for (key, value_diffs) in key_to_vals {
@@ -395,6 +398,7 @@ fn reduce_accum_subgraph(
             }
         };
         let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
+
         let accums = accums.inner;
 
         // deser accums from offsets
@@ -732,6 +736,7 @@ mod test {
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
     use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject};
+    use crate::repr::{ColumnType, RelationType};
 
     /// SELECT DISTINCT col FROM table
     ///
@@ -758,13 +763,20 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         let key_val_plan = KeyValPlan {
             key_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
             val_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
         };
         let reduce_plan = ReducePlan::Distinct;
         let bundle = ctx
-            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .render_reduce(
+                Box::new(input_plan.with_types(typ)),
+                key_val_plan,
+                reduce_plan,
+            )
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
@@ -805,6 +817,9 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         let key_val_plan = KeyValPlan {
             key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
             val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
@@ -831,7 +846,11 @@ mod test {
 
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
-            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .render_reduce(
+                Box::new(input_plan.with_types(typ)),
+                key_val_plan,
+                reduce_plan,
+            )
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
@@ -878,6 +897,9 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         let key_val_plan = KeyValPlan {
             key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
             val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
@@ -904,7 +926,11 @@ mod test {
 
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
-            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .render_reduce(
+                Box::new(input_plan.with_types(typ)),
+                key_val_plan,
+                reduce_plan,
+            )
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
@@ -947,6 +973,9 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         let key_val_plan = KeyValPlan {
             key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
             val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
@@ -973,7 +1002,11 @@ mod test {
 
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
-            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .render_reduce(
+                Box::new(input_plan.with_types(typ)),
+                key_val_plan,
+                reduce_plan,
+            )
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
@@ -1016,6 +1049,9 @@ mod test {
         let input_plan = Plan::Get {
             id: expr::Id::Global(GlobalId::User(1)),
         };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
         let key_val_plan = KeyValPlan {
             key_plan: MapFilterProject::new(1).project([]).unwrap().into_safe(),
             val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
@@ -1057,7 +1093,11 @@ mod test {
 
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
-            .render_reduce(Box::new(input_plan), key_val_plan, reduce_plan)
+            .render_reduce(
+                Box::new(input_plan.with_types(typ)),
+                key_val_plan,
+                reduce_plan,
+            )
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);

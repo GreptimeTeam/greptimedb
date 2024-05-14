@@ -313,6 +313,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("View already exists, view: {}", view_name))]
+    ViewAlreadyExists {
+        view_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Flow already exists: {}", flow_name))]
     FlowAlreadyExists {
         flow_name: String,
@@ -350,6 +357,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("View not found: '{}'", view_name))]
+    ViewNotFound {
+        view_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Flow not found: '{}'", flow_name))]
     FlowNotFound {
         flow_name: String,
@@ -373,6 +387,13 @@ pub enum Error {
 
     #[snafu(display("Invalid table metadata, err: {}", err_msg))]
     InvalidTableMetadata {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid view info, err: {}", err_msg))]
+    InvalidViewInfo {
         err_msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -638,6 +659,7 @@ impl ErrorExt for Error {
             | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidTableMetadata { .. }
+            | InvalidViewInfo { .. }
             | MoveRegion { .. }
             | Unexpected { .. }
             | TableInfoNotFound { .. }
@@ -688,8 +710,8 @@ impl ErrorExt for Error {
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowAlreadyExists { .. } => StatusCode::FlowAlreadyExists,
 
-            TableNotFound { .. } => StatusCode::TableNotFound,
-            TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+            ViewNotFound { .. } | TableNotFound { .. } => StatusCode::TableNotFound,
+            ViewAlreadyExists { .. } | TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
             SubmitProcedure { source, .. }
             | QueryProcedure { source, .. }

@@ -39,6 +39,12 @@ lazy_static! {
         &["step"]
     )
     .unwrap();
+    pub static ref METRIC_META_PROCEDURE_CREATE_VIEW: HistogramVec = register_histogram_vec!(
+        "greptime_meta_procedure_create_view",
+        "meta procedure create view",
+        &["step"]
+    )
+    .unwrap();
     pub static ref METRIC_META_PROCEDURE_CREATE_FLOW: HistogramVec = register_histogram_vec!(
         "greptime_meta_procedure_create_flow",
         "meta procedure create flow",
@@ -86,6 +92,13 @@ lazy_static! {
     pub static ref CACHE_CONTAINER_CACHE_MISS: IntCounterVec = register_int_counter_vec!(
         "greptime_meta_cache_container_cache_miss",
         "cache container cache miss",
+        &["name"]
+    )
+    .unwrap();
+    /// Cache container load cache timer
+    pub static ref CACHE_CONTAINER_LOAD_CACHE: HistogramVec = register_histogram_vec!(
+        "greptime_meta_cache_container_load_cache",
+        "cache container load cache",
         &["name"]
     )
     .unwrap();

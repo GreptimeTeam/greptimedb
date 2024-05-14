@@ -18,8 +18,8 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, DropColumn, DropColumns, RenameTable,
-    SemanticType, TableName,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
+    DropColumns, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -36,7 +36,9 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::create::{CreateExternalTable, CreateFlow, CreateTable, TIME_INDEX};
+use sql::statements::create::{
+    CreateExternalTable, CreateFlow, CreateTable, CreateView, TIME_INDEX,
+};
 use sql::statements::{
     column_def_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
 };
@@ -513,6 +515,28 @@ pub(crate) fn to_alter_expr(
     })
 }
 
+/// Try to cast the `[CreateViewExpr]` statement into gRPC `[CreateViewExpr]`.
+pub fn to_create_view_expr(
+    stmt: CreateView,
+    logical_plan: Vec<u8>,
+    query_ctx: QueryContextRef,
+) -> Result<CreateViewExpr> {
+    let (catalog_name, schema_name, view_name) = table_idents_to_full_name(&stmt.name, &query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    let expr = CreateViewExpr {
+        catalog_name,
+        schema_name,
+        view_name,
+        logical_plan,
+        create_if_not_exists: stmt.if_not_exists,
+        or_replace: stmt.or_replace,
+    };
+
+    Ok(expr)
+}
+
 pub fn to_create_flow_task_expr(
     create_flow: CreateFlow,
     query_ctx: &QueryContextRef,
@@ -766,5 +790,55 @@ mod tests {
             change_column_type.target_type
         );
         assert!(change_column_type.target_type_extension.is_none());
+    }
+
+    #[test]
+    fn test_to_create_view_expr() {
+        let sql = "CREATE VIEW test AS SELECT * FROM NUMBERS";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateView(stmt) = stmt else {
+            unreachable!()
+        };
+
+        let logical_plan = vec![1, 2, 3];
+
+        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!("public", expr.schema_name);
+        assert_eq!("test", expr.view_name);
+        assert!(!expr.create_if_not_exists);
+        assert!(!expr.or_replace);
+        assert_eq!(logical_plan, expr.logical_plan);
+    }
+
+    #[test]
+    fn test_to_create_view_expr_complex() {
+        let sql = "CREATE OR REPLACE VIEW IF NOT EXISTS test.test_view AS SELECT * FROM NUMBERS";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateView(stmt) = stmt else {
+            unreachable!()
+        };
+
+        let logical_plan = vec![1, 2, 3];
+
+        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!("test", expr.schema_name);
+        assert_eq!("test_view", expr.view_name);
+        assert!(expr.create_if_not_exists);
+        assert!(expr.or_replace);
+        assert_eq!(logical_plan, expr.logical_plan);
     }
 }
