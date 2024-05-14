@@ -461,13 +461,11 @@ mod test {
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::adapter::FlowTickManager;
     use crate::expr::Id;
     use crate::plan::Plan;
     use crate::repr::{RelationType, Row};
     #[tokio::test]
     pub async fn test_simple_get_with_worker_and_handle() {
-        let flow_tick = FlowTickManager::new();
         let (tx, rx) = oneshot::channel();
         let worker_thread_handle = std::thread::spawn(move || {
             let (handle, mut worker) = create_worker();
@@ -502,7 +500,7 @@ mod test {
             .await
             .unwrap();
         tx.send((Row::empty(), 0, 0)).unwrap();
-        handle.run_available(flow_tick.tick()).await;
+        handle.run_available(0).await;
         assert_eq!(sink_rx.recv().await.unwrap().0, Row::empty());
         handle.shutdown().await;
         worker_thread_handle.join().unwrap();
