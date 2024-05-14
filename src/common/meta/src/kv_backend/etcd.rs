@@ -32,11 +32,6 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
-    let (key, value) = kv.into_key_value();
-    KeyValue { key, value }
-}
-
 pub struct EtcdStore {
     client: Client,
     // Maximum number of operations permitted in a transaction.
@@ -123,7 +118,7 @@ impl KvBackend for EtcdStore {
         let kvs = res
             .take_kvs()
             .into_iter()
-            .map(convert_key_value)
+            .map(KeyValue::from)
             .collect::<Vec<_>>();
 
         Ok(RangeResponse {
@@ -146,7 +141,7 @@ impl KvBackend for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.take_prev_key().map(convert_key_value);
+        let prev_kv = res.take_prev_key().map(KeyValue::from);
         Ok(PutResponse { prev_kv })
     }
 
@@ -165,7 +160,7 @@ impl KvBackend for EtcdStore {
             for op_res in txn_res.op_responses() {
                 match op_res {
                     TxnOpResponse::Put(mut put_res) => {
-                        if let Some(prev_kv) = put_res.take_prev_key().map(convert_key_value) {
+                        if let Some(prev_kv) = put_res.take_prev_key().map(KeyValue::from) {
                             prev_kvs.push(prev_kv);
                         }
                     }
@@ -194,7 +189,7 @@ impl KvBackend for EtcdStore {
                     TxnOpResponse::Get(get_res) => get_res,
                     _ => unreachable!(),
                 };
-                kvs.extend(get_res.take_kvs().into_iter().map(convert_key_value));
+                kvs.extend(get_res.take_kvs().into_iter().map(KeyValue::from));
             }
         }
 
@@ -214,7 +209,7 @@ impl KvBackend for EtcdStore {
         let prev_kvs = res
             .take_prev_kvs()
             .into_iter()
-            .map(convert_key_value)
+            .map(KeyValue::from)
             .collect::<Vec<_>>();
 
         Ok(DeleteRangeResponse {
@@ -242,7 +237,7 @@ impl KvBackend for EtcdStore {
                         delete_res
                             .take_prev_kvs()
                             .into_iter()
-                            .map(convert_key_value)
+                            .map(KeyValue::from)
                             .for_each(|kv| {
                                 prev_kvs.push(kv);
                             });
