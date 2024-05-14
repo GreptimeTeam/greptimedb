@@ -418,15 +418,15 @@ impl StatementExecutor {
     ) -> Result<TableRef> {
         let _timer = crate::metrics::DIST_CREATE_VIEW.start_timer();
 
-        let schema = self
+        let schema_exists = self
             .table_metadata_manager
             .schema_manager()
-            .get(SchemaNameKey::new(&expr.catalog_name, &expr.schema_name))
+            .exists(SchemaNameKey::new(&expr.catalog_name, &expr.schema_name))
             .await
             .context(TableMetadataManagerSnafu)?;
 
         ensure!(
-            schema.is_some(),
+            schema_exists,
             SchemaNotFoundSnafu {
                 schema_info: &expr.schema_name,
             }
