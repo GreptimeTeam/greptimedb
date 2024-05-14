@@ -170,13 +170,13 @@ impl Txn {
     }
 
     /// Builds a transaction that puts a value at a key if the key exists and the value
-    /// is equal to `old_value`.
-    pub fn compare_and_put(key: Vec<u8>, old_value: Vec<u8>, value: Vec<u8>) -> Self {
+    /// is equal to `expect`.
+    pub fn compare_and_put(key: Vec<u8>, expect: Vec<u8>, value: Vec<u8>) -> Self {
         Self::new()
             .when(vec![Compare::with_value(
                 key.clone(),
                 CompareOp::Equal,
-                old_value,
+                expect,
             )])
             .and_then(vec![TxnOp::Put(key.clone(), value)])
             .or_else(vec![TxnOp::Get(key)])

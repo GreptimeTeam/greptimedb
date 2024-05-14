@@ -16,10 +16,9 @@ use std::any::Any;
 use std::sync::Arc;
 
 use etcd_client::{
-    Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
-    TxnResponse,
+    Client, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, TxnResponse,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 
 use super::KvBackendRef;
 use crate::error::{self, Error, Result};
@@ -28,8 +27,8 @@ use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -200,53 +199,6 @@ impl KvBackend for EtcdStore {
         }
 
         Ok(BatchGetResponse { kvs })
-    }
-
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        let CompareAndPut {
-            key,
-            expect,
-            value,
-            put_options,
-        } = req.try_into()?;
-
-        let compare = if expect.is_empty() {
-            // create if absent
-            // revision 0 means key was not exist
-            Compare::create_revision(key.clone(), CompareOp::Equal, 0)
-        } else {
-            // compare and put
-            Compare::value(key.clone(), CompareOp::Equal, expect)
-        };
-        let put = TxnOp::put(key.clone(), value, put_options);
-        let get = TxnOp::get(key, None);
-        let txn = Txn::new()
-            .when(vec![compare])
-            .and_then(vec![put])
-            .or_else(vec![get]);
-
-        let txn_res = self
-            .client
-            .kv_client()
-            .txn(txn)
-            .await
-            .context(error::EtcdFailedSnafu)?;
-
-        let success = txn_res.succeeded();
-        let op_res = txn_res
-            .op_responses()
-            .pop()
-            .context(error::InvalidTxnResultSnafu {
-                err_msg: "empty response",
-            })?;
-
-        let prev_kv = match op_res {
-            TxnOpResponse::Put(mut res) => res.take_prev_key().map(convert_key_value),
-            TxnOpResponse::Get(mut res) => res.take_kvs().into_iter().next().map(convert_key_value),
-            _ => unreachable!(),
-        };
-
-        Ok(CompareAndPutResponse { success, prev_kv })
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
@@ -461,28 +413,6 @@ impl TryFrom<BatchDeleteRequest> for BatchDelete {
     }
 }
 
-struct CompareAndPut {
-    key: Vec<u8>,
-    expect: Vec<u8>,
-    value: Vec<u8>,
-    put_options: Option<PutOptions>,
-}
-
-impl TryFrom<CompareAndPutRequest> for CompareAndPut {
-    type Error = Error;
-
-    fn try_from(req: CompareAndPutRequest) -> Result<Self> {
-        let CompareAndPutRequest { key, expect, value } = req;
-
-        Ok(CompareAndPut {
-            key,
-            expect,
-            value,
-            put_options: Some(PutOptions::default().with_prev_key()),
-        })
-    }
-}
-
 struct Delete {
     key: Vec<u8>,
     options: Option<DeleteOptions>,
@@ -595,22 +525,6 @@ mod tests {
         assert_eq!(b"k2".to_vec(), batch_delete.keys.get(1).unwrap().clone());
         assert_eq!(b"k3".to_vec(), batch_delete.keys.get(2).unwrap().clone());
         let _ = batch_delete.options.unwrap();
-    }
-
-    #[test]
-    fn test_parse_compare_and_put() {
-        let req = CompareAndPutRequest {
-            key: b"test_key".to_vec(),
-            expect: b"test_expect".to_vec(),
-            value: b"test_value".to_vec(),
-        };
-
-        let compare_and_put: CompareAndPut = req.try_into().unwrap();
-
-        assert_eq!(b"test_key".to_vec(), compare_and_put.key);
-        assert_eq!(b"test_expect".to_vec(), compare_and_put.expect);
-        assert_eq!(b"test_value".to_vec(), compare_and_put.value);
-        let _ = compare_and_put.put_options.unwrap();
     }
 
     #[test]
