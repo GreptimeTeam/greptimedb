@@ -57,7 +57,7 @@ impl<'a> ParserContext<'a> {
 
         let req = if self.parser.parse_keyword(Keyword::TO) {
             let (with, connection, location, limit) = self.parse_copy_parameters()?;
-            if let Some(num) = limit {
+            if limit.is_some() {
                 return error::InvalidSqlSnafu {
                     msg: "limit xxx is not supported",
                 }
@@ -76,7 +76,7 @@ impl<'a> ParserContext<'a> {
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu)?;
             let (with, connection, location, limit) = self.parse_copy_parameters()?;
-            if let Some(num) = limit {
+            if limit.is_some() {
                 return error::InvalidSqlSnafu {
                     msg: "limit xxx is not supported",
                 }
