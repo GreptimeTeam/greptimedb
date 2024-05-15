@@ -68,7 +68,7 @@ impl TypedPlan {
     pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
         let input_arity = self.typ.column_types.len();
         let output_arity = exprs.len();
-        let (exprs, expr_typs): (Vec<_>, Vec<_>) = exprs
+        let (exprs, _expr_typs): (Vec<_>, Vec<_>) = exprs
             .into_iter()
             .map(|TypedExpr { expr, typ }| (expr, typ))
             .unzip();
