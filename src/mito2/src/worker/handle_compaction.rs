@@ -14,6 +14,7 @@
 
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
+use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
 use crate::metrics::COMPACTION_REQUEST_COUNT;
@@ -25,6 +26,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn handle_compaction_request(
         &mut self,
         region_id: RegionId,
+        req: RegionCompactRequest,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
@@ -33,6 +35,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         COMPACTION_REQUEST_COUNT.inc();
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
+            req.compact_type,
             &region.version_control,
             &region.access_layer,
             &region.file_purger,

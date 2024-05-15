@@ -25,8 +25,7 @@ use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
-use greptime_proto::v1::region::compact_type::Ty;
-use greptime_proto::v1::region::{Regular, StrictWindow};
+use greptime_proto::v1::region::CompactType;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
@@ -240,17 +239,17 @@ pub struct FlushTableRequest {
     pub table_name: String,
 }
 
-#[derive(Debug, Clone, Default)]
-pub enum CompactType {
-    #[default]
-    Regular,
-    StrictWindow(StrictWindowOptions),
-}
+// #[derive(Debug, Clone, Default)]
+// pub enum CompactType {
+//     #[default]
+//     Regular,
+//     StrictWindow(StrictWindowOptions),
+// }
 
-#[derive(Debug, Clone, Default)]
-pub struct StrictWindowOptions {
-    pub window_size: Option<i64>,
-}
+// #[derive(Debug, Clone, Default)]
+// pub struct StrictWindowOptions {
+//     pub window_size: Option<i64>,
+// }
 
 #[derive(Debug, Clone, Default)]
 pub struct CompactTableRequest {
@@ -260,19 +259,33 @@ pub struct CompactTableRequest {
     pub compact_type: CompactType,
 }
 
-impl From<&CompactType> for greptime_proto::v1::region::CompactType {
-    fn from(value: &CompactType) -> Self {
-        let compact_type = match value {
-            CompactType::Regular => Ty::Regular(Regular::default()),
-            CompactType::StrictWindow(window) => Ty::StrictWindow(StrictWindow {
-                window: window.window_size.unwrap_or(0),
-            }),
-        };
-        greptime_proto::v1::region::CompactType {
-            ty: Some(compact_type),
-        }
-    }
-}
+// impl From<&CompactType> for greptime_proto::v1::region::CompactType {
+//     fn from(value: &CompactType) -> Self {
+//         let compact_type = match value {
+//             CompactType::Regular => Ty::Regular(Regular::default()),
+//             CompactType::StrictWindow(window) => Ty::StrictWindow(StrictWindow {
+//                 window: window.window_size.unwrap_or(0),
+//             }),
+//         };
+//         greptime_proto::v1::region::CompactType {
+//             ty: Some(compact_type),
+//         }
+//     }
+// }
+//
+// impl From<&greptime_proto::v1::region::CompactType> for CompactType {
+//     fn from(value: &greptime_proto::v1::region::CompactType) -> Self {
+//         match &value.ty {
+//             None => CompactType::Regular,
+//             Some(t) => match t {
+//                 Ty::Regular(_) => CompactType::Regular,
+//                 Ty::StrictWindow(window) => CompactType::StrictWindow(StrictWindowOptions {
+//                     window_size: Some(window.window),
+//                 }),
+//             },
+//         }
+//     }
+// }
 
 /// Truncate table request
 #[derive(Debug, Clone, Serialize, Deserialize)]

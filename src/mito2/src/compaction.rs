@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::greptime_proto::v1::region::CompactType;
 use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
@@ -48,6 +49,7 @@ pub struct CompactionRequest {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
+    pub(crate) compact_type: CompactType,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
@@ -119,6 +121,7 @@ impl CompactionScheduler {
     pub(crate) fn schedule_compaction(
         &mut self,
         region_id: RegionId,
+        compact_type: CompactType,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
@@ -139,6 +142,7 @@ impl CompactionScheduler {
             file_purger.clone(),
         );
         let request = status.new_compaction_request(
+            compact_type,
             self.request_sender.clone(),
             waiter,
             self.engine_config.clone(),
@@ -159,8 +163,10 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
+
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
+            CompactType::default(), // todo(hl): we should not trigger a regular compaction after major compaction.
             self.request_sender.clone(),
             OptionOutputTx::none(),
             self.engine_config.clone(),
@@ -336,6 +342,7 @@ impl CompactionStatus {
     /// It consumes all pending compaction waiters.
     fn new_compaction_request(
         &mut self,
+        compact_type: CompactType,
         request_sender: Sender<WorkerRequest>,
         waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
@@ -349,6 +356,7 @@ impl CompactionStatus {
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
+            compact_type,
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
@@ -397,6 +405,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 builder.region_id(),
+                CompactType::default(),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -415,6 +424,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 builder.region_id(),
+                CompactType::default(),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -477,6 +487,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 region_id,
+                CompactType::default(),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -505,6 +516,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 region_id,
+                CompactType::default(),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -536,6 +548,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 region_id,
+                CompactType::default(),
                 &version_control,
                 &env.access_layer,
                 &purger,

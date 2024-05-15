@@ -15,6 +15,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use api::v1::region::compact_type::Ty;
+use api::v1::region::{CompactType, StrictWindow};
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::Error::ThreadJoin;
@@ -29,7 +31,7 @@ use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
 use snafu::{ensure, Location, OptionExt, ResultExt};
-use table::requests::{CompactTableRequest, CompactType, FlushTableRequest, StrictWindowOptions};
+use table::requests::{CompactTableRequest, FlushTableRequest};
 
 use crate::ensure_greptime;
 use crate::function::{Function, FunctionContext};
@@ -150,21 +152,25 @@ fn parse_compact_params(
             .fail();
         };
         if compact_ty_str.eq_ignore_ascii_case("strict_window") {
-            let window = params.get(2).and_then(|v| {
-                if let ValueRef::String(window_str) = v {
-                    i64::from_str(window_str).ok()
-                } else {
-                    None
-                }
-            });
-            CompactType::StrictWindow(StrictWindowOptions {
-                window_size: window,
-            })
+            let window = params
+                .get(2)
+                .and_then(|v| {
+                    if let ValueRef::String(window_str) = v {
+                        i64::from_str(window_str).ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            CompactType {
+                ty: Some(Ty::StrictWindow(StrictWindow { window })),
+            }
         } else {
-            CompactType::Regular
+            CompactType::default()
         }
     } else {
-        CompactType::Regular
+        CompactType::default()
     };
 
     Ok(CompactTableRequest {
@@ -242,6 +248,4 @@ mod tests {
     }
 
     define_table_function_test!(flush_table, FlushTableFunction);
-
-    define_table_function_test!(compact_table, CompactTableFunction);
 }

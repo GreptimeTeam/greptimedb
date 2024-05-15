@@ -139,6 +139,7 @@ impl Picker for TwcsPicker {
             engine_config,
             current_version,
             access_layer,
+            compact_type,
             request_sender,
             waiters,
             file_purger,
