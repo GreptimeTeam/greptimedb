@@ -101,7 +101,7 @@ jobs:
       - name: Running tests
         run: cargo nextest run -F pyo3_backend,dashboard
         env:
-          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+          CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
