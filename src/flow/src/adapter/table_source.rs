@@ -88,6 +88,7 @@ impl TableSource {
             .map(|name| name.table_name())
             .map(|name| [name.catalog_name, name.schema_name, name.table_name])
     }
+
     /// query metasrv about the table name and table id
     pub async fn get_table_info_value(
         &self,
