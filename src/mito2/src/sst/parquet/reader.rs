@@ -199,7 +199,7 @@ impl ParquetReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
 
-        let mut metrics = Metrics::default();
+        let mut metrics = ReaderMetrics::default();
 
         let row_groups = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics)
@@ -312,7 +312,7 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut Metrics,
+        metrics: &mut ReaderMetrics,
     ) -> BTreeMap<usize, Option<RowSelection>> {
         let num_row_groups = parquet_meta.num_row_groups();
         if num_row_groups == 0 {
@@ -334,7 +334,7 @@ impl ParquetReaderBuilder {
     async fn prune_row_groups_by_inverted_index(
         &self,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut Metrics,
+        metrics: &mut ReaderMetrics,
     ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
         let Some(index_applier) = &self.index_applier else {
             return None;
@@ -416,7 +416,7 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut Metrics,
+        metrics: &mut ReaderMetrics,
     ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
         let Some(predicate) = &self.predicate else {
             return None;
@@ -501,7 +501,7 @@ fn time_range_to_predicate(
 
 /// Parquet reader metrics.
 #[derive(Debug, Default)]
-struct Metrics {
+pub(crate) struct ReaderMetrics {
     /// Number of row groups before filtering.
     num_row_groups_before_filtering: usize,
     /// Number of row groups filtered by inverted index.
@@ -524,6 +524,24 @@ struct Metrics {
     num_batches: usize,
     /// Number of rows read.
     num_rows: usize,
+}
+
+impl ReaderMetrics {
+    /// Adds `other` metrics to this metrics.
+    pub(crate) fn merge_from(&mut self, other: &ReaderMetrics) {
+        self.num_row_groups_before_filtering += other.num_row_groups_before_filtering;
+        self.num_row_groups_inverted_index_filtered += other.num_row_groups_inverted_index_filtered;
+        self.num_row_groups_min_max_filtered += other.num_row_groups_min_max_filtered;
+        self.num_rows_precise_filtered += other.num_rows_precise_filtered;
+        self.num_rows_in_row_group_before_filtering += other.num_rows_in_row_group_before_filtering;
+        self.num_rows_in_row_group_inverted_index_filtered +=
+            other.num_rows_in_row_group_inverted_index_filtered;
+        self.build_cost += other.build_cost;
+        self.scan_cost += other.scan_cost;
+        self.num_record_batches += other.num_record_batches;
+        self.num_batches += other.num_batches;
+        self.num_rows += other.num_rows;
+    }
 }
 
 /// Builder to build a [ParquetRecordBatchReader] for a row group.
@@ -594,12 +612,12 @@ enum ReaderState {
     /// The reader is reading a row group.
     Readable(RowGroupReader),
     /// The reader is exhausted.
-    Exhausted(Metrics),
+    Exhausted(ReaderMetrics),
 }
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&self) -> &Metrics {
+    fn metrics(&self) -> &ReaderMetrics {
         match self {
             ReaderState::Readable(reader) => &reader.metrics,
             ReaderState::Exhausted(m) => m,
@@ -795,7 +813,7 @@ impl ParquetReader {
                 .await?;
             ReaderState::Readable(RowGroupReader::new(context.clone(), parquet_reader))
         } else {
-            ReaderState::Exhausted(Metrics::default())
+            ReaderState::Exhausted(ReaderMetrics::default())
         };
 
         Ok(ParquetReader {
@@ -825,7 +843,7 @@ pub struct RowGroupReader {
     /// Buffered batches to return.
     batches: VecDeque<Batch>,
     /// Local scan metrics.
-    metrics: Metrics,
+    metrics: ReaderMetrics,
 }
 
 impl RowGroupReader {
@@ -835,8 +853,13 @@ impl RowGroupReader {
             context,
             reader,
             batches: VecDeque::new(),
-            metrics: Metrics::default(),
+            metrics: ReaderMetrics::default(),
         }
+    }
+
+    /// Gets the metrics and consume the reader.
+    pub(crate) fn metrics(&self) -> &ReaderMetrics {
+        &self.metrics
     }
 
     /// Resets the parquet reader.

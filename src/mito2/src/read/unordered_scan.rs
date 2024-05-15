@@ -35,6 +35,7 @@ use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{ScanInput, ScanPart};
 use crate::read::Source;
+use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -192,8 +193,8 @@ impl RegionScanner for UnorderedScan {
                     yield batch;
                 }
             }
-            // TODO(yingwen): metrics.
             // Then scans file ranges.
+            let mut reader_metrics = ReaderMetrics::default();
             for file_range in file_ranges {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
                 let compat_batch = file_range.compat_batch();
@@ -203,11 +204,17 @@ impl RegionScanner for UnorderedScan {
                     metrics.num_rows += batch.num_rows();
                     yield batch;
                 }
+                if let Source::RowGroupReader(reader) = source {
+                    reader_metrics.merge_from(reader.metrics());
+                }
             }
 
             metrics.total_cost = query_start.elapsed();
             Self::observe_metrics_on_finish(&metrics);
-            debug!("Unordered scan partition {} finished, region_id: {}, metrics: {:?}", partition, mapper.metadata().region_id, metrics);
+            debug!(
+                "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}",
+                partition, mapper.metadata().region_id, metrics, reader_metrics
+            );
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
             self.input.mapper.output_schema(),
