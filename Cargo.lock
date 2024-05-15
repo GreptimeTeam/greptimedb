@@ -1624,7 +1624,6 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
- "config",
  "datanode",
  "datatypes",
  "either",
@@ -1728,9 +1727,22 @@ name = "common-config"
 version = "0.7.2"
 dependencies = [
  "common-base",
+ "common-error",
+ "common-macro",
+ "common-telemetry",
+ "common-test-util",
+ "common-wal",
+ "config",
+ "datanode",
+ "meta-client",
  "num_cpus",
  "serde",
+ "serde_json",
+ "snafu 0.8.2",
  "sysinfo",
+ "temp-env",
+ "tempfile",
+ "toml 0.8.12",
 ]
 
 [[package]]
@@ -3149,6 +3161,7 @@ dependencies = [
  "catalog",
  "client",
  "common-base",
+ "common-config",
  "common-error",
  "common-function",
  "common-greptimedb-telemetry",
@@ -5601,6 +5614,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-greptimedb-telemetry",
  "common-grpc",

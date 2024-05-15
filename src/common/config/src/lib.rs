@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod config;
+pub mod error;
 pub mod utils;
 
 use common_base::readable_size::ReadableSize;
+pub use config::*;
 use serde::{Deserialize, Serialize};
 
 pub fn metadata_store_dir(store_dir: &str) -> String {

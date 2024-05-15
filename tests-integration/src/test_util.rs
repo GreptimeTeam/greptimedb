@@ -22,6 +22,7 @@ use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::secrets::ExposeSecret;
+use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_runtime::Builder as RuntimeBuilder;
@@ -391,7 +392,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
             None,
         )
         .with_metrics_handler(MetricsHandler)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml_string())
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     (http_server.build(http_server.make_app()), instance.guard)
 }
@@ -463,7 +464,7 @@ pub async fn setup_test_prom_app_with_frontend(
         )
         .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
         .with_prometheus_handler(frontend_ref)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml_string())
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let app = http_server.build(http_server.make_app());
     (app, instance.guard)

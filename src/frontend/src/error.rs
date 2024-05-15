@@ -343,8 +343,10 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
-        #[snafu(source)]
-        error: toml::ser::Error,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
+        source: Box<common_config::error::Error>,
     },
 
     #[snafu(display("Failed to get cache from cache registry: {}", name))]

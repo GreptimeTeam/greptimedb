@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
+use common_config::Configurable;
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
@@ -31,14 +32,14 @@ use servers::server::{Server, ServerHandlers};
 use servers::tls::{maybe_watch_tls_config, ReloadableTlsServerConfig};
 use snafu::ResultExt;
 
-use crate::error::{self, Result, StartServerSnafu};
-use crate::frontend::{FrontendOptions, TomlSerializable};
+use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
+use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
 use crate::service_config::GrpcOptions;
 
 pub struct Services<T, U>
 where
-    T: Into<FrontendOptions> + TomlSerializable + Clone,
+    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
     U: FrontendInstance,
 {
     opts: T,
@@ -50,7 +51,7 @@ where
 
 impl<T, U> Services<T, U>
 where
-    T: Into<FrontendOptions> + TomlSerializable + Clone,
+    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
     U: FrontendInstance,
 {
     pub fn new(opts: T, instance: Arc<U>, plugins: Plugins) -> Self {
@@ -171,7 +172,7 @@ where
         let opts = self.opts.clone();
         let instance = self.instance.clone();
 
-        let toml = opts.to_toml()?;
+        let toml = opts.to_toml().context(TomlFormatSnafu)?;
         let opts: FrontendOptions = opts.into();
 
         let handlers = ServerHandlers::default();
