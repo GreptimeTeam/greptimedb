@@ -157,18 +157,6 @@ impl RegionEngine for MetricEngine {
         })
     }
 
-    /// Handles substrait query and return a stream of record batches
-    async fn handle_query(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.inner
-            .read_region(region_id, request)
-            .await
-            .map_err(BoxedError::new)
-    }
-
     async fn handle_partitioned_query(
         &self,
         region_id: RegionId,
@@ -262,6 +250,18 @@ impl MetricEngine {
             .metadata_region
             .logical_regions(physical_region_id)
             .await
+    }
+
+    /// Handles substrait query and return a stream of record batches
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.inner
+            .read_region(region_id, request)
+            .await
+            .map_err(BoxedError::new)
     }
 }
 

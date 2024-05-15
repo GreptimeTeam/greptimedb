@@ -51,6 +51,20 @@ impl FileRegionEngine {
             inner: Arc::new(EngineInner::new(object_store)),
         }
     }
+
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.inner
+            .get_region(region_id)
+            .await
+            .context(RegionNotFoundSnafu { region_id })
+            .map_err(BoxedError::new)?
+            .query(request)
+            .map_err(BoxedError::new)
+    }
 }
 
 #[async_trait]
@@ -67,20 +81,6 @@ impl RegionEngine for FileRegionEngine {
         self.inner
             .handle_request(region_id, request)
             .await
-            .map_err(BoxedError::new)
-    }
-
-    async fn handle_query(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.inner
-            .get_region(region_id)
-            .await
-            .context(RegionNotFoundSnafu { region_id })
-            .map_err(BoxedError::new)?
-            .query(request)
             .map_err(BoxedError::new)
     }
 

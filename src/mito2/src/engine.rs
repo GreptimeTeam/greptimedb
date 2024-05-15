@@ -115,6 +115,20 @@ impl MitoEngine {
         Ok(region.region_usage().await)
     }
 
+    /// Handle substrait query and return a stream of record batches
+    #[tracing::instrument(skip_all)]
+    pub async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+        self.scanner(region_id, request)
+            .map_err(BoxedError::new)?
+            .scan()
+            .await
+            .map_err(BoxedError::new)
+    }
+
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.scan_region(region_id, request)?.scanner()
@@ -319,20 +333,6 @@ impl RegionEngine for MitoEngine {
             .handle_request(region_id, request)
             .await
             .map(RegionResponse::new)
-            .map_err(BoxedError::new)
-    }
-
-    /// Handle substrait query and return a stream of record batches
-    #[tracing::instrument(skip_all)]
-    async fn handle_query(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        self.scanner(region_id, request)
-            .map_err(BoxedError::new)?
-            .scan()
-            .await
             .map_err(BoxedError::new)
     }
 

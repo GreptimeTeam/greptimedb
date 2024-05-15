@@ -195,13 +195,6 @@ pub trait RegionEngine: Send + Sync {
         request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError>;
 
-    /// Handles substrait query and return a stream of record batches
-    async fn handle_query(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError>;
-
     /// Handles query and return a scanner that can be used to scan the region concurrently.
     async fn handle_partitioned_query(
         &self,

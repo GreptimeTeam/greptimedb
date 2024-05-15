@@ -23,7 +23,6 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
@@ -60,14 +59,6 @@ impl RegionEngine for MetaRegionEngine {
         _region_id: RegionId,
         _request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError> {
-        unimplemented!()
-    }
-
-    async fn handle_query(
-        &self,
-        _region_id: RegionId,
-        _request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
         unimplemented!()
     }
 
