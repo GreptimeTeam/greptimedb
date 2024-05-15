@@ -146,13 +146,13 @@ pub enum Error {
     InvalidTableOptionValue {
         key: Ident,
         value: Expr,
+        location: Location,
     },
 
     #[snafu(display("Unrecognized database option key: {}, value: {}", key, value))]
     InvalidDatabaseOptionValue {
         key: Ident,
         value: u64,
-        location: Location,
     },
 
     #[snafu(display("Failed to serialize column default constraint"))]
