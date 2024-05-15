@@ -28,5 +28,5 @@ mod worker;
 pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
 // TODO: refactor common types for flow to a separate module
 /// FlowId is a unique identifier for a flow task
-pub type FlowId = u64;
+pub type FlowId = u32;
 pub type TableName = [String; 3];

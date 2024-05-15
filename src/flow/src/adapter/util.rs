@@ -32,7 +32,7 @@ pub fn column_schemas_to_proto(
             ColumnDataTypeWrapper::try_from(c.data_type.clone())
                 .map(|w| w.to_parts())
                 .map_err(BoxedError::new)
-                .with_context(|_| ExternalSnafu)
+                .context(ExternalSnafu)
         })
         .try_collect()?;
 
