@@ -83,14 +83,18 @@ impl TypedExpr {
 }
 
 impl AggregateExpr {
+    /// Convert list of `Measure` into Flow's AggregateExpr
+    ///
+    /// Return both the AggregateExpr and a MapFilterProject that is the final output of the aggregate function
     fn from_substrait_agg_measures(
         ctx: &mut FlownodeContext,
         measures: &[Measure],
         typ: &RelationType,
         extensions: &FunctionExtensions,
-    ) -> Result<Vec<AggregateExpr>, Error> {
+    ) -> Result<(Vec<AggregateExpr>, MapFilterProject), Error> {
         let _ = ctx;
-        let mut aggr_exprs = vec![];
+        let mut all_aggr_exprs = vec![];
+        let mut post_maps = vec![];
 
         for m in measures {
             let filter = &m
@@ -99,7 +103,7 @@ impl AggregateExpr {
                 .map(|fil| TypedExpr::from_substrait_rex(fil, typ, extensions))
                 .transpose()?;
 
-            let agg_func = match &m.measure {
+            let (aggr_expr, post_mfp) = match &m.measure {
                 Some(f) => {
                     let distinct = match f.invocation {
                         _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
@@ -113,12 +117,30 @@ impl AggregateExpr {
                 }
                 None => not_impl_err!("Aggregate without aggregate function is not supported"),
             }?;
-            aggr_exprs.push(agg_func);
+            // permute col index refer to the output of post_mfp,
+            // so to help construct a mfp at the end
+            let mut post_map = post_mfp.unwrap_or(ScalarExpr::Column(0));
+            let cur_arity = all_aggr_exprs.len();
+            let remap = (0..aggr_expr.len()).map(|i| i + cur_arity).collect_vec();
+            post_map.permute(&remap)?;
+
+            all_aggr_exprs.extend(aggr_expr);
+            post_maps.push(post_map);
         }
-        Ok(aggr_exprs)
+
+        let input_arity = all_aggr_exprs.len();
+        let aggr_arity = post_maps.len();
+        let post_mfp_final = MapFilterProject::new(all_aggr_exprs.len())
+            .map(post_maps)?
+            .project(input_arity..input_arity + aggr_arity)?;
+
+        Ok((all_aggr_exprs, post_mfp_final))
     }
 
     /// Convert AggregateFunction into Flow's AggregateExpr
+    ///
+    /// the returned value is a tuple of AggregateExpr and a optional ScalarExpr that if exist is the final output of the aggregate function
+    /// since aggr functions like `avg` need to be transform to `sum(x)/cast(count(x) as x_type)`
     pub fn from_substrait_agg_func(
         f: &proto::AggregateFunction,
         input_schema: &RelationType,
@@ -126,7 +148,7 @@ impl AggregateExpr {
         filter: &Option<TypedExpr>,
         order_by: &Option<Vec<TypedExpr>>,
         distinct: bool,
-    ) -> Result<AggregateExpr, Error> {
+    ) -> Result<(Vec<AggregateExpr>, Option<ScalarExpr>), Error> {
         // TODO(discord9): impl filter
         let _ = filter;
         let _ = order_by;
@@ -141,26 +163,60 @@ impl AggregateExpr {
             args.push(arg_expr);
         }
 
+        if args.len() != 1 {
+            return not_impl_err!("Aggregated function with multiple arguments is not supported");
+        }
+
         let arg = if let Some(first) = args.first() {
             first
         } else {
             return not_impl_err!("Aggregated function without arguments is not supported");
         };
 
-        let func = match extensions.get(&f.function_reference) {
+        match extensions.get(&f.function_reference).map(|s| s.as_ref()) {
+            Some("avg") => AggregateExpr::from_avg_aggr_func(arg),
             Some(function_name) => {
-                AggregateFunc::from_str_and_type(function_name, Some(arg.typ.scalar_type.clone()))
+                let func = AggregateFunc::from_str_and_type(
+                    function_name,
+                    Some(arg.typ.scalar_type.clone()),
+                )?;
+                let exprs = vec![AggregateExpr {
+                    func,
+                    expr: arg.expr.clone(),
+                    distinct,
+                }];
+                let ret_mfp = None;
+                Ok((exprs, ret_mfp))
             }
             None => not_impl_err!(
                 "Aggregated function not found: function anchor = {:?}",
                 f.function_reference
             ),
-        }?;
-        Ok(AggregateExpr {
-            func,
+        }
+    }
+
+    /// convert `avg` function into `sum(x)/cast(count(x) as x_type)`
+    fn from_avg_aggr_func(
+        arg: &TypedExpr,
+    ) -> Result<(Vec<AggregateExpr>, Option<ScalarExpr>), Error> {
+        let arg_type = arg.typ.scalar_type.clone();
+        let sum = AggregateExpr {
+            func: AggregateFunc::from_str_and_type("sum", Some(arg_type.clone()))?,
             expr: arg.expr.clone(),
-            distinct,
-        })
+            distinct: false,
+        };
+        let count = AggregateExpr {
+            func: AggregateFunc::Count,
+            expr: arg.expr.clone(),
+            distinct: false,
+        };
+        let avg_output = ScalarExpr::Column(0).call_binary(
+            ScalarExpr::Column(1).call_unary(UnaryFunc::Cast(arg_type.clone())),
+            BinaryFunc::div(arg_type.clone())?,
+        );
+        let ret_aggr_exprs = vec![sum, count];
+        let ret_mfp = Some(avg_output);
+        Ok((ret_aggr_exprs, ret_mfp))
     }
 }
 
@@ -231,7 +287,7 @@ impl TypedPlan {
         let group_exprs =
             TypedExpr::from_substrait_agg_grouping(ctx, &agg.groupings, &input.typ, extensions)?;
 
-        let mut aggr_exprs =
+        let (mut aggr_exprs, post_mfp) =
             AggregateExpr::from_substrait_agg_measures(ctx, &agg.measures, &input.typ, extensions)?;
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(

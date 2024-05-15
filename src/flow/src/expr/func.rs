@@ -375,6 +375,22 @@ impl BinaryFunc {
         )
     }
 
+    pub fn add(input_type: ConcreteDataType) -> Result<Self, Error> {
+        Self::specialization(GenericFn::Add, input_type)
+    }
+
+    pub fn sub(input_type: ConcreteDataType) -> Result<Self, Error> {
+        Self::specialization(GenericFn::Sub, input_type)
+    }
+
+    pub fn mul(input_type: ConcreteDataType) -> Result<Self, Error> {
+        Self::specialization(GenericFn::Mul, input_type)
+    }
+
+    pub fn div(input_type: ConcreteDataType) -> Result<Self, Error> {
+        Self::specialization(GenericFn::Div, input_type)
+    }
+
     /// Get the specialization of the binary function based on the generic function and the input type
     pub fn specialization(generic: GenericFn, input_type: ConcreteDataType) -> Result<Self, Error> {
         let rule = SPECIALIZATION.get_or_init(|| {
