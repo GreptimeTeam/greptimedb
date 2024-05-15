@@ -65,10 +65,21 @@ lazy_static! {
     ];
     pub static ref STRING_DATA_TYPES: Vec<ConcreteDataType> =
         vec![ConcreteDataType::string_datatype()];
+    pub static ref MYSQL_TS_DATA_TYPES: Vec<ConcreteDataType> = vec![
+        // MySQL only permits fractional seconds with up to microseconds (6 digits) precision.
+        ConcreteDataType::timestamp_microsecond_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        ConcreteDataType::timestamp_second_datatype(),
+    ];
 }
 
 impl_random!(ConcreteDataType, ColumnTypeGenerator, DATA_TYPES);
 impl_random!(ConcreteDataType, TsColumnTypeGenerator, TS_DATA_TYPES);
+impl_random!(
+    ConcreteDataType,
+    MySQLTsColumnTypeGenerator,
+    MYSQL_TS_DATA_TYPES
+);
 impl_random!(
     ConcreteDataType,
     PartibleColumnTypeGenerator,
@@ -82,6 +93,7 @@ impl_random!(
 
 pub struct ColumnTypeGenerator;
 pub struct TsColumnTypeGenerator;
+pub struct MySQLTsColumnTypeGenerator;
 pub struct PartibleColumnTypeGenerator;
 pub struct StringColumnTypeGenerator;
 
@@ -110,6 +122,31 @@ pub fn generate_random_value<R: Rng>(
     }
 }
 
+/// Generates a random [Value] for MySQL.
+pub fn generate_random_value_for_mysql<R: Rng>(
+    rng: &mut R,
+    datatype: &ConcreteDataType,
+    random_str: Option<&dyn Random<Ident, R>>,
+) -> Value {
+    match datatype {
+        &ConcreteDataType::Boolean(_) => Value::from(rng.gen::<bool>()),
+        ConcreteDataType::Int16(_) => Value::from(rng.gen::<i16>()),
+        ConcreteDataType::Int32(_) => Value::from(rng.gen::<i32>()),
+        ConcreteDataType::Int64(_) => Value::from(rng.gen::<i64>()),
+        ConcreteDataType::Float32(_) => Value::from(rng.gen::<f32>()),
+        ConcreteDataType::Float64(_) => Value::from(rng.gen::<f64>()),
+        ConcreteDataType::String(_) => match random_str {
+            Some(random) => Value::from(random.gen(rng).value),
+            None => Value::from(rng.gen::<char>().to_string()),
+        },
+        ConcreteDataType::Date(_) => generate_random_date(rng),
+        ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
+        &ConcreteDataType::Timestamp(ts_type) => generate_random_timestamp_for_mysql(rng, ts_type),
+
+        _ => unimplemented!("unsupported type: {datatype}"),
+    }
+}
+
 fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
     let v = match ts_type {
         TimestampType::Second(_) => {
@@ -133,6 +170,37 @@ fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Val
         TimestampType::Nanosecond(_) => {
             let min = i64::from(Timestamp::MIN_NANOSECOND);
             let max = i64::from(Timestamp::MAX_NANOSECOND);
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_nanosecond(value)
+        }
+    };
+    Value::from(v)
+}
+
+// MySQL supports timestamp from '1970-01-01 00:00:01.000000' to '2038-01-19 03:14:07.499999'
+fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
+    let v = match ts_type {
+        TimestampType::Second(_) => {
+            let min = 1;
+            let max = 2_147_483_647;
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_second(value)
+        }
+        TimestampType::Millisecond(_) => {
+            let min = 1000;
+            let max = 2_147_483_647_499;
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_millisecond(value)
+        }
+        TimestampType::Microsecond(_) => {
+            let min = 1_000_000;
+            let max = 2_147_483_647_499_999;
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_microsecond(value)
+        }
+        TimestampType::Nanosecond(_) => {
+            let min = 1_000_000_000;
+            let max = 2_147_483_647_499_999_000;
             let value = rng.gen_range(min..=max);
             Timestamp::new_nanosecond(value)
         }
@@ -256,6 +324,14 @@ impl Column {
                 opt,
                 ColumnOption::DefaultValue(_) | ColumnOption::DefaultFn(_)
             )
+        })
+    }
+
+    // Returns default value if it has.
+    pub fn default_value(&self) -> Option<&Value> {
+        self.options.iter().find_map(|opt| match opt {
+            ColumnOption::DefaultValue(value) => Some(value),
+            _ => None,
         })
     }
 }

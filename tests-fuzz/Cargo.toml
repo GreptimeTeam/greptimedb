@@ -17,6 +17,7 @@ unstable = ["nix"]
 [dependencies]
 arbitrary = { version = "1.3.0", features = ["derive"] }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
 common-query = { workspace = true }

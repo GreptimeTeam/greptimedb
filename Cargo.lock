@@ -10608,6 +10608,7 @@ version = "0.7.2"
 dependencies = [
  "arbitrary",
  "async-trait",
+ "chrono",
  "common-error",
  "common-macro",
  "common-query",

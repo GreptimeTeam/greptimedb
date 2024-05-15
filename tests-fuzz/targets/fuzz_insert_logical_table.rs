@@ -34,11 +34,12 @@ use tests_fuzz::generator::create_expr::{
 };
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
-use tests_fuzz::ir::{CreateTableExpr, InsertIntoExpr};
+use tests_fuzz::ir::{generate_random_value_for_mysql, CreateTableExpr, InsertIntoExpr};
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::validator;
 
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -107,6 +108,7 @@ fn generate_insert_expr<R: Rng + 'static>(
         .omit_column_list(false)
         .table_ctx(table_ctx)
         .rows(input.rows)
+        .value_generator(Box::new(generate_random_value_for_mysql))
         .build()
         .unwrap();
     insert_generator.generate(rng)
@@ -160,7 +162,39 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         }
     );
 
-    // TODO: Validate inserted rows
+    // Validate inserted rows
+    let ts_column_idx = create_logical_table_expr
+        .columns
+        .iter()
+        .position(|c| c.is_time_index())
+        .unwrap();
+    let ts_column_name = create_logical_table_expr.columns[ts_column_idx]
+        .name
+        .clone();
+    let ts_column_idx_in_insert = insert_expr
+        .columns
+        .iter()
+        .position(|c| c.name == ts_column_name)
+        .unwrap();
+    let column_list = insert_expr
+        .columns
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .to_string();
+    let select_sql = format!(
+        "SELECT {} FROM {} ORDER BY {}",
+        column_list, create_logical_table_expr.table_name, ts_column_name
+    );
+    let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
+    let mut expected_rows = insert_expr.values_list;
+    expected_rows.sort_by(|a, b| {
+        a[ts_column_idx_in_insert]
+            .cmp(&b[ts_column_idx_in_insert])
+            .unwrap()
+    });
+    validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
     // Clean up logical table
     let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
