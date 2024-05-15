@@ -698,6 +698,7 @@ pub enum Error {
     #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
     BuildTimeRangeFilter {
         timestamp: Timestamp,
+        #[snafu(implicit)]
         location: Location,
     },
 }
