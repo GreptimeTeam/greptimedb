@@ -48,3 +48,15 @@ ENGINE=mito
 WITH(
   storage = 'S3'
 );
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+show create table phy;
+
+show create table t1;
+
+drop table t1;
+
+drop table phy;

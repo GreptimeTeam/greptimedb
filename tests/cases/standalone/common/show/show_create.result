@@ -95,3 +95,57 @@ WITH(
 
 Error: 1004(InvalidArguments), Object store not found: S3
 
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+show create table phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "host" STRING NULL,              |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("host")             |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
+show create table t1;
+
++-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| t1    | CREATE TABLE IF NOT EXISTS "t1" ( |
+|       |   "host" STRING NULL,             |
+|       |   "ts" TIMESTAMP(3) NOT NULL,     |
+|       |   "val" DOUBLE NULL,              |
+|       |   TIME INDEX ("ts"),              |
+|       |   PRIMARY KEY ("host")            |
+|       | )                                 |
+|       |                                   |
+|       | ENGINE=metric                     |
+|       | WITH(                             |
+|       |   on_physical_table = 'phy'       |
+|       | )                                 |
++-------+-----------------------------------+
+
+drop table t1;
+
+Affected Rows: 0
+
+drop table phy;
+
+Affected Rows: 0
+
