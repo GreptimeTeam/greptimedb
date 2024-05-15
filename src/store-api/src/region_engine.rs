@@ -282,7 +282,7 @@ impl RegionScanner for SinglePartitionScanner {
         stream
             .take()
             .context(ExecuteRepeatedlySnafu)
-            .map_err(|e| BoxedError::new(e))
+            .map_err(BoxedError::new)
     }
 }
 
