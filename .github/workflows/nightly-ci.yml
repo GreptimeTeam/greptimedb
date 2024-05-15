@@ -76,6 +76,9 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -98,6 +101,7 @@ jobs:
       - name: Running tests
         run: cargo nextest run -F pyo3_backend,dashboard
         env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
