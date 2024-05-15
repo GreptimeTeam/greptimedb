@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use chrono::{DateTime, Utc};
-use common_time::Timestamp;
+use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime, Utc};
+use common_time::date::Date;
+use common_time::{DateTime, Timestamp};
 use datatypes::value::Value;
 use snafu::{ensure, ResultExt};
 use sqlx::database::HasArguments;
@@ -43,7 +44,9 @@ where
     f64: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
     String: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
     Vec<u8>: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
-    DateTime<Utc>: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
+    ChronoDateTime<Utc>: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
+    NaiveDateTime: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
+    NaiveDate: sqlx::Type<DB> + sqlx::Decode<'a, DB>,
 {
     ensure!(
         fetched_rows.len() == rows.len(),
@@ -106,12 +109,18 @@ where
                     "TIMESTAMP" => RowValue::Value(Value::Timestamp(
                         Timestamp::from_chrono_datetime(
                             fetched_row
-                                .try_get::<DateTime<Utc>, usize>(idx)
+                                .try_get::<ChronoDateTime<Utc>, usize>(idx)
                                 .unwrap()
                                 .naive_utc(),
                         )
                         .unwrap(),
                     )),
+                    "DATETIME" => RowValue::Value(Value::DateTime(DateTime::from(
+                        fetched_row.try_get::<NaiveDateTime, usize>(idx).unwrap(),
+                    ))),
+                    "DATE" => RowValue::Value(Value::Date(Date::from(
+                        fetched_row.try_get::<NaiveDate, usize>(idx).unwrap(),
+                    ))),
                     _ => panic!("Unsupported type: {}", value_type),
                 }
             };
