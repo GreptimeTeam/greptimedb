@@ -426,9 +426,11 @@ mod tests {
 
         // waiting for async load
         #[cfg(not(target_os = "windows"))]
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let timeout_millis = 300;
         #[cfg(target_os = "windows")]
-        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let timeout_millis = 2000;
+
+        std::thread::sleep(std::time::Duration::from_millis(timeout_millis));
 
         assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
