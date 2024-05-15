@@ -74,8 +74,7 @@ pub trait Configurable<'de>: Serialize + Deserialize<'de> + Default + Sized {
 
         let opts = layered_config
             .build()
-            .context(LoadLayeredConfigSnafu)?
-            .try_deserialize()
+            .and_then(|x| x.try_deserialize())
             .context(LoadLayeredConfigSnafu)?;
 
         Ok(opts)
