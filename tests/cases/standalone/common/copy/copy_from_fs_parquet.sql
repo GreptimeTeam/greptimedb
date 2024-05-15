@@ -34,12 +34,6 @@ Copy without_limit_rows FROM '/tmp/demo/export/parquet_files/';
 
 select count(*) from without_limit_rows;
 
-CREATE TABLE with_limit_rows(host string, cpu double, memory double, ts timestamp time index);
-
-Copy with_limit_rows FROM '/tmp/demo/export/parquet_files/' WITH (MAX_INSERT_ROWS = 2);
-
-select count(*) from with_limit_rows;
-
 CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts timestamp time index);
 
 Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
@@ -59,7 +53,5 @@ drop table with_path;
 drop table with_pattern;
 
 drop table without_limit_rows;
-
-drop table with_limit_rows;
 
 drop table with_limit_rows_segment;

@@ -52,7 +52,6 @@ use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 const DEFAULT_READ_BUFFER: usize = 256 * 1024;
-const MAX_INSERT_ROWS: &str = "max_insert_rows";
 
 enum FileMetadata {
     Parquet {
@@ -378,23 +377,7 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
-        let max_insert_rows = if let Some(num) = req.limit {
-            Some(num as usize)
-        } else {
-            match req.with.get(MAX_INSERT_ROWS) {
-                Some(num) => match num.parse::<usize>() {
-                    Ok(num) => Some(num),
-                    Err(_) => {
-                        return Err(error::InvalidCopyParameterSnafu {
-                            key: MAX_INSERT_ROWS,
-                            value: num,
-                        }
-                        .build());
-                    }
-                },
-                None => None,
-            }
-        };
+        let max_insert_rows = req.limit;
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -447,7 +430,7 @@ impl StatementExecutor {
                 }
 
                 if let Some(max_insert_rows) = max_insert_rows {
-                    if rows_inserted >= max_insert_rows {
+                    if rows_inserted >= max_insert_rows as usize {
                         return Ok(gen_insert_output(rows_inserted, insert_cost));
                     }
                 }
