@@ -56,7 +56,15 @@ impl<'a> ParserContext<'a> {
             })?;
 
         let req = if self.parser.parse_keyword(Keyword::TO) {
-            let (with, connection, location, _) = self.parse_copy_parameters()?;
+            let (with, connection, location, limit) = self.parse_copy_parameters()?;
+            if let Some(num) = limit {
+                return Err(error::InvalidDatabaseOptionValueSnafu {
+                    key: "LIMIT",
+                    value: num,
+                }
+                .build());
+            }
+
             let argument = CopyDatabaseArgument {
                 database_name,
                 with: with.into(),
@@ -68,7 +76,15 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .expect_keyword(Keyword::FROM)
                 .context(error::SyntaxSnafu)?;
-            let (with, connection, location, _) = self.parse_copy_parameters()?;
+            let (with, connection, location, limit) = self.parse_copy_parameters()?;
+            if let Some(num) = limit {
+                return Err(error::InvalidDatabaseOptionValueSnafu {
+                    key: "LIMIT",
+                    value: num,
+                }
+                .build());
+            }
+
             let argument = CopyDatabaseArgument {
                 database_name,
                 with: with.into(),
