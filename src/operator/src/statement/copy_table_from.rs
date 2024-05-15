@@ -377,7 +377,7 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
-        let max_insert_rows = req.limit;
+        let max_insert_rows = req.limit.map(|n| n as usize);
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -430,7 +430,7 @@ impl StatementExecutor {
                 }
 
                 if let Some(max_insert_rows) = max_insert_rows {
-                    if rows_inserted >= max_insert_rows as usize {
+                    if rows_inserted >= max_insert_rows {
                         return Ok(gen_insert_output(rows_inserted, insert_cost));
                     }
                 }
