@@ -425,7 +425,12 @@ mod tests {
             .expect("failed to copy key to tmpdir");
 
         // waiting for async load
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if server_config.get_version() > 1 {
+                break;
+            }
+        }
         assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
     }
