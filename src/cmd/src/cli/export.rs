@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -176,6 +177,28 @@ impl Export {
     /// Return a list of [`TableReference`] to be exported.
     /// Includes all tables under the given `catalog` and `schema`
     async fn get_table_list(&self, catalog: &str, schema: &str) -> Result<Vec<TableReference>> {
+        // Puts all metric table first
+        let sql = format!(
+            "select table_catalog, table_schema, table_name from \
+            information_schema.columns where column_name = '__tsid' \
+            and table_catalog = \'{catalog}\' and table_schema = \'{schema}\'"
+        );
+        let result = self.sql(&sql).await?;
+        let Some(records) = result else {
+            EmptyResultSnafu.fail()?
+        };
+        let mut metric_physical_tables = HashSet::with_capacity(records.len());
+        for value in records {
+            let mut t = Vec::with_capacity(3);
+            for v in &value {
+                let serde_json::Value::String(value) = v else {
+                    unreachable!()
+                };
+                t.push(value);
+            }
+            metric_physical_tables.insert((t[0].clone(), t[1].clone(), t[2].clone()));
+        }
+
         // TODO: SQL injection hurts
         let sql = format!(
             "select table_catalog, table_schema, table_name from \
@@ -202,10 +225,17 @@ impl Export {
                 };
                 t.push(value);
             }
-            result.push((t[0].clone(), t[1].clone(), t[2].clone()));
+            let table = (t[0].clone(), t[1].clone(), t[2].clone());
+            // Ignores the physical table
+            if !metric_physical_tables.contains(&table) {
+                result.push(table);
+            }
         }
+        let mut tables = Vec::with_capacity(metric_physical_tables.len() + result.len());
+        tables.extend(metric_physical_tables.into_iter());
+        tables.extend(result);
 
-        Ok(result)
+        Ok(tables)
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
@@ -270,7 +300,7 @@ impl Export {
             })
             .count();
 
-        info!("success {success}/{db_count} jobs");
+        info!("Success {success}/{db_count} jobs");
 
         Ok(())
     }

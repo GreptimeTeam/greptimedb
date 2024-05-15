@@ -41,6 +41,11 @@ pub trait App: Send {
 
     async fn start(&mut self) -> error::Result<()>;
 
+    /// Waits the quit signal by default.
+    fn wait_signal(&self) -> bool {
+        true
+    }
+
     async fn stop(&self) -> error::Result<()>;
 }
 
@@ -51,11 +56,13 @@ pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
 
     app.start().await?;
 
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        error!("Failed to listen for ctrl-c signal: {}", e);
-        // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
-        // the underlying system. So we stop the app instead of running nonetheless to let people
-        // investigate the issue.
+    if app.wait_signal() {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for ctrl-c signal: {}", e);
+            // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
+            // the underlying system. So we stop the app instead of running nonetheless to let people
+            // investigate the issue.
+        }
     }
 
     app.stop().await?;
