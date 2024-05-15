@@ -153,6 +153,8 @@ pub enum Error {
     InvalidDatabaseOptionValue {
         key: Ident,
         value: u64,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to serialize column default constraint"))]
