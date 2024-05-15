@@ -17,9 +17,16 @@
 
 pub(crate) mod error;
 pub(crate) mod node_context;
+mod table_source;
+mod util;
 
-pub(crate) use node_context::{FlowId, FlownodeContext, TableName};
+pub(crate) use node_context::FlownodeContext;
+pub(crate) use table_source::TableSource;
 
 mod worker;
 
 pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
+// TODO: refactor common types for flow to a separate module
+/// FlowId is a unique identifier for a flow task
+pub type FlowId = u64;
+pub type TableName = [String; 3];
