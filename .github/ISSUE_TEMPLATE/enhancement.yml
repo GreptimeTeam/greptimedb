@@ -1,7 +1,7 @@
 ---
 name: Enhancement
 description: Suggest an enhancement to existing functionality
-labels: [ "enhancement" ]
+labels: [ "C-enhancement" ]
 body:
   - type: dropdown
     id: type
