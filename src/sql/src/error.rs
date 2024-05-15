@@ -151,7 +151,7 @@ pub enum Error {
 
     #[snafu(display("Unrecognized database option key: {}, value: {}", key, value))]
     InvalidDatabaseOptionValue {
-        key: Ident,
+        key: String,
         value: u64,
         location: Location,
     },

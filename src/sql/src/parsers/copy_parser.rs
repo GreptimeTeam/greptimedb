@@ -78,11 +78,11 @@ impl<'a> ParserContext<'a> {
                 .context(error::SyntaxSnafu)?;
             let (with, connection, location, limit) = self.parse_copy_parameters()?;
             if let Some(num) = limit {
-                return Err(error::InvalidDatabaseOptionValueSnafu {
+                return error::InvalidDatabaseOptionValueSnafu {
                     key: "LIMIT",
                     value: num,
                 }
-                .build());
+                .fail();
             }
 
             let argument = CopyDatabaseArgument {
