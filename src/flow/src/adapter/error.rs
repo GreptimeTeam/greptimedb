@@ -98,23 +98,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid query plan: {source}"))]
-    InvalidQueryPlan {
-        source: query::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid query: prost can't decode substrait plan: {inner}"))]
     InvalidQueryProst {
         inner: api::DecodeError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid query, can't transform to substrait: {source}"))]
-    InvalidQuerySubstrait {
-        source: substrait::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -193,9 +179,7 @@ impl ErrorExt for Error {
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
             | Self::FlowNotFound { .. } => StatusCode::TableNotFound,
-            Self::InvalidQueryPlan { .. }
-            | Self::InvalidQuerySubstrait { .. }
-            | Self::InvalidQueryProst { .. }
+            Self::InvalidQueryProst { .. }
             | &Self::InvalidQuery { .. }
             | &Self::Plan { .. }
             | &Self::Datatypes { .. } => StatusCode::PlanQuery,

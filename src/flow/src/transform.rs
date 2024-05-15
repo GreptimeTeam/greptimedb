@@ -35,8 +35,8 @@ use substrait_proto::proto::extensions::simple_extension_declaration::MappingTyp
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
 use crate::adapter::error::{
-    Error, ExternalSnafu, InvalidQueryPlanSnafu, InvalidQueryProstSnafu,
-    InvalidQuerySubstraitSnafu, NotImplementedSnafu, TableNotFoundSnafu, UnexpectedSnafu,
+    Error, ExternalSnafu, InvalidQueryProstSnafu, NotImplementedSnafu, TableNotFoundSnafu,
+    UnexpectedSnafu,
 };
 use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
@@ -110,12 +110,15 @@ pub async fn sql_to_flow_plan(
         }
         .build()
     })?;
-    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).context(InvalidQueryPlanSnafu)?;
+    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
     let plan = engine
         .planner()
         .plan(stmt, query_ctx)
         .await
-        .context(InvalidQueryPlanSnafu)?;
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
     let LogicalPlan::DfPlan(plan) = plan;
     let sub_plan = DFLogicalSubstraitConvertor {}
         .to_sub_plan(&plan)

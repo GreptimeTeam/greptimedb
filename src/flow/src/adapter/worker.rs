@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 use enum_as_inner::EnumAsInner;
 use hydroflow::scheduled::graph::Hydroflow;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::adapter::error::{Error, EvalSnafu, FlowAlreadyExistSnafu, InternalSnafu};
+use crate::adapter::error::{Error, FlowAlreadyExistSnafu, InternalSnafu};
 use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::GlobalId;
@@ -151,6 +151,8 @@ impl WorkerHandle {
     /// trigger running the worker, will not block, and will run the worker parallelly
     ///
     /// will set the current timestamp to `now` for all dataflows before running them
+    ///
+    /// the returned error is unrecoverable, and the worker should be shutdown/rebooted
     pub async fn run_available(&self, now: repr::Timestamp) -> Result<(), Error> {
         self.itc_client
             .lock()
