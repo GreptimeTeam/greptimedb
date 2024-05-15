@@ -12,42 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::RowInsertRequests;
-use catalog::CatalogManager;
 use partition::manager::PartitionRuleManager;
-use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt};
-use table::TableRef;
+use snafu::OptionExt;
+use table::metadata::TableId;
 
-use crate::error::{CatalogSnafu, Result, TableNotFoundSnafu};
+use crate::error::{Result, TableNotFoundSnafu};
 use crate::req_convert::common::partitioner::Partitioner;
 
 pub struct RowToRegion<'a> {
-    catalog_manager: &'a dyn CatalogManager,
+    table_name_to_ids: HashMap<String, TableId>,
     partition_manager: &'a PartitionRuleManager,
-    ctx: &'a QueryContext,
 }
 
 impl<'a> RowToRegion<'a> {
     pub fn new(
-        catalog_manager: &'a dyn CatalogManager,
+        table_name_to_ids: HashMap<String, TableId>,
         partition_manager: &'a PartitionRuleManager,
-        ctx: &'a QueryContext,
     ) -> Self {
         Self {
-            catalog_manager,
+            table_name_to_ids,
             partition_manager,
-            ctx,
         }
     }
 
     pub async fn convert(&self, requests: RowInsertRequests) -> Result<RegionInsertRequests> {
         let mut region_request = Vec::with_capacity(requests.inserts.len());
         for request in requests.inserts {
-            let table = self.get_table(&request.table_name).await?;
-            let table_id = table.table_info().table_id();
-
+            let table_id = self.get_table_id(&request.table_name)?;
             let requests = Partitioner::new(self.partition_manager)
                 .partition_insert_requests(table_id, request.rows.unwrap_or_default())
                 .await?;
@@ -60,19 +55,10 @@ impl<'a> RowToRegion<'a> {
         })
     }
 
-    async fn get_table(&self, table_name: &str) -> Result<TableRef> {
-        let catalog_name = self.ctx.current_catalog();
-        let schema_name = self.ctx.current_schema();
-        self.catalog_manager
-            .table(catalog_name, schema_name, table_name)
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: common_catalog::format_full_table_name(
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                ),
-            })
+    fn get_table_id(&self, table_name: &str) -> Result<TableId> {
+        self.table_name_to_ids
+            .get(table_name)
+            .cloned()
+            .context(TableNotFoundSnafu { table_name })
     }
 }
