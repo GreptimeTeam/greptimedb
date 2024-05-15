@@ -14,7 +14,7 @@
 
 //! Util record batch stream wrapper that can perform precise filter.
 
-use datafusion::logical_expr::{Expr, Operator};
+use datafusion::logical_expr::{Expr, Literal, Operator};
 use datafusion_common::arrow::array::{ArrayRef, Datum, Scalar};
 use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::arrow::compute::kernels::cmp;
@@ -43,6 +43,28 @@ pub struct SimpleFilterEvaluator {
 }
 
 impl SimpleFilterEvaluator {
+    pub fn new<T: Literal>(column_name: String, lit: T, op: Operator) -> Option<Self> {
+        match op {
+            Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq => {}
+            _ => return None,
+        }
+
+        let Expr::Literal(val) = lit.lit() else {
+            return None;
+        };
+
+        Some(Self {
+            column_name,
+            literal: val.to_scalar().ok()?,
+            op,
+        })
+    }
+
     pub fn try_new(predicate: &Expr) -> Option<Self> {
         match predicate {
             Expr::BinaryExpr(binary) => {

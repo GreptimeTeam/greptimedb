@@ -23,6 +23,11 @@ use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit;
+use datafusion_common::arrow::array::BooleanArray;
+use datafusion_common::arrow::buffer::BooleanBuffer;
+use datafusion_common::ScalarValue;
+use datafusion_expr::Operator;
 use datafusion_expr::Expr;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
@@ -38,6 +43,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::cache::CacheManagerRef;
+use crate::error;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
 };
@@ -225,7 +231,7 @@ impl ParquetReaderBuilder {
 
         metrics.build_cost = start.elapsed();
 
-        let filters = if let Some(predicate) = &self.predicate {
+        let mut filters = if let Some(predicate) = &self.predicate {
             predicate
                 .exprs()
                 .iter()
@@ -240,6 +246,11 @@ impl ParquetReaderBuilder {
         } else {
             vec![]
         };
+
+        if let Some(time_range) = &self.time_range {
+            predicate.extend(time_range_to_predicate(*time_range, &region_meta)?);
+        }
+
         let codec = McmpRowCodec::new(
             read_format
                 .metadata()
@@ -447,6 +458,67 @@ impl ParquetReaderBuilder {
 
         Some(row_groups)
     }
+}
+
+/// Transforms time range into [SimpleFilterEvaluator].
+fn time_range_to_predicate(
+    time_range: TimestampRange,
+    metadata: &RegionMetadataRef,
+) -> Result<Vec<SimpleFilterEvaluator>> {
+    let ts_col = metadata.time_index_column();
+
+    let ts_lit = |val: i64| match ts_col
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .unwrap()
+        .unit()
+    {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(val), None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(val), None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(val), None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(val), None),
+    };
+
+    let predicates = match (time_range.start(), time_range.end()) {
+        (Some(start), Some(end)) => {
+            vec![
+                SimpleFilterEvaluator::new(
+                    ts_col.column_schema.name.clone(),
+                    ts_lit(start.value()),
+                    Operator::GtEq,
+                )
+                .context(error::BuildTimeRangeFilterSnafu { timestamp: *start })?,
+                SimpleFilterEvaluator::new(
+                    ts_col.column_schema.name.clone(),
+                    ts_lit(end.value()),
+                    Operator::Lt,
+                )
+                .context(error::BuildTimeRangeFilterSnafu { timestamp: *end })?,
+            ]
+        }
+
+        (Some(start), None) => {
+            vec![SimpleFilterEvaluator::new(
+                ts_col.column_schema.name.clone(),
+                ts_lit(start.value()),
+                Operator::GtEq,
+            )
+            .context(error::BuildTimeRangeFilterSnafu { timestamp: *start })?]
+        }
+        (None, Some(end)) => {
+            vec![SimpleFilterEvaluator::new(
+                ts_col.column_schema.name.clone(),
+                ts_lit(end.value()),
+                Operator::Lt,
+            )
+            .context(error::BuildTimeRangeFilterSnafu { timestamp: *end })?]
+        }
+        (None, None) => {
+            vec![]
+        }
+    };
+    Ok(predicates)
 }
 
 /// Parquet reader metrics.

@@ -128,250 +128,246 @@ impl Predicate {
     }
 }
 
-// tests for `TimeRangePredicateBuilder` locates in src/query/tests/time_range_filter_test.rs
+// tests for `build_time_range_predicate` locates in src/query/tests/time_range_filter_test.rs
 // since it requires query engine to convert sql to filters.
-/// `TimeRangePredicateBuilder` extracts time range from logical exprs to facilitate fast
+/// `build_time_range_predicate` extracts time range from logical exprs to facilitate fast
 /// time range pruning.
-pub struct TimeRangePredicateBuilder<'a> {
+pub fn build_time_range_predicate<'a>(
     ts_col_name: &'a str,
     ts_col_unit: TimeUnit,
     filters: &'a [Expr],
-}
+) -> TimestampRange {
+    let mut res = TimestampRange::min_to_max();
 
-impl<'a> TimeRangePredicateBuilder<'a> {
-    pub fn new(ts_col_name: &'a str, ts_col_unit: TimeUnit, filters: &'a [Expr]) -> Self {
-        Self {
-            ts_col_name,
-            ts_col_unit,
-            filters,
-        }
-    }
-
-    pub fn build(&self) -> TimestampRange {
-        let mut res = TimestampRange::min_to_max();
-        for expr in self.filters {
-            let range = self
-                .extract_time_range_from_expr(expr)
-                .unwrap_or_else(TimestampRange::min_to_max);
+    for expr in filters {
+        if let Some(range) = extract_time_range_from_expr(ts_col_name, ts_col_unit, expr.df_expr())
+        {
             res = res.and(&range);
         }
-        res
     }
+    res
+}
 
-    /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
-    /// Return None if no time range can be found in expr.
-    fn extract_time_range_from_expr(&self, expr: &Expr) -> Option<TimestampRange> {
-        match expr {
-            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
-                self.extract_from_binary_expr(left, op, right)
-            }
-            Expr::Between(Between {
-                expr,
-                negated,
-                low,
-                high,
-            }) => self.extract_from_between_expr(expr, negated, low, high),
-            Expr::InList(InList {
-                expr,
-                list,
-                negated,
-            }) => self.extract_from_in_list_expr(expr, *negated, list),
-            _ => None,
+/// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
+/// Return None if no time range can be found in expr.
+fn extract_time_range_from_expr(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    expr: &Expr,
+) -> Option<TimestampRange> {
+    match expr {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            extract_from_binary_expr(ts_col_name, ts_col_unit, left, op, right)
         }
+        Expr::Between(Between {
+            expr,
+            negated,
+            low,
+            high,
+        }) => extract_from_between_expr(ts_col_name, ts_col_unit, expr, negated, low, high),
+        Expr::InList(InList {
+            expr,
+            list,
+            negated,
+        }) => extract_from_in_list_expr(ts_col_name, expr, *negated, list),
+        _ => None,
     }
+}
 
-    fn extract_from_binary_expr(
-        &self,
-        left: &Expr,
-        op: &Operator,
-        right: &Expr,
-    ) -> Option<TimestampRange> {
-        match op {
-            Operator::Eq => self
-                .get_timestamp_filter(left, right)
-                .and_then(|(ts, _)| ts.convert_to(self.ts_col_unit))
-                .map(TimestampRange::single),
-            Operator::Lt => {
-                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
-                if reverse {
-                    // [lit] < ts_col
-                    let ts_val = ts.convert_to(self.ts_col_unit)?.value();
-                    Some(TimestampRange::from_start(Timestamp::new(
-                        ts_val + 1,
-                        self.ts_col_unit,
-                    )))
-                } else {
-                    // ts_col < [lit]
-                    ts.convert_to_ceil(self.ts_col_unit)
-                        .map(|ts| TimestampRange::until_end(ts, false))
-                }
+fn extract_from_binary_expr(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    left: &Expr,
+    op: &Operator,
+    right: &Expr,
+) -> Option<TimestampRange> {
+    match op {
+        Operator::Eq => get_timestamp_filter(ts_col_name, left, right)
+            .and_then(|(ts, _)| ts.convert_to(ts_col_unit))
+            .map(TimestampRange::single),
+        Operator::Lt => {
+            let (ts, reverse) = get_timestamp_filter(ts_col_name, left, right)?;
+            if reverse {
+                // [lit] < ts_col
+                let ts_val = ts.convert_to(ts_col_unit)?.value();
+                Some(TimestampRange::from_start(Timestamp::new(
+                    ts_val + 1,
+                    ts_col_unit,
+                )))
+            } else {
+                // ts_col < [lit]
+                ts.convert_to_ceil(ts_col_unit)
+                    .map(|ts| TimestampRange::until_end(ts, false))
             }
-            Operator::LtEq => {
-                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
-                if reverse {
-                    // [lit] <= ts_col
-                    ts.convert_to_ceil(self.ts_col_unit)
-                        .map(TimestampRange::from_start)
-                } else {
-                    // ts_col <= [lit]
-                    ts.convert_to(self.ts_col_unit)
-                        .map(|ts| TimestampRange::until_end(ts, true))
-                }
-            }
-            Operator::Gt => {
-                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
-                if reverse {
-                    // [lit] > ts_col
-                    ts.convert_to_ceil(self.ts_col_unit)
-                        .map(|t| TimestampRange::until_end(t, false))
-                } else {
-                    // ts_col > [lit]
-                    let ts_val = ts.convert_to(self.ts_col_unit)?.value();
-                    Some(TimestampRange::from_start(Timestamp::new(
-                        ts_val + 1,
-                        self.ts_col_unit,
-                    )))
-                }
-            }
-            Operator::GtEq => {
-                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
-                if reverse {
-                    // [lit] >= ts_col
-                    ts.convert_to(self.ts_col_unit)
-                        .map(|t| TimestampRange::until_end(t, true))
-                } else {
-                    // ts_col >= [lit]
-                    ts.convert_to_ceil(self.ts_col_unit)
-                        .map(TimestampRange::from_start)
-                }
-            }
-            Operator::And => {
-                // instead of return none when failed to extract time range from left/right, we unwrap the none into
-                // `TimestampRange::min_to_max`.
-                let left = self
-                    .extract_time_range_from_expr(left)
-                    .unwrap_or_else(TimestampRange::min_to_max);
-                let right = self
-                    .extract_time_range_from_expr(right)
-                    .unwrap_or_else(TimestampRange::min_to_max);
-                Some(left.and(&right))
-            }
-            Operator::Or => {
-                let left = self.extract_time_range_from_expr(left)?;
-                let right = self.extract_time_range_from_expr(right)?;
-                Some(left.or(&right))
-            }
-            Operator::NotEq
-            | Operator::Plus
-            | Operator::Minus
-            | Operator::Multiply
-            | Operator::Divide
-            | Operator::Modulo
-            | Operator::IsDistinctFrom
-            | Operator::IsNotDistinctFrom
-            | Operator::RegexMatch
-            | Operator::RegexIMatch
-            | Operator::RegexNotMatch
-            | Operator::RegexNotIMatch
-            | Operator::BitwiseAnd
-            | Operator::BitwiseOr
-            | Operator::BitwiseXor
-            | Operator::BitwiseShiftRight
-            | Operator::BitwiseShiftLeft
-            | Operator::StringConcat
-            | Operator::ArrowAt
-            | Operator::AtArrow
-            | Operator::LikeMatch
-            | Operator::ILikeMatch
-            | Operator::NotLikeMatch
-            | Operator::NotILikeMatch => None,
         }
+        Operator::LtEq => {
+            let (ts, reverse) = get_timestamp_filter(ts_col_name, left, right)?;
+            if reverse {
+                // [lit] <= ts_col
+                ts.convert_to_ceil(ts_col_unit)
+                    .map(TimestampRange::from_start)
+            } else {
+                // ts_col <= [lit]
+                ts.convert_to(ts_col_unit)
+                    .map(|ts| TimestampRange::until_end(ts, true))
+            }
+        }
+        Operator::Gt => {
+            let (ts, reverse) = get_timestamp_filter(ts_col_name, left, right)?;
+            if reverse {
+                // [lit] > ts_col
+                ts.convert_to_ceil(ts_col_unit)
+                    .map(|t| TimestampRange::until_end(t, false))
+            } else {
+                // ts_col > [lit]
+                let ts_val = ts.convert_to(ts_col_unit)?.value();
+                Some(TimestampRange::from_start(Timestamp::new(
+                    ts_val + 1,
+                    ts_col_unit,
+                )))
+            }
+        }
+        Operator::GtEq => {
+            let (ts, reverse) = get_timestamp_filter(ts_col_name, left, right)?;
+            if reverse {
+                // [lit] >= ts_col
+                ts.convert_to(ts_col_unit)
+                    .map(|t| TimestampRange::until_end(t, true))
+            } else {
+                // ts_col >= [lit]
+                ts.convert_to_ceil(ts_col_unit)
+                    .map(TimestampRange::from_start)
+            }
+        }
+        Operator::And => {
+            // instead of return none when failed to extract time range from left/right, we unwrap the none into
+            // `TimestampRange::min_to_max`.
+            let left = extract_time_range_from_expr(ts_col_name, ts_col_unit, left)
+                .unwrap_or_else(TimestampRange::min_to_max);
+            let right = extract_time_range_from_expr(ts_col_name, ts_col_unit, right)
+                .unwrap_or_else(TimestampRange::min_to_max);
+            Some(left.and(&right))
+        }
+        Operator::Or => {
+            let left = extract_time_range_from_expr(ts_col_name, ts_col_unit, left)?;
+            let right = extract_time_range_from_expr(ts_col_name, ts_col_unit, right)?;
+            Some(left.or(&right))
+        }
+        Operator::NotEq
+        | Operator::Plus
+        | Operator::Minus
+        | Operator::Multiply
+        | Operator::Divide
+        | Operator::Modulo
+        | Operator::IsDistinctFrom
+        | Operator::IsNotDistinctFrom
+        | Operator::RegexMatch
+        | Operator::RegexIMatch
+        | Operator::RegexNotMatch
+        | Operator::RegexNotIMatch
+        | Operator::BitwiseAnd
+        | Operator::BitwiseOr
+        | Operator::BitwiseXor
+        | Operator::BitwiseShiftRight
+        | Operator::BitwiseShiftLeft
+        | Operator::StringConcat
+        | Operator::ArrowAt
+        | Operator::AtArrow
+        | Operator::LikeMatch
+        | Operator::ILikeMatch
+        | Operator::NotLikeMatch
+        | Operator::NotILikeMatch => None,
+    }
+}
+
+fn get_timestamp_filter(
+    ts_col_name: &str,
+    left: &Expr,
+    right: &Expr,
+) -> Option<(Timestamp, bool)> {
+    let (col, lit, reverse) = match (left, right) {
+        (Expr::Column(column), Expr::Literal(scalar)) => (column, scalar, false),
+        (Expr::Literal(scalar), Expr::Column(column)) => (column, scalar, true),
+        _ => {
+            return None;
+        }
+    };
+    if col.name != ts_col_name {
+        return None;
     }
 
-    fn get_timestamp_filter(&self, left: &Expr, right: &Expr) -> Option<(Timestamp, bool)> {
-        let (col, lit, reverse) = match (left, right) {
-            (Expr::Column(column), Expr::Literal(scalar)) => (column, scalar, false),
-            (Expr::Literal(scalar), Expr::Column(column)) => (column, scalar, true),
-            _ => {
+    return_none_if_utf8!(lit);
+    scalar_value_to_timestamp(lit, None).map(|t| (t, reverse))
+}
+
+fn extract_from_between_expr(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    expr: &Expr,
+    negated: &bool,
+    low: &Expr,
+    high: &Expr,
+) -> Option<TimestampRange> {
+    let Expr::Column(col) = expr else {
+        return None;
+    };
+    if col.name != ts_col_name {
+        return None;
+    }
+
+    if *negated {
+        return None;
+    }
+
+    match (low, high) {
+        (Expr::Literal(low), Expr::Literal(high)) => {
+            return_none_if_utf8!(low);
+            return_none_if_utf8!(high);
+
+            let low_opt =
+                scalar_value_to_timestamp(low, None).and_then(|ts| ts.convert_to(ts_col_unit));
+            let high_opt = scalar_value_to_timestamp(high, None)
+                .and_then(|ts| ts.convert_to_ceil(ts_col_unit));
+            Some(TimestampRange::new_inclusive(low_opt, high_opt))
+        }
+        _ => None,
+    }
+}
+
+/// Extract time range filter from `IN (...)` expr.
+fn extract_from_in_list_expr(
+    ts_col_name: &str,
+    expr: &Expr,
+    negated: bool,
+    list: &[Expr],
+) -> Option<TimestampRange> {
+    if negated {
+        return None;
+    }
+    let Expr::Column(col) = expr else {
+        return None;
+    };
+    if col.name != ts_col_name {
+        return None;
+    }
+
+    if list.is_empty() {
+        return Some(TimestampRange::empty());
+    }
+    let mut init_range = TimestampRange::empty();
+    for expr in list {
+        if let Expr::Literal(scalar) = expr {
+            return_none_if_utf8!(scalar);
+            if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
+                init_range = init_range.or(&TimestampRange::single(timestamp))
+            } else {
+                // TODO(hl): maybe we should raise an error here since cannot parse
+                // timestamp value from in list expr
                 return None;
             }
-        };
-        if col.name != self.ts_col_name {
-            return None;
-        }
-
-        return_none_if_utf8!(lit);
-        scalar_value_to_timestamp(lit, None).map(|t| (t, reverse))
-    }
-
-    fn extract_from_between_expr(
-        &self,
-        expr: &Expr,
-        negated: &bool,
-        low: &Expr,
-        high: &Expr,
-    ) -> Option<TimestampRange> {
-        let Expr::Column(col) = expr else {
-            return None;
-        };
-        if col.name != self.ts_col_name {
-            return None;
-        }
-
-        if *negated {
-            return None;
-        }
-
-        match (low, high) {
-            (Expr::Literal(low), Expr::Literal(high)) => {
-                return_none_if_utf8!(low);
-                return_none_if_utf8!(high);
-
-                let low_opt = scalar_value_to_timestamp(low, None)
-                    .and_then(|ts| ts.convert_to(self.ts_col_unit));
-                let high_opt = scalar_value_to_timestamp(high, None)
-                    .and_then(|ts| ts.convert_to_ceil(self.ts_col_unit));
-                Some(TimestampRange::new_inclusive(low_opt, high_opt))
-            }
-            _ => None,
         }
     }
-
-    /// Extract time range filter from `IN (...)` expr.
-    fn extract_from_in_list_expr(
-        &self,
-        expr: &Expr,
-        negated: bool,
-        list: &[Expr],
-    ) -> Option<TimestampRange> {
-        if negated {
-            return None;
-        }
-        let Expr::Column(col) = expr else {
-            return None;
-        };
-        if col.name != self.ts_col_name {
-            return None;
-        }
-
-        if list.is_empty() {
-            return Some(TimestampRange::empty());
-        }
-        let mut init_range = TimestampRange::empty();
-        for expr in list {
-            if let Expr::Literal(scalar) = expr {
-                return_none_if_utf8!(scalar);
-                if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
-                    init_range = init_range.or(&TimestampRange::single(timestamp))
-                } else {
-                    // TODO(hl): maybe we should raise an error here since cannot parse
-                    // timestamp value from in list expr
-                    return None;
-                }
-            }
-        }
-        Some(init_range)
-    }
+    Some(init_range)
 }
 
 #[cfg(test)]
@@ -395,7 +391,7 @@ mod tests {
     fn check_build_predicate(expr: Expr, expect: TimestampRange) {
         assert_eq!(
             expect,
-            TimeRangePredicateBuilder::new("ts", TimeUnit::Millisecond, &[expr]).build()
+            build_time_range_predicate("ts", TimeUnit::Millisecond, &[Expr::from(expr)])
         );
     }
 

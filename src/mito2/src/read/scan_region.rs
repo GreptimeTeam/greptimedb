@@ -22,7 +22,7 @@ use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
 use store_api::region_engine::{RegionScannerRef, SinglePartitionScanner};
 use store_api::storage::ScanRequest;
-use table::predicate::{Predicate, TimeRangePredicateBuilder};
+use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -235,7 +235,7 @@ impl ScanRegion {
     }
 
     /// Creates a scan input.
-    fn scan_input(self, filter_deleted: bool) -> Result<ScanInput> {
+    fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
@@ -300,7 +300,7 @@ impl ScanRegion {
     }
 
     /// Build time range predicate from filters.
-    fn build_time_range_predicate(&self) -> TimestampRange {
+    fn build_time_range_predicate(&mut self) -> TimestampRange {
         let time_index = self.version.metadata.time_index_column();
         let unit = time_index
             .column_schema
@@ -308,8 +308,7 @@ impl ScanRegion {
             .as_timestamp()
             .expect("Time index must have timestamp-compatible type")
             .unit();
-        TimeRangePredicateBuilder::new(&time_index.column_schema.name, unit, &self.request.filters)
-            .build()
+        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
     /// Use the latest schema to build the index applier.
