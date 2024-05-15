@@ -15,6 +15,6 @@ Please explain IN DETAIL what the changes are in this PR and why they are needed
 
 ## Checklist
 
-- [ ]  I have written the necessary rustdoc comments.
-- [ ]  I have added the necessary unit tests and integration tests.
-- [x]  This PR does not require documentation updates.
+- [ ] I have written the necessary rustdoc comments.
+- [ ] I have added the necessary unit tests and integration tests.
+- [ ] This PR requires documentation updates.
