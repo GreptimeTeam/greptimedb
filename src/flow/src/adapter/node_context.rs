@@ -71,18 +71,14 @@ pub struct SourceSender {
 
 impl Default for SourceSender {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SourceSender {
-    pub fn new() -> Self {
         Self {
             sender: broadcast::Sender::new(BROADCAST_CAP),
             send_buf: Default::default(),
         }
     }
+}
 
+impl SourceSender {
     pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
         self.sender.subscribe()
     }
