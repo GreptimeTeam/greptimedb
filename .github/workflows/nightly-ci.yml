@@ -1,6 +1,6 @@
 on:
   schedule:
-    - cron: '0 23 * * 1-5'
+    - cron: "0 23 * * 1-5"
   workflow_dispatch:
 
 name: Nightly CI
@@ -76,6 +76,9 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -88,7 +91,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - name: Install PyArrow Package
         run: pip install pyarrow
       - name: Install WSL distribution
@@ -98,6 +101,7 @@ jobs:
       - name: Running tests
         run: cargo nextest run -F pyo3_backend,dashboard
         env:
+          CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
