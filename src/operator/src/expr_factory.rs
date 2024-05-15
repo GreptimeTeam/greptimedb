@@ -519,6 +519,7 @@ pub(crate) fn to_alter_expr(
 pub fn to_create_view_expr(
     stmt: CreateView,
     logical_plan: Vec<u8>,
+    table_names: Vec<TableName>,
     query_ctx: QueryContextRef,
 ) -> Result<CreateViewExpr> {
     let (catalog_name, schema_name, view_name) = table_idents_to_full_name(&stmt.name, &query_ctx)
@@ -532,6 +533,7 @@ pub fn to_create_view_expr(
         logical_plan,
         create_if_not_exists: stmt.if_not_exists,
         or_replace: stmt.or_replace,
+        table_names,
     };
 
     Ok(expr)

@@ -12,15 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_meta::table_name::TableName;
 use common_query::prelude::ScalarValue;
-use datafusion_common::ParamValues;
+use datafusion::datasource::DefaultTableSource;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_common::{ParamValues, TableReference};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
 use snafu::ResultExt;
+pub use table::metadata::TableType;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{ConvertDatafusionSchemaSnafu, DataFusionSnafu, Result};
 
@@ -94,10 +100,88 @@ impl LogicalPlan {
             LogicalPlan::DfPlan(plan) => plan,
         }
     }
+
+    /// Returns the DataFusion logical plan reference
+    pub fn df_plan(&self) -> &DfLogicalPlan {
+        match self {
+            LogicalPlan::DfPlan(plan) => &plan,
+        }
+    }
 }
 
 impl From<DfLogicalPlan> for LogicalPlan {
     fn from(plan: DfLogicalPlan) -> Self {
         Self::DfPlan(plan)
     }
+}
+
+/// Visitor to extract table names from logical plan (TableScan node)
+#[derive(Default)]
+pub struct TableNamesExtractor {
+    pub table_names: HashSet<TableName>,
+}
+
+impl TreeNodeVisitor for TableNamesExtractor {
+    type Node = DfLogicalPlan;
+
+    fn f_down(&mut self, node: &Self::Node) -> datafusion::error::Result<TreeNodeRecursion> {
+        match node {
+            DfLogicalPlan::TableScan(scan) => {
+                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
+                    if let Some(provider) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DfTableProviderAdapter>()
+                    {
+                        if provider.table().table_type() == TableType::Base {
+                            let info = provider.table().table_info();
+                            self.table_names.insert(TableName::new(
+                                info.catalog_name.clone(),
+                                info.schema_name.clone(),
+                                info.name.clone(),
+                            ));
+                        }
+                    }
+                }
+                match &scan.table_name {
+                    TableReference::Full {
+                        catalog,
+                        schema,
+                        table,
+                    } => {
+                        self.table_names.insert(TableName::new(
+                            catalog.to_string(),
+                            schema.to_string(),
+                            table.to_string(),
+                        ));
+                    }
+                    // TODO(ruihang): Maybe the following two cases should not be valid
+                    TableReference::Partial { schema, table } => {
+                        self.table_names.insert(TableName::new(
+                            DEFAULT_CATALOG_NAME.to_string(),
+                            schema.to_string(),
+                            table.to_string(),
+                        ));
+                    }
+                    TableReference::Bare { table } => {
+                        self.table_names.insert(TableName::new(
+                            DEFAULT_CATALOG_NAME.to_string(),
+                            DEFAULT_SCHEMA_NAME.to_string(),
+                            table.to_string(),
+                        ));
+                    }
+                }
+
+                Ok(TreeNodeRecursion::Continue)
+            }
+            _ => Ok(TreeNodeRecursion::Continue),
+        }
+    }
+}
+
+/// Extract fully resolved table names from logical plan
+pub fn extract_full_table_names(plan: &DfLogicalPlan) -> Result<HashSet<TableName>> {
+    let mut extractor = TableNamesExtractor::default();
+    let _ = plan.visit(&mut extractor).context(DataFusionSnafu)?;
+    Ok(extractor.table_names)
 }

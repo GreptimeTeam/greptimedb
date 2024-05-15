@@ -39,6 +39,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::error;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
+use crate::query_engine::DefaultSerializer;
 use crate::region_query::RegionQueryHandlerRef;
 
 pub struct DistExtensionPlanner {
@@ -101,7 +102,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         // Pass down the original plan, allow execution nodes to do their optimization
         let amended_plan = Self::plan_with_full_table_name(input_plan.clone(), &table_name)?;
         let substrait_plan = DFLogicalSubstraitConvertor
-            .encode(&amended_plan)
+            .encode(&amended_plan, DefaultSerializer)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?
             .into();
 

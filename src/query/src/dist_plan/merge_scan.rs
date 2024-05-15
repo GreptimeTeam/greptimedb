@@ -119,6 +119,60 @@ impl MergeScanLogicalPlan {
     }
 }
 
+/// The encoded `MergeScanLogicalPlan`,
+/// used as a temporary container for decoding
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub struct EncodedMergeScan {
+    pub input: Vec<u8>,
+    pub is_placeholder: bool,
+}
+
+impl UserDefinedLogicalNodeCore for EncodedMergeScan {
+    fn name(&self) -> &str {
+        Self::name()
+    }
+
+    // Prevent further optimization.
+    // The input can be retrieved by `self.input()`
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        unreachable!();
+    }
+
+    fn schema(&self) -> &datafusion_common::DFSchemaRef {
+        unreachable!();
+    }
+
+    // Prevent further optimization
+    fn expressions(&self) -> Vec<datafusion_expr::Expr> {
+        unreachable!();
+    }
+
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "EncodedMergeScan [is_placeholder={}]",
+            self.is_placeholder
+        )
+    }
+
+    fn from_template(&self, _exprs: &[datafusion_expr::Expr], _inputs: &[LogicalPlan]) -> Self {
+        self.clone()
+    }
+}
+
+impl EncodedMergeScan {
+    pub fn new(input: Vec<u8>, is_placeholder: bool) -> Self {
+        Self {
+            input,
+            is_placeholder,
+        }
+    }
+
+    pub fn name() -> &'static str {
+        "EncodedMergeScan"
+    }
+}
+
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,

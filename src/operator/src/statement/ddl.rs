@@ -43,6 +43,8 @@ use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
+use query::plan::extract_full_table_names;
+use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
@@ -398,15 +400,27 @@ impl StatementExecutor {
                 return InvalidViewStmtSnafu {}.fail();
             }
         };
-        let optimized_plan = self.optimize_logical_plan(logical_plan)?;
+
+        // Extract the table names before optimizing the plan
+        let table_names = extract_full_table_names(logical_plan.df_plan())
+            .unwrap()
+            .into_iter()
+            .map(|t| t.into())
+            .collect();
+
+        let optimized_plan = self.optimize_logical_plan(logical_plan)?.unwrap_df_plan();
 
         // encode logical plan
         let encoded_plan = DFLogicalSubstraitConvertor
-            .encode(&optimized_plan.unwrap_df_plan())
+            .encode(&optimized_plan, DefaultSerializer)
             .context(SubstraitCodecSnafu)?;
 
-        let expr =
-            expr_factory::to_create_view_expr(create_view, encoded_plan.to_vec(), ctx.clone())?;
+        let expr = expr_factory::to_create_view_expr(
+            create_view,
+            encoded_plan.to_vec(),
+            table_names,
+            ctx.clone(),
+        )?;
 
         self.create_view_by_expr(expr, ctx).await
     }

@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true

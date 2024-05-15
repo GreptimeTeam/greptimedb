@@ -12,11 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod analyzer;
-mod commutativity;
-mod merge_scan;
-mod planner;
-
-pub use analyzer::DistPlannerAnalyzer;
-pub use merge_scan::{EncodedMergeScan, MergeScanExec, MergeScanLogicalPlan};
-pub use planner::DistExtensionPlanner;
+pub(crate) mod error;
+pub mod planner;

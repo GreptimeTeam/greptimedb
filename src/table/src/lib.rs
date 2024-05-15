@@ -21,6 +21,7 @@ pub mod predicate;
 pub mod requests;
 pub mod stats;
 pub mod table;
+pub mod table_name;
 pub mod table_reference;
 pub mod test_util;
 

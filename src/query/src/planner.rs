@@ -24,7 +24,6 @@ use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
 use datafusion_expr::Expr as DfExpr;
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
-use promql::planner::PromPlanner;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -34,7 +33,8 @@ use sql::statements::statement::Statement;
 use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::parser::QueryStatement;
 use crate::plan::LogicalPlan;
-use crate::query_engine::QueryEngineState;
+use crate::promql::planner::PromPlanner;
+use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;
 use crate::{DfContextProviderAdapter, QueryEngineContext};
 
@@ -69,6 +69,7 @@ impl DfLogicalPlanner {
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
+            Arc::new(DefaultPlanDecoder::new(self.session_state.clone())),
         );
 
         let context_provider = DfContextProviderAdapter::try_new(
@@ -140,6 +141,7 @@ impl DfLogicalPlanner {
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
+            Arc::new(DefaultPlanDecoder::new(self.session_state.clone())),
         );
         PromPlanner::stmt_to_plan(table_provider, stmt)
             .await

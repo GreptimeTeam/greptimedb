@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::result;
 
 use api::v1::meta::ddl_task_request::Task;
@@ -331,6 +331,14 @@ impl CreateViewTask {
 
     pub fn raw_logical_plan(&self) -> &Vec<u8> {
         &self.create_view.logical_plan
+    }
+
+    pub fn table_names(&self) -> HashSet<TableName> {
+        self.create_view
+            .table_names
+            .iter()
+            .map(|t| t.clone().into())
+            .collect()
     }
 }
 

@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use super::VIEW_INFO_KEY_PATTERN;
 use crate::error::{InvalidViewInfoSnafu, Result};
@@ -80,21 +82,30 @@ impl<'a> MetaKey<'a, ViewInfoKey> for ViewInfoKey {
 /// The VIEW info value that keeps the metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewInfoValue {
+    /// The encoded logical plan
     pub view_info: RawViewLogicalPlan,
+    /// The resolved fully table names in logical plan
+    pub table_names: HashSet<TableName>,
     version: u64,
 }
 
 impl ViewInfoValue {
-    pub fn new(view_info: &RawViewLogicalPlan) -> Self {
+    pub fn new(view_info: &RawViewLogicalPlan, table_names: HashSet<TableName>) -> Self {
         Self {
             view_info: view_info.clone(),
+            table_names,
             version: 0,
         }
     }
 
-    pub(crate) fn update(&self, new_view_info: RawViewLogicalPlan) -> Self {
+    pub(crate) fn update(
+        &self,
+        new_view_info: RawViewLogicalPlan,
+        table_names: HashSet<TableName>,
+    ) -> Self {
         Self {
             view_info: new_view_info,
+            table_names,
             version: self.version + 1,
         }
     }
@@ -104,6 +115,8 @@ impl ViewInfoValue {
 pub struct ViewInfoManager {
     kv_backend: KvBackendRef,
 }
+
+pub type ViewInfoManagerRef = Arc<ViewInfoManager>;
 
 impl ViewInfoManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {

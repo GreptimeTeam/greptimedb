@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+substrait.workspace = true
 catalog.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

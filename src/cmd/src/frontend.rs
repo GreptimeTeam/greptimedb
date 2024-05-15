@@ -16,10 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cache::{
-    build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
-    TABLE_ROUTE_CACHE_NAME,
-};
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
@@ -302,23 +299,11 @@ impl StartCommand {
             .build(),
         );
 
-        let table_cache = layered_cache_registry
-            .get()
-            .context(error::CacheRequiredSnafu {
-                name: TABLE_CACHE_NAME,
-            })?;
-        let table_route_cache =
-            layered_cache_registry
-                .get()
-                .context(error::CacheRequiredSnafu {
-                    name: TABLE_ROUTE_CACHE_NAME,
-                })?;
         let catalog_manager = KvBackendCatalogManager::new(
             opts.mode,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
-            table_cache,
-            table_route_cache,
+            layered_cache_registry.clone(),
         )
         .await;
 

@@ -324,6 +324,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to get view info from cache"))]
+    GetViewCache {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Cache not found: {name}"))]
+    CacheNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -337,6 +351,7 @@ impl ErrorExt for Error {
             | Error::FindPartitions { .. }
             | Error::FindRegionRoutes { .. }
             | Error::InvalidEntryType { .. }
+            | Error::CacheNotFound { .. }
             | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
@@ -385,7 +400,9 @@ impl ErrorExt for Error {
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
             Error::TableMetadataManager { source, .. } => source.status_code(),
-            Error::GetTableCache { .. } => StatusCode::Internal,
+            Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

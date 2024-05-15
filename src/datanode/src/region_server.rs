@@ -51,7 +51,6 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
@@ -653,14 +652,11 @@ impl RegionServerInner {
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
         let query_engine_ctx = self.query_engine.engine_context(ctx.clone());
+        let plan_decoder = query_engine_ctx.new_plan_decoder();
+
         // decode substrait plan to logical plan and execute it
-        let logical_plan = DFLogicalSubstraitConvertor
-            .decode(
-                Bytes::from(plan),
-                catalog_list,
-                query_engine_ctx.state().clone(),
-                ctx.clone(),
-            )
+        let logical_plan = plan_decoder
+            .decode(Bytes::from(plan), catalog_list)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 

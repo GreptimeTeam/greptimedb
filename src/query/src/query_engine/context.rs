@@ -14,9 +14,12 @@
 
 use std::sync::Arc;
 
+use common_query::logical_plan::SubstraitPlanDecoderRef;
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::context::{SessionState, TaskContext};
 use session::context::QueryContextRef;
+
+use crate::query_engine::default_serializer::DefaultPlanDecoder;
 
 #[derive(Debug)]
 pub struct QueryEngineContext {
@@ -56,6 +59,11 @@ impl QueryEngineContext {
             state.window_functions().clone(),
             state.runtime_env().clone(),
         ))
+    }
+
+    /// Creates a `[LogicalPlan]` decoder
+    pub fn new_plan_decoder(&self) -> SubstraitPlanDecoderRef {
+        Arc::new(DefaultPlanDecoder::new(self.state.clone()))
     }
 
     /// Mock an engine context for unit tests.

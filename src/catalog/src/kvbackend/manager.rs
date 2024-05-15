@@ -22,7 +22,7 @@ use common_catalog::consts::{
 };
 use common_config::Mode;
 use common_error::ext::BoxedError;
-use common_meta::cache::TableRouteCacheRef;
+use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoValue;
@@ -41,8 +41,8 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::error::{
-    GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu, ListSchemasSnafu,
-    ListTablesSnafu, Result, TableMetadataManagerSnafu,
+    CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
+    ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
 use crate::information_schema::InformationSchemaProvider;
 use crate::kvbackend::TableCacheRef;
@@ -61,7 +61,7 @@ pub struct KvBackendCatalogManager {
     table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
     system_catalog: SystemCatalog,
-    table_cache: TableCacheRef,
+    cache_registry: LayeredCacheRegistryRef,
 }
 
 const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
@@ -71,15 +71,14 @@ impl KvBackendCatalogManager {
         mode: Mode,
         meta_client: Option<Arc<MetaClient>>,
         backend: KvBackendRef,
-        table_cache: TableCacheRef,
-        table_route_cache: TableRouteCacheRef,
+        cache_registry: LayeredCacheRegistryRef,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             mode,
             meta_client,
             partition_manager: Arc::new(PartitionRuleManager::new(
                 backend.clone(),
-                table_route_cache,
+                cache_registry.get().expect(""),
             )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             system_catalog: SystemCatalog {
@@ -90,13 +89,17 @@ impl KvBackendCatalogManager {
                     me.clone(),
                 )),
             },
-            table_cache,
+            cache_registry,
         })
     }
 
     /// Returns the server running mode.
     pub fn running_mode(&self) -> &Mode {
         &self.mode
+    }
+
+    pub fn view_info_cache(&self) -> ViewInfoCacheRef {
+        self.cache_registry.get().unwrap()
     }
 
     /// Returns the `[MetaClient]`.
@@ -215,7 +218,11 @@ impl CatalogManager for KvBackendCatalogManager {
             return Ok(Some(table));
         }
 
-        self.table_cache
+        let table_cache: TableCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_cache",
+        })?;
+
+        table_cache
             .get_by_ref(&TableName {
                 catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),

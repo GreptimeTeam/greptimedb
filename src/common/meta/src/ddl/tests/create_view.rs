@@ -31,7 +31,7 @@ use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
-fn test_create_view_task(name: &str) -> CreateViewTask {
+pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
     let expr = CreateViewExpr {
         catalog_name: "greptime".to_string(),
         schema_name: "public".to_string(),

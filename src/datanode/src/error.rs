@@ -68,7 +68,7 @@ pub enum Error {
     DecodeLogicalPlan {
         #[snafu(implicit)]
         location: Location,
-        source: substrait::error::Error,
+        source: common_query::error::Error,
     },
 
     #[snafu(display("Incorrect internal state: {}", state))]

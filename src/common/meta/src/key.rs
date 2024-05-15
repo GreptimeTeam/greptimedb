@@ -491,6 +491,7 @@ impl TableMetadataManager {
         &self,
         view_info: RawTableInfo,
         raw_logical_plan: &Vec<u8>,
+        table_names: HashSet<TableName>,
     ) -> Result<()> {
         let view_id = view_info.ident.table_id;
 
@@ -512,7 +513,7 @@ impl TableMetadataManager {
             .build_create_txn(view_id, &table_info_value)?;
 
         // Creates view info
-        let view_info_value = ViewInfoValue::new(raw_logical_plan);
+        let view_info_value = ViewInfoValue::new(raw_logical_plan, table_names);
         let (create_view_info_txn, on_create_view_info_failure) = self
             .view_info_manager()
             .build_create_txn(view_id, &view_info_value)?;
@@ -903,8 +904,9 @@ impl TableMetadataManager {
         view_id: TableId,
         current_view_info_value: &DeserializedValueWithBytes<ViewInfoValue>,
         new_view_info: Vec<u8>,
+        table_names: HashSet<TableName>,
     ) -> Result<()> {
-        let new_view_info_value = current_view_info_value.update(new_view_info);
+        let new_view_info_value = current_view_info_value.update(new_view_info, table_names);
 
         // Updates view info.
         let (update_view_info_txn, on_update_view_info_failure) = self

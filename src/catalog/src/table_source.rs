@@ -15,14 +15,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use common_catalog::format_full_table_name;
+use common_query::logical_plan::SubstraitPlanDecoderRef;
 use datafusion::common::{ResolvedTableReference, TableReference};
-use datafusion::datasource::provider_as_source;
+use datafusion::datasource::view::ViewTable;
+use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::logical_expr::TableSource;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt};
+use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dummy_catalog::DummyCatalogList;
 use crate::error::{QueryAccessDeniedSnafu, Result, TableNotExistSnafu};
 use crate::CatalogManagerRef;
 
@@ -32,6 +37,7 @@ pub struct DfTableSourceProvider {
     disallow_cross_catalog_query: bool,
     default_catalog: String,
     default_schema: String,
+    plan_decoder: SubstraitPlanDecoderRef,
 }
 
 impl DfTableSourceProvider {
@@ -39,6 +45,7 @@ impl DfTableSourceProvider {
         catalog_manager: CatalogManagerRef,
         disallow_cross_catalog_query: bool,
         query_ctx: &QueryContext,
+        plan_decoder: SubstraitPlanDecoderRef,
     ) -> Self {
         Self {
             catalog_manager,
@@ -46,6 +53,7 @@ impl DfTableSourceProvider {
             resolved_tables: HashMap::new(),
             default_catalog: query_ctx.current_catalog().to_owned(),
             default_schema: query_ctx.current_schema().to_owned(),
+            plan_decoder,
         }
     }
 
@@ -94,8 +102,62 @@ impl DfTableSourceProvider {
                 table: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let provider = DfTableProviderAdapter::new(table);
-        let source = provider_as_source(Arc::new(provider));
+        let provider: Arc<dyn TableProvider> = if table.table_info().table_type == TableType::View {
+            use crate::kvbackend::KvBackendCatalogManager;
+            let catalog_manager = self
+                .catalog_manager
+                .as_any()
+                .downcast_ref::<KvBackendCatalogManager>()
+                .unwrap();
+
+            let view_info = catalog_manager
+                .view_info_cache()
+                .get(table.table_info().ident.table_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let mut tables = HashMap::with_capacity(view_info.table_names.len());
+
+            for table_name in &view_info.table_names {
+                let table = self
+                    .catalog_manager
+                    .table(
+                        &table_name.catalog_name,
+                        &table_name.schema_name,
+                        &table_name.table_name,
+                    )
+                    .await?
+                    .with_context(|| TableNotExistSnafu {
+                        table: format_full_table_name(
+                            &table_name.catalog_name,
+                            &table_name.schema_name,
+                            &table_name.table_name,
+                        ),
+                    })?;
+
+                let name = &table.table_info().name;
+
+                let table_provider: Arc<dyn TableProvider> =
+                    Arc::new(DfTableProviderAdapter::new(table));
+                //FIXME: use datafusion::catalog::MemoryCatalogProviderList instead.
+                tables.insert(name.to_string(), table_provider);
+            }
+
+            let catalog_list = Arc::new(DummyCatalogList::with_tables(tables));
+
+            let logical_plan = self
+                .plan_decoder
+                .decode(Bytes::from(view_info.view_info.clone()), catalog_list)
+                .await
+                .unwrap();
+
+            Arc::new(ViewTable::try_new(logical_plan, None).unwrap())
+        } else {
+            Arc::new(DfTableProviderAdapter::new(table))
+        };
+
+        let source = provider_as_source(provider);
         let _ = self.resolved_tables.insert(resolved_name, source.clone());
         Ok(source)
     }
