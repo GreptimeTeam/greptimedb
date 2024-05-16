@@ -35,6 +35,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Routes, TcpIncoming};
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
@@ -175,8 +176,14 @@ impl Server for GrpcServer {
         let builder = tonic::transport::Server::builder()
             .layer(metrics_layer)
             .add_routes(routes)
-            .add_service(self.create_healthcheck_service())
-            .add_service(self.create_reflection_service());
+            .add_service(
+                self.create_healthcheck_service()
+                    .accept_compressed(CompressionEncoding::Gzip),
+            )
+            .add_service(
+                self.create_reflection_service()
+                    .accept_compressed(CompressionEncoding::Gzip),
+            );
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();
         let mut serve_state = self.serve_state.lock().await;

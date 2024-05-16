@@ -23,6 +23,7 @@ use common_runtime::Runtime;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer;
 use tokio::sync::Mutex;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::RoutesBuilder;
 use tower::ServiceBuilder;
 
@@ -48,7 +49,8 @@ macro_rules! add_service {
         $builder.routes_builder_mut().add_service(
             $service
                 .max_decoding_message_size(max_recv_message_size)
-                .max_encoding_message_size(max_send_message_size),
+                .max_encoding_message_size(max_send_message_size)
+                .accept_compressed(CompressionEncoding::Gzip),
         )
     };
 }
@@ -125,14 +127,18 @@ impl GrpcServerBuilder {
     ) -> Self {
         let trace_server = ServiceBuilder::new()
             .layer(AuthMiddlewareLayer::with(user_provider.clone()))
-            .service(TraceServiceServer::new(OtlpService::new(
-                otlp_handler.clone(),
-            )));
+            .service(
+                TraceServiceServer::new(OtlpService::new(otlp_handler.clone()))
+                    .accept_compressed(CompressionEncoding::Gzip),
+            );
         self.routes_builder.add_service(trace_server);
 
         let metrics_server = ServiceBuilder::new()
             .layer(AuthMiddlewareLayer::with(user_provider))
-            .service(MetricsServiceServer::new(OtlpService::new(otlp_handler)));
+            .service(
+                MetricsServiceServer::new(OtlpService::new(otlp_handler))
+                    .accept_compressed(CompressionEncoding::Gzip),
+            );
         self.routes_builder.add_service(metrics_server);
 
         self
