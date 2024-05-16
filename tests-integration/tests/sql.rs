@@ -36,8 +36,12 @@ macro_rules! sql_test {
                         #[$meta]
                     )*
                     async fn [< $test >]() {
+                        common_telemetry::init_default_ut_logging();
+
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
+                            common_telemetry::info!("test {} starts, store_type: {:?}", stringify!($test), store_type);
+
                             let _ = $crate::sql::$test(store_type).await;
                         }
 
