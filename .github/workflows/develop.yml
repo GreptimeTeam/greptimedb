@@ -256,7 +256,7 @@ jobs:
         run: | 
           helm upgrade \
             --install etcd oci://registry-1.docker.io/bitnamicharts/etcd \
-            --set replicaCount=3 \
+            --set replicaCount=1 \
             --set auth.rbac.create=false \
             --set auth.rbac.token.enabled=false \
             --set persistence.size=1Gi \
