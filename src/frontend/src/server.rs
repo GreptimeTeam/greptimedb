@@ -76,9 +76,13 @@ where
         let grpc_config = GrpcServerConfig {
             max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
+            tls: opts.tls.clone(),
         };
-
-        Ok(GrpcServerBuilder::new(grpc_config, grpc_runtime))
+        let mut builder = GrpcServerBuilder::new(grpc_config, grpc_runtime);
+        builder = builder
+            .with_tls_config(opts.tls.clone())
+            .context(error::InvalidTlsConfigSnafu)?;
+        Ok(builder)
     }
 
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {

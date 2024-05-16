@@ -216,6 +216,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_addr {
             opts.grpc.addr.clone_from(addr);
+            opts.grpc.tls = tls_opts.clone();
         }
 
         if let Some(addr) = &self.mysql_addr {

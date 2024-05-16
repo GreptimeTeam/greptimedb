@@ -367,6 +367,14 @@ pub enum Error {
         #[snafu(source(from(common_config::error::Error, Box::new)))]
         source: Box<common_config::error::Error>,
     },
+
+    #[snafu(display("Invalid tls config"))]
+    InvalidTlsConfig {
+        #[snafu(source)]
+        error: common_grpc::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -401,6 +409,7 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | MissingKvBackend { .. }
             | TomlFormat { .. } => StatusCode::InvalidArguments,
+            InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
                 StatusCode::Unexpected

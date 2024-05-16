@@ -19,12 +19,15 @@ use api::v1::prometheus_gateway_server::PrometheusGatewayServer;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use auth::UserProviderRef;
+use common_grpc::error::{InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer;
+use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::RoutesBuilder;
+use tonic::transport::{Identity, ServerTlsConfig};
 use tower::ServiceBuilder;
 
 use super::flight::{FlightCraftRef, FlightCraftWrapper};
@@ -37,6 +40,7 @@ use crate::grpc::otlp::OtlpService;
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::tls::{TlsMode, TlsOption};
 
 /// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
 /// This macro will automatically add some gRPC properties to the service.
@@ -62,6 +66,7 @@ pub struct GrpcServerBuilder {
     config: GrpcServerConfig,
     runtime: Arc<Runtime>,
     routes_builder: RoutesBuilder,
+    tls_config: Option<ServerTlsConfig>,
 }
 
 impl GrpcServerBuilder {
@@ -70,6 +75,7 @@ impl GrpcServerBuilder {
             config,
             runtime,
             routes_builder: RoutesBuilder::default(),
+            tls_config: None,
         }
     }
 
@@ -157,11 +163,28 @@ impl GrpcServerBuilder {
         &mut self.routes_builder
     }
 
+    pub fn with_tls_config(mut self, tls_option: TlsOption) -> Result<Self> {
+        let tls_config = match tls_option.mode {
+            TlsMode::Require => {
+                let cert = std::fs::read_to_string(tls_option.cert_path)
+                    .context(InvalidConfigFilePathSnafu)?;
+                let key = std::fs::read_to_string(tls_option.key_path)
+                    .context(InvalidConfigFilePathSnafu)?;
+                let identity = Identity::from_pem(cert, key);
+                Some(ServerTlsConfig::new().identity(identity))
+            }
+            _ => None,
+        };
+        self.tls_config = tls_config;
+        Ok(self)
+    }
+
     pub fn build(self) -> GrpcServer {
         GrpcServer {
             routes: Mutex::new(Some(self.routes_builder.routes())),
             shutdown_tx: Mutex::new(None),
             serve_state: Mutex::new(None),
+            tls_config: self.tls_config,
         }
     }
 }

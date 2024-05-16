@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
+use servers::tls::TlsOption;
 use servers::Mode;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::mb(256);
@@ -236,6 +237,7 @@ pub struct DatanodeOptions {
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub tls: TlsOption,
 }
 
 impl Default for DatanodeOptions {
@@ -263,6 +265,7 @@ impl Default for DatanodeOptions {
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            tls: TlsOption::default(),
         }
     }
 }

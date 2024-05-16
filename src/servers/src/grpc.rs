@@ -36,6 +36,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tonic::transport::server::{Routes, TcpIncoming};
+use tonic::transport::ServerTlsConfig;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
@@ -44,6 +45,7 @@ use crate::error::{
 };
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::server::Server;
+use crate::tls::TlsOption;
 
 type TonicResult<T> = std::result::Result<T, Status>;
 
@@ -55,6 +57,8 @@ pub struct GrpcServer {
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
     // handlers
     routes: Mutex<Option<Routes>>,
+    // tls config
+    tls_config: Option<ServerTlsConfig>,
 }
 
 /// Grpc Server configuration
@@ -64,6 +68,7 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
+    pub tls: TlsOption,
 }
 
 impl Default for GrpcServerConfig {
@@ -71,6 +76,7 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
+            tls: TlsOption::default(),
         }
     }
 }
@@ -172,8 +178,11 @@ impl Server for GrpcServer {
             .layer(MetricsMiddlewareLayer)
             .into_inner();
 
-        let builder = tonic::transport::Server::builder()
-            .layer(metrics_layer)
+        let mut builder = tonic::transport::Server::builder().layer(metrics_layer);
+        if let Some(tls_config) = self.tls_config.clone() {
+            builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
+        }
+        let builder = builder
             .add_routes(routes)
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());

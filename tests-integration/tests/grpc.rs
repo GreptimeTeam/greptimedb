@@ -30,6 +30,7 @@ use servers::http::prometheus::{
     PrometheusResponse,
 };
 use servers::server::Server;
+use servers::tls::TlsOption;
 use tests_integration::database::Database;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
@@ -129,6 +130,7 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        tls: TlsOption::default(),
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -166,6 +168,7 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 50,
+        tls: TlsOption::default(),
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -185,6 +188,7 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 10,
         max_send_message_size: 1024,
+        tls: TlsOption::default(),
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -663,6 +667,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        tls: TlsOption::default(),
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;

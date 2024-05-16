@@ -24,7 +24,7 @@ use servers::server::{ServerHandler, ServerHandlers};
 use snafu::ResultExt;
 
 use crate::config::DatanodeOptions;
-use crate::error::{ParseAddrSnafu, Result, TomlFormatSnafu};
+use crate::error::{InvalidTlsConfigSnafu, ParseAddrSnafu, Result, TomlFormatSnafu};
 use crate::region_server::RegionServer;
 
 pub struct DatanodeServiceBuilder<'a> {
@@ -49,10 +49,10 @@ impl<'a> DatanodeServiceBuilder<'a> {
         }
     }
 
-    pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Self {
-        let grpc_server = Self::grpc_server_builder(self.opts, region_server).build();
-        self.grpc_server = Some(grpc_server);
-        self
+    pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Result<Self> {
+        let grpc_server_build = Self::grpc_server_builder(self.opts, region_server)?;
+        self.grpc_server = Some(grpc_server_build.build());
+        Ok(self)
     }
 
     pub fn enable_http_service(self) -> Self {
@@ -91,14 +91,18 @@ impl<'a> DatanodeServiceBuilder<'a> {
     pub fn grpc_server_builder(
         opts: &DatanodeOptions,
         region_server: &RegionServer,
-    ) -> GrpcServerBuilder {
+    ) -> Result<GrpcServerBuilder> {
         let config = GrpcServerConfig {
             max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
+            tls: opts.tls.clone(),
         };
 
-        GrpcServerBuilder::new(config, region_server.runtime())
+        let build = GrpcServerBuilder::new(config, region_server.runtime())
+            .with_tls_config(opts.tls.clone())
+            .context(InvalidTlsConfigSnafu)?
             .flight_handler(Arc::new(region_server.clone()))
-            .region_server_handler(Arc::new(region_server.clone()))
+            .region_server_handler(Arc::new(region_server.clone()));
+        Ok(build)
     }
 }
