@@ -134,8 +134,8 @@ impl<S> RegionWorkerLoop<S> {
         let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
 
         for region in &regions {
-            if self.flush_scheduler.is_flush_requested(region.region_id) {
-                // Already flushing.
+            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
+                // Already flushing or not writable.
                 continue;
             }
 
