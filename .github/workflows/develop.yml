@@ -297,6 +297,7 @@ jobs:
             --timeout=120s \
             -n my-greptimedb
       - name: Print GreptimeDB info
+        if: always()
         run: kubectl get all --show-labels -n my-greptimedb
 
   sqlness:
