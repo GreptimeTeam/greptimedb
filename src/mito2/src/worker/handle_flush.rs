@@ -85,8 +85,8 @@ impl<S> RegionWorkerLoop<S> {
         let mut max_mem_region = None;
 
         for region in &regions {
-            if self.flush_scheduler.is_flush_requested(region.region_id) {
-                // Already flushing.
+            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
+                // Already flushing or not writable.
                 continue;
             }
 

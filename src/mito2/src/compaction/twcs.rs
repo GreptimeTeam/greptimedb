@@ -396,7 +396,7 @@ impl TwcsCompactionTask {
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             info!(
-                "Compaction region {} output [{}]-> {}",
+                "Compaction region {}. Input [{}] -> output {}",
                 self.region_id,
                 output
                     .inputs
