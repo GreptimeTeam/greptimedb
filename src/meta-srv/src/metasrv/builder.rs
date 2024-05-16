@@ -66,7 +66,7 @@ use crate::metasrv::{
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
-use crate::pubsub::PublishRef;
+use crate::pubsub::PublisherRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
@@ -320,7 +320,7 @@ impl MetasrvBuilder {
 
                 let publish_heartbeat_handler = plugins
                     .clone()
-                    .and_then(|plugins| plugins.get::<PublishRef>())
+                    .and_then(|plugins| plugins.get::<PublisherRef>())
                     .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
 
                 let region_lease_handler = RegionLeaseHandler::new(
