@@ -427,7 +427,13 @@ mod tests {
             .expect("failed to copy key to tmpdir");
 
         // waiting for async load
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        #[cfg(not(target_os = "windows"))]
+        let timeout_millis = 300;
+        #[cfg(target_os = "windows")]
+        let timeout_millis = 2000;
+
+        std::thread::sleep(std::time::Duration::from_millis(timeout_millis));
+
         assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
     }
