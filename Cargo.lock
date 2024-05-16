@@ -1613,6 +1613,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-grpc",
  "common-macro",
  "common-meta",
  "common-procedure",
