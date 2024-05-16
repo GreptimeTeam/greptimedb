@@ -21,12 +21,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
-use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::KvBackendRef;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
@@ -86,9 +85,8 @@ pub struct FlownodeBuilder {
     flow_node_id: u32,
     opts: FlownodeOptions,
     plugins: Plugins,
-    kv_backend: Option<KvBackendRef>,
     table_meta: TableMetadataManagerRef,
-    catalog_manager: Arc<KvBackendCatalogManager>,
+    catalog_manager: CatalogManagerRef,
 }
 
 impl FlownodeBuilder {
@@ -98,23 +96,14 @@ impl FlownodeBuilder {
         opts: FlownodeOptions,
         plugins: Plugins,
         table_meta: TableMetadataManagerRef,
-        catalog_manager: Arc<KvBackendCatalogManager>,
+        catalog_manager: CatalogManagerRef,
     ) -> Self {
         Self {
             flow_node_id,
             opts,
             plugins,
-            kv_backend: None,
             table_meta,
             catalog_manager,
-        }
-    }
-
-    /// set kv backend
-    pub fn with_kv_backend(self, kv_backend: KvBackendRef) -> Self {
-        Self {
-            kv_backend: Some(kv_backend),
-            ..self
         }
     }
 
