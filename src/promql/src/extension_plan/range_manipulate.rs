@@ -433,7 +433,7 @@ impl RangeManipulateStream {
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
-        let (aligned_ts, ranges) = self.calculate_range(&input);
+        let (aligned_ts, ranges) = self.calculate_range(&input)?;
         // ignore this if all ranges are empty
         if ranges.iter().all(|(_, len)| *len == 0) {
             return Ok(None);
@@ -472,12 +472,19 @@ impl RangeManipulateStream {
             .map_err(|e| DataFusionError::ArrowError(e, None))
     }
 
-    fn calculate_range(&self, input: &RecordBatch) -> (ArrayRef, Vec<(u32, u32)>) {
+    fn calculate_range(
+        &self,
+        input: &RecordBatch,
+    ) -> DataFusionResult<(ArrayRef, Vec<(u32, u32)>)> {
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
         let mut aligned_ts = vec![];
         let mut ranges = vec![];
@@ -506,7 +513,7 @@ impl RangeManipulateStream {
 
         let aligned_ts_array = Arc::new(TimestampMillisecondArray::from(aligned_ts)) as _;
 
-        (aligned_ts_array, ranges)
+        Ok((aligned_ts_array, ranges))
     }
 }
 

@@ -1116,9 +1116,11 @@ impl RangeSelectStream {
         let ts_column_ref = ts_column
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or(DataFusionError::Execution(
-                "Time index Column downcast to TimestampMillisecondArray failed".into(),
-            ))?;
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
         for i in 0..self.range_exec.len() {
             let args = self.evaluate_many(&batch, &self.range_exec[i].args)?;
             // use self.modify_map record (hash, align_ts) => [row_nums]

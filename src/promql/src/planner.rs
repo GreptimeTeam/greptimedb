@@ -35,7 +35,8 @@ use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datafusion_expr::utils::conjunction;
-use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
+use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
@@ -910,9 +911,62 @@ impl PromPlanner {
             .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?;
-        // Safety: `scan_filters` is not empty.
-        let result = LogicalPlanBuilder::scan(table_ref, provider, None)
+
+        let is_time_index_ms = provider
+            .as_any()
+            .downcast_ref::<DefaultTableSource>()
+            .context(UnknownTableSnafu)?
+            .table_provider
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()
+            .context(UnknownTableSnafu)?
+            .table()
+            .schema()
+            .timestamp_column()
+            .with_context(|| TimeIndexNotFoundSnafu {
+                table: table_ref.to_quoted_string(),
+            })?
+            .data_type
+            == ConcreteDataType::timestamp_millisecond_datatype();
+
+        let mut scan_plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)
             .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        if !is_time_index_ms {
+            // cast to ms if time_index not in Millisecond precision
+            let expr: Vec<_> = self
+                .ctx
+                .field_columns
+                .iter()
+                .map(|col| DfExpr::Column(Column::new(Some(table_ref.clone()), col.clone())))
+                .chain(self.create_tag_column_exprs()?)
+                .chain(Some(DfExpr::Alias(Alias {
+                    expr: Box::new(DfExpr::Cast(Cast {
+                        expr: Box::new(self.create_time_index_column_expr()?),
+                        data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    })),
+                    relation: Some(table_ref.clone()),
+                    name: self
+                        .ctx
+                        .time_index_column
+                        .as_ref()
+                        .with_context(|| TimeIndexNotFoundSnafu {
+                            table: table_ref.to_quoted_string(),
+                        })?
+                        .clone(),
+                })))
+                .collect::<Vec<_>>();
+            scan_plan = LogicalPlanBuilder::from(scan_plan)
+                .project(expr)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
+
+        // Safety: `scan_filters` is not empty.
+        let result = LogicalPlanBuilder::from(scan_plan)
             .filter(conjunction(filter).unwrap())
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -2971,5 +3025,100 @@ mod test {
             let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt).await;
             assert!(plan.is_err(), "query: {:?}", query);
         }
+    }
+
+    #[tokio::test]
+    async fn test_non_ms_precision() {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        let columns = vec![
+            ColumnSchema::new(
+                "tag".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "field".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name("metrics".to_string())
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+        assert!(catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "metrics".to_string(),
+                table_id: 1024,
+                table,
+            })
+            .is_ok());
+
+        let plan = PromPlanner::stmt_to_plan(
+            DfTableSourceProvider::new(catalog_list.clone(), false, QueryContext::arc().as_ref()),
+            EvalStmt {
+                expr: parser::parse("metrics{tag = \"1\"}").unwrap(),
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH
+                    .checked_add(Duration::from_secs(100_000))
+                    .unwrap(),
+                interval: Duration::from_secs(5),
+                lookback_delta: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.display_indent_schema().to_string(),
+        "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n  PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n    PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n      Sort: metrics.tag DESC NULLS LAST, metrics.timestamp DESC NULLS LAST [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n        Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-1000, None) AND metrics.timestamp <= TimestampMillisecond(100001000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n          Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(Millisecond, None)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n            TableScan: metrics [tag:Utf8, timestamp:Timestamp(Nanosecond, None), field:Float64;N]"
+        );
+        let plan = PromPlanner::stmt_to_plan(
+            DfTableSourceProvider::new(catalog_list.clone(), false, QueryContext::arc().as_ref()),
+            EvalStmt {
+                expr: parser::parse("avg_over_time(metrics{tag = \"1\"}[5s])").unwrap(),
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH
+                    .checked_add(Duration::from_secs(100_000))
+                    .unwrap(),
+                interval: Duration::from_secs(5),
+                lookback_delta: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.display_indent_schema().to_string(),
+        "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
+        \n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(Millisecond, None), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
+        \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [field:Dictionary(Int64, Float64);N, tag:Utf8, timestamp:Timestamp(Millisecond, None), timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
+        \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n        PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n          Sort: metrics.tag DESC NULLS LAST, metrics.timestamp DESC NULLS LAST [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-6000, None) AND metrics.timestamp <= TimestampMillisecond(100001000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n              Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(Millisecond, None)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
+        \n                TableScan: metrics [tag:Utf8, timestamp:Timestamp(Nanosecond, None), field:Float64;N]"
+        );
     }
 }
