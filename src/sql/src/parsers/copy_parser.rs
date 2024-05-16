@@ -164,7 +164,7 @@ impl<'a> ParserContext<'a> {
                     .parse_literal_uint()
                     .with_context(|_| error::UnexpectedSnafu {
                         sql: self.sql,
-                        expected: "maximum rows",
+                        expected: "the number of maximum rows",
                         actual: self.peek_token_as_string(),
                     })?,
             )

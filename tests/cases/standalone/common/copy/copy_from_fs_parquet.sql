@@ -40,7 +40,7 @@ Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT 2;
 
 select count(*) from with_limit_rows_segment;
 
-Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT -1;
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT hello;
 
 drop table demo;
 

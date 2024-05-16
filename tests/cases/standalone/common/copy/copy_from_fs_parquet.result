@@ -109,9 +109,9 @@ select count(*) from with_limit_rows_segment;
 | 2        |
 +----------+
 
-Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT -1;
+Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT hello;
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT -1;, expected: 'maximum rows', found: 1: sql parser error: Expected literal int, found: - at Line: 1, Column 75
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement: Copy with_limit_rows_segment FROM '/tmp/demo/export/parquet_files/' LIMIT hello;, expected: 'the number of maximum rows', found: ;: sql parser error: Expected literal int, found: hello at Line: 1, Column 75
 
 drop table demo;
 
