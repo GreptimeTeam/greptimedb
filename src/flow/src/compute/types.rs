@@ -153,6 +153,9 @@ pub struct ErrCollector {
 }
 
 impl ErrCollector {
+    pub fn get_all_blocking(&self) -> Vec<EvalError> {
+        self.inner.blocking_lock().drain(..).collect_vec()
+    }
     pub async fn get_all(&self) -> Vec<EvalError> {
         self.inner.lock().await.drain(..).collect_vec()
     }

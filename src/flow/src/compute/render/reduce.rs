@@ -729,14 +729,112 @@ mod test {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use datatypes::data_type::ConcreteDataType;
+    use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
     use hydroflow::scheduled::graph::Hydroflow;
 
     use super::*;
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
-    use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject};
+    use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, UnaryFunc};
     use crate::repr::{ColumnType, RelationType};
+
+    /// select avg(number) from number;
+    #[test]
+    fn test_avg_eval() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let rows = vec![
+            (Row::new(vec![1u32.into()]), 1, 1),
+            (Row::new(vec![2u32.into()]), 1, 1),
+            (Row::new(vec![3u32.into()]), 1, 1),
+            (Row::new(vec![1u32.into()]), 1, 1),
+            (Row::new(vec![2u32.into()]), 1, 1),
+            (Row::new(vec![3u32.into()]), 1, 1),
+        ];
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+
+        let aggr_exprs = vec![
+            AggregateExpr {
+                func: AggregateFunc::SumUInt32,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+            AggregateExpr {
+                func: AggregateFunc::Count,
+                expr: ScalarExpr::Column(0),
+                distinct: false,
+            },
+        ];
+        let avg_expr = ScalarExpr::If {
+            cond: Box::new(ScalarExpr::Column(1).call_binary(
+                ScalarExpr::Literal(Value::from(0u32), CDT::int64_datatype()),
+                BinaryFunc::NotEq,
+            )),
+            then: Box::new(ScalarExpr::Column(0).call_binary(
+                ScalarExpr::Column(1).call_unary(UnaryFunc::Cast(CDT::uint64_datatype())),
+                BinaryFunc::DivUInt64,
+            )),
+            els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::int64_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(1)
+                                .project(vec![])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(1)
+                                .project(vec![0])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: aggr_exprs.clone(),
+                            simple_aggrs: vec![
+                                AggrWithIndex::new(aggr_exprs[0].clone(), 0, 0),
+                                AggrWithIndex::new(aggr_exprs[1].clone(), 0, 1),
+                            ],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), true),
+                        ColumnType::new(ConcreteDataType::int64_datatype(), true),
+                    ])),
+                ),
+                mfp: MapFilterProject::new(2)
+                    .map(vec![
+                        avg_expr,
+                        // TODO(discord9): optimize mfp so to remove indirect ref
+                        ScalarExpr::Column(2),
+                    ])
+                    .unwrap()
+                    .project(vec![3])
+                    .unwrap(),
+            },
+        };
+
+        let bundle = ctx.render_plan(expected).unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        let expected = BTreeMap::from([(1, vec![(Row::new(vec![2u64.into()]), 1, 1)])]);
+        run_and_check(&mut state, &mut df, 1..2, expected, output);
+    }
 
     /// SELECT DISTINCT col FROM table
     ///

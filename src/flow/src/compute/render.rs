@@ -238,6 +238,12 @@ mod test {
         for now in time_range {
             state.set_current_ts(now);
             state.run_available_with_schedule(df);
+            if !state.get_err_collector().is_empty() {
+                panic!(
+                    "Errors occur: {:?}",
+                    state.get_err_collector().get_all_blocking()
+                )
+            }
             assert!(state.get_err_collector().is_empty());
             if let Some(expected) = expected.get(&now) {
                 assert_eq!(*output.borrow(), *expected, "at ts={}", now);

@@ -222,7 +222,7 @@ impl AggregateExpr {
         // make sure we wouldn't divide by zero
         let zero = ScalarExpr::literal(arg_type.default_value(), arg_type.clone());
         let non_zero = ScalarExpr::If {
-            cond: Box::new(ScalarExpr::Column(1).call_binary(zero.clone(), BinaryFunc::Eq)),
+            cond: Box::new(ScalarExpr::Column(1).call_binary(zero.clone(), BinaryFunc::NotEq)),
             then: Box::new(avg_output),
             els: Box::new(ScalarExpr::literal(Value::Null, arg_type.clone())),
         };
@@ -436,7 +436,7 @@ mod test {
         let avg_expr = ScalarExpr::If {
             cond: Box::new(ScalarExpr::Column(2).call_binary(
                 ScalarExpr::Literal(Value::from(0u32), CDT::uint32_datatype()),
-                BinaryFunc::Eq,
+                BinaryFunc::NotEq,
             )),
             then: Box::new(ScalarExpr::Column(1).call_binary(
                 ScalarExpr::Column(2).call_unary(UnaryFunc::Cast(CDT::uint32_datatype())),
@@ -532,7 +532,7 @@ mod test {
         let avg_expr = ScalarExpr::If {
             cond: Box::new(ScalarExpr::Column(1).call_binary(
                 ScalarExpr::Literal(Value::from(0u32), CDT::uint32_datatype()),
-                BinaryFunc::Eq,
+                BinaryFunc::NotEq,
             )),
             then: Box::new(ScalarExpr::Column(0).call_binary(
                 ScalarExpr::Column(1).call_unary(UnaryFunc::Cast(CDT::uint32_datatype())),

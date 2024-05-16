@@ -136,11 +136,13 @@ impl AggregateFunc {
 
 /// Generate signature for each aggregate function
 macro_rules! generate_signature {
-    ($value:ident, { $($user_arm:tt)* },
-    [ $(
-        $auto_arm:ident=>($con_type:ident,$generic:ident)
-        ),*
-    ]) => {
+    ($value:ident,
+        { $($user_arm:tt)* },
+        [ $(
+            $auto_arm:ident=>($con_type:ident,$generic:ident)
+            ),*
+        ]
+    ) => {
         match $value {
             $($user_arm)*,
             $(
@@ -223,6 +225,8 @@ impl AggregateFunc {
 
     /// all concrete datatypes with precision types will be returned with largest possible variant
     /// as a exception, count have a signature of `null -> i64`, but it's actually `anytype -> i64`
+    ///
+    /// TODO(discorcd9): fix signature for sum usign -> u64 sum signed -> i64
     pub fn signature(&self) -> Signature {
         generate_signature!(self, {
             AggregateFunc::Count => Signature {
