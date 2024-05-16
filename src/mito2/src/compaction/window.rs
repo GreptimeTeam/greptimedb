@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 
 use api::v1::region::compact_type::Ty;
 use api::v1::region::CompactType;
@@ -40,6 +40,12 @@ pub struct WindowedCompactionPicker {
 }
 
 impl WindowedCompactionPicker {
+    pub fn new(window_seconds: Option<i64>) -> Self {
+        Self {
+            compaction_time_window_seconds: window_seconds,
+        }
+    }
+
     // Computes compaction time window. First we respect user specified parameter, then
     // use persisted window. If persist window is not present, we check the time window
     // provided while creating table. If all of those are absent, we infer the window

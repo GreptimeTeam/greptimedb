@@ -66,7 +66,7 @@ pub(crate) async fn flush_table(
         .fail();
     };
 
-    let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, &query_ctx)
+    let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, query_ctx)
         .map_err(BoxedError::new)
         .context(TableMutationSnafu)?;
 
@@ -125,9 +125,9 @@ fn parse_compact_params(
     query_ctx: &QueryContextRef,
 ) -> Result<CompactTableRequest> {
     ensure!(
-        params.len() >= 1,
+        !params.is_empty(),
         InvalidFuncArgsSnafu {
-            err_msg: "The length of the args is not correct, expect at least 1",
+            err_msg: "Args cannot be empty",
         }
     );
 
@@ -139,7 +139,7 @@ fn parse_compact_params(
         .fail();
     };
 
-    let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, &query_ctx)
+    let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, query_ctx)
         .map_err(BoxedError::new)
         .context(TableMutationSnafu)?;
 

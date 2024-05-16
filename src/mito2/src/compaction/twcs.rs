@@ -115,7 +115,6 @@ impl Picker for TwcsPicker {
             engine_config,
             current_version,
             access_layer,
-            compact_type,
             request_sender,
             waiters,
             file_purger,
@@ -124,6 +123,7 @@ impl Picker for TwcsPicker {
             manifest_ctx,
             version_control,
             listener,
+            ..
         } = req;
 
         let region_metadata = current_version.metadata.clone();
