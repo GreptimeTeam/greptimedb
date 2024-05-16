@@ -75,3 +75,8 @@ pub const ALTER_PHYSICAL_EXTENSION_KEY: &str = "ALTER_PHYSICAL";
 pub fn is_metric_engine_internal_column(name: &str) -> bool {
     name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || name == DATA_SCHEMA_TSID_COLUMN_NAME
 }
+
+/// Returns true if it's metric engine
+pub fn is_metric_engine(name: &str) -> bool {
+    name == METRIC_ENGINE_NAME
+}

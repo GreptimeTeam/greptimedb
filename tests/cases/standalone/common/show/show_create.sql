@@ -60,3 +60,22 @@ show create table t1;
 drop table t1;
 
 drop table phy;
+
+CREATE TABLE IF NOT EXISTS "phy" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "__table_id" INT UNSIGNED NOT NULL,
+  "__tsid" BIGINT UNSIGNED NOT NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("__table_id", "__tsid", "host", "job")
+)
+ENGINE=mito
+WITH(
+   physical_metric_table = '',
+);
+
+show create table phy;
+
+drop table phy;
