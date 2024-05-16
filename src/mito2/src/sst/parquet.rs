@@ -79,19 +79,28 @@ pub struct SstInfo {
 mod tests {
     use std::sync::Arc;
 
+    use common_datasource::file_format::parquet::BufferedWriter;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Expr, Operator};
+    use parquet::basic::{Compression, Encoding, ZstdLevel};
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+    use parquet::schema::types::ColumnPath;
+    use store_api::metadata::RegionMetadataRef;
+    use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
     use table::predicate::Predicate;
 
     use super::*;
     use crate::cache::{CacheManager, PageKey};
     use crate::sst::index::Indexer;
+    use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
+    use crate::sst::DEFAULT_WRITE_CONCURRENCY;
     use crate::test_util::sst_util::{
-        assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle,
-        sst_region_metadata,
+        assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
+        new_batch_with_binary_by_range, new_source, sst_file_handle, sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
 
@@ -398,5 +407,78 @@ mod tests {
             .predicate(predicate);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
+    }
+
+    fn customize_column_config(
+        builder: WriterPropertiesBuilder,
+        region_metadata: &RegionMetadataRef,
+    ) -> WriterPropertiesBuilder {
+        let ts_col = ColumnPath::new(vec![region_metadata
+            .time_index_column()
+            .column_schema
+            .name
+            .clone()]);
+        let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+
+        builder
+            .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(seq_col, false)
+            .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(ts_col, false)
+    }
+
+    #[tokio::test]
+    async fn test_read_large_binary() {
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = handle.file_path(FILE_DIR);
+
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+
+        let metadata = build_test_binary_test_region_metadata();
+        let json = metadata.to_json().unwrap();
+        let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
+
+        let props_builder = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![key_value_meta]))
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_encoding(Encoding::PLAIN)
+            .set_max_row_group_size(write_opts.row_group_size);
+
+        let props_builder = customize_column_config(props_builder, &metadata);
+        let writer_props = props_builder.build();
+
+        let write_format = WriteFormat::new(metadata.clone());
+        let string = file_path.clone();
+        let mut buffered_writer = BufferedWriter::try_new(
+            string,
+            object_store.clone(),
+            write_format.arrow_schema(),
+            Some(writer_props),
+            write_opts.write_buffer_size.as_bytes() as usize,
+            DEFAULT_WRITE_CONCURRENCY,
+        )
+        .await
+        .unwrap();
+        let batch = new_batch_with_binary_by_range(&["a"], 0, 60);
+        let arrow_batch = write_format.convert_batch(&batch).unwrap();
+
+        buffered_writer.write(&arrow_batch).await.unwrap();
+
+        buffered_writer.close().await.unwrap();
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let mut reader = builder.build().await.unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_with_binary_by_range(&["a"], 0, 50),
+                new_batch_with_binary_by_range(&["a"], 50, 60),
+            ],
+        )
+        .await;
     }
 }
