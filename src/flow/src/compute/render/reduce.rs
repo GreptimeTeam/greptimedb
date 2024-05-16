@@ -29,8 +29,8 @@ use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector
 use crate::expr::error::{DataTypeSnafu, InternalSnafu};
 use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
-use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter};
+use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
+use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
 impl<'referred, 'df> Context<'referred, 'df> {
     const REDUCE: &'static str = "reduce";
@@ -42,6 +42,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
         input: Box<TypedPlan>,
         key_val_plan: KeyValPlan,
         reduce_plan: ReducePlan,
+        output_type: RelationType,
     ) -> Result<CollectionBundle, Error> {
         let input = self.render_plan(*input)?;
         // first assembly key&val that's ((Row, Row), tick, diff)
@@ -52,6 +53,15 @@ impl<'referred, 'df> Context<'referred, 'df> {
 
         // TODO(discord9): config global expire time from self
         let arrange_handler = self.compute_state.new_arrange(None);
+
+        if let (Some(time_index), Some(expire_after)) =
+            (output_type.time_index, self.compute_state.expire_after())
+        {
+            let expire_man =
+                KeyExpiryManager::new(Some(expire_after), Some(ScalarExpr::Column(time_index)));
+            arrange_handler.write().set_expire_state(expire_man);
+        }
+
         // reduce need full arrangement to be able to query all keys
         let arrange_handler_inner = arrange_handler.clone_full_arrange().context(PlanSnafu {
             reason: "No write is expected at this point",
@@ -776,6 +786,7 @@ mod test {
                 Box::new(input_plan.with_types(typ)),
                 key_val_plan,
                 reduce_plan,
+                RelationType::empty(),
             )
             .unwrap();
 
@@ -850,6 +861,7 @@ mod test {
                 Box::new(input_plan.with_types(typ)),
                 key_val_plan,
                 reduce_plan,
+                RelationType::empty(),
             )
             .unwrap();
 
@@ -930,6 +942,7 @@ mod test {
                 Box::new(input_plan.with_types(typ)),
                 key_val_plan,
                 reduce_plan,
+                RelationType::empty(),
             )
             .unwrap();
 
@@ -1006,6 +1019,7 @@ mod test {
                 Box::new(input_plan.with_types(typ)),
                 key_val_plan,
                 reduce_plan,
+                RelationType::empty(),
             )
             .unwrap();
 
@@ -1097,6 +1111,7 @@ mod test {
                 Box::new(input_plan.with_types(typ)),
                 key_val_plan,
                 reduce_plan,
+                RelationType::empty(),
             )
             .unwrap();
 

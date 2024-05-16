@@ -31,6 +31,7 @@ use crate::repr::{value_to_internal_ts, Diff, DiffRow, Duration, KeyValDiffRow, 
 pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
 
 /// A spine of batches, arranged by timestamp
+/// TODO(discord9): consider internally index by key, value, and timestamp for faster lookup
 pub type Spine = BTreeMap<Timestamp, Batch>;
 
 /// Determine when should a key expire according to it's event timestamp in key.
@@ -51,6 +52,17 @@ pub struct KeyExpiryManager {
 }
 
 impl KeyExpiryManager {
+    pub fn new(
+        key_expiration_duration: Option<Duration>,
+        event_timestamp_from_row: Option<ScalarExpr>,
+    ) -> Self {
+        Self {
+            event_ts_to_key: Default::default(),
+            key_expiration_duration,
+            event_timestamp_from_row,
+        }
+    }
+
     /// Extract event timestamp from key row.
     ///
     /// If no expire state is set, return None.
@@ -175,6 +187,10 @@ impl Arrangement {
             last_compaction_time: None,
             name,
         }
+    }
+
+    pub fn set_expire_state(&mut self, expire_state: KeyExpiryManager) {
+        self.expire_state = Some(expire_state);
     }
 
     /// Apply updates into spine, with no respect of whether the updates are in futures, past, or now.
