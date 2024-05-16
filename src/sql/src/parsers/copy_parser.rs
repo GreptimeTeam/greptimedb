@@ -78,7 +78,7 @@ impl<'a> ParserContext<'a> {
             let (with, connection, location, limit) = self.parse_copy_parameters()?;
             if limit.is_some() {
                 return error::InvalidSqlSnafu {
-                    msg: "limit xxx is not supported",
+                    msg: "limit is not supported",
                 }
                 .fail();
             }
