@@ -58,7 +58,7 @@ Affected Rows: 1
 
 COPY DATABASE public FROM '/tmp/demo/export/parquet_range/' LIMIT 2;
 
-Error: 2000(InvalidSyntax), Invalid SQL, error: limit xxx is not supported
+Error: 2000(InvalidSyntax), Invalid SQL, error: limit is not supported
 
 DROP TABLE demo;
 
