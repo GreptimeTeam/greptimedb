@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt::{format, Debug};
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 
@@ -46,7 +46,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
