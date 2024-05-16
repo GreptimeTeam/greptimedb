@@ -152,6 +152,7 @@ impl GreptimeDbStandaloneBuilder {
         .await;
 
         let flow_builder = FlownodeBuilder::new(
+            1, // for standalone mode this value is default to one
             Default::default(),
             plugins.clone(),
             table_metadata_manager.clone(),

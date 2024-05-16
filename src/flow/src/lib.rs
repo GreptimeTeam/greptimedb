@@ -17,6 +17,7 @@
 //! It also contains definition of expression, adapter and plan, and internal state management.
 
 #![feature(let_chains)]
+#![feature(duration_abs_diff)]
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![warn(missing_docs)]
@@ -31,7 +32,4 @@ mod repr;
 mod transform;
 mod utils;
 
-pub use adapter::{
-    start_flow_node_with_one_worker, FlownodeBuilder, FlownodeManager, FlownodeManagerRef,
-    FlownodeOptions,
-};
+pub use adapter::{FlownodeBuilder, FlownodeManager, FlownodeManagerRef, FlownodeOptions};

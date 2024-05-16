@@ -431,6 +431,7 @@ impl StartCommand {
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
         let flow_builder = FlownodeBuilder::new(
+            1,
             Default::default(),
             fe_plugins.clone(),
             table_metadata_manager.clone(),
@@ -500,6 +501,7 @@ impl StartCommand {
         flownode
             .set_frontend_invoker(Box::new(frontend.clone()))
             .await;
+        // TODO(discord9): unify with adding `start` and `shutdown` method to flownode too.
         let _handle = flownode.clone().run_background();
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)

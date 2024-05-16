@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use catalog::kvbackend::KvBackendCatalogManager;
@@ -32,7 +33,6 @@ use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::Itertools;
-use minstant::Anchor;
 use query::{QueryEngine, QueryEngineFactory};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
@@ -83,6 +83,7 @@ pub struct FlownodeOptions {
 
 /// Flownode Builder
 pub struct FlownodeBuilder {
+    flow_node_id: u32,
     opts: FlownodeOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
@@ -93,12 +94,14 @@ pub struct FlownodeBuilder {
 impl FlownodeBuilder {
     /// init flownode builder
     pub fn new(
+        flow_node_id: u32,
         opts: FlownodeOptions,
         plugins: Plugins,
         table_meta: TableMetadataManagerRef,
         catalog_manager: Arc<KvBackendCatalogManager>,
     ) -> Self {
         Self {
+            flow_node_id,
             opts,
             plugins,
             kv_backend: None,
@@ -130,8 +133,9 @@ impl FlownodeBuilder {
 
         let (tx, rx) = oneshot::channel();
 
+        let node_id = Some(self.flow_node_id);
+
         let _handle = std::thread::spawn(move || {
-            let node_id = Some(1);
             let (flow_node_manager, mut worker) =
                 FlownodeManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
             let _ = tx.send(flow_node_manager);
@@ -142,24 +146,6 @@ impl FlownodeBuilder {
         info!("Flow Node Manager started");
         man
     }
-}
-
-/// This function will create a new thread for flow worker and return a handle to the flow node manager
-pub fn start_flow_node_with_one_worker(
-    query_engine: Arc<dyn QueryEngine>,
-    table_meta: TableMetadataManagerRef,
-) -> FlownodeManager {
-    let (tx, rx) = oneshot::channel();
-
-    let _handle = std::thread::spawn(move || {
-        let node_id = Some(1);
-        let (flow_node_manager, mut worker) =
-            FlownodeManager::new_with_worker(node_id, query_engine, table_meta);
-        let _ = tx.send(flow_node_manager);
-        worker.run();
-    });
-
-    rx.blocking_recv().unwrap()
 }
 
 /// Arc-ed FlowNodeManager, cheaper to clone
@@ -668,7 +654,7 @@ impl FlownodeManager {
 /// TSO coord mess
 #[derive(Clone)]
 pub struct FlowTickManager {
-    anchor: Anchor,
+    start: Instant,
 }
 
 impl std::fmt::Debug for FlowTickManager {
@@ -680,12 +666,16 @@ impl std::fmt::Debug for FlowTickManager {
 impl FlowTickManager {
     pub fn new() -> Self {
         FlowTickManager {
-            anchor: Anchor::new(),
+            start: Instant::now(),
         }
     }
 
     /// Return the current timestamp in milliseconds
+    ///
+    /// TODO(discord9): reconsider since `tick()` require a monotonic clock and also need to survive recover later
     pub fn tick(&self) -> repr::Timestamp {
-        (minstant::Instant::now().as_unix_nanos(&self.anchor) / 1_000_000) as repr::Timestamp
+        let current = Instant::now();
+        let since_the_epoch = current - self.start;
+        since_the_epoch.as_millis() as repr::Timestamp
     }
 }
