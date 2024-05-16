@@ -24,9 +24,7 @@ use sql::dialect::GreptimeDbDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self, OptionMap};
-use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-};
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
 
@@ -117,7 +115,7 @@ fn create_table_constraints(
         let columns = table_meta
             .row_key_column_names()
             .flat_map(|name| {
-                if !is_internal_column(name) {
+                if !is_metric_engine_internal_column(name) {
                     Some(Ident::with_quote(quote_style, name))
                 } else {
                     None
@@ -135,10 +133,6 @@ fn create_table_constraints(
     constraints
 }
 
-fn is_internal_column(name: &str) -> bool {
-    name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || name == DATA_SCHEMA_TSID_COLUMN_NAME
-}
-
 /// Create a CreateTable statement from table info.
 pub fn create_table_stmt(table_info: &TableInfoRef, quote_style: char) -> Result<CreateTable> {
     let table_meta = &table_info.meta;
@@ -149,7 +143,7 @@ pub fn create_table_stmt(table_info: &TableInfoRef, quote_style: char) -> Result
         .column_schemas()
         .iter()
         .filter_map(|c| {
-            if !is_internal_column(&c.name) {
+            if !is_metric_engine_internal_column(&c.name) {
                 Some(create_column_def(c, quote_style))
             } else {
                 None
