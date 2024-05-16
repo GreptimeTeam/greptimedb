@@ -347,9 +347,11 @@ impl InstantManipulateStream {
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or(DataFusionError::Execution(
-                "Time index Column downcast to TimestampMillisecondArray failed".into(),
-            ))?;
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
         // field column for staleness check
         let field_column = self

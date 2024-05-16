@@ -480,9 +480,11 @@ impl RangeManipulateStream {
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or(DataFusionError::Execution(
-                "Time index Column downcast to TimestampMillisecondArray failed".into(),
-            ))?;
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
         let mut aligned_ts = vec![];
         let mut ranges = vec![];
