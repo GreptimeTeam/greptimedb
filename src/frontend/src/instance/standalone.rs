@@ -31,16 +31,19 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
-pub struct StandaloneDatanodeManager(pub RegionServer);
+pub struct StandaloneDatanodeManager {
+    pub region_server: RegionServer,
+    pub flow_server: FlownodeRef,
+}
 
 #[async_trait]
 impl NodeManager for StandaloneDatanodeManager {
     async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
-        RegionInvoker::arc(self.0.clone())
+        RegionInvoker::arc(self.region_server.clone())
     }
 
     async fn flownode(&self, _node: &Peer) -> FlownodeRef {
-        unimplemented!()
+        self.flow_server.clone()
     }
 }
 
