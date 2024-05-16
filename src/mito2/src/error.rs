@@ -20,6 +20,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
+use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
@@ -695,6 +696,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Time range predicate overflows, timestamp: {:?}, target unit: {}",
+        timestamp,
+        unit
+    ))]
+    TimeRangePredicateOverflow {
+        timestamp: Timestamp,
+        unit: TimeUnit,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
     BuildTimeRangeFilter {
         timestamp: Timestamp,
@@ -810,6 +823,7 @@ impl ErrorExt for Error {
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
+            TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
         }
     }

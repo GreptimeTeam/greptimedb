@@ -25,7 +25,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 pub use picker::CompactionPickerRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use table::predicate::Predicate;
@@ -38,6 +38,7 @@ use crate::compaction::window::WindowedCompactionPicker;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    TimeRangePredicateOverflowSnafu,
 };
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
@@ -439,7 +440,7 @@ async fn build_sst_reader(
     // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
     // by converting time ranges into predicate.
     if let Some(time_range) = time_range {
-        scan_input = scan_input.with_predicate(time_range_to_predicate(time_range, &metadata));
+        scan_input = scan_input.with_predicate(time_range_to_predicate(time_range, &metadata)?);
     }
 
     SeqScan::new(scan_input).build_reader().await
@@ -449,47 +450,61 @@ async fn build_sst_reader(
 fn time_range_to_predicate(
     range: TimestampRange,
     metadata: &RegionMetadataRef,
-) -> Option<Predicate> {
+) -> Result<Option<Predicate>> {
     let ts_col = metadata.time_index_column();
+
+    // safety: time index column's type must be a valid timestamp type.
+    let ts_col_unit = ts_col
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .unwrap()
+        .unit();
 
     let exprs = match (range.start(), range.end()) {
         (Some(start), Some(end)) => {
             vec![
                 datafusion_expr::col(ts_col.column_schema.name.clone())
-                    .gt_eq(ts_to_lit(*start))
+                    .gt_eq(ts_to_lit(*start, ts_col_unit)?)
                     .into(),
                 datafusion_expr::col(ts_col.column_schema.name.clone())
-                    .lt(ts_to_lit(*end))
+                    .lt(ts_to_lit(*end, ts_col_unit)?)
                     .into(),
             ]
         }
         (Some(start), None) => {
             vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .gt_eq(ts_to_lit(*start))
+                .gt_eq(ts_to_lit(*start, ts_col_unit)?)
                 .into()]
         }
 
         (None, Some(end)) => {
             vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .lt(ts_to_lit(*end))
+                .lt(ts_to_lit(*end, ts_col_unit)?)
                 .into()]
         }
         (None, None) => {
-            return None;
+            return Ok(None);
         }
     };
-    Some(Predicate::new(exprs))
+    Ok(Some(Predicate::new(exprs)))
 }
 
-fn ts_to_lit(ts: Timestamp) -> DfExpr {
+fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<DfExpr> {
+    let ts = ts
+        .convert_to(ts_col_unit)
+        .context(TimeRangePredicateOverflowSnafu {
+            timestamp: ts,
+            unit: ts_col_unit,
+        })?;
     let val = ts.value();
-    let scalar_value = match ts.unit() {
+    let scalar_value = match ts_col_unit {
         TimeUnit::Second => ScalarValue::TimestampSecond(Some(val), None),
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(val), None),
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(val), None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(val), None),
     };
-    datafusion_expr::lit(scalar_value)
+    Ok(datafusion_expr::lit(scalar_value))
 }
 
 /// Finds all expired SSTs across levels.

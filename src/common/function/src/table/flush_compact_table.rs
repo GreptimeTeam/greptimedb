@@ -131,54 +131,48 @@ fn parse_compact_params(
         }
     );
 
-    let ValueRef::String(table_name) = params[0] else {
-        return UnsupportedInputDataTypeSnafu {
-            function: "compact_table",
-            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+    let (table_name, compact_type) = match params {
+        [ValueRef::String(table_name)] => (table_name, CompactType::default()),
+        [ValueRef::String(table_name), ValueRef::String(compact_ty_str)] => {
+            let compact_type = parse_compact_type(compact_ty_str, None)?;
+            (table_name, compact_type)
         }
-        .fail();
+
+        [ValueRef::String(table_name), ValueRef::String(compact_ty_str), ValueRef::String(options_str)] =>
+        {
+            let compact_type = parse_compact_type(compact_ty_str, Some(options_str))?;
+            (table_name, compact_type)
+        }
+        _ => {
+            return UnsupportedInputDataTypeSnafu {
+                function: "compact_table",
+                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+            }
+            .fail()
+        }
     };
 
     let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, query_ctx)
         .map_err(BoxedError::new)
         .context(TableMutationSnafu)?;
 
-    let ty = if params.len() > 1 {
-        let ValueRef::String(compact_ty_str) = params[1] else {
-            return UnsupportedInputDataTypeSnafu {
-                function: "compact_table",
-                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
-            }
-            .fail();
-        };
-        if compact_ty_str.eq_ignore_ascii_case("strict_window") {
-            let window = params
-                .get(2)
-                .and_then(|v| {
-                    if let ValueRef::String(window_str) = v {
-                        i64::from_str(window_str).ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-
-            CompactType {
-                ty: Some(Ty::StrictWindow(StrictWindow { window })),
-            }
-        } else {
-            CompactType::default()
-        }
-    } else {
-        CompactType::default()
-    };
-
     Ok(CompactTableRequest {
         catalog_name,
         schema_name,
         table_name,
-        compact_type: ty,
+        compact_type,
     })
+}
+
+fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<CompactType> {
+    if type_str.eq_ignore_ascii_case("strict_window") {
+        let window = option.and_then(|v| i64::from_str(v).ok()).unwrap_or(0);
+        Ok(CompactType {
+            ty: Some(Ty::StrictWindow(StrictWindow { window })),
+        })
+    } else {
+        Ok(CompactType::default())
+    }
 }
 
 #[cfg(test)]
