@@ -111,13 +111,13 @@ impl RelationType {
     /// then new key=`[1]`, new time index=`[0]`
     ///
     /// note that this function will remove empty keys like key=`[]` will be removed
-    pub fn apply_mfp(&self, mfp: &MapFilterProject, expr_typs: &[ColumnType]) -> Result<Self> {
-        let all_types = self
-            .column_types
-            .iter()
-            .chain(expr_typs.iter())
-            .cloned()
-            .collect_vec();
+    pub fn apply_mfp(&self, mfp: &MapFilterProject) -> Result<Self> {
+        let mut all_types = self.column_types.clone();
+        for expr in &mfp.expressions {
+            let expr_typ = expr.typ(&self.column_types)?;
+            all_types.push(expr_typ);
+        }
+        let all_types = all_types;
         let mfp_out_types = mfp
             .projection
             .iter()
@@ -131,6 +131,7 @@ impl RelationType {
                 })
             })
             .try_collect()?;
+
         let old_to_new_col = BTreeMap::from_iter(
             mfp.projection
                 .clone()

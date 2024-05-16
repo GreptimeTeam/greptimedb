@@ -44,7 +44,7 @@ pub struct TypedPlan {
 impl TypedPlan {
     /// directly apply a mfp to the plan
     pub fn mfp(self, mfp: MapFilterProject) -> Result<Self, Error> {
-        let new_type = self.typ.apply_mfp(&mfp, &[])?;
+        let new_type = self.typ.apply_mfp(&mfp)?;
         let plan = match self.plan {
             Plan::Mfp {
                 input,
@@ -68,14 +68,14 @@ impl TypedPlan {
     pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
         let input_arity = self.typ.column_types.len();
         let output_arity = exprs.len();
-        let (exprs, expr_typs): (Vec<_>, Vec<_>) = exprs
+        let (exprs, _expr_typs): (Vec<_>, Vec<_>) = exprs
             .into_iter()
             .map(|TypedExpr { expr, typ }| (expr, typ))
             .unzip();
         let mfp = MapFilterProject::new(input_arity)
             .map(exprs)?
             .project(input_arity..input_arity + output_arity)?;
-        let out_typ = self.typ.apply_mfp(&mfp, &expr_typs)?;
+        let out_typ = self.typ.apply_mfp(&mfp)?;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
             Plan::Mfp {
