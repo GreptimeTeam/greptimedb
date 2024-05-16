@@ -235,11 +235,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: nolar/setup-k3d-k3s@v1
-        with:
-          version: v1.27
-          k3d-name: kube
-          k3d-args: "--no-lb --no-rollback --k3s-arg --disable=traefik,servicelb,metrics-server@server:*"
+      - name: Install Kind
+        run: |
+          [ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Create kind cluster
+        run: |
+          ./.github/scripts/kind-with-registry.sh
       - name: Install greptime operator
         run: |
           helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
