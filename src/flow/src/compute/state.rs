@@ -102,6 +102,10 @@ impl DataflowState {
         self.err_collector.clone()
     }
 
+    pub fn set_expire_after(&mut self, after: Option<repr::Duration>) {
+        self.expire_after = after;
+    }
+
     pub fn expire_after(&self) -> Option<Timestamp> {
         self.expire_after
     }

@@ -208,7 +208,6 @@ impl<'s> Worker<'s> {
         create_if_not_exist: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
-        let _ = expire_when;
         let already_exist = self.task_states.contains_key(&flow_id);
         match (already_exist, create_if_not_exist) {
             (true, true) => return Ok(None),
@@ -220,6 +219,7 @@ impl<'s> Worker<'s> {
             err_collector,
             ..Default::default()
         };
+        cur_task_state.state.set_expire_after(expire_when);
 
         {
             let mut ctx = cur_task_state.new_ctx(sink_id);
