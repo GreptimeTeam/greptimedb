@@ -12,19 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod buckets;
 mod picker;
+mod task;
 #[cfg(test)]
 mod test_util;
 mod twcs;
+mod window;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::greptime_proto::v1::region::CompactType;
 use common_telemetry::{debug, error};
+use common_time::range::TimestampRange;
+use common_time::Timestamp;
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -36,12 +42,18 @@ use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
+use crate::read::projection::ProjectionMapper;
+use crate::read::scan_region::ScanInput;
+use crate::read::seq_scan::SeqScan;
+use crate::read::BoxedBatchReader;
 use crate::region::options::CompactionOptions;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
+use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
 /// Region compaction request.
@@ -374,6 +386,62 @@ impl CompactionStatus {
 
         req
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompactionOutput {
+    pub output_file_id: FileId,
+    /// Compaction output file level.
+    pub output_level: Level,
+    /// Compaction input files.
+    pub inputs: Vec<FileHandle>,
+    /// Whether to remove deletion markers.
+    pub filter_deleted: bool,
+    /// Compaction output time range.
+    pub output_time_range: Option<TimestampRange>,
+}
+
+/// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
+async fn build_sst_reader(
+    metadata: RegionMetadataRef,
+    sst_layer: AccessLayerRef,
+    inputs: &[FileHandle],
+    append_mode: bool,
+    filter_deleted: bool,
+    time_range: Option<TimestampRange>,
+) -> Result<BoxedBatchReader> {
+    let scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
+        .with_files(inputs.to_vec())
+        .with_time_range(time_range)
+        .with_append_mode(append_mode)
+        .with_filter_deleted(filter_deleted)
+        // We ignore file not found error during compaction.
+        .with_ignore_file_not_found(true);
+    SeqScan::new(scan_input).build_reader().await
+}
+
+/// Finds all expired SSTs across levels.
+fn get_expired_ssts(
+    levels: &[LevelMeta],
+    ttl: Option<Duration>,
+    now: Timestamp,
+) -> Vec<FileHandle> {
+    let Some(ttl) = ttl else {
+        return vec![];
+    };
+
+    let expire_time = match now.sub_duration(ttl) {
+        Ok(expire_time) => expire_time,
+        Err(e) => {
+            error!(e; "Failed to calculate region TTL expire time");
+            return vec![];
+        }
+    };
+
+    levels
+        .iter()
+        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
+        .collect()
 }
 
 #[cfg(test)]
