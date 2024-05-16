@@ -231,6 +231,70 @@ jobs:
           path: /tmp/unstable-greptime/
           retention-days: 3
 
+  e2e: 
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nolar/setup-k3d-k3s@v1
+        with:
+          version: v1.27
+          k3d-name: kube
+          k3d-args: "--no-lb --no-rollback --k3s-arg --disable=traefik,servicelb,metrics-server@server:*"
+      - name: Install greptime operator
+        run: |
+          helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
+          helm repo update
+          helm upgrade \
+            --install \
+            --create-namespace \
+            greptimedb-operator greptime/greptimedb-operator \
+            -n greptimedb-admin
+      - name: Install etcd cluster
+        run: | 
+          helm upgrade \
+            --install etcd oci://registry-1.docker.io/bitnamicharts/etcd \
+            --set replicaCount=3 \
+            --set auth.rbac.create=false \
+            --set auth.rbac.token.enabled=false \
+            --set persistence.size=1Gi \
+            --create-namespace \
+            -n etcd-cluster
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - name: Print etcd info
+        run: kubectl get all --show-labels -n etcd-cluster
+      - name: Install GreptimeDB cluster
+        run: | 
+          helm upgrade \
+            --install my-greptimedb \
+            --set meta.etcdEndpoints=etcd.etcd-cluster.svc.cluster.local:2379 \
+            greptime/greptimedb-cluster \
+            --create-namespace \
+            -n my-greptimedb
+      - name: Wait for GreptimeDB
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.greptime.io/component=my-greptimedb-meta \
+            --timeout=120s \
+            -n my-greptimedb
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.greptime.io/component=my-greptimedb-datanode \
+            --timeout=120s \
+            -n my-greptimedb
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.greptime.io/component=my-greptimedb-frontend \
+            --timeout=120s \
+            -n my-greptimedb
+      - name: Print GreptimeDB info
+        run: kubectl get all --show-labels -n my-greptimedb
 
   sqlness:
     name: Sqlness Test
