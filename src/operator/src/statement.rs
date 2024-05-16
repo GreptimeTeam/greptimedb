@@ -321,6 +321,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         connection,
         with,
         table_name,
+        limit,
         ..
     } = match stmt {
         CopyTable::To(arg) => arg,
@@ -347,6 +348,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
         pattern,
         direction,
         timestamp_range,
+        limit,
     })
 }
 

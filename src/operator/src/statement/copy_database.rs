@@ -90,6 +90,7 @@ impl StatementExecutor {
                         pattern: None,
                         direction: CopyDirection::Export,
                         timestamp_range: req.time_range,
+                        limit: None,
                     },
                     ctx.clone(),
                 )
@@ -155,6 +156,7 @@ impl StatementExecutor {
                 pattern: None,
                 direction: CopyDirection::Import,
                 timestamp_range: None,
+                limit: None,
             };
             debug!("Copy table, arg: {:?}", req);
             match self.copy_table_from(req, ctx.clone()).await {

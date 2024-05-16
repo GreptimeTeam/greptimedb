@@ -111,6 +111,7 @@ pub struct CopyTableArgument {
     pub connection: OptionMap,
     /// Copy tbl [To|From] 'location'.
     pub location: String,
+    pub limit: Option<u64>,
 }
 
 #[cfg(test)]
