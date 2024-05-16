@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -118,7 +118,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
     fn should_flush_engine(&self) -> bool {
         let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
         if mutable_memtable_memory_usage > self.mutable_limit {
-            info!(
+            debug!(
                 "Engine should flush (over mutable limit), mutable_usage: {}, memory_usage: {}, mutable_limit: {}, global_limit: {}",
                 mutable_memtable_memory_usage, self.memory_usage(), self.mutable_limit, self.global_write_buffer_size,
             );
@@ -132,7 +132,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         if memory_usage >= self.global_write_buffer_size
             && mutable_memtable_memory_usage >= self.global_write_buffer_size / 2
         {
-            info!(
+            debug!(
                 "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
                 memory_usage,
