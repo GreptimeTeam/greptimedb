@@ -19,6 +19,7 @@ use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
 use common_recordbatch::util::collect;
+use common_telemetry::info;
 use datafusion::prelude::{col, lit};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
