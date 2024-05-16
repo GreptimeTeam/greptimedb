@@ -24,6 +24,7 @@ use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, Me
 use clap::Parser;
 use client::client_manager::DatanodeClients;
 use common_config::Configurable;
+use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -318,11 +319,19 @@ impl StartCommand {
             Arc::new(executor),
         );
 
+        // frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        let client = DatanodeClients::new(channel_config);
+
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
-            Arc::new(DatanodeClients::default()),
+            Arc::new(client),
             meta_client,
         )
         .with_plugin(plugins.clone())

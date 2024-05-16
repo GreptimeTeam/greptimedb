@@ -25,8 +25,6 @@ pub struct DatanodeOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatanodeClientOptions {
     #[serde(with = "humantime_serde")]
-    pub timeout: Duration,
-    #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
     pub tcp_nodelay: bool,
 }
@@ -34,7 +32,6 @@ pub struct DatanodeClientOptions {
 impl Default for DatanodeClientOptions {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS),
             connect_timeout: Duration::from_secs(
                 channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS,
             ),

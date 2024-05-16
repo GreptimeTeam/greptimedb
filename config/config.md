@@ -186,7 +186,6 @@
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
-| `datanode.client.timeout` | String | `10s` | -- |
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `logging` | -- | -- | The logging options. |
