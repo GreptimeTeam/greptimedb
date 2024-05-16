@@ -29,6 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
@@ -216,7 +217,7 @@ impl Export {
             return Ok(vec![]);
         }
 
-        let mut result = Vec::with_capacity(records.len());
+        let mut remaining_tables = Vec::with_capacity(records.len());
         for value in records {
             let mut t = Vec::with_capacity(3);
             for v in &value {
@@ -228,12 +229,12 @@ impl Export {
             let table = (t[0].clone(), t[1].clone(), t[2].clone());
             // Ignores the physical table
             if !metric_physical_tables.contains(&table) {
-                result.push(table);
+                remaining_tables.push(table);
             }
         }
-        let mut tables = Vec::with_capacity(metric_physical_tables.len() + result.len());
+        let mut tables = Vec::with_capacity(metric_physical_tables.len() + remaining_tables.len());
         tables.extend(metric_physical_tables.into_iter());
-        tables.extend(result);
+        tables.extend(remaining_tables);
 
         Ok(tables)
     }
@@ -255,6 +256,7 @@ impl Export {
     }
 
     async fn export_create_table(&self) -> Result<()> {
+        let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.iter_db_names().await?;
         let db_count = db_names.len();
@@ -300,12 +302,14 @@ impl Export {
             })
             .count();
 
-        info!("Success {success}/{db_count} jobs");
+        let elapsed = timer.elapsed();
+        info!("Success {success}/{db_count} jobs, cost: {:?}", elapsed);
 
         Ok(())
     }
 
     async fn export_table_data(&self) -> Result<()> {
+        let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.iter_db_names().await?;
         let db_count = db_names.len();
@@ -381,8 +385,8 @@ impl Export {
                 }
             })
             .count();
-
-        info!("success {success}/{db_count} jobs");
+        let elapsed = timer.elapsed();
+        info!("Success {success}/{db_count} jobs, costs: {:?}", elapsed);
 
         Ok(())
     }
