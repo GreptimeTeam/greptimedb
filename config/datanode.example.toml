@@ -29,6 +29,9 @@ rpc_max_recv_message_size = "512MB"
 ## The maximum send message size for gRPC server.
 rpc_max_send_message_size = "512MB"
 
+## Enable gzip compression for gRPC
+enable_gzip_compression = false
+
 ## Enable telemetry to collect anonymous usage data.
 enable_telemetry = true
 

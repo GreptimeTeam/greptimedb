@@ -76,6 +76,7 @@ where
         let grpc_config = GrpcServerConfig {
             max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
+            enable_gzip_compression: opts.enable_gzip_compression,
         };
 
         Ok(GrpcServerBuilder::new(grpc_config, grpc_runtime))

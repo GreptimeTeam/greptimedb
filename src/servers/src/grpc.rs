@@ -35,7 +35,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Routes, TcpIncoming};
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
@@ -65,6 +64,8 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
+    // Enable gzip compression for gRPC
+    pub enable_gzip_compression: bool,
 }
 
 impl Default for GrpcServerConfig {
@@ -72,6 +73,7 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
+            enable_gzip_compression: false,
         }
     }
 }
@@ -176,14 +178,8 @@ impl Server for GrpcServer {
         let builder = tonic::transport::Server::builder()
             .layer(metrics_layer)
             .add_routes(routes)
-            .add_service(
-                self.create_healthcheck_service()
-                    .accept_compressed(CompressionEncoding::Gzip),
-            )
-            .add_service(
-                self.create_reflection_service()
-                    .accept_compressed(CompressionEncoding::Gzip),
-            );
+            .add_service(self.create_healthcheck_service())
+            .add_service(self.create_reflection_service());
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();
         let mut serve_state = self.serve_state.lock().await;

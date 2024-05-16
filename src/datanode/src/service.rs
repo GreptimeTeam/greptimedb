@@ -95,6 +95,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
         let config = GrpcServerConfig {
             max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
+            enable_gzip_compression: opts.enable_gzip_compression,
         };
 
         GrpcServerBuilder::new(config, region_server.runtime())
