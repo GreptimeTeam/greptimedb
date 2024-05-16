@@ -298,7 +298,19 @@ jobs:
             -n my-greptimedb
       - name: Print GreptimeDB info
         if: always()
-        run: kubectl get all --show-labels -n my-greptimedb
+        run: | 
+          kubectl get all --show-labels -n my-greptimedb
+      - name: Export kind logs
+        if: failure()
+        run: | 
+          kind export logs /tmp/kind
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-logs
+          path: /tmp/kind
+          retention-days: 3
 
   sqlness:
     name: Sqlness Test
