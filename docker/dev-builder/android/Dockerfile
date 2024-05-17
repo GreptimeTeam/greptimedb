@@ -34,7 +34,7 @@ RUN rustup toolchain install ${RUST_TOOLCHAIN}
 RUN rustup target add aarch64-linux-android
 
 # Install cargo-ndk
-RUN cargo install cargo-ndk
+RUN cargo install cargo-ndk@3.5.4
 ENV ANDROID_NDK_HOME $NDK_ROOT
 
 # Builder entrypoint.
