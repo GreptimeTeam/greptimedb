@@ -38,7 +38,7 @@ use crate::expr::error::{
 };
 use crate::expr::signature::{GenericFn, Signature};
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
-use crate::repr::{value_to_internal_ts, Row};
+use crate::repr::{self, value_to_internal_ts, Row};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling
@@ -274,7 +274,39 @@ impl UnaryFunc {
                 debug!("Cast to type: {to:?}, result: {:?}", res);
                 res
             }
-            Self::TumbleWindowFloor { .. } | Self::TumbleWindowCeiling { .. } => todo!(),
+            Self::TumbleWindowFloor {
+                window_size,
+                start_time,
+            } => {
+                let ts = arg.as_datetime().with_context(|| TypeMismatchSnafu {
+                    expected: ConcreteDataType::datetime_datatype(),
+                    actual: arg.data_type(),
+                })?;
+                let ts = ts.val();
+                let start_time = start_time.map(|t| t.val()).unwrap_or(0);
+                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let window_start = start_time + (ts - start_time) / window_size * window_size;
+
+                let ret = DateTime::new(window_start);
+                Ok(Value::from(ret))
+            }
+            Self::TumbleWindowCeiling {
+                window_size,
+                start_time,
+            } => {
+                let ts = arg.as_datetime().with_context(|| TypeMismatchSnafu {
+                    expected: ConcreteDataType::datetime_datatype(),
+                    actual: arg.data_type(),
+                })?;
+                let ts = ts.val();
+                let start_time = start_time.map(|t| t.val()).unwrap_or(0);
+                let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
+                let window_start = start_time + (ts - start_time) / window_size * window_size;
+
+                let window_end = window_start + window_size;
+                let ret = DateTime::new(window_end);
+                Ok(Value::from(ret))
+            }
         }
     }
 }
