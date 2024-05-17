@@ -22,6 +22,7 @@ use api::v1::{
 use auth::user_provider_from_option;
 use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
+use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
@@ -30,7 +31,7 @@ use servers::http::prometheus::{
     PrometheusResponse,
 };
 use servers::server::Server;
-use servers::tls::TlsOption;
+use servers::tls::{TlsMode, TlsOption};
 use tests_integration::database::Database;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
@@ -78,6 +79,7 @@ macro_rules! grpc_tests {
                 test_health_check,
                 test_prom_gateway_query,
                 test_grpc_timezone,
+                test_grpc_tls_config,
             );
         )*
     };
@@ -723,4 +725,49 @@ async fn to_batch(output: Output) -> String {
     }
     .pretty_print()
     .unwrap()
+}
+
+pub async fn test_grpc_tls_config(store_type: StorageType) {
+    let comm_dir = std::path::PathBuf::from_iter([
+        std::env!("CARGO_RUSTC_CURRENT_DIR"),
+        "src/common/grpc/tests",
+    ]);
+    let ca_path = comm_dir.join("tls/server.cert.pem");
+    let cert_path = comm_dir.join("tls/client.cert.pem");
+    let key_path = comm_dir.join("tls/client.key.pem");
+    let ca_path_string = ca_path.to_str().unwrap().to_string();
+    let cert_path_str = cert_path.to_str().unwrap();
+    let key_path_str = key_path.to_str().unwrap();
+
+    let tls = TlsOption::new(
+        Some(TlsMode::Require),
+        Some(cert_path_str.to_string()),
+        Some(key_path_str.to_string()),
+    );
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+        tls,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
+
+    let client_tls = ClientTlsOption {
+        server_ca_cert_path: ca_path_string,
+        client_cert_path: cert_path_str.to_string(),
+        client_key_path: key_path_str.to_string(),
+    };
+    let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls).unwrap();
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    db.sql("show tables;").await.unwrap();
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_grpc_server_builder() {
+    test_grpc_tls_config(StorageType::File).await;
 }
