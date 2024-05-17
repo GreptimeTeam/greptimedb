@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
@@ -306,12 +306,9 @@ impl FlownodeManager {
                                 .collect_vec()
                         })
                         .unwrap_or_default();
-                    let ts_col = ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        true,
-                    )
-                    .with_time_index(true);
+                    let ts_col =
+                        ColumnSchema::new("update_at", ConcreteDataType::datetime_datatype(), true)
+                            .with_time_index(true);
 
                     let wout_ts = schema
                         .column_types
@@ -336,16 +333,23 @@ impl FlownodeManager {
                 table_name.join("."),
                 reqs
             );
-
+            let now = SystemTime::now();
+            let now = now
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|s| s.as_millis() as repr::Timestamp)
+                .unwrap_or_else(|_| {
+                    -(SystemTime::UNIX_EPOCH
+                        .duration_since(now)
+                        .unwrap()
+                        .as_millis() as repr::Timestamp)
+                });
             for req in reqs {
                 match req {
                     DiffRequest::Insert(insert) => {
                         let rows_proto: Vec<v1::Row> = insert
                             .into_iter()
                             .map(|(mut row, _ts)| {
-                                row.extend(Some(Value::from(
-                                    common_time::Timestamp::new_millisecond(0),
-                                )));
+                                row.extend(Some(Value::from(common_time::DateTime::new(now))));
                                 row.into()
                             })
                             .collect::<Vec<_>>();
