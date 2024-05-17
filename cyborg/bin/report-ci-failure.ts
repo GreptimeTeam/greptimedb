@@ -20,17 +20,16 @@ import {context} from "@actions/github"
 import _ from "lodash"
 
 async function main() {
-    const success = process.env["CI_REPORT_STATUS"] === "success"
+    const success = process.env["CI_REPORT_STATUS"] === "true"
     core.info(`CI_REPORT_STATUS=${process.env["CI_REPORT_STATUS"]}, resolved to ${success}`)
 
     const client = obtainClient("GITHUB_TOKEN")
     const title = `Workflow run '${context.action}' failed`
-    const url =`${process.env["GITHUB_SERVER_URL"]}/${process.env["GITHUB_REPOSITORY"]}/actions/runs/${process.env["GITHUB_RUN_ID"]}`
+    const url = `${process.env["GITHUB_SERVER_URL"]}/${process.env["GITHUB_REPOSITORY"]}/actions/runs/${process.env["GITHUB_RUN_ID"]}`
     const failure_comment = `New failure: ${url}`
     const success_comment = `Back to success: ${url}`
 
-    const owner = "GreptimeTeam"
-    const repo = "greptimedb"
+    const {owner, repo} = context.repo
     const labels = ['O-ci-failure']
 
     const issues = await client.paginate(client.rest.issues.listForRepo, {
@@ -67,14 +66,17 @@ async function main() {
                 state_reason: "completed",
             })
         }
+        core.setOutput("html_url", issue.html_url)
     } else if (!success) { // create new issue for failure
-        await client.rest.issues.create({
+        const issue = await client.rest.issues.create({
             owner,
             repo,
             title,
             labels,
             body: failure_comment,
         })
+        core.info(`Created issue ${issue.data.html_url}`)
+        core.setOutput("html_url", issue.data.html_url)
     }
 }
 

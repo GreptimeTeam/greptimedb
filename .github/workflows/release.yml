@@ -93,6 +93,9 @@ env:
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
   NEXT_RELEASE_VERSION: v0.8.0
 
+permissions:
+  issues: write
+
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -245,7 +248,7 @@ jobs:
       - name: Set build macos result
         id: set-build-macos-result
         run: |
-          echo "build-macos-result=success" >> $GITHUB_OUTPUT    
+          echo "build-macos-result=success" >> $GITHUB_OUTPUT
 
   build-windows-artifacts:
     name: Build Windows artifacts
@@ -318,7 +321,7 @@ jobs:
       - name: Set build image result
         id: set-build-image-result
         run: |
-          echo "build-image-result=success" >> $GITHUB_OUTPUT    
+          echo "build-image-result=success" >> $GITHUB_OUTPUT
 
   release-cn-artifacts:
     name: Release artifacts to CN region
@@ -436,7 +439,7 @@ jobs:
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
 
   notification:
-    if: ${{ always() || github.repository == 'GreptimeTeam/greptimedb' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }}
     name: Send notification to Greptime team
     needs: [
       release-images-to-dockerhub,
@@ -447,6 +450,15 @@ jobs:
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cyborg
+      - name: Report CI status
+        id: report-ci-status
+        working-directory: cyborg
+        run: pnpm tsx bin/report-ci-failure.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
       - name: Notifiy release successful result
         uses: slackapi/slack-github-action@v1.25.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
@@ -459,4 +471,4 @@ jobs:
         if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB's release version has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/release.yml'."}
+            {"text": "GreptimeDB's release version has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}
