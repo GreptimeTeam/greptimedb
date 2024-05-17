@@ -328,18 +328,24 @@ impl Export {
                     .context(FileIoSnafu)?;
                 let output_dir = Path::new(&self.output_dir).join(format!("{catalog}-{schema}/"));
                 // Ignores metric physical tables
-                let (_, table_list) = self.get_table_list(&catalog, &schema).await?;
-                for (_, _, table_name) in table_list {
+                let (metrics_tables, table_list) = self.get_table_list(&catalog, &schema).await?;
+                for (_, _, table_name) in metrics_tables {
+                    warn!("Ignores metric physical table: {table_name}");
+                }
+                for (catalog_name, schema_name, table_name) in table_list {
                     // copy table to
                     let sql = format!(
-                        "copy table {} to '{}{}.parquet' with (format='parquet');",
-                        schema,
+                        r#"Copy "{}"."{}"."{}" TO '{}{}.parquet' WITH (format='parquet');"#,
+                        catalog_name,
+                        schema_name,
+                        table_name,
                         output_dir.to_str().unwrap(),
                         table_name,
                     );
+                    info!("Executing sql: {sql}");
                     self.sql(&sql).await?;
-                    info!("finished exporting {catalog}.{schema} data");
                 }
+                info!("Finished exporting {catalog}.{schema} data");
 
                 // export copy from sql
                 let dir_filenames = match output_dir.read_dir() {
