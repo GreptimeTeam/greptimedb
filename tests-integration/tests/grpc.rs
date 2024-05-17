@@ -730,19 +730,19 @@ async fn to_batch(output: Output) -> String {
 pub async fn test_grpc_tls_config(store_type: StorageType) {
     let comm_dir = std::path::PathBuf::from_iter([
         std::env!("CARGO_RUSTC_CURRENT_DIR"),
-        "src/common/grpc/tests",
+        "src/common/grpc/tests/tls",
     ]);
-    let ca_path = comm_dir.join("tls/server.cert.pem");
-    let cert_path = comm_dir.join("tls/client.cert.pem");
-    let key_path = comm_dir.join("tls/client.key.pem");
-    let ca_path_string = ca_path.to_str().unwrap().to_string();
-    let cert_path_str = cert_path.to_str().unwrap();
-    let key_path_str = key_path.to_str().unwrap();
+    let ca_path = comm_dir.join("ca.pem").to_str().unwrap().to_string();
+    let server_cert_path = comm_dir.join("server.pem").to_str().unwrap().to_string();
+    let server_key_path = comm_dir.join("server.key").to_str().unwrap().to_string();
+    let client_cert_path = comm_dir.join("client.pem").to_str().unwrap().to_string();
+    let client_key_path = comm_dir.join("client.key").to_str().unwrap().to_string();
+    let client_corrupted = comm_dir.join("corrupted").to_str().unwrap().to_string();
 
     let tls = TlsOption::new(
         Some(TlsMode::Require),
-        Some(cert_path_str.to_string()),
-        Some(key_path_str.to_string()),
+        Some(server_cert_path),
+        Some(server_key_path),
     );
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
@@ -752,22 +752,32 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
 
-    let client_tls = ClientTlsOption {
-        server_ca_cert_path: ca_path_string,
-        client_cert_path: cert_path_str.to_string(),
-        client_key_path: key_path_str.to_string(),
+    let mut client_tls = ClientTlsOption {
+        server_ca_cert_path: ca_path,
+        client_cert_path,
+        client_key_path,
     };
-    let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls).unwrap();
-    let db = Database::new_with_dbname(
-        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
-        grpc_client,
-    );
-    db.sql("show tables;").await.unwrap();
+    {
+        let grpc_client =
+            Client::with_tls_and_urls(vec![addr.clone()], client_tls.clone()).unwrap();
+        let db = Database::new_with_dbname(
+            format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+            grpc_client,
+        );
+        db.sql("show tables;").await.unwrap();
+    }
+
+    {
+        // test corrupted client key
+        client_tls.client_key_path = client_corrupted;
+        let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls.clone()).unwrap();
+        let db = Database::new_with_dbname(
+            format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+            grpc_client,
+        );
+        let re = db.sql("show tables;").await;
+        assert!(re.is_err());
+    }
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_grpc_server_builder() {
-    test_grpc_tls_config(StorageType::File).await;
 }
