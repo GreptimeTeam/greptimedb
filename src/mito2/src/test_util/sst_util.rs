@@ -18,6 +18,9 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
+use datatypes::arrow::array::{
+    LargeBinaryArray, TimestampMillisecondArray, UInt64Array, UInt8Array,
+};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::ValueRef;
@@ -27,12 +30,10 @@ use store_api::metadata::{
 };
 use store_api::storage::RegionId;
 
-use crate::read::{Batch, Source};
+use crate::read::{Batch, BatchBuilder, Source};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
-use crate::test_util::{
-    new_batch_builder, new_binary_batch_builder, new_noop_file_purger, VecBatchReader,
-};
+use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -132,7 +133,7 @@ pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
         .unwrap()
 }
 
-pub fn new_batch_with_binary_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
+pub fn new_batch_with_large_binary(tags: &[&str], start: usize, end: usize) -> Batch {
     assert!(end >= start);
     let pk = new_primary_key(tags);
     let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
@@ -143,9 +144,23 @@ pub fn new_batch_with_binary_by_range(tags: &[&str], start: usize, end: usize) -
         .map(|_v| "some data".as_bytes().to_vec())
         .collect();
 
-    new_binary_batch_builder(&pk, &timestamps, &sequences, &op_types, 1, field)
-        .build()
+    let mut builder = BatchBuilder::new(pk);
+    builder
+        .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+            timestamps.iter().copied(),
+        )))
         .unwrap()
+        .sequences_array(Arc::new(UInt64Array::from_iter_values(
+            sequences.iter().copied(),
+        )))
+        .unwrap()
+        .op_types_array(Arc::new(UInt8Array::from_iter_values(
+            op_types.iter().map(|v| *v as u8),
+        )))
+        .unwrap()
+        .push_field_array(1, Arc::new(LargeBinaryArray::from_iter_values(field)))
+        .unwrap();
+    builder.build().unwrap()
 }
 
 /// ParquetMetaData doesn't implement `PartialEq` trait, check internal fields manually
@@ -174,7 +189,7 @@ pub fn assert_parquet_metadata_eq(a: Arc<ParquetMetaData>, b: Arc<ParquetMetaDat
 
 /// Creates a new region metadata for testing SSTs with binary datatype.
 ///
-/// Schema: tag_0, field_1(binary), ts
+/// Schema: tag_0(string), field_0(binary), ts
 pub fn build_test_binary_test_region_metadata() -> RegionMetadataRef {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
     builder
@@ -188,7 +203,7 @@ pub fn build_test_binary_test_region_metadata() -> RegionMetadataRef {
             column_id: 0,
         })
         .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("field_1", ConcreteDataType::binary_datatype(), true),
+            column_schema: ColumnSchema::new("field_0", ConcreteDataType::binary_datatype(), true),
             semantic_type: SemanticType::Field,
             column_id: 1,
         })
