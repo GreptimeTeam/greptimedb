@@ -125,15 +125,6 @@ impl<'a> ParserContext<'a> {
         Ok(TqlParameters::new(start, end, step, lookback, query))
     }
 
-    pub fn is_delimiter_token(token: &Token, delimiter_token: &[Token]) -> bool {
-        for delimiter in delimiter_token {
-            if delimiter == token {
-                return true;
-            }
-        }
-        false
-    }
-
     pub fn comma_or_rparen(token: &Token) -> bool {
         Self::is_comma(token) || Self::is_rparen(token)
     }
@@ -161,7 +152,7 @@ impl<'a> ParserContext<'a> {
     ) -> std::result::Result<(String, Token), TQLError> {
         let mut tokens = vec![];
 
-        while !Self::is_delimiter_token(&parser.peek_token().token, delimiter_tokens) {
+        while !delimiter_tokens.contains(&parser.peek_token().token) {
             let token = parser.next_token().token;
             if matches!(token, Token::EOF) {
                 break;
