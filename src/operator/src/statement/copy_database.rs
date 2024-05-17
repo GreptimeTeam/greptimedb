@@ -24,7 +24,9 @@ use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::table_reference::TableReference;
 
 use crate::error;
 use crate::error::{CatalogSnafu, InvalidCopyDatabasePathSnafu};
@@ -65,9 +67,27 @@ impl StatementExecutor {
 
         let mut exported_rows = 0;
         for table_name in table_names {
-            // TODO(hl): also handles tables with metric engine.
             // TODO(hl): remove this hardcode once we've removed numbers table.
             if table_name == "numbers" {
+                continue;
+            }
+
+            let table = self
+                .get_table(&TableReference {
+                    catalog: &req.catalog_name,
+                    schema: &req.schema_name,
+                    table: &table_name,
+                })
+                .await?;
+            // Ignores physical tables of metric engine.
+            if table.table_info().meta.engine == METRIC_ENGINE_NAME
+                && !table
+                    .table_info()
+                    .meta
+                    .options
+                    .extra_options
+                    .contains_key(LOGICAL_TABLE_METADATA_KEY)
+            {
                 continue;
             }
             let mut table_file = req.location.clone();
