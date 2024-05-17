@@ -206,6 +206,15 @@ impl RelationType {
         self
     }
 
+    /// will also remove time index from keys if it's in keys
+    pub fn with_time_index(mut self, time_index: Option<usize>) -> Self {
+        self.time_index = time_index;
+        for key in &mut self.keys {
+            key.remove_col(time_index.unwrap_or(usize::MAX));
+        }
+        self
+    }
+
     /// Computes the number of columns in the relation.
     pub fn arity(&self) -> usize {
         self.column_types.len()

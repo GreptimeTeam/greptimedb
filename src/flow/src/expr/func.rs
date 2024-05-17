@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_time::DateTime;
 use datafusion_expr::Operator;
@@ -30,13 +31,13 @@ use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 use substrait::df_logical_plan::consumer::name_to_op;
 
-use crate::adapter::error::{Error, InvalidQuerySnafu, PlanSnafu};
+use crate::adapter::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
     CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, TryFromValueSnafu,
     TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::{InvalidArgumentSnafu, ScalarExpr};
+use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
 use crate::repr::{value_to_internal_ts, Row};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
@@ -45,6 +46,11 @@ use crate::repr::{value_to_internal_ts, Row};
 pub enum UnmaterializableFunc {
     Now,
     CurrentSchema,
+    TumbleWindow {
+        ts: Box<TypedExpr>,
+        window_size: common_time::Interval,
+        start_time: Option<DateTime>,
+    },
 }
 
 impl UnmaterializableFunc {
@@ -61,14 +67,53 @@ impl UnmaterializableFunc {
                 output: ConcreteDataType::string_datatype(),
                 generic_fn: GenericFn::CurrentSchema,
             },
+            Self::TumbleWindow { .. } => Signature {
+                input: smallvec![ConcreteDataType::datetime_datatype()],
+                output: ConcreteDataType::datetime_datatype(),
+                generic_fn: GenericFn::TumbleWindow,
+            },
         }
     }
 
     /// Create a UnmaterializableFunc from a string of the function name
-    pub fn from_str(name: &str) -> Result<Self, Error> {
-        match name {
+    pub fn from_str_args(name: &str, args: Vec<TypedExpr>) -> Result<Self, Error> {
+        match name.to_lowercase().as_str() {
             "now" => Ok(Self::Now),
             "current_schema" => Ok(Self::CurrentSchema),
+            "tumble" => {
+                let ts = args.first().context(InvalidQuerySnafu {
+                    reason: "Tumble window function requires a timestamp argument".to_string(),
+                })?;
+                let window_size = args
+                    .get(1)
+                    .and_then(|expr| expr.expr.as_literal())
+                    .context(InvalidQuerySnafu {
+                        reason: "Tumble window function requires a window size argument"
+                            .to_string(),
+                    })?.as_string()// TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
+                    .map(|s|cast(Value::from(s), &ConcreteDataType::interval_month_day_nano_datatype())).transpose().map_err(BoxedError::new).context(
+                        ExternalSnafu
+                    )?.and_then(|v|v.as_interval())
+                    .with_context(||InvalidQuerySnafu {
+                        reason: format!("Tumble window function requires window size argument to be a string describe a interval, found {:?}", args.get(1))
+                            .to_string(),
+                    })?;
+                let start_time = match args.get(2) {
+                    Some(start_time) => start_time.expr.as_literal(),
+                    None => None,
+                }
+                .map(|s| cast(s.clone(), &ConcreteDataType::datetime_datatype())).transpose().map_err(BoxedError::new).context(ExternalSnafu)?.map(|v|v.as_datetime().with_context(
+                    ||InvalidQuerySnafu {
+                        reason: format!("Tumble window function requires start time argument to be a datetime describe in string, found {:?}", args.get(2))
+                    }
+                )).transpose()?;
+
+                Ok(Self::TumbleWindow {
+                    ts: Box::new(ts.clone()),
+                    window_size,
+                    start_time,
+                })
+            }
             _ => InvalidQuerySnafu {
                 reason: format!("Unknown unmaterializable function: {}", name),
             }
@@ -87,6 +132,14 @@ pub enum UnaryFunc {
     IsFalse,
     StepTimestamp,
     Cast(ConcreteDataType),
+    TumbleWindowFloor {
+        window_size: common_time::Interval,
+        start_time: Option<DateTime>,
+    },
+    TumbleWindowCeiling {
+        window_size: common_time::Interval,
+        start_time: Option<DateTime>,
+    },
 }
 
 impl UnaryFunc {
@@ -117,6 +170,16 @@ impl UnaryFunc {
                 input: smallvec![ConcreteDataType::null_datatype()],
                 output: to.clone(),
                 generic_fn: GenericFn::Cast,
+            },
+            Self::TumbleWindowFloor { .. } => Signature {
+                input: smallvec![ConcreteDataType::datetime_datatype()],
+                output: ConcreteDataType::datetime_datatype(),
+                generic_fn: GenericFn::TumbleWindow,
+            },
+            Self::TumbleWindowCeiling { .. } => Signature {
+                input: smallvec![ConcreteDataType::datetime_datatype()],
+                output: ConcreteDataType::datetime_datatype(),
+                generic_fn: GenericFn::TumbleWindow,
             },
         }
     }
@@ -211,6 +274,7 @@ impl UnaryFunc {
                 debug!("Cast to type: {to:?}, result: {:?}", res);
                 res
             }
+            Self::TumbleWindowFloor { .. } | Self::TumbleWindowCeiling { .. } => todo!(),
         }
     }
 }
