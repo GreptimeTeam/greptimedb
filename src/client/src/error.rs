@@ -18,7 +18,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu};
+use snafu::{location, Location, Snafu};
 use tonic::{Code, Status};
 
 #[derive(Snafu)]
@@ -83,14 +83,28 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to request RegionServer, code: {}", code))]
-    RegionServer { code: Code, source: BoxedError },
+    RegionServer {
+        code: Code,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     // Server error carried in Tonic Status's metadata.
     #[snafu(display("{}", msg))]
-    Server { code: StatusCode, msg: String },
+    Server {
+        code: StatusCode,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Illegal Database response: {err_msg}"))]
-    IllegalDatabaseResponse { err_msg: String },
+    IllegalDatabaseResponse {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to send request with streaming: {}", err_msg))]
     ClientStreaming {
@@ -148,7 +162,11 @@ impl From<Status> for Error {
         let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
             .unwrap_or_else(|| e.message().to_string());
 
-        Self::Server { code, msg }
+        Self::Server {
+            code,
+            msg,
+            location: location!(),
+        }
     }
 }
 

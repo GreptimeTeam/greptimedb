@@ -34,6 +34,7 @@ use common_telemetry::{info, warn};
 use dashmap::DashMap;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
+use mito2::engine::MITO_ENGINE_NAME;
 use prost::Message;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
@@ -44,7 +45,9 @@ use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::metric_engine_consts::{
+    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+};
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -403,7 +406,7 @@ impl RegionServerInner {
         let current_region_status = self.region_map.get(&region_id);
 
         let engine = match region_change {
-            RegionChange::Register(ref engine_type, _) => match current_region_status {
+            RegionChange::Register(attribute) => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_) => {
                         return Ok(CurrentEngine::EarlyReturn(0))
@@ -417,8 +420,10 @@ impl RegionServerInner {
                     .engines
                     .read()
                     .unwrap()
-                    .get(engine_type)
-                    .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?
+                    .get(attribute.engine())
+                    .with_context(|| RegionEngineNotFoundSnafu {
+                        name: attribute.engine(),
+                    })?
                     .clone(),
             },
             RegionChange::Deregisters => match current_region_status {
@@ -461,11 +466,13 @@ impl RegionServerInner {
             .start_timer();
 
         let region_change = match &request {
-            RegionRequest::Create(create) => RegionChange::Register(create.engine.clone(), false),
+            RegionRequest::Create(create) => {
+                let attribute = parse_region_attribute(&create.engine, &create.options)?;
+                RegionChange::Register(attribute)
+            }
             RegionRequest::Open(open) => {
-                let is_opening_physical_region =
-                    open.options.contains_key(PHYSICAL_TABLE_METADATA_KEY);
-                RegionChange::Register(open.engine.clone(), is_opening_physical_region)
+                let attribute = parse_region_attribute(&open.engine, &open.options)?;
+                RegionChange::Register(attribute)
             }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
             RegionRequest::Put(_)
@@ -514,7 +521,7 @@ impl RegionServerInner {
         region_change: &RegionChange,
     ) {
         match region_change {
-            RegionChange::Register(_, _) => {
+            RegionChange::Register(_) => {
                 self.region_map.insert(
                     region_id,
                     RegionEngineWithStatus::Registering(engine.clone()),
@@ -533,7 +540,7 @@ impl RegionServerInner {
     fn unset_region_status(&self, region_id: RegionId, region_change: RegionChange) {
         match region_change {
             RegionChange::None => {}
-            RegionChange::Register(_, _) | RegionChange::Deregisters => {
+            RegionChange::Register(_) | RegionChange::Deregisters => {
                 self.region_map.remove(&region_id);
             }
         }
@@ -548,15 +555,28 @@ impl RegionServerInner {
         let engine_type = engine.name();
         match region_change {
             RegionChange::None => {}
-            RegionChange::Register(_, is_opening_physical_region) => {
-                if is_opening_physical_region {
-                    self.register_logical_regions(&engine, region_id).await?;
-                }
-
-                info!("Region {region_id} is registered to engine {engine_type}");
+            RegionChange::Register(attribute) => {
+                info!(
+                    "Region {region_id} is registered to engine {}",
+                    attribute.engine()
+                );
                 self.region_map
-                    .insert(region_id, RegionEngineWithStatus::Ready(engine));
-                self.event_listener.on_region_registered(region_id);
+                    .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
+
+                match attribute {
+                    RegionAttribute::Metric { physical } => {
+                        if physical {
+                            // Registers the logical regions belong to the physical region (`region_id`).
+                            self.register_logical_regions(&engine, region_id).await?;
+                            // We only send the `on_region_registered` event of the physical region.
+                            self.event_listener.on_region_registered(region_id);
+                        }
+                    }
+                    RegionAttribute::Mito => self.event_listener.on_region_registered(region_id),
+                    RegionAttribute::File => {
+                        // do nothing
+                    }
+                }
             }
             RegionChange::Deregisters => {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
@@ -699,8 +719,43 @@ impl RegionServerInner {
 
 enum RegionChange {
     None,
-    Register(String, bool),
+    Register(RegionAttribute),
     Deregisters,
+}
+
+fn parse_region_attribute(
+    engine: &str,
+    options: &HashMap<String, String>,
+) -> Result<RegionAttribute> {
+    match engine {
+        MITO_ENGINE_NAME => Ok(RegionAttribute::Mito),
+        METRIC_ENGINE_NAME => {
+            let physical = !options.contains_key(LOGICAL_TABLE_METADATA_KEY);
+
+            Ok(RegionAttribute::Metric { physical })
+        }
+        FILE_ENGINE_NAME => Ok(RegionAttribute::File),
+        _ => error::UnexpectedSnafu {
+            violated: format!("Unknown engine: {}", engine),
+        }
+        .fail(),
+    }
+}
+
+enum RegionAttribute {
+    Mito,
+    Metric { physical: bool },
+    File,
+}
+
+impl RegionAttribute {
+    fn engine(&self) -> &'static str {
+        match self {
+            RegionAttribute::Mito => MITO_ENGINE_NAME,
+            RegionAttribute::Metric { .. } => METRIC_ENGINE_NAME,
+            RegionAttribute::File => FILE_ENGINE_NAME,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -723,7 +778,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut mock_region_server = mock_region_server();
-        let (engine, _receiver) = MockRegionEngine::new();
+        let (engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
         let engine_name = engine.name();
 
         mock_region_server.register_engine(engine.clone());
@@ -781,7 +836,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut mock_region_server = mock_region_server();
-        let (engine, _receiver) = MockRegionEngine::new();
+        let (engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
 
         mock_region_server.register_engine(engine.clone());
 
@@ -832,7 +887,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut mock_region_server = mock_region_server();
-        let (engine, _receiver) = MockRegionEngine::new();
+        let (engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
 
         mock_region_server.register_engine(engine.clone());
 
@@ -857,13 +912,15 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut mock_region_server = mock_region_server();
-        let (engine, _receiver) =
-            MockRegionEngine::with_mock_fn(Box::new(|_region_id, _request| {
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(|_region_id, _request| {
                 error::UnexpectedSnafu {
                     violated: "test".to_string(),
                 }
                 .fail()
-            }));
+            }),
+        );
 
         mock_region_server.register_engine(engine.clone());
 
@@ -904,7 +961,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut mock_region_server = mock_region_server();
-        let (engine, _) = MockRegionEngine::new();
+        let (engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(engine.clone());
 
         let region_id = RegionId::new(1024, 1);
@@ -950,7 +1007,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: None,
-                region_change: RegionChange::Register(engine.name().to_string(), false),
+                region_change: RegionChange::Register(RegionAttribute::Mito),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::Engine(_));
@@ -959,7 +1016,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
-                region_change: RegionChange::Register(engine.name().to_string(), false),
+                region_change: RegionChange::Register(RegionAttribute::Mito),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::EarlyReturn(_));
@@ -968,7 +1025,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
-                region_change: RegionChange::Register(engine.name().to_string(), false),
+                region_change: RegionChange::Register(RegionAttribute::Mito),
                 assert: Box::new(|result| {
                     let err = result.unwrap_err();
                     assert_eq!(err.status_code(), StatusCode::RegionBusy);
@@ -977,7 +1034,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: Some(RegionEngineWithStatus::Ready(engine.clone())),
-                region_change: RegionChange::Register(engine.name().to_string(), false),
+                region_change: RegionChange::Register(RegionAttribute::Mito),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::Engine(_));

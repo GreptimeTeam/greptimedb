@@ -189,6 +189,7 @@ impl RegionRequester {
                 error::Error::RegionServer {
                     code,
                     source: BoxedError::new(err),
+                    location: location!(),
                 }
             })?
             .into_inner();
@@ -272,7 +273,7 @@ mod test {
                 err_msg: "blabla".to_string(),
             }),
         }));
-        let Server { code, msg } = result.unwrap_err() else {
+        let Server { code, msg, .. } = result.unwrap_err() else {
             unreachable!()
         };
         assert_eq!(code, StatusCode::Internal);

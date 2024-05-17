@@ -121,6 +121,7 @@ mod tests {
     use std::time::Duration;
 
     use common_meta::instruction::{InstructionReply, UpgradeRegion};
+    use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
@@ -133,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn test_region_not_exist() {
         let mut mock_region_server = mock_region_server();
-        let (mock_engine, _) = MockRegionEngine::new();
+        let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
 
         let handler_context = HandlerContext {
@@ -167,13 +168,14 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            region_engine.mock_role = Some(Some(RegionRole::Leader));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
-                // Should be unreachable.
-                unreachable!();
-            }));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                region_engine.mock_role = Some(Some(RegionRole::Leader));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
+                    // Should be unreachable.
+                    unreachable!();
+                }));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
         let handler_context = HandlerContext {
@@ -207,13 +209,14 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            // Region is not ready.
-            region_engine.mock_role = Some(Some(RegionRole::Follower));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
-            // Note: Don't change.
-            region_engine.handle_request_delay = Some(Duration::from_secs(100));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
+                // Note: Don't change.
+                region_engine.handle_request_delay = Some(Duration::from_secs(100));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
         let handler_context = HandlerContext {
@@ -247,13 +250,14 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            // Region is not ready.
-            region_engine.mock_role = Some(Some(RegionRole::Follower));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
-            // Note: Don't change.
-            region_engine.handle_request_delay = Some(Duration::from_millis(300));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
+                // Note: Don't change.
+                region_engine.handle_request_delay = Some(Duration::from_millis(300));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
         let waits = vec![
@@ -308,18 +312,19 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            // Region is not ready.
-            region_engine.mock_role = Some(Some(RegionRole::Follower));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
-                error::UnexpectedSnafu {
-                    violated: "mock_error".to_string(),
-                }
-                .fail()
-            }));
-            // Note: Don't change.
-            region_engine.handle_request_delay = Some(Duration::from_millis(100));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
+                    error::UnexpectedSnafu {
+                        violated: "mock_error".to_string(),
+                    }
+                    .fail()
+                }));
+                // Note: Don't change.
+                region_engine.handle_request_delay = Some(Duration::from_millis(100));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
         let handler_context = HandlerContext {
