@@ -218,3 +218,24 @@ impl Server for GrpcServer {
         GRPC_SERVER
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_parse_compression_encoding() {
+        let encodings = vec![];
+        let result = super::parse_grpc_compression_encoding(&encodings).unwrap();
+        assert_eq!(result.len(), 0);
+
+        let encodings = vec!["gzip".to_string(), "zstd".to_string()];
+        let result = super::parse_grpc_compression_encoding(&encodings).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], tonic::codec::CompressionEncoding::Gzip);
+        assert_eq!(result[1], tonic::codec::CompressionEncoding::Zstd);
+
+        let encodings = vec!["unknown".to_string()];
+        let result = super::parse_grpc_compression_encoding(&encodings);
+        assert!(result.is_err());
+    }
+}
