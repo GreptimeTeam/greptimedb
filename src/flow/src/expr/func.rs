@@ -90,7 +90,7 @@ impl UnmaterializableFunc {
                     .and_then(|expr| expr.expr.as_literal())
                     .context(InvalidQuerySnafu {
                         reason: "Tumble window function requires a window size argument"
-                    })?.as_string()// TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
+                    })?.as_string() // TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
                     .map(|s|cast(Value::from(s), &ConcreteDataType::interval_month_day_nano_datatype())).transpose().map_err(BoxedError::new).context(
                         ExternalSnafu
                     )?.and_then(|v|v.as_interval())

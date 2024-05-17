@@ -787,7 +787,7 @@ mod test {
         };
         let expected = TypedPlan {
             typ: RelationType::new(vec![
-                ColumnType::new(CDT::uint64_datatype(), true), //sum(number)
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
             ]),
