@@ -312,8 +312,11 @@ impl FlownodeManager {
                             .collect_vec()
                     })
                     .unwrap_or_default();
-                let update_at =
-                    ColumnSchema::new("update_at", ConcreteDataType::datetime_datatype(), true);
+                let update_at = ColumnSchema::new(
+                    "update_at",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                );
                 // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
                 let ts_col = ColumnSchema::new(
                     "__ts_placeholder",
@@ -363,7 +366,9 @@ impl FlownodeManager {
                             .into_iter()
                             .map(|(mut row, _ts)| {
                                 // `update_at` col
-                                row.extend([Value::from(common_time::DateTime::new(now))]);
+                                row.extend([Value::from(common_time::Timestamp::new_millisecond(
+                                    now,
+                                ))]);
                                 // ts col, if auto create
                                 if is_auto_create {
                                     row.extend([Value::from(
