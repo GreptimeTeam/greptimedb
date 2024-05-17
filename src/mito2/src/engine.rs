@@ -57,7 +57,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing::{self};
+use common_telemetry::tracing;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;

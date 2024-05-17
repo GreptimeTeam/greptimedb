@@ -566,7 +566,6 @@ impl RegionServerInner {
                 match attribute {
                     RegionAttribute::Metric { physical } => {
                         if physical {
-                            info!("Registering logical regions for physical region: {region_id}");
                             // Registers the logical regions belong to the physical region (`region_id`).
                             self.register_logical_regions(&engine, region_id).await?;
                             // We only send the `on_region_registered` event of the physical region.
