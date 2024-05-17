@@ -285,7 +285,8 @@
 | `rpc_runtime_size` | Integer | `8` | The number of gRPC server worker threads. |
 | `rpc_max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `rpc_max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
-| `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
+| `## Enable telemetry to collect anonymous usage data.` | Array | -- | Supported compression encoding for gRPC server, e.g: gzip, zstd |
+| `enable_telemetry` | Bool | `true` | -- |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
