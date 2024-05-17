@@ -71,7 +71,7 @@ impl TypedExpr {
                     ),
                 })?;
         let arg_len = f.arguments.len();
-        let arg_exprs: Vec<TypedExpr> = f
+        let arg_typed_exprs: Vec<TypedExpr> = f
             .arguments
             .iter()
             .map(|arg| match &arg.arg_type {
@@ -83,7 +83,8 @@ impl TypedExpr {
             .try_collect()?;
 
         // literal's type is determined by the function and type of other args
-        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_exprs
+        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_typed_exprs
+            .clone()
             .into_iter()
             .map(
                 |TypedExpr {
@@ -174,7 +175,9 @@ impl TypedExpr {
                     };
                     expr.optimize();
                     Ok(TypedExpr::new(expr, ret_type))
-                } else if let Ok(func) = UnmaterializableFunc::from_str(fn_name) {
+                } else if let Ok(func) =
+                    UnmaterializableFunc::from_str_args(fn_name, arg_typed_exprs)
+                {
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     Ok(TypedExpr::new(
                         ScalarExpr::CallUnmaterializable(func),

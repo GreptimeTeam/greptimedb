@@ -302,8 +302,26 @@ impl TypedPlan {
             return not_impl_err!("Aggregate without an input is not supported");
         };
 
-        let group_exprs =
-            TypedExpr::from_substrait_agg_grouping(ctx, &agg.groupings, &input.typ, extensions)?;
+        let group_exprs = {
+            let group_exprs = TypedExpr::from_substrait_agg_grouping(
+                ctx,
+                &agg.groupings,
+                &input.typ,
+                extensions,
+            )?;
+
+            TypedExpr::expand_multi_value(&input.typ, &group_exprs)?
+        };
+
+        let time_index = group_exprs.iter().position(|expr| {
+            matches!(
+                &expr.expr,
+                ScalarExpr::CallUnary {
+                    func: UnaryFunc::TumbleWindowFloor { .. },
+                    expr: _
+                }
+            )
+        });
 
         let (mut aggr_exprs, post_mfp) =
             AggregateExpr::from_substrait_agg_measures(ctx, &agg.measures, &input.typ, extensions)?;
@@ -314,6 +332,7 @@ impl TypedPlan {
             input.typ.column_types.len(),
         )?;
 
+        // output type is group_exprs + aggr_exprs
         let output_type = {
             let mut output_types = Vec::new();
             // first append group_expr as key, then aggr_expr as value
@@ -332,7 +351,8 @@ impl TypedPlan {
             } else {
                 RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
             }
-        };
+        }
+        .with_time_index(time_index);
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
@@ -406,6 +426,7 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use pretty_assertions::{assert_eq, assert_ne};
 
@@ -413,6 +434,106 @@ mod test {
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+
+    #[tokio::test]
+    async fn test_tumble_parse() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour', '2021-07-01 00:00:00')";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ]),
+            // TODO(discord9): mfp indirectly ref to key columns
+            /*
+            .with_key(vec![1])
+            .with_time_index(Some(0)),*/
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                3_600_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                3_600_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .project(vec![0, 1])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0)),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::Column(3),
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan, expected);
+    }
 
     #[tokio::test]
     async fn test_avg_group_by() {
@@ -514,7 +635,8 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -587,7 +709,7 @@ mod test {
                     .unwrap(),
             },
         };
-        assert_eq!(flow_plan.unwrap(), expected);
+        assert_eq!(flow_plan, expected);
     }
 
     #[tokio::test]

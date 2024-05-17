@@ -119,12 +119,11 @@ impl CreateFlowProcedure {
                 &sink_table_name.table_name,
             ))
             .await?;
-        ensure!(
-            !exists,
-            error::TableAlreadyExistsSnafu {
-                table_name: sink_table_name.to_string(),
-            }
-        );
+        // TODO(discord9): due to undefined behavior in flow's plan in how to transform types in mfp, sometime flow can't deduce correct schema
+        // and require manually create sink table
+        if exists {
+            common_telemetry::warn!("Table already exists, table: {}", sink_table_name);
+        }
 
         self.collect_source_tables().await?;
         self.allocate_flow_id().await?;

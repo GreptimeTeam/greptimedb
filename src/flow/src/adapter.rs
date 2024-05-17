@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
@@ -49,7 +49,7 @@ use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::expr::GlobalId;
 use crate::repr::{self, DiffRow, Row};
-use crate::transform::sql_to_flow_plan;
+use crate::transform::{register_function_to_query_engine, sql_to_flow_plan};
 
 pub(crate) mod error;
 mod flownode_impl;
@@ -119,6 +119,8 @@ impl FlownodeBuilder {
             self.plugins.clone(),
         );
         let query_engine = query_engine_factory.query_engine();
+
+        register_function_to_query_engine(&query_engine);
 
         let (tx, rx) = oneshot::channel();
 
@@ -261,7 +263,7 @@ impl FlownodeManager {
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
             // TODO(discord9): instead of auto build table from request schema, actually build table
             // before `create flow` to be able to assign pk and ts etc.
-            let (primary_keys, schema) = if let Some(table_id) = self
+            let (primary_keys, schema, is_auto_create) = if let Some(table_id) = self
                 .table_info_source
                 .get_table_id_from_name(&table_name)
                 .await?
@@ -278,54 +280,65 @@ impl FlownodeManager {
                     .map(|i| meta.schema.column_schemas[i].name.clone())
                     .collect_vec();
                 let schema = meta.schema.column_schemas;
-                (primary_keys, schema)
+                let is_auto_create = schema
+                    .last()
+                    .map(|s| s.name == "__ts_placeholder")
+                    .unwrap_or(false);
+                (primary_keys, schema, is_auto_create)
             } else {
-                // TODO(discord9): get ts column from `RelationType` once we are done rewriting flow plan to attach ts
-                let (primary_keys, schema) = {
-                    let node_ctx = self.node_context.lock().await;
-                    let gid: GlobalId = node_ctx
-                        .table_repr
-                        .get_by_name(&table_name)
-                        .map(|x| x.1)
-                        .unwrap();
-                    let schema = node_ctx
-                        .schema
-                        .get(&gid)
-                        .with_context(|| TableNotFoundSnafu {
-                            name: format!("Table name = {:?}", table_name),
-                        })?
-                        .clone();
-                    // TODO(discord9): use default key from schema
-                    let primary_keys = schema
-                        .keys
-                        .first()
-                        .map(|v| {
-                            v.column_indices
-                                .iter()
-                                .map(|i| format!("Col_{i}"))
-                                .collect_vec()
-                        })
-                        .unwrap_or_default();
-                    let ts_col = ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        true,
-                    )
-                    .with_time_index(true);
+                // TODO(discord9): condiser remove buggy auto create by schema
 
-                    let wout_ts = schema
-                        .column_types
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, typ)| {
-                            ColumnSchema::new(format!("Col_{idx}"), typ.scalar_type, typ.nullable)
-                        })
-                        .collect_vec();
-                    let mut with_ts = wout_ts.clone();
-                    with_ts.push(ts_col);
-                    (primary_keys, with_ts)
-                };
-                (primary_keys, schema)
+                let node_ctx = self.node_context.lock().await;
+                let gid: GlobalId = node_ctx
+                    .table_repr
+                    .get_by_name(&table_name)
+                    .map(|x| x.1)
+                    .unwrap();
+                let schema = node_ctx
+                    .schema
+                    .get(&gid)
+                    .with_context(|| TableNotFoundSnafu {
+                        name: format!("Table name = {:?}", table_name),
+                    })?
+                    .clone();
+                // TODO(discord9): use default key from schema
+                let primary_keys = schema
+                    .keys
+                    .first()
+                    .map(|v| {
+                        v.column_indices
+                            .iter()
+                            .map(|i| format!("Col_{i}"))
+                            .collect_vec()
+                    })
+                    .unwrap_or_default();
+                let update_at = ColumnSchema::new(
+                    "update_at",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                );
+                // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
+                let ts_col = ColumnSchema::new(
+                    "__ts_placeholder",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                )
+                .with_time_index(true);
+
+                let wout_ts = schema
+                    .column_types
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, typ)| {
+                        ColumnSchema::new(format!("Col_{idx}"), typ.scalar_type, typ.nullable)
+                    })
+                    .collect_vec();
+
+                let mut with_ts = wout_ts.clone();
+                with_ts.push(update_at);
+                with_ts.push(ts_col);
+
+                (primary_keys, with_ts, true)
             };
 
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
@@ -336,16 +349,32 @@ impl FlownodeManager {
                 table_name.join("."),
                 reqs
             );
-
+            let now = SystemTime::now();
+            let now = now
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|s| s.as_millis() as repr::Timestamp)
+                .unwrap_or_else(|_| {
+                    -(SystemTime::UNIX_EPOCH
+                        .duration_since(now)
+                        .unwrap()
+                        .as_millis() as repr::Timestamp)
+                });
             for req in reqs {
                 match req {
                     DiffRequest::Insert(insert) => {
                         let rows_proto: Vec<v1::Row> = insert
                             .into_iter()
                             .map(|(mut row, _ts)| {
-                                row.extend(Some(Value::from(
-                                    common_time::Timestamp::new_millisecond(0),
-                                )));
+                                // `update_at` col
+                                row.extend([Value::from(common_time::Timestamp::new_millisecond(
+                                    now,
+                                ))]);
+                                // ts col, if auto create
+                                if is_auto_create {
+                                    row.extend([Value::from(
+                                        common_time::Timestamp::new_millisecond(0),
+                                    )]);
+                                }
                                 row.into()
                             })
                             .collect::<Vec<_>>();

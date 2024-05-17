@@ -30,7 +30,7 @@ use crate::expr::GlobalId;
 use crate::repr::{DiffRow, RelationType, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct FlownodeContext {
     /// mapping from source table to tasks, useful for schedule which task to run when a source table is updated
     pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
@@ -64,6 +64,7 @@ pub struct FlownodeContext {
 ///
 /// receiver still use tokio broadcast channel, since only sender side need to know
 /// backpressure and adjust dataflow running duration to avoid blocking
+#[derive(Debug)]
 pub struct SourceSender {
     sender: broadcast::Sender<DiffRow>,
     send_buf: VecDeque<DiffRow>,

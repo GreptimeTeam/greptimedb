@@ -739,6 +739,7 @@ mod test {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use common_time::{DateTime, Interval, Timestamp};
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
     use hydroflow::scheduled::graph::Hydroflow;
 
@@ -747,6 +748,165 @@ mod test {
     use crate::compute::state::DataflowState;
     use crate::expr::{self, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, UnaryFunc};
     use crate::repr::{ColumnType, RelationType};
+
+    /// SELECT sum(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00')
+    /// input table columns: number, ts
+    /// expected: sum(number), window_start, window_end
+    #[test]
+    fn test_tumble_group_by() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+        const START: i64 = 1625097600000;
+        let rows = vec![
+            (1u32, START + 1000),
+            (2u32, START + 1500),
+            (3u32, START + 2000),
+            (1u32, START + 2500),
+            (2u32, START + 3000),
+            (3u32, START + 3500),
+        ];
+        let rows = rows
+            .into_iter()
+            .map(|(number, ts)| {
+                (
+                    Row::new(vec![number.into(), Timestamp::new_millisecond(ts).into()]),
+                    1,
+                    1,
+                )
+            })
+            .collect_vec();
+
+        let collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(1), collection);
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ]),
+            // TODO(discord9): mfp indirectly ref to key columns
+            /*
+            .with_key(vec![1])
+            .with_time_index(Some(0)),*/
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .project(vec![0, 1])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0)),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::Column(3),
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+
+        let bundle = ctx.render_plan(expected).unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        let expected = BTreeMap::from([(
+            1,
+            vec![
+                (
+                    Row::new(vec![
+                        3u64.into(),
+                        Timestamp::new_millisecond(START + 1000).into(),
+                        Timestamp::new_millisecond(START + 2000).into(),
+                    ]),
+                    1,
+                    1,
+                ),
+                (
+                    Row::new(vec![
+                        4u64.into(),
+                        Timestamp::new_millisecond(START + 2000).into(),
+                        Timestamp::new_millisecond(START + 3000).into(),
+                    ]),
+                    1,
+                    1,
+                ),
+                (
+                    Row::new(vec![
+                        5u64.into(),
+                        Timestamp::new_millisecond(START + 3000).into(),
+                        Timestamp::new_millisecond(START + 4000).into(),
+                    ]),
+                    1,
+                    1,
+                ),
+            ],
+        )]);
+        run_and_check(&mut state, &mut df, 1..2, expected, output);
+    }
 
     /// select avg(number) from number;
     #[test]
