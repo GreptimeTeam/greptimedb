@@ -69,8 +69,8 @@ impl UnmaterializableFunc {
                 generic_fn: GenericFn::CurrentSchema,
             },
             Self::TumbleWindow { .. } => Signature {
-                input: smallvec![ConcreteDataType::datetime_datatype()],
-                output: ConcreteDataType::datetime_datatype(),
+                input: smallvec![ConcreteDataType::timestamp_millisecond_datatype()],
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::TumbleWindow,
             },
         }
@@ -277,14 +277,7 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let ts = arg.as_timestamp().with_context(|| TypeMismatchSnafu {
-                    expected: ConcreteDataType::timestamp_millisecond_datatype(),
-                    actual: arg.data_type(),
-                })?;
-                let ts = ts
-                    .convert_to(TimeUnit::Millisecond)
-                    .context(OverflowSnafu)?
-                    .value();
+                let ts = get_ts_as_millisecond(arg)?;
                 let start_time = start_time.map(|t| t.val()).unwrap_or(0);
                 let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
                 let window_start = start_time + (ts - start_time) / window_size * window_size;
@@ -296,14 +289,7 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let ts = arg.as_timestamp().with_context(|| TypeMismatchSnafu {
-                    expected: ConcreteDataType::timestamp_millisecond_datatype(),
-                    actual: arg.data_type(),
-                })?;
-                let ts = ts
-                    .convert_to(TimeUnit::Millisecond)
-                    .context(OverflowSnafu)?
-                    .value();
+                let ts = get_ts_as_millisecond(arg)?;
                 let start_time = start_time.map(|t| t.val()).unwrap_or(0);
                 let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
                 let window_start = start_time + (ts - start_time) / window_size * window_size;
@@ -314,6 +300,22 @@ impl UnaryFunc {
             }
         }
     }
+}
+
+fn get_ts_as_millisecond(arg: Value) -> Result<repr::Timestamp, EvalError> {
+    let ts = if let Some(ts) = arg.as_timestamp() {
+        ts.convert_to(TimeUnit::Millisecond)
+            .context(OverflowSnafu)?
+            .value()
+    } else if let Some(ts) = arg.as_datetime() {
+        ts.val()
+    } else {
+        InvalidArgumentSnafu {
+            reason: "Expect input to be timestamp or datetime type",
+        }
+        .fail()?
+    };
+    Ok(ts)
 }
 
 /// BinaryFunc is a function that takes two arguments.

@@ -223,11 +223,11 @@ mod test {
     use hydroflow::scheduled::graph::Hydroflow;
     use hydroflow::scheduled::graph_ext::GraphExt;
     use hydroflow::scheduled::handoff::VecHandoff;
+    use pretty_assertions::{assert_eq, assert_ne};
 
     use super::*;
     use crate::expr::BinaryFunc;
     use crate::repr::Row;
-
     pub fn run_and_check(
         state: &mut DataflowState,
         df: &mut Hydroflow,

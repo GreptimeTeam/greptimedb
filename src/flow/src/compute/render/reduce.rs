@@ -739,7 +739,7 @@ mod test {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use common_time::{DateTime, Interval};
+    use common_time::{DateTime, Interval, Timestamp};
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
     use hydroflow::scheduled::graph::Hydroflow;
 
@@ -770,7 +770,7 @@ mod test {
             .into_iter()
             .map(|(number, ts)| {
                 (
-                    Row::new(vec![number.into(), DateTime::new(ts).into()]),
+                    Row::new(vec![number.into(), Timestamp::new_millisecond(ts).into()]),
                     1,
                     1,
                 )
@@ -879,8 +879,8 @@ mod test {
                 (
                     Row::new(vec![
                         3u64.into(),
-                        DateTime::new(START + 1000).into(),
-                        DateTime::new(START + 2000).into(),
+                        Timestamp::new_millisecond(START + 1000).into(),
+                        Timestamp::new_millisecond(START + 2000).into(),
                     ]),
                     1,
                     1,
@@ -888,8 +888,8 @@ mod test {
                 (
                     Row::new(vec![
                         4u64.into(),
-                        DateTime::new(START + 2000).into(),
-                        DateTime::new(START + 3000).into(),
+                        Timestamp::new_millisecond(START + 2000).into(),
+                        Timestamp::new_millisecond(START + 3000).into(),
                     ]),
                     1,
                     1,
@@ -897,8 +897,8 @@ mod test {
                 (
                     Row::new(vec![
                         5u64.into(),
-                        DateTime::new(START + 3000).into(),
-                        DateTime::new(START + 4000).into(),
+                        Timestamp::new_millisecond(START + 3000).into(),
+                        Timestamp::new_millisecond(START + 4000).into(),
                     ]),
                     1,
                     1,
