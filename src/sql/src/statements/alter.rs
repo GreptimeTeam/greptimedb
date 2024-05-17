@@ -39,6 +39,10 @@ impl AlterTable {
     pub fn alter_operation(&self) -> &AlterTableOperation {
         &self.alter_operation
     }
+
+    pub fn alter_operation_mut(&mut self) -> &mut AlterTableOperation {
+        &mut self.alter_operation
+    }
 }
 
 impl Display for AlterTable {

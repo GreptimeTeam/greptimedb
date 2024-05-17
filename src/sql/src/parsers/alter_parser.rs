@@ -309,6 +309,71 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_alter_change_column_alias_type() {
+        let sql_1 = "ALTER TABLE my_metric_1 MODIFY COLUMN a MediumText";
+        let mut result_1 = ParserContext::create_with_dialect(
+            sql_1,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+
+        match result_1.remove(0) {
+            Statement::Alter(alter_table) => {
+                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::ChangeColumnType { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::ChangeColumnType {
+                        column_name,
+                        target_type,
+                    } => {
+                        assert_eq!("a", column_name.value);
+                        assert_eq!(DataType::Text, *target_type);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        let sql_2 = "ALTER TABLE my_metric_1 MODIFY COLUMN a TIMESTAMP_US";
+        let mut result_2 = ParserContext::create_with_dialect(
+            sql_2,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+
+        match result_2.remove(0) {
+            Statement::Alter(alter_table) => {
+                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::ChangeColumnType { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::ChangeColumnType {
+                        column_name,
+                        target_type,
+                    } => {
+                        assert_eq!("a", column_name.value);
+                        assert!(matches!(target_type, DataType::Timestamp(Some(6), _)));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
         let result =
