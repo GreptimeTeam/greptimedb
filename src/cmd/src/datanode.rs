@@ -266,6 +266,7 @@ impl StartCommand {
 
         let services = DatanodeServiceBuilder::new(&opts)
             .with_default_grpc_server(&datanode.region_server())
+            .context(StartDatanodeSnafu)?
             .enable_http_service()
             .build()
             .await

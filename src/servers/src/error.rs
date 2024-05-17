@@ -417,6 +417,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported gRPC compression encoding: {}", encoding))]
+    UnsupportedGrpcCompressionEncoding {
+        encoding: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build HTTP response"))]
     BuildHttpResponse {
         #[snafu(source)]
@@ -599,7 +606,9 @@ impl ErrorExt for Error {
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
 
-            UnsupportedDataType { .. } => StatusCode::Unsupported,
+            UnsupportedDataType { .. } | UnsupportedGrpcCompressionEncoding { .. } => {
+                StatusCode::Unsupported
+            }
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,

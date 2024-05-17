@@ -17,14 +17,14 @@ use std::sync::Arc;
 
 use common_config::Configurable;
 use servers::grpc::builder::GrpcServerBuilder;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{parse_grpc_compression_encoding, GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
 use snafu::ResultExt;
 
 use crate::config::DatanodeOptions;
-use crate::error::{ParseAddrSnafu, Result, TomlFormatSnafu};
+use crate::error::{ParseAddrSnafu, Result, StartServerSnafu, TomlFormatSnafu};
 use crate::region_server::RegionServer;
 
 pub struct DatanodeServiceBuilder<'a> {
@@ -49,10 +49,10 @@ impl<'a> DatanodeServiceBuilder<'a> {
         }
     }
 
-    pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Self {
-        let grpc_server = Self::grpc_server_builder(self.opts, region_server).build();
+    pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Result<Self> {
+        let grpc_server = Self::grpc_server_builder(self.opts, region_server)?.build();
         self.grpc_server = Some(grpc_server);
-        self
+        Ok(self)
     }
 
     pub fn enable_http_service(self) -> Self {
@@ -91,15 +91,17 @@ impl<'a> DatanodeServiceBuilder<'a> {
     pub fn grpc_server_builder(
         opts: &DatanodeOptions,
         region_server: &RegionServer,
-    ) -> GrpcServerBuilder {
+    ) -> Result<GrpcServerBuilder> {
+        let accept_compressed = parse_grpc_compression_encoding(&opts.rpc_accept_compressed)
+            .context(StartServerSnafu)?;
         let config = GrpcServerConfig {
             max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
-            enable_gzip_compression: opts.enable_gzip_compression,
+            accept_compressed,
         };
 
-        GrpcServerBuilder::new(config, region_server.runtime())
+        Ok(GrpcServerBuilder::new(config, region_server.runtime())
             .flight_handler(Arc::new(region_server.clone()))
-            .region_server_handler(Arc::new(region_server.clone()))
+            .region_server_handler(Arc::new(region_server.clone())))
     }
 }

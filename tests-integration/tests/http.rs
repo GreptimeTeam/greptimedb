@@ -743,7 +743,7 @@ addr = "127.0.0.1:4001"
 runtime_size = 8
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
-enable_gzip_compression = false
+accept_compressed = []
 
 [mysql]
 enable = true

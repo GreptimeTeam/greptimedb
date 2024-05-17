@@ -225,8 +225,8 @@ pub struct DatanodeOptions {
     pub rpc_max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub rpc_max_send_message_size: ReadableSize,
-    // Enable gzip compression for gRPC
-    pub enable_gzip_compression: bool,
+    // Supported compression encoding for gRPC server, e.g: gzip, zstd
+    pub rpc_accept_compressed: Vec<String>,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
@@ -252,7 +252,7 @@ impl Default for DatanodeOptions {
             rpc_runtime_size: 8,
             rpc_max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             rpc_max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-            enable_gzip_compression: false,
+            rpc_accept_compressed: vec![],
             http: HttpOptions::default(),
             meta_client: None,
             wal: DatanodeWalConfig::default(),

@@ -35,6 +35,7 @@ use tests_integration::database::Database;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
 };
+use tonic::codec::CompressionEncoding;
 
 #[macro_export]
 macro_rules! grpc_test {
@@ -131,7 +132,7 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        enable_gzip_compression: false,
+        accept_compressed: vec![],
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -150,13 +151,13 @@ pub async fn test_grpc_gzip_compression(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        enable_gzip_compression: true,
+        accept_compressed: vec![CompressionEncoding::Gzip],
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
 
     let cm = ChannelManager::with_config(ChannelConfig {
-        enable_gzip_compression: true,
+        accept_compressed: vec![CompressionEncoding::Gzip],
         ..Default::default()
     });
 
@@ -175,14 +176,14 @@ pub async fn test_grpc_wrong_compression(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        enable_gzip_compression: false,
+        accept_compressed: vec![],
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
 
     // set client compression to true
     let cm = ChannelManager::with_config(ChannelConfig {
-        enable_gzip_compression: true,
+        accept_compressed: vec![CompressionEncoding::Gzip],
         ..Default::default()
     });
 
@@ -202,7 +203,7 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 50,
-        enable_gzip_compression: false,
+        accept_compressed: vec![],
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -222,7 +223,7 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 10,
         max_send_message_size: 1024,
-        enable_gzip_compression: false,
+        accept_compressed: vec![],
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -701,7 +702,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        enable_gzip_compression: false,
+        accept_compressed: vec![],
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;

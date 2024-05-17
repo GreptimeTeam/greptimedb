@@ -35,12 +35,14 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Routes, TcpIncoming};
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
 use crate::error::{
     AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
+    UnsupportedGrpcCompressionEncodingSnafu,
 };
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::server::Server;
@@ -65,7 +67,24 @@ pub struct GrpcServerConfig {
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
     // Enable gzip compression for gRPC
-    pub enable_gzip_compression: bool,
+    pub accept_compressed: Vec<CompressionEncoding>,
+}
+
+pub fn parse_grpc_compression_encoding(
+    encodings: &Vec<String>,
+) -> Result<Vec<CompressionEncoding>> {
+    let mut result = Vec::with_capacity(encodings.len());
+    for encoding in encodings {
+        let encoding = match encoding.as_str() {
+            "gzip" => CompressionEncoding::Gzip,
+            "zstd" => CompressionEncoding::Zstd,
+            _ => {
+                return UnsupportedGrpcCompressionEncodingSnafu { encoding }.fail();
+            }
+        };
+        result.push(encoding);
+    }
+    Ok(result)
 }
 
 impl Default for GrpcServerConfig {
@@ -73,7 +92,7 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
-            enable_gzip_compression: false,
+            accept_compressed: vec![],
         }
     }
 }

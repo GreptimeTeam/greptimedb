@@ -150,8 +150,12 @@ impl Client {
             .as_bytes() as usize
     }
 
-    pub fn enable_gzip_compression(&self) -> bool {
-        self.inner.channel_manager.config().enable_gzip_compression
+    pub fn accept_compressed(&self) -> &Vec<CompressionEncoding> {
+        self.inner
+            .channel_manager
+            .config()
+            .accept_compressed
+            .as_ref()
     }
 
     pub fn make_flight_client(&self) -> Result<FlightClient> {
@@ -160,10 +164,11 @@ impl Client {
         let mut client = FlightServiceClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
             .max_encoding_message_size(self.max_grpc_send_message_size());
-        if self.enable_gzip_compression() {
+
+        for encoding in self.accept_compressed() {
             client = client
-                .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip);
+                .accept_compressed(*encoding)
+                .send_compressed(*encoding);
         }
         Ok(FlightClient { addr, client })
     }
@@ -173,10 +178,10 @@ impl Client {
         let mut client = PbRegionClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
             .max_encoding_message_size(self.max_grpc_send_message_size());
-        if self.enable_gzip_compression() {
+        for encoding in self.accept_compressed() {
             client = client
-                .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip);
+                .accept_compressed(*encoding)
+                .send_compressed(*encoding);
         }
         Ok(client)
     }

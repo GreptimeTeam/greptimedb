@@ -26,8 +26,8 @@ pub struct GrpcOptions {
     pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
-    // Enable gzip compression for gRPC
-    pub enable_gzip_compression: bool,
+    // Supported compression encoding for gRPC server, e.g: gzip, zstd
+    pub accept_compressed: Vec<String>,
 }
 
 impl Default for GrpcOptions {
@@ -37,7 +37,7 @@ impl Default for GrpcOptions {
             runtime_size: 8,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-            enable_gzip_compression: false,
+            accept_compressed: vec![],
         }
     }
 }

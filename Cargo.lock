@@ -11214,6 +11214,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "zstd 0.12.4",
 ]
 
 [[package]]

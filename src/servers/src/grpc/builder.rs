@@ -23,7 +23,6 @@ use common_runtime::Runtime;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer;
 use tokio::sync::Mutex;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::server::RoutesBuilder;
 use tower::ServiceBuilder;
 
@@ -42,7 +41,7 @@ use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 /// This macro will automatically add some gRPC properties to the service.
 #[macro_export]
 macro_rules! add_service {
-    ($builder: ident, $service: expr, $enable_gzip: expr) => {
+    ($builder: ident, $service: expr, $accept_compressed: expr) => {
         let max_recv_message_size = $builder.config().max_recv_message_size;
         let max_send_message_size = $builder.config().max_send_message_size;
 
@@ -50,10 +49,10 @@ macro_rules! add_service {
             .max_decoding_message_size(max_recv_message_size)
             .max_encoding_message_size(max_send_message_size);
 
-        if $enable_gzip {
+        for encoding in $accept_compressed {
             service_builder = service_builder
-                .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip);
+                .accept_compressed(*encoding)
+                .send_compressed(*encoding);
         }
 
         $builder.routes_builder_mut().add_service(service_builder);
@@ -88,7 +87,7 @@ impl GrpcServerBuilder {
         add_service!(
             self,
             GreptimeDatabaseServer::new(DatabaseService::new(database_handler)),
-            self.config.enable_gzip_compression
+            &self.config.accept_compressed
         );
         self
     }
@@ -105,7 +104,7 @@ impl GrpcServerBuilder {
                 prometheus_handler,
                 user_provider,
             )),
-            self.config.enable_gzip_compression
+            &self.config.accept_compressed
         );
         self
     }
@@ -115,7 +114,7 @@ impl GrpcServerBuilder {
         add_service!(
             self,
             FlightServiceServer::new(FlightCraftWrapper(flight_handler.clone())),
-            self.config.enable_gzip_compression
+            &self.config.accept_compressed
         );
         self
     }
@@ -126,7 +125,7 @@ impl GrpcServerBuilder {
         add_service!(
             self,
             RegionServer::new(handler),
-            self.config.enable_gzip_compression
+            &self.config.accept_compressed
         );
         self
     }
@@ -138,10 +137,10 @@ impl GrpcServerBuilder {
         user_provider: Option<UserProviderRef>,
     ) -> Self {
         let mut tracing_service = TraceServiceServer::new(OtlpService::new(otlp_handler.clone()));
-        if self.config.enable_gzip_compression {
+        for encoding in &self.config.accept_compressed {
             tracing_service = tracing_service
-                .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip);
+                .accept_compressed(*encoding)
+                .send_compressed(*encoding);
         }
         let trace_server = ServiceBuilder::new()
             .layer(AuthMiddlewareLayer::with(user_provider.clone()))
@@ -149,10 +148,10 @@ impl GrpcServerBuilder {
         self.routes_builder.add_service(trace_server);
 
         let mut metrics_service = MetricsServiceServer::new(OtlpService::new(otlp_handler));
-        if self.config.enable_gzip_compression {
+        for encoding in &self.config.accept_compressed {
             metrics_service = metrics_service
-                .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip);
+                .accept_compressed(*encoding)
+                .send_compressed(*encoding);
         }
         let metrics_server = ServiceBuilder::new()
             .layer(AuthMiddlewareLayer::with(user_provider))
