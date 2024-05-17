@@ -82,21 +82,19 @@ impl UnmaterializableFunc {
             "current_schema" => Ok(Self::CurrentSchema),
             "tumble" => {
                 let ts = args.first().context(InvalidQuerySnafu {
-                    reason: "Tumble window function requires a timestamp argument".to_string(),
+                    reason: "Tumble window function requires a timestamp argument",
                 })?;
                 let window_size = args
                     .get(1)
                     .and_then(|expr| expr.expr.as_literal())
                     .context(InvalidQuerySnafu {
                         reason: "Tumble window function requires a window size argument"
-                            .to_string(),
                     })?.as_string()// TODO(discord9): since df to substrait convertor does not support interval type yet, we need to take a string and cast it to interval instead
                     .map(|s|cast(Value::from(s), &ConcreteDataType::interval_month_day_nano_datatype())).transpose().map_err(BoxedError::new).context(
                         ExternalSnafu
                     )?.and_then(|v|v.as_interval())
                     .with_context(||InvalidQuerySnafu {
                         reason: format!("Tumble window function requires window size argument to be a string describe a interval, found {:?}", args.get(1))
-                            .to_string(),
                     })?;
                 let start_time = match args.get(2) {
                     Some(start_time) => start_time.expr.as_literal(),

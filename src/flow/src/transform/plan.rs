@@ -203,7 +203,6 @@ impl TypedPlan {
                                 &input.typ,
                                 &mut exprs,
                             )?;
-                            dbg!(&exprs);
                         }
                         Plan::Mfp { input, mfp: _ } => {
                             if let Plan::Reduce {

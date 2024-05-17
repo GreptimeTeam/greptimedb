@@ -389,7 +389,6 @@ impl TypedPlan {
         };
         // FIX(discord9): deal with key first
         if post_mfp.is_identity() {
-            dbg!("simple path");
             Ok(TypedPlan {
                 typ: output_type,
                 plan,

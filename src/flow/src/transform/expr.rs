@@ -177,7 +177,6 @@ impl TypedExpr {
                     Ok(TypedExpr::new(expr, ret_type))
                 } else if let Ok(func) =
                     UnmaterializableFunc::from_str_args(fn_name, arg_typed_exprs)
-                        .map_err(|e| dbg!(e))
                 {
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     Ok(TypedExpr::new(
