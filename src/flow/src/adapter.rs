@@ -307,8 +307,7 @@ impl FlownodeManager {
                         })
                         .unwrap_or_default();
                     let ts_col =
-                        ColumnSchema::new("update_at", ConcreteDataType::datetime_datatype(), true)
-                            .with_time_index(true);
+                        ColumnSchema::new("update_at", ConcreteDataType::datetime_datatype(), true);
 
                     let wout_ts = schema
                         .column_types
