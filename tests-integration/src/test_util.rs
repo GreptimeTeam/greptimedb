@@ -25,9 +25,11 @@ use common_base::secrets::ExposeSecret;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_query::OutputData;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::warn;
 use common_test_util::ports;
+use common_test_util::recordbatch::{check_output_stream, ExpectedOutput};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{
@@ -54,6 +56,7 @@ use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
 
+use crate::database::Database;
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
@@ -684,4 +687,20 @@ where
         .collect::<Vec<_>>();
 
     test(endpoints).await
+}
+
+pub async fn execute_and_check_output(db: &Database, sql: &str, expected: ExpectedOutput<'_>) {
+    let output = db.sql(sql).await.unwrap();
+    let output = output.data;
+
+    match (&output, expected) {
+        (OutputData::AffectedRows(x), ExpectedOutput::AffectedRows(y)) => {
+            assert_eq!(*x, y, "actual: \n{}", x)
+        }
+        (OutputData::RecordBatches(_), ExpectedOutput::QueryResult(x))
+        | (OutputData::Stream(_), ExpectedOutput::QueryResult(x)) => {
+            check_output_stream(output, x).await
+        }
+        _ => panic!(),
+    }
 }

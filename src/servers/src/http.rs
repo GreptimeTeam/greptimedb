@@ -842,6 +842,13 @@ impl Server for HttpServer {
             let app = self.build(app);
             let server = axum::Server::bind(&listening)
                 .tcp_nodelay(true)
+                // Enable TCP keepalive to close the dangling established connections.
+                // It's configured to let the keepalive probes first send after the connection sits
+                // idle for 59 minutes, and then send every 10 seconds for 6 times.
+                // So the connection will be closed after roughly 1 hour.
+                .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
+                .tcp_keepalive_interval(Some(Duration::from_secs(10)))
+                .tcp_keepalive_retries(Some(6))
                 .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
