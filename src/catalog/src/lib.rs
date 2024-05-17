@@ -32,6 +32,7 @@ pub mod information_schema;
 pub mod kvbackend;
 pub mod memory;
 mod metrics;
+pub mod pg_catalog;
 pub mod table_source;
 
 #[async_trait::async_trait]

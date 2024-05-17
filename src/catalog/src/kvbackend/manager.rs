@@ -19,6 +19,7 @@ use std::sync::{Arc, Weak};
 use async_stream::try_stream;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
+    PG_CATALOG_NAME,
 };
 use common_config::Mode;
 use common_error::ext::BoxedError;
@@ -46,6 +47,7 @@ use crate::error::{
 };
 use crate::information_schema::InformationSchemaProvider;
 use crate::kvbackend::TableCacheRef;
+use crate::pg_catalog::PGCatalogProvider;
 use crate::CatalogManager;
 
 /// Access all existing catalog, schema and tables.
@@ -87,6 +89,10 @@ impl KvBackendCatalogManager {
                 catalog_manager: me.clone(),
                 catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
                 information_schema_provider: Arc::new(InformationSchemaProvider::new(
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    me.clone(),
+                )),
+                pg_catalog_provider: Arc::new(PGCatalogProvider::new(
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
@@ -295,30 +301,37 @@ fn build_table(table_info_value: TableInfoValue) -> Result<TableRef> {
 /// Existing system tables:
 /// - public.numbers
 /// - information_schema.{tables}
+/// - pg_catalog.{tables}
 #[derive(Clone)]
 struct SystemCatalog {
     catalog_manager: Weak<KvBackendCatalogManager>,
     catalog_cache: Cache<String, Arc<InformationSchemaProvider>>,
     information_schema_provider: Arc<InformationSchemaProvider>,
+    pg_catalog_provider: Arc<PGCatalogProvider>,
 }
 
 impl SystemCatalog {
+    // TODO(j0hn50n133): remove the duplicated hard-coded table names logic
     fn schema_names(&self) -> Vec<String> {
-        vec![INFORMATION_SCHEMA_NAME.to_string()]
+        vec![
+            INFORMATION_SCHEMA_NAME.to_string(),
+            PG_CATALOG_NAME.to_string(),
+        ]
     }
 
     fn table_names(&self, schema: &str) -> Vec<String> {
-        if schema == INFORMATION_SCHEMA_NAME {
-            self.information_schema_provider.table_names()
-        } else if schema == DEFAULT_SCHEMA_NAME {
-            vec![NUMBERS_TABLE_NAME.to_string()]
-        } else {
-            vec![]
+        match schema {
+            INFORMATION_SCHEMA_NAME => self.information_schema_provider.table_names(),
+            PG_CATALOG_NAME => self.pg_catalog_provider.table_names(),
+            DEFAULT_SCHEMA_NAME => {
+                vec![NUMBERS_TABLE_NAME.to_string()]
+            }
+            _ => vec![],
         }
     }
 
     fn schema_exists(&self, schema: &str) -> bool {
-        schema == INFORMATION_SCHEMA_NAME
+        schema == INFORMATION_SCHEMA_NAME || schema == PG_CATALOG_NAME
     }
 
     fn table_exists(&self, schema: &str, table: &str) -> bool {
@@ -326,6 +339,8 @@ impl SystemCatalog {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
             table == NUMBERS_TABLE_NAME
+        } else if schema == PG_CATALOG_NAME {
+            self.pg_catalog_provider.table(table).is_some()
         } else {
             false
         }

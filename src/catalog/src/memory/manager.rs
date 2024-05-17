@@ -20,7 +20,8 @@ use std::sync::{Arc, RwLock, Weak};
 use async_stream::{stream, try_stream};
 use common_catalog::build_db_string;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
+    INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use futures_util::stream::BoxStream;
 use snafu::OptionExt;
@@ -176,6 +177,12 @@ impl MemoryCatalogManager {
         manager
             .register_schema_sync(RegisterSchemaRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: PG_CATALOG_NAME.to_string(),
+            })
+            .unwrap();
+        manager
+            .register_schema_sync(RegisterSchemaRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: INFORMATION_SCHEMA_NAME.to_string(),
             })
             .unwrap();
@@ -196,7 +203,7 @@ impl MemoryCatalogManager {
     }
 
     fn catalog_exist_sync(&self, catalog: &str) -> Result<bool> {
-        Ok(self.catalogs.read().unwrap().get(catalog).is_some())
+        Ok(self.catalogs.read().unwrap().contains_key(catalog))
     }
 
     /// Registers a catalog if it does not exist and returns false if the schema exists.
