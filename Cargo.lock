@@ -2043,7 +2043,7 @@ dependencies = [
  "datatypes",
  "serde",
  "snafu 0.8.2",
- "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "sqlparser_derive 0.1.1",
  "statrs",
  "tokio",
@@ -3947,7 +3947,7 @@ dependencies = [
  "session",
  "snafu 0.8.2",
  "sql",
- "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "store-api",
  "strfmt",
  "table",
@@ -6670,7 +6670,7 @@ dependencies = [
  "session",
  "snafu 0.8.2",
  "sql",
- "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "store-api",
  "substrait 0.7.2",
  "table",
@@ -6932,7 +6932,7 @@ dependencies = [
  "serde_json",
  "snafu 0.8.2",
  "sql",
- "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "store-api",
  "table",
 ]
@@ -9903,7 +9903,7 @@ dependencies = [
  "lazy_static",
  "regex",
  "snafu 0.8.2",
- "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "sqlparser_derive 0.1.1",
  "table",
 ]
@@ -9967,13 +9967,13 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.44.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0#c919990bf62ad38d2b0c0a3bc90b26ad919d51b0"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d#e4e496b8d62416ad50ce70a1b460c7313610cf5d"
 dependencies = [
  "lazy_static",
  "log",
  "regex",
  "sqlparser 0.44.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlparser_derive 0.2.2 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser_derive 0.2.2 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
 ]
 
 [[package]]
@@ -10001,7 +10001,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.2.2"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0#c919990bf62ad38d2b0c0a3bc90b26ad919d51b0"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d#e4e496b8d62416ad50ce70a1b460c7313610cf5d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10645,7 +10645,7 @@ dependencies = [
  "serde_json",
  "snafu 0.8.2",
  "sql",
- "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=c919990bf62ad38d2b0c0a3bc90b26ad919d51b0)",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "sqlx",
  "tinytemplate",
  "tokio",
