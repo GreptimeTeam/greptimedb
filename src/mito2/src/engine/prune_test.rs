@@ -26,7 +26,7 @@ use crate::test_util::{
     build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };
 
-async fn check_prune_row_groups(expr: Expr, expected: &str) {
+async fn check_prune_row_groups(exprs: Vec<Expr>, expected: &str) {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -55,7 +55,7 @@ async fn check_prune_row_groups(expr: Expr, expected: &str) {
         .scan_to_stream(
             region_id,
             ScanRequest {
-                filters: vec![expr],
+                filters: exprs,
                 ..Default::default()
             },
         )
@@ -70,7 +70,9 @@ async fn test_read_parquet_stats() {
     common_telemetry::init_default_ut_logging();
 
     check_prune_row_groups(
-        datafusion_expr::col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(4000), None))),
+        vec![
+            datafusion_expr::col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(4000), None)))
+        ],
         "\
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
@@ -94,7 +96,7 @@ async fn test_read_parquet_stats() {
 async fn test_prune_tag() {
     // prune result: only row group 1&2
     check_prune_row_groups(
-        datafusion_expr::col("tag_0").gt(lit(ScalarValue::Utf8(Some("4".to_string())))),
+        vec![datafusion_expr::col("tag_0").gt(lit(ScalarValue::Utf8(Some("4".to_string()))))],
         "\
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
@@ -114,9 +116,10 @@ async fn test_prune_tag_and_field() {
     common_telemetry::init_default_ut_logging();
     // prune result: only row group 1
     check_prune_row_groups(
-        col("tag_0")
-            .gt(lit(ScalarValue::Utf8(Some("4".to_string()))))
-            .and(col("field_0").lt(lit(8.0))),
+        vec![
+            col("tag_0").gt(lit(ScalarValue::Utf8(Some("4".to_string())))),
+            col("field_0").lt(lit(8.0)),
+        ],
         "\
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
@@ -124,8 +127,6 @@ async fn test_prune_tag_and_field() {
 | 5     | 5.0     | 1970-01-01T00:00:05 |
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 | 7     | 7.0     | 1970-01-01T00:00:07 |
-| 8     | 8.0     | 1970-01-01T00:00:08 |
-| 9     | 9.0     | 1970-01-01T00:00:09 |
 +-------+---------+---------------------+",
     )
     .await;

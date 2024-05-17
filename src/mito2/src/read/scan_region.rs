@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use store_api::region_engine::{RegionScannerRef, SinglePartitionScanner};
 use store_api::storage::ScanRequest;
@@ -278,6 +278,7 @@ impl ScanRegion {
         );
 
         let index_applier = self.build_index_applier();
+        info!("Request filters: {:?}", self.request.filters);
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -308,7 +309,11 @@ impl ScanRegion {
             .as_timestamp()
             .expect("Time index must have timestamp-compatible type")
             .unit();
-        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
+        build_time_range_predicate(
+            &time_index.column_schema.name,
+            unit,
+            &mut self.request.filters,
+        )
     }
 
     /// Use the latest schema to build the index applier.

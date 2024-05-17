@@ -135,16 +135,19 @@ impl Predicate {
 pub fn build_time_range_predicate<'a>(
     ts_col_name: &'a str,
     ts_col_unit: TimeUnit,
-    filters: &'a [Expr],
+    filters: &'a mut Vec<Expr>,
 ) -> TimestampRange {
     let mut res = TimestampRange::min_to_max();
-
-    for expr in filters {
+    let mut filters_remain = vec![];
+    for expr in std::mem::take(filters) {
         if let Some(range) = extract_time_range_from_expr(ts_col_name, ts_col_unit, expr.df_expr())
         {
             res = res.and(&range);
+        } else {
+            filters_remain.push(expr);
         }
     }
+    *filters = filters_remain;
     res
 }
 
@@ -391,7 +394,7 @@ mod tests {
     fn check_build_predicate(expr: Expr, expect: TimestampRange) {
         assert_eq!(
             expect,
-            build_time_range_predicate("ts", TimeUnit::Millisecond, &[Expr::from(expr)])
+            build_time_range_predicate("ts", TimeUnit::Millisecond, &mut vec![Expr::from(expr)])
         );
     }
 
