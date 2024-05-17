@@ -30,7 +30,7 @@ rpc_max_recv_message_size = "512MB"
 rpc_max_send_message_size = "512MB"
 
 ## Supported compression encoding for gRPC server, e.g: gzip, zstd.
-rpc_accept_compressed = []
+rpc_accept_compressed = ["gzip"]
 
 ## Enable telemetry to collect anonymous usage data.
 enable_telemetry = true
