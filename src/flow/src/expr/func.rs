@@ -19,7 +19,8 @@ use std::sync::OnceLock;
 
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
-use common_time::DateTime;
+use common_time::timestamp::TimeUnit;
+use common_time::{DateTime, Timestamp};
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
@@ -33,8 +34,8 @@ use substrait::df_logical_plan::consumer::name_to_op;
 
 use crate::adapter::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
-    CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, TryFromValueSnafu,
-    TypeMismatchSnafu,
+    CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, OverflowSnafu,
+    TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
 use crate::expr::{InvalidArgumentSnafu, ScalarExpr, TypedExpr};
@@ -170,13 +171,13 @@ impl UnaryFunc {
                 generic_fn: GenericFn::Cast,
             },
             Self::TumbleWindowFloor { .. } => Signature {
-                input: smallvec![ConcreteDataType::datetime_datatype()],
-                output: ConcreteDataType::datetime_datatype(),
+                input: smallvec![ConcreteDataType::timestamp_millisecond_datatype()],
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::TumbleWindow,
             },
             Self::TumbleWindowCeiling { .. } => Signature {
-                input: smallvec![ConcreteDataType::datetime_datatype()],
-                output: ConcreteDataType::datetime_datatype(),
+                input: smallvec![ConcreteDataType::timestamp_millisecond_datatype()],
+                output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::TumbleWindow,
             },
         }
@@ -276,33 +277,39 @@ impl UnaryFunc {
                 window_size,
                 start_time,
             } => {
-                let ts = arg.as_datetime().with_context(|| TypeMismatchSnafu {
-                    expected: ConcreteDataType::datetime_datatype(),
+                let ts = arg.as_timestamp().with_context(|| TypeMismatchSnafu {
+                    expected: ConcreteDataType::timestamp_millisecond_datatype(),
                     actual: arg.data_type(),
                 })?;
-                let ts = ts.val();
+                let ts = ts
+                    .convert_to(TimeUnit::Millisecond)
+                    .context(OverflowSnafu)?
+                    .value();
                 let start_time = start_time.map(|t| t.val()).unwrap_or(0);
                 let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
                 let window_start = start_time + (ts - start_time) / window_size * window_size;
 
-                let ret = DateTime::new(window_start);
+                let ret = Timestamp::new_millisecond(window_start);
                 Ok(Value::from(ret))
             }
             Self::TumbleWindowCeiling {
                 window_size,
                 start_time,
             } => {
-                let ts = arg.as_datetime().with_context(|| TypeMismatchSnafu {
-                    expected: ConcreteDataType::datetime_datatype(),
+                let ts = arg.as_timestamp().with_context(|| TypeMismatchSnafu {
+                    expected: ConcreteDataType::timestamp_millisecond_datatype(),
                     actual: arg.data_type(),
                 })?;
-                let ts = ts.val();
+                let ts = ts
+                    .convert_to(TimeUnit::Millisecond)
+                    .context(OverflowSnafu)?
+                    .value();
                 let start_time = start_time.map(|t| t.val()).unwrap_or(0);
                 let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
                 let window_start = start_time + (ts - start_time) / window_size * window_size;
 
                 let window_end = window_start + window_size;
-                let ret = DateTime::new(window_end);
+                let ret = Timestamp::new_millisecond(window_end);
                 Ok(Value::from(ret))
             }
         }
