@@ -262,7 +262,7 @@ pub struct ChannelConfig {
     pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
-    // Enable gzip compression for gRPC
+    // Supported compression encoding for gRPC, e.g: gzip, zstd.
     pub accept_compressed: Vec<CompressionEncoding>,
 }
 

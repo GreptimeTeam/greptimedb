@@ -66,7 +66,7 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
-    // Enable gzip compression for gRPC
+    // Supported compression encoding for gRPC, e.g: gzip, zstd.
     pub accept_compressed: Vec<CompressionEncoding>,
 }
 
@@ -75,7 +75,7 @@ pub fn parse_grpc_compression_encoding(
 ) -> Result<Vec<CompressionEncoding>> {
     let mut result = Vec::with_capacity(encodings.len());
     for encoding in encodings {
-        let encoding = match encoding.as_str() {
+        let encoding = match encoding.to_lowercase().as_str() {
             "gzip" => CompressionEncoding::Gzip,
             "zstd" => CompressionEncoding::Zstd,
             _ => {
@@ -228,7 +228,7 @@ mod tests {
         let result = super::parse_grpc_compression_encoding(&encodings).unwrap();
         assert_eq!(result.len(), 0);
 
-        let encodings = vec!["gzip".to_string(), "zstd".to_string()];
+        let encodings = vec!["gzip".to_string(), "ZSTD".to_string()];
         let result = super::parse_grpc_compression_encoding(&encodings).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], tonic::codec::CompressionEncoding::Gzip);
