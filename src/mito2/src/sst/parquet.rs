@@ -88,10 +88,7 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
-    use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
-    use parquet::schema::types::ColumnPath;
-    use store_api::metadata::RegionMetadataRef;
-    use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+    use parquet::file::properties::WriterProperties;
     use table::predicate::Predicate;
 
     use super::*;
@@ -103,7 +100,7 @@ mod tests {
     use crate::sst::DEFAULT_WRITE_CONCURRENCY;
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
-        new_batch_with_large_binary, new_source, sst_file_handle, sst_region_metadata,
+        new_batch_with_binary, new_source, sst_file_handle, sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
 
@@ -412,24 +409,6 @@ mod tests {
         check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
     }
 
-    fn customize_column_config(
-        builder: WriterPropertiesBuilder,
-        region_metadata: &RegionMetadataRef,
-    ) -> WriterPropertiesBuilder {
-        let ts_col = ColumnPath::new(vec![region_metadata
-            .time_index_column()
-            .column_schema
-            .name
-            .clone()]);
-        let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
-
-        builder
-            .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(seq_col, false)
-            .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(ts_col, false)
-    }
-
     #[tokio::test]
     async fn test_read_large_binary() {
         let mut env = TestEnv::new();
@@ -452,10 +431,9 @@ mod tests {
             .set_encoding(Encoding::PLAIN)
             .set_max_row_group_size(write_opts.row_group_size);
 
-        let props_builder = customize_column_config(props_builder, &metadata);
         let writer_props = props_builder.build();
 
-        let write_format = WriteFormat::new(metadata.clone());
+        let write_format = WriteFormat::new(metadata);
         let fields: Vec<_> = write_format
             .arrow_schema()
             .fields()
@@ -474,12 +452,8 @@ mod tests {
 
         // Ensures field_0 has LargeBinary type.
         assert_eq!(
-            DataType::LargeBinary,
-            arrow_schema
-                .field_with_name("field_0")
-                .unwrap()
-                .data_type()
-                .clone()
+            &DataType::LargeBinary,
+            arrow_schema.field_with_name("field_0").unwrap().data_type()
         );
         let mut buffered_writer = BufferedWriter::try_new(
             file_path.clone(),
@@ -492,7 +466,7 @@ mod tests {
         .await
         .unwrap();
 
-        let batch = new_batch_with_large_binary(&["a"], 0, 60);
+        let batch = new_batch_with_binary(&["a"], 0, 60);
         let arrow_batch = write_format.convert_batch(&batch).unwrap();
         let arrays: Vec<_> = arrow_batch
             .columns()
@@ -516,8 +490,8 @@ mod tests {
         check_reader_result(
             &mut reader,
             &[
-                new_batch_with_large_binary(&["a"], 0, 50),
-                new_batch_with_large_binary(&["a"], 50, 60),
+                new_batch_with_binary(&["a"], 0, 50),
+                new_batch_with_binary(&["a"], 50, 60),
             ],
         )
         .await;

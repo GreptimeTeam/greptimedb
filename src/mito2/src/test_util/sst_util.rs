@@ -18,9 +18,7 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
-use datatypes::arrow::array::{
-    LargeBinaryArray, TimestampMillisecondArray, UInt64Array, UInt8Array,
-};
+use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::ValueRef;
@@ -133,7 +131,7 @@ pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
         .unwrap()
 }
 
-pub fn new_batch_with_large_binary(tags: &[&str], start: usize, end: usize) -> Batch {
+pub fn new_batch_with_binary(tags: &[&str], start: usize, end: usize) -> Batch {
     assert!(end >= start);
     let pk = new_primary_key(tags);
     let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
@@ -158,7 +156,7 @@ pub fn new_batch_with_large_binary(tags: &[&str], start: usize, end: usize) -> B
             op_types.iter().map(|v| *v as u8),
         )))
         .unwrap()
-        .push_field_array(1, Arc::new(LargeBinaryArray::from_iter_values(field)))
+        .push_field_array(1, Arc::new(BinaryArray::from_iter_values(field)))
         .unwrap();
     builder.build().unwrap()
 }
