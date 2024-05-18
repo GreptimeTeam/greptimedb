@@ -15,15 +15,16 @@
 //! For single-thread flow worker
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use enum_as_inner::EnumAsInner;
 use hydroflow::scheduled::graph::Hydroflow;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, OptionExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::adapter::error::{Error, EvalSnafu, FlowAlreadyExistSnafu, InternalSnafu};
+use crate::adapter::error::{Error, FlowAlreadyExistSnafu, InternalSnafu, UnexpectedSnafu};
 use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};
 use crate::expr::GlobalId;
@@ -39,6 +40,7 @@ pub fn create_worker<'a>() -> (WorkerHandle, Worker<'a>) {
     let (itc_client, itc_server) = create_inter_thread_call();
     let worker_handle = WorkerHandle {
         itc_client: Mutex::new(itc_client),
+        shutdown: AtomicBool::new(false),
     };
     let worker = Worker {
         task_states: BTreeMap::new(),
@@ -105,6 +107,7 @@ impl<'subgraph> ActiveDataflowState<'subgraph> {
 #[derive(Debug)]
 pub struct WorkerHandle {
     itc_client: Mutex<InterThreadCallClient>,
+    shutdown: AtomicBool,
 }
 
 impl WorkerHandle {
@@ -123,7 +126,7 @@ impl WorkerHandle {
             .itc_client
             .lock()
             .await
-            .call_blocking(create_reqs)
+            .call_with_resp(create_reqs)
             .await?;
         ret.into_create().map_err(|ret| {
             InternalSnafu {
@@ -138,7 +141,7 @@ impl WorkerHandle {
     /// remove task, return task id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<bool, Error> {
         let req = Request::Remove { flow_id };
-        let ret = self.itc_client.lock().await.call_blocking(req).await?;
+        let ret = self.itc_client.lock().await.call_with_resp(req).await?;
 
         ret.into_remove().map_err(|ret| {
             InternalSnafu {
@@ -151,17 +154,18 @@ impl WorkerHandle {
     /// trigger running the worker, will not block, and will run the worker parallelly
     ///
     /// will set the current timestamp to `now` for all dataflows before running them
+    ///
+    /// the returned error is unrecoverable, and the worker should be shutdown/rebooted
     pub async fn run_available(&self, now: repr::Timestamp) -> Result<(), Error> {
         self.itc_client
             .lock()
             .await
-            .call_non_blocking(Request::RunAvail { now })
-            .await
+            .call_no_resp(Request::RunAvail { now })
     }
 
     pub async fn contains_flow(&self, flow_id: FlowId) -> Result<bool, Error> {
         let req = Request::ContainTask { flow_id };
-        let ret = self.itc_client.lock().await.call_blocking(req).await?;
+        let ret = self.itc_client.lock().await.call_with_resp(req).await?;
 
         ret.into_contain_task().map_err(|ret| {
             InternalSnafu {
@@ -175,11 +179,37 @@ impl WorkerHandle {
 
     /// shutdown the worker
     pub async fn shutdown(&self) -> Result<(), Error> {
-        self.itc_client
-            .lock()
-            .await
-            .call_non_blocking(Request::Shutdown)
-            .await
+        if !self.shutdown.fetch_or(true, Ordering::SeqCst) {
+            self.itc_client.lock().await.call_no_resp(Request::Shutdown)
+        } else {
+            UnexpectedSnafu {
+                reason: "Worker already shutdown",
+            }
+            .fail()
+        }
+    }
+
+    /// shutdown the worker
+    pub fn shutdown_blocking(&self) -> Result<(), Error> {
+        if !self.shutdown.fetch_or(true, Ordering::SeqCst) {
+            self.itc_client
+                .blocking_lock()
+                .call_no_resp(Request::Shutdown)
+        } else {
+            UnexpectedSnafu {
+                reason: "Worker already shutdown",
+            }
+            .fail()
+        }
+    }
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        if let Err(err) = self.shutdown_blocking() {
+            common_telemetry::error!("Fail to shutdown worker: {:?}", err)
+        }
+        info!("Flow Worker shutdown due to Worker Handle dropped.")
     }
 }
 
@@ -206,7 +236,6 @@ impl<'s> Worker<'s> {
         create_if_not_exist: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
-        let _ = expire_when;
         let already_exist = self.task_states.contains_key(&flow_id);
         match (already_exist, create_if_not_exist) {
             (true, true) => return Ok(None),
@@ -218,6 +247,7 @@ impl<'s> Worker<'s> {
             err_collector,
             ..Default::default()
         };
+        cur_task_state.state.set_expire_after(expire_when);
 
         {
             let mut ctx = cur_task_state.new_ctx(sink_id);
@@ -393,7 +423,7 @@ struct InterThreadCallClient {
 
 impl InterThreadCallClient {
     /// call without expecting responses or blocking
-    async fn call_non_blocking(&self, req: Request) -> Result<(), Error> {
+    fn call_no_resp(&self, req: Request) -> Result<(), Error> {
         // TODO(discord9): relax memory order later
         let call_id = self.call_id.fetch_add(1, Ordering::SeqCst);
         self.arg_sender
@@ -402,7 +432,7 @@ impl InterThreadCallClient {
     }
 
     /// call blocking, and return the result
-    async fn call_blocking(&mut self, req: Request) -> Result<Response, Error> {
+    async fn call_with_resp(&mut self, req: Request) -> Result<Response, Error> {
         // TODO(discord9): relax memory order later
         let call_id = self.call_id.fetch_add(1, Ordering::SeqCst);
         self.arg_sender

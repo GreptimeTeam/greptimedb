@@ -516,6 +516,7 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
+    use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
@@ -528,7 +529,7 @@ mod tests {
         let txn = mgr
             .build_create_txn(
                 1028,
-                "mock",
+                MITO_ENGINE_NAME,
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
                 HashMap::default(),
@@ -542,8 +543,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_initialize_region_server() {
+        common_telemetry::init_default_ut_logging();
         let mut mock_region_server = mock_region_server();
-        let (mock_region, mut mock_region_handler) = MockRegionEngine::new();
+        let (mock_region, mut mock_region_handler) = MockRegionEngine::new(MITO_ENGINE_NAME);
 
         mock_region_server.register_engine(mock_region.clone());
 

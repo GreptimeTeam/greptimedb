@@ -18,53 +18,53 @@ use std::sync::Arc;
 
 use common_telemetry::error;
 
-use crate::pubsub::{Message, SubscribeManager, Transport, UnSubRequest};
+use crate::pubsub::{Message, SubscriptionManager, Transport, UnsubscribeRequest};
 
-/// This trait provides a `send_msg` method that can be used by other modules
+/// This trait provides a `publish` method that can be used by other modules
 /// of meta to publish [Message].
 #[async_trait::async_trait]
-pub trait Publish: Send + Sync {
-    async fn send_msg(&self, message: Message);
+pub trait Publisher: Send + Sync {
+    async fn publish(&self, message: Message);
 }
 
-pub type PublishRef = Arc<dyn Publish>;
+pub type PublisherRef = Arc<dyn Publisher>;
 
-/// The default implementation of [Publish]
-pub struct DefaultPublish<M, T> {
-    subscribe_manager: Arc<M>,
+/// The default implementation of [Publisher]
+pub struct DefaultPublisher<M, T> {
+    subscription_manager: Arc<M>,
     _transport: PhantomData<T>,
 }
 
-impl<M, T> DefaultPublish<M, T> {
-    pub fn new(subscribe_manager: Arc<M>) -> Self {
+impl<M, T> DefaultPublisher<M, T> {
+    pub fn new(subscription_manager: Arc<M>) -> Self {
         Self {
-            subscribe_manager,
+            subscription_manager,
             _transport: PhantomData,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<M, T> Publish for DefaultPublish<M, T>
+impl<M, T> Publisher for DefaultPublisher<M, T>
 where
-    M: SubscribeManager<T>,
+    M: SubscriptionManager<T>,
     T: Transport + Debug,
 {
-    async fn send_msg(&self, message: Message) {
-        let sub_list = self
-            .subscribe_manager
+    async fn publish(&self, message: Message) {
+        let subscribers = self
+            .subscription_manager
             .subscribers_by_topic(&message.topic());
 
-        for sub in sub_list {
-            if sub.transport_msg(message.clone()).await.is_err() {
+        for subscriber in subscribers {
+            if subscriber.transport_msg(message.clone()).await.is_err() {
                 // If an error occurs, we consider the subscriber offline,
                 // so un_subscribe here.
-                let req = UnSubRequest {
-                    subscriber_id: sub.id(),
+                let req = UnsubscribeRequest {
+                    subscriber_id: subscriber.id(),
                 };
 
-                if let Err(e) = self.subscribe_manager.un_subscribe(req.clone()) {
-                    error!(e; "failed to un_subscribe, req: {:?}", req);
+                if let Err(e) = self.subscription_manager.unsubscribe(req.clone()) {
+                    error!(e; "failed to unsubscribe, req: {:?}", req);
                 }
             }
         }

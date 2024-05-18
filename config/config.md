@@ -1,5 +1,11 @@
 # Configurations
 
+- [Standalone Mode](#standalone-mode)
+- [Distributed Mode](#distributed-mode)
+    - [Frontend](#frontend)
+    - [Metasrv](#metasrv)
+    - [Datanode](#datanode)
+
 ## Standalone Mode
 
 | Key | Type | Default | Descriptions |
@@ -131,7 +137,7 @@
 | `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
 
 
-## Cluster Mode
+## Distributed Mode
 
 ### Frontend
 
@@ -186,7 +192,6 @@
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
-| `datanode.client.timeout` | String | `10s` | -- |
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `logging` | -- | -- | The logging options. |

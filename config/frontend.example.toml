@@ -136,7 +136,6 @@ metadata_cache_tti = "5m"
 [datanode]
 ## Datanode client options.
 [datanode.client]
-timeout = "10s"
 connect_timeout = "10s"
 tcp_nodelay = true
 

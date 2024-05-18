@@ -39,6 +39,8 @@ pub const DATA_REGION_SUBDIR: &str = "data";
 
 pub const METRIC_ENGINE_NAME: &str = "metric";
 
+pub const FILE_ENGINE_NAME: &str = "file";
+
 /// Metadata key present in the `CREATE TABLE ... WITH ()` clause. This key is
 /// used to identify the table is a physical metric table. E.g.:
 /// ```sql
@@ -70,3 +72,13 @@ pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
 /// HashMap key to be used in the region server's extension response.
 /// Represent a list of column metadata that are added to physical table.
 pub const ALTER_PHYSICAL_EXTENSION_KEY: &str = "ALTER_PHYSICAL";
+
+/// Returns true if it's a internal column of the metric engine.
+pub fn is_metric_engine_internal_column(name: &str) -> bool {
+    name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || name == DATA_SCHEMA_TSID_COLUMN_NAME
+}
+
+/// Returns true if it's metric engine
+pub fn is_metric_engine(name: &str) -> bool {
+    name == METRIC_ENGINE_NAME
+}

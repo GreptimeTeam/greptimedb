@@ -64,6 +64,10 @@ impl App for Instance {
         self.tool.do_work().await
     }
 
+    fn wait_signal(&self) -> bool {
+        false
+    }
+
     async fn stop(&self) -> Result<()> {
         Ok(())
     }

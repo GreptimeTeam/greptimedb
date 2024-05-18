@@ -23,6 +23,7 @@ use arrow_schema::DECIMAL_DEFAULT_SCALE;
 use common_decimal::decimal128::DECIMAL128_MAX_PRECISION;
 use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
+use enum_dispatch::enum_dispatch;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +42,7 @@ use crate::value::Value;
 use crate::vectors::MutableVector;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[enum_dispatch::enum_dispatch(DataType)]
+#[enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
     Boolean(BooleanType),

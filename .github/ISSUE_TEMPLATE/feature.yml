@@ -1,7 +1,7 @@
 ---
-name: Feature request
+name: New Feature
 description: Suggest a new feature for GreptimeDB
-labels: [ "feature request" ]
+labels: [ "C-feature" ]
 body:
   - type: markdown
     id: info

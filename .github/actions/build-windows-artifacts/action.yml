@@ -59,6 +59,9 @@ runs:
       if: ${{ inputs.disable-run-tests == 'false' }}
       shell: pwsh
       run: make test sqlness-test
+      env:
+        RUSTUP_WINDOWS_PATH_ADD_BIN: 1 # Workaround for https://github.com/nextest-rs/nextest/issues/1493
+        RUST_BACKTRACE: 1
 
     - name: Upload sqlness logs
       if: ${{ failure() }} # Only upload logs when the integration tests failed.

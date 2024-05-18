@@ -104,17 +104,19 @@ impl<'a> ParserContext<'a> {
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
                 let _consume_lparen_token = parser.next_token();
-                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-                let delimiter_token = Self::find_next_delimiter_token(parser);
-                let (step, lookback) = if Self::is_comma(&delimiter_token) {
-                    let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-                    let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
-                    (step, lookback)
+                let start = Self::parse_string_or_number_or_word(parser, &[Token::Comma])?.0;
+                let end = Self::parse_string_or_number_or_word(parser, &[Token::Comma])?.0;
+
+                let (step, delimiter) =
+                    Self::parse_string_or_number_or_word(parser, &[Token::Comma, Token::RParen])?;
+                let lookback = if delimiter == Token::Comma {
+                    Self::parse_string_or_number_or_word(parser, &[Token::RParen])
+                        .ok()
+                        .map(|t| t.0)
                 } else {
-                    let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
-                    (step, None)
+                    None
                 };
+
                 (start, end, step, lookback)
             }
             _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
@@ -123,22 +125,8 @@ impl<'a> ParserContext<'a> {
         Ok(TqlParameters::new(start, end, step, lookback, query))
     }
 
-    fn find_next_delimiter_token(parser: &mut Parser) -> Token {
-        let mut n: usize = 0;
-        while !(Self::is_comma(&parser.peek_nth_token(n).token)
-            || Self::is_rparen(&parser.peek_nth_token(n).token))
-        {
-            n += 1;
-        }
-        parser.peek_nth_token(n).token
-    }
-
-    pub fn is_delimiter_token(token: &Token, delimiter_token: &Token) -> bool {
-        match token {
-            Token::Comma => Self::is_comma(delimiter_token),
-            Token::RParen => Self::is_rparen(delimiter_token),
-            _ => false,
-        }
+    pub fn comma_or_rparen(token: &Token) -> bool {
+        Self::is_comma(token) || Self::is_rparen(token)
     }
 
     #[inline]
@@ -155,15 +143,21 @@ impl<'a> ParserContext<'a> {
         self.peek_token_as_string().eq_ignore_ascii_case(VERBOSE)
     }
 
+    /// Try to parse and consume a string, number or word token.
+    /// Return `Ok` if it's parsed and one of the given delimiter tokens is consumed.
+    /// The string and matched delimiter will be returned as a tuple.
     fn parse_string_or_number_or_word(
         parser: &mut Parser,
-        delimiter_token: Token,
-    ) -> std::result::Result<String, TQLError> {
+        delimiter_tokens: &[Token],
+    ) -> std::result::Result<(String, Token), TQLError> {
         let mut tokens = vec![];
 
-        while !Self::is_delimiter_token(&parser.peek_token().token, &delimiter_token) {
-            let token = parser.next_token();
-            tokens.push(token.token);
+        while !delimiter_tokens.contains(&parser.peek_token().token) {
+            let token = parser.next_token().token;
+            if matches!(token, Token::EOF) {
+                break;
+            }
+            tokens.push(token);
         }
         let result = match tokens.len() {
             0 => Err(ParserError::ParserError(
@@ -186,8 +180,15 @@ impl<'a> ParserContext<'a> {
             }
             _ => Self::parse_tokens(tokens),
         };
-        parser.expect_token(&delimiter_token).context(ParserSnafu)?;
-        result
+        for token in delimiter_tokens {
+            if parser.consume_token(token) {
+                return result.map(|v| (v, token.clone()));
+            }
+        }
+        Err(ParserError::ParserError(format!(
+            "Delimiters not match {delimiter_tokens:?}"
+        )))
+        .context(ParserSnafu)
     }
 
     fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
@@ -733,5 +734,11 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
         assert!(result.output_msg().contains("empty TQL query"));
+
+        // invalid token
+        let sql = "tql eval (0, 0, '1s) t;;';";
+        let result =
+            ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
+        assert!(result.output_msg().contains("Delimiters not match"));
     }
 }

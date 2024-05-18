@@ -250,12 +250,15 @@ pub struct SeriesNormalizeStream {
 
 impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        // TODO(ruihang): maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
         // bias the timestamp column by offset
         let ts_column_biased = if self.offset == 0 {

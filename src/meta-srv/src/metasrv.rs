@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
+use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::ProcedureExecutorRef;
@@ -52,7 +53,7 @@ use crate::handler::HeartbeatHandlerGroup;
 use crate::lease::lookup_alive_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
-use crate::pubsub::{PublishRef, SubscribeManagerRef};
+use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
@@ -113,12 +114,6 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
 }
 
-impl MetasrvOptions {
-    pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints"])
-    }
-}
-
 impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
@@ -153,9 +148,9 @@ impl Default for MetasrvOptions {
     }
 }
 
-impl MetasrvOptions {
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string(&self).unwrap()
+impl Configurable<'_> for MetasrvOptions {
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
     }
 }
 
@@ -261,7 +256,7 @@ pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 pub struct MetaStateHandler {
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
-    subscribe_manager: Option<SubscribeManagerRef>,
+    subscribe_manager: Option<SubscriptionManagerRef>,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     state: StateRef,
@@ -300,7 +295,7 @@ impl MetaStateHandler {
 
         if let Some(sub_manager) = self.subscribe_manager.clone() {
             info!("Leader changed, un_subscribe all");
-            if let Err(e) = sub_manager.un_subscribe_all() {
+            if let Err(e) = sub_manager.unsubscribe_all() {
                 error!("Failed to un_subscribe all, error: {}", e);
             }
         }
@@ -356,7 +351,7 @@ impl Metasrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
-            let subscribe_manager = self.subscribe_manager();
+            let subscribe_manager = self.subscription_manager();
             let mut rx = election.subscribe_leader_change();
             let greptimedb_telemetry_task = self.greptimedb_telemetry_task.clone();
             greptimedb_telemetry_task
@@ -545,12 +540,12 @@ impl Metasrv {
         &self.region_migration_manager
     }
 
-    pub fn publish(&self) -> Option<PublishRef> {
-        self.plugins.get::<PublishRef>()
+    pub fn publish(&self) -> Option<PublisherRef> {
+        self.plugins.get::<PublisherRef>()
     }
 
-    pub fn subscribe_manager(&self) -> Option<SubscribeManagerRef> {
-        self.plugins.get::<SubscribeManagerRef>()
+    pub fn subscription_manager(&self) -> Option<SubscriptionManagerRef> {
+        self.plugins.get::<SubscriptionManagerRef>()
     }
 
     pub fn plugins(&self) -> &Plugins {

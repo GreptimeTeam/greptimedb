@@ -1,0 +1,22 @@
+name: Follow Up Docs
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  docbot:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cyborg
+      - name: Maybe Follow Up Docs Issue
+        working-directory: cyborg
+        run: pnpm tsx bin/follow-up-docs-issue.ts
+        env:
+          DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

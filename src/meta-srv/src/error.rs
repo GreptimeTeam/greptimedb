@@ -832,6 +832,14 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to serialize options to TOML"))]
+    TomlFormat {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
+        source: Box<common_config::error::Error>,
+    },
 }
 
 impl Error {
@@ -903,7 +911,8 @@ impl ErrorExt for Error {
             | Error::InitExportMetricsTask { .. }
             | Error::InvalidHeartbeatRequest { .. }
             | Error::ProcedureNotFound { .. }
-            | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
+            | Error::TooManyPartitions { .. }
+            | Error::TomlFormat { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::StatKeyFromUtf8 { .. }

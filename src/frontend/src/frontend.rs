@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_config::config::Configurable;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
@@ -19,9 +20,7 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
-use snafu::prelude::*;
 
-use crate::error::{Result, TomlFormatSnafu};
 use crate::service_config::{
     DatanodeOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
     PostgresOptions, PromStoreOptions,
@@ -75,23 +74,9 @@ impl Default for FrontendOptions {
     }
 }
 
-impl FrontendOptions {
-    pub fn env_list_keys() -> Option<&'static [&'static str]> {
+impl Configurable<'_> for FrontendOptions {
+    fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client.metasrv_addrs"])
-    }
-
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string(&self).unwrap()
-    }
-}
-
-pub trait TomlSerializable {
-    fn to_toml(&self) -> Result<String>;
-}
-
-impl TomlSerializable for FrontendOptions {
-    fn to_toml(&self) -> Result<String> {
-        toml::to_string(&self).context(TomlFormatSnafu)
     }
 }
 

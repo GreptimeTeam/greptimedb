@@ -20,6 +20,7 @@ use sqlparser::ast::{
 };
 
 use crate::error::Result;
+use crate::statements::alter::AlterTableOperation;
 use crate::statements::create::{CreateExternalTable, CreateTable};
 use crate::statements::statement::Statement;
 use crate::statements::transform::TransformRule;
@@ -50,6 +51,13 @@ impl TransformRule for TypeAliasTransformRule {
                 columns
                     .iter_mut()
                     .for_each(|ColumnDef { data_type, .. }| replace_type_alias(data_type));
+            }
+            Statement::Alter(alter_table) => {
+                if let AlterTableOperation::ChangeColumnType { target_type, .. } =
+                    alter_table.alter_operation_mut()
+                {
+                    replace_type_alias(target_type)
+                }
             }
             _ => {}
         }

@@ -111,7 +111,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 input,
                 key_val_plan,
                 reduce_plan,
-            } => self.render_reduce(input, key_val_plan, reduce_plan),
+            } => self.render_reduce(input, key_val_plan, reduce_plan, plan.typ),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP",
             }
@@ -223,11 +223,11 @@ mod test {
     use hydroflow::scheduled::graph::Hydroflow;
     use hydroflow::scheduled::graph_ext::GraphExt;
     use hydroflow::scheduled::handoff::VecHandoff;
+    use pretty_assertions::{assert_eq, assert_ne};
 
     use super::*;
     use crate::expr::BinaryFunc;
     use crate::repr::Row;
-
     pub fn run_and_check(
         state: &mut DataflowState,
         df: &mut Hydroflow,
@@ -238,6 +238,12 @@ mod test {
         for now in time_range {
             state.set_current_ts(now);
             state.run_available_with_schedule(df);
+            if !state.get_err_collector().is_empty() {
+                panic!(
+                    "Errors occur: {:?}",
+                    state.get_err_collector().get_all_blocking()
+                )
+            }
             assert!(state.get_err_collector().is_empty());
             if let Some(expected) = expected.get(&now) {
                 assert_eq!(*output.borrow(), *expected, "at ts={}", now);

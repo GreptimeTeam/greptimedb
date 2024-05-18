@@ -64,7 +64,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -100,6 +100,7 @@ bytemuck = "1.12"
 bytes = { version = "1.5", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
+config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
@@ -117,7 +118,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/killme2008/greptime-proto.git", rev = "57e186d572c6c5898e90d6ab9e91b0867c30d1da" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a11db14b8502f55ca5348917fd18e6fcf140f55e" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -158,7 +159,7 @@ smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sysinfo = "0.30"
 # on branch v0.44.x
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "c919990bf62ad38d2b0c0a3bc90b26ad919d51b0", features = [
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "e4e496b8d62416ad50ce70a1b460c7313610cf5d", features = [
     "visitor",
 ] }
 strum = { version = "0.25", features = ["derive"] }

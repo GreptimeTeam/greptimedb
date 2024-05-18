@@ -36,8 +36,12 @@ macro_rules! sql_test {
                         #[$meta]
                     )*
                     async fn [< $test >]() {
+                        common_telemetry::init_default_ut_logging();
+
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
+                            common_telemetry::info!("test {} starts, store_type: {:?}", stringify!($test), store_type);
+
                             let _ = $crate::sql::$test(store_type).await;
                         }
 
@@ -427,8 +431,10 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
     let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
         .await
         .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         connection.await.unwrap();
+        tx.send(()).unwrap();
     });
     let _ = client
         .simple_query("CREATE TABLE test(b BLOB, ts TIMESTAMP TIME INDEX)")
@@ -481,6 +487,9 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
     let val: Vec<u8> = row.get("b");
     assert_eq!(val, [97, 98, 99, 107, 108, 109, 42, 169, 84]);
 
+    drop(client);
+    rx.await.unwrap();
+
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
@@ -492,8 +501,10 @@ pub async fn test_postgres_datestyle(store_type: StorageType) {
         .await
         .unwrap();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         connection.await.unwrap();
+        tx.send(()).unwrap();
     });
 
     let validate_datestyle = |client: Client, datestyle: &str, is_valid: bool| {
@@ -703,6 +714,9 @@ pub async fn test_postgres_datestyle(store_type: StorageType) {
         }
     }
 
+    drop(client);
+    rx.await.unwrap();
+
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
@@ -714,8 +728,10 @@ pub async fn test_postgres_timezone(store_type: StorageType) {
         .await
         .unwrap();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         connection.await.unwrap();
+        tx.send(()).unwrap();
     });
 
     let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
@@ -758,6 +774,10 @@ pub async fn test_postgres_timezone(store_type: StorageType) {
             .unwrap(),
     );
     assert_eq!(timezone, "UTC");
+
+    drop(client);
+    rx.await.unwrap();
+
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
@@ -769,8 +789,10 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
         .await
         .unwrap();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         connection.await.unwrap();
+        tx.send(()).unwrap();
     });
 
     // Create demo table
@@ -795,6 +817,10 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
         .unwrap();
 
     assert_eq!(1, rows.len());
+
+    // Shutdown the client.
+    drop(client);
+    rx.await.unwrap();
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;

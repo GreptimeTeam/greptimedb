@@ -391,6 +391,8 @@ mod tests {
 
     #[test]
     fn test_tls_file_change_watch() {
+        common_telemetry::init_default_ut_logging();
+
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("serevr.crt");
         let key_path = dir.path().join("server.key");
@@ -425,7 +427,13 @@ mod tests {
             .expect("failed to copy key to tmpdir");
 
         // waiting for async load
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        #[cfg(not(target_os = "windows"))]
+        let timeout_millis = 300;
+        #[cfg(target_os = "windows")]
+        let timeout_millis = 2000;
+
+        std::thread::sleep(std::time::Duration::from_millis(timeout_millis));
+
         assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
     }

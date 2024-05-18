@@ -30,7 +30,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
-use common_config::KvBackendConfig;
+use common_config::{Configurable, KvBackendConfig};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_frontend::handler::FrontendInvoker;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -86,7 +86,7 @@ use crate::error::{
     PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
     TableOperationSnafu,
 };
-use crate::frontend::{FrontendOptions, TomlSerializable};
+use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 
@@ -188,7 +188,7 @@ impl Instance {
 
     pub fn build_servers(
         &mut self,
-        opts: impl Into<FrontendOptions> + TomlSerializable,
+        opts: impl Into<FrontendOptions> + for<'de> Configurable<'de>,
         servers: ServerHandlers,
     ) -> Result<()> {
         let opts: FrontendOptions = opts.into();

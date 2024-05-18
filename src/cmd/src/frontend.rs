@@ -23,6 +23,8 @@ use cache::{
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
+use common_config::Configurable;
+use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -40,7 +42,9 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
+use crate::error::{
+    self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
+};
 use crate::options::{GlobalOptions, Options};
 use crate::App;
 
@@ -153,12 +157,24 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: FrontendOptions = Options::load_layered_options(
-            self.config_file.as_deref(),
-            self.env_prefix.as_ref(),
-            FrontendOptions::env_list_keys(),
-        )?;
+        Ok(Options::Frontend(Box::new(
+            self.merge_with_cli_options(
+                global_options,
+                FrontendOptions::load_layered_options(
+                    self.config_file.as_deref(),
+                    self.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        )))
+    }
 
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        mut opts: FrontendOptions,
+    ) -> Result<FrontendOptions> {
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -220,7 +236,7 @@ impl StartCommand {
 
         opts.user_provider.clone_from(&self.user_provider);
 
-        Ok(Options::Frontend(Box::new(opts)))
+        Ok(opts)
     }
 
     async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
@@ -303,11 +319,19 @@ impl StartCommand {
             Arc::new(executor),
         );
 
+        // frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        let client = DatanodeClients::new(channel_config);
+
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
-            Arc::new(DatanodeClients::default()),
+            Arc::new(client),
             meta_client,
         )
         .with_plugin(plugins.clone())
@@ -336,12 +360,13 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
+    use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use frontend::service_config::GrpcOptions;
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::{GlobalOptions, ENV_VAR_SEP};
+    use crate::options::GlobalOptions;
 
     #[test]
     fn test_try_from_start_command() {

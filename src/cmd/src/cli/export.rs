@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
@@ -174,8 +176,34 @@ impl Export {
     }
 
     /// Return a list of [`TableReference`] to be exported.
-    /// Includes all tables under the given `catalog` and `schema`
-    async fn get_table_list(&self, catalog: &str, schema: &str) -> Result<Vec<TableReference>> {
+    /// Includes all tables under the given `catalog` and `schema`.
+    async fn get_table_list(
+        &self,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<(Vec<TableReference>, Vec<TableReference>)> {
+        // Puts all metric table first
+        let sql = format!(
+            "select table_catalog, table_schema, table_name from \
+            information_schema.columns where column_name = '__tsid' \
+            and table_catalog = \'{catalog}\' and table_schema = \'{schema}\'"
+        );
+        let result = self.sql(&sql).await?;
+        let Some(records) = result else {
+            EmptyResultSnafu.fail()?
+        };
+        let mut metric_physical_tables = HashSet::with_capacity(records.len());
+        for value in records {
+            let mut t = Vec::with_capacity(3);
+            for v in &value {
+                let serde_json::Value::String(value) = v else {
+                    unreachable!()
+                };
+                t.push(value);
+            }
+            metric_physical_tables.insert((t[0].clone(), t[1].clone(), t[2].clone()));
+        }
+
         // TODO: SQL injection hurts
         let sql = format!(
             "select table_catalog, table_schema, table_name from \
@@ -190,10 +218,10 @@ impl Export {
         debug!("Fetched table list: {:?}", records);
 
         if records.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
 
-        let mut result = Vec::with_capacity(records.len());
+        let mut remaining_tables = Vec::with_capacity(records.len());
         for value in records {
             let mut t = Vec::with_capacity(3);
             for v in &value {
@@ -202,10 +230,17 @@ impl Export {
                 };
                 t.push(value);
             }
-            result.push((t[0].clone(), t[1].clone(), t[2].clone()));
+            let table = (t[0].clone(), t[1].clone(), t[2].clone());
+            // Ignores the physical table
+            if !metric_physical_tables.contains(&table) {
+                remaining_tables.push(table);
+            }
         }
 
-        Ok(result)
+        Ok((
+            metric_physical_tables.into_iter().collect(),
+            remaining_tables,
+        ))
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
@@ -225,6 +260,7 @@ impl Export {
     }
 
     async fn export_create_table(&self) -> Result<()> {
+        let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.iter_db_names().await?;
         let db_count = db_names.len();
@@ -233,15 +269,16 @@ impl Export {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let table_list = self.get_table_list(&catalog, &schema).await?;
-                let table_count = table_list.len();
+                let (metric_physical_tables, remaining_tables) =
+                    self.get_table_list(&catalog, &schema).await?;
+                let table_count = metric_physical_tables.len() + remaining_tables.len();
                 tokio::fs::create_dir_all(&self.output_dir)
                     .await
                     .context(FileIoSnafu)?;
                 let output_file =
                     Path::new(&self.output_dir).join(format!("{catalog}-{schema}.sql"));
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
-                for (c, s, t) in table_list {
+                for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
                     match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
                             error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
@@ -270,12 +307,14 @@ impl Export {
             })
             .count();
 
-        info!("success {success}/{db_count} jobs");
+        let elapsed = timer.elapsed();
+        info!("Success {success}/{db_count} jobs, cost: {:?}", elapsed);
 
         Ok(())
     }
 
     async fn export_table_data(&self) -> Result<()> {
+        let timer = Instant::now();
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.iter_db_names().await?;
         let db_count = db_names.len();
@@ -288,15 +327,25 @@ impl Export {
                     .await
                     .context(FileIoSnafu)?;
                 let output_dir = Path::new(&self.output_dir).join(format!("{catalog}-{schema}/"));
-
-                // copy database to
-                let sql = format!(
-                    "copy database {} to '{}' with (format='parquet');",
-                    schema,
-                    output_dir.to_str().unwrap()
-                );
-                self.sql(&sql).await?;
-                info!("finished exporting {catalog}.{schema} data");
+                // Ignores metric physical tables
+                let (metrics_tables, table_list) = self.get_table_list(&catalog, &schema).await?;
+                for (_, _, table_name) in metrics_tables {
+                    warn!("Ignores metric physical table: {table_name}");
+                }
+                for (catalog_name, schema_name, table_name) in table_list {
+                    // copy table to
+                    let sql = format!(
+                        r#"Copy "{}"."{}"."{}" TO '{}{}.parquet' WITH (format='parquet');"#,
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        output_dir.to_str().unwrap(),
+                        table_name,
+                    );
+                    info!("Executing sql: {sql}");
+                    self.sql(&sql).await?;
+                }
+                info!("Finished exporting {catalog}.{schema} data");
 
                 // export copy from sql
                 let dir_filenames = match output_dir.read_dir() {
@@ -351,8 +400,8 @@ impl Export {
                 }
             })
             .count();
-
-        info!("success {success}/{db_count} jobs");
+        let elapsed = timer.elapsed();
+        info!("Success {success}/{db_count} jobs, costs: {:?}", elapsed);
 
         Ok(())
     }

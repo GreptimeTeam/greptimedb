@@ -19,8 +19,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::DefaultSubscribeManager;
 use crate::pubsub::{
-    AddSubRequest, DefaultPublish, Message, Publish, SubscribeManager, SubscribeQuery, Subscriber,
-    Topic, UnSubRequest,
+    DefaultPublisher, Message, Publisher, SubscribeRequest, Subscriber, SubscriptionManager,
+    SubscriptionQuery, Topic, UnsubscribeRequest,
 };
 
 #[tokio::test]
@@ -28,15 +28,15 @@ async fn test_pubsub() {
     let manager = Arc::new(DefaultSubscribeManager::default());
 
     let (subscriber1, mut rx1) = mock_subscriber(1, "tidigong");
-    let req = AddSubRequest {
-        topic_list: vec![Topic::Heartbeat],
+    let req = SubscribeRequest {
+        topics: vec![Topic::Heartbeat],
         subscriber: subscriber1,
     };
     manager.subscribe(req).unwrap();
 
     let (subscriber2, mut rx2) = mock_subscriber(2, "gcrm");
-    let req = AddSubRequest {
-        topic_list: vec![Topic::Heartbeat],
+    let req = SubscribeRequest {
+        topics: vec![Topic::Heartbeat],
         subscriber: subscriber2,
     };
     manager.subscribe(req).unwrap();
@@ -44,10 +44,10 @@ async fn test_pubsub() {
     let manager_clone = manager.clone();
     let message_number: usize = 5;
     tokio::spawn(async move {
-        let publisher: DefaultPublish<DefaultSubscribeManager<Sender<Message>>, Sender<Message>> =
-            DefaultPublish::new(manager_clone);
+        let publisher: DefaultPublisher<DefaultSubscribeManager<Sender<Message>>, Sender<Message>> =
+            DefaultPublisher::new(manager_clone);
         for _ in 0..message_number {
-            publisher.send_msg(mock_message()).await;
+            publisher.publish(mock_message()).await;
         }
     });
 
@@ -59,12 +59,12 @@ async fn test_pubsub() {
     }
 
     manager
-        .un_subscribe(UnSubRequest { subscriber_id: 1 })
+        .unsubscribe(UnsubscribeRequest { subscriber_id: 1 })
         .unwrap();
     let may_msg = rx1.recv().await;
     assert!(may_msg.is_none());
 
-    manager.un_subscribe_all().unwrap();
+    manager.unsubscribe_all().unwrap();
     let may_msg = rx2.recv().await;
     assert!(may_msg.is_none());
 }
@@ -74,15 +74,15 @@ async fn test_subscriber_disconnect() {
     let manager = Arc::new(DefaultSubscribeManager::default());
 
     let (subscriber1, rx1) = mock_subscriber(1, "tidigong");
-    let req = AddSubRequest {
-        topic_list: vec![Topic::Heartbeat],
+    let req = SubscribeRequest {
+        topics: vec![Topic::Heartbeat],
         subscriber: subscriber1,
     };
     manager.subscribe(req).unwrap();
 
     let (subscriber2, rx2) = mock_subscriber(2, "gcrm");
-    let req = AddSubRequest {
-        topic_list: vec![Topic::Heartbeat],
+    let req = SubscribeRequest {
+        topics: vec![Topic::Heartbeat],
         subscriber: subscriber2,
     };
     manager.subscribe(req).unwrap();
@@ -90,10 +90,10 @@ async fn test_subscriber_disconnect() {
     let manager_clone = manager.clone();
     let message_number: usize = 5;
     let join = tokio::spawn(async move {
-        let publisher: DefaultPublish<DefaultSubscribeManager<Sender<Message>>, Sender<Message>> =
-            DefaultPublish::new(manager_clone);
+        let publisher: DefaultPublisher<DefaultSubscribeManager<Sender<Message>>, Sender<Message>> =
+            DefaultPublisher::new(manager_clone);
         for _ in 0..message_number {
-            publisher.send_msg(mock_message()).await;
+            publisher.publish(mock_message()).await;
         }
     });
 
@@ -118,8 +118,8 @@ fn test_sub_manager() {
     let manager = DefaultSubscribeManager::default();
 
     let subscriber = mock_subscriber(1, "tidigong").0;
-    let req = AddSubRequest {
-        topic_list: vec![Topic::Heartbeat],
+    let req = SubscribeRequest {
+        topics: vec![Topic::Heartbeat],
         subscriber,
     };
     manager.subscribe(req).unwrap();
@@ -127,21 +127,21 @@ fn test_sub_manager() {
     assert_eq!(1, ret.len());
 
     let subscriber = mock_subscriber(2, "gcrm").0;
-    let req = AddSubRequest {
-        topic_list: vec![Topic::Heartbeat],
+    let req = SubscribeRequest {
+        topics: vec![Topic::Heartbeat],
         subscriber,
     };
     manager.subscribe(req).unwrap();
     let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(2, ret.len());
 
-    let req = UnSubRequest { subscriber_id: 1 };
-    manager.un_subscribe(req).unwrap();
+    let req = UnsubscribeRequest { subscriber_id: 1 };
+    manager.unsubscribe(req).unwrap();
     let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(1, ret.len());
 
-    let req = UnSubRequest { subscriber_id: 2 };
-    manager.un_subscribe(req).unwrap();
+    let req = UnsubscribeRequest { subscriber_id: 2 };
+    manager.unsubscribe(req).unwrap();
     let ret = manager.subscribers_by_topic(&Topic::Heartbeat);
     assert_eq!(0, ret.len());
 }

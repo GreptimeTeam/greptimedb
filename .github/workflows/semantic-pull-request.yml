@@ -13,16 +13,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: pnpm/action-setup@v3
-        with:
-          package_json_file: 'cyborg/package.json'
-          run_install: true
-      - name: Describe the Environment
-        working-directory: cyborg
-        run: pnpm tsx -v
+      - uses: ./.github/actions/setup-cyborg
       - name: Check Pull Request
         working-directory: cyborg
         run: pnpm tsx bin/check-pull-request.ts

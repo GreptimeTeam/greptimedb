@@ -228,6 +228,7 @@ pub struct CopyTableRequest {
     pub pattern: Option<String>,
     pub direction: CopyDirection,
     pub timestamp_range: Option<TimestampRange>,
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]

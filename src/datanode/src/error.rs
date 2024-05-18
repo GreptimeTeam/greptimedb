@@ -359,6 +359,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to serialize options to TOML"))]
+    TomlFormat {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
+        source: Box<common_config::error::Error>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -391,7 +399,8 @@ impl ErrorExt for Error {
             | MissingNodeId { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
-            | MissingKvBackend { .. } => StatusCode::InvalidArguments,
+            | MissingKvBackend { .. }
+            | TomlFormat { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
                 StatusCode::Unexpected

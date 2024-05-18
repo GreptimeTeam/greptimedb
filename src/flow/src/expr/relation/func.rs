@@ -136,23 +136,40 @@ impl AggregateFunc {
 
 /// Generate signature for each aggregate function
 macro_rules! generate_signature {
-    ($value:ident, { $($user_arm:tt)* },
-    [ $(
-        $auto_arm:ident=>($con_type:ident,$generic:ident)
-        ),*
-    ]) => {
+    ($value:ident,
+        { $($user_arm:tt)* },
+        [ $(
+            $auto_arm:ident=>($($arg:ident),*)
+            ),*
+        ]
+    ) => {
         match $value {
             $($user_arm)*,
             $(
-                Self::$auto_arm => Signature {
-                    input: smallvec![
-                        ConcreteDataType::$con_type(),
-                        ConcreteDataType::$con_type(),
-                    ],
-                    output: ConcreteDataType::$con_type(),
-                    generic_fn: GenericFn::$generic,
-                },
+                Self::$auto_arm => gen_one_siginature!($($arg),*),
             )*
+        }
+    };
+}
+
+/// Generate one match arm with optional arguments
+macro_rules! gen_one_siginature {
+    (
+        $con_type:ident, $generic:ident
+    ) => {
+        Signature {
+            input: smallvec![ConcreteDataType::$con_type(), ConcreteDataType::$con_type(),],
+            output: ConcreteDataType::$con_type(),
+            generic_fn: GenericFn::$generic,
+        }
+    };
+    (
+        $in_type:ident, $out_type:ident, $generic:ident
+    ) => {
+        Signature {
+            input: smallvec![ConcreteDataType::$in_type()],
+            output: ConcreteDataType::$out_type(),
+            generic_fn: GenericFn::$generic,
         }
     };
 }
@@ -223,6 +240,8 @@ impl AggregateFunc {
 
     /// all concrete datatypes with precision types will be returned with largest possible variant
     /// as a exception, count have a signature of `null -> i64`, but it's actually `anytype -> i64`
+    ///
+    /// TODO(discorcd9): fix signature for sum unsign -> u64 sum signed -> i64
     pub fn signature(&self) -> Signature {
         generate_signature!(self, {
             AggregateFunc::Count => Signature {
@@ -263,12 +282,12 @@ impl AggregateFunc {
             MinTime => (time_second_datatype, Min),
             MinDuration => (duration_second_datatype, Min),
             MinInterval => (interval_year_month_datatype, Min),
-            SumInt16 => (int16_datatype, Sum),
-            SumInt32 => (int32_datatype, Sum),
-            SumInt64 => (int64_datatype, Sum),
-            SumUInt16 => (uint16_datatype, Sum),
-            SumUInt32 => (uint32_datatype, Sum),
-            SumUInt64 => (uint64_datatype, Sum),
+            SumInt16 => (int16_datatype, int64_datatype, Sum),
+            SumInt32 => (int32_datatype, int64_datatype, Sum),
+            SumInt64 => (int64_datatype, int64_datatype, Sum),
+            SumUInt16 => (uint16_datatype, uint64_datatype, Sum),
+            SumUInt32 => (uint32_datatype, uint64_datatype, Sum),
+            SumUInt64 => (uint64_datatype, uint64_datatype, Sum),
             SumFloat32 => (float32_datatype, Sum),
             SumFloat64 => (float64_datatype, Sum),
             Any => (boolean_datatype, Any),

@@ -21,94 +21,92 @@ use tokio::sync::mpsc::Sender;
 use crate::error::Result;
 use crate::pubsub::{Message, Subscriber, SubscriberRef, Topic, Transport};
 
-pub trait SubscribeQuery<T>: Send + Sync {
+pub trait SubscriptionQuery<T>: Send + Sync {
     fn subscribers_by_topic(&self, topic: &Topic) -> Vec<SubscriberRef<T>>;
 }
 
-pub trait SubscribeManager<T>: SubscribeQuery<T> {
-    fn subscribe(&self, req: AddSubRequest<T>) -> Result<()>;
+pub trait SubscriptionManager<T>: SubscriptionQuery<T> {
+    fn subscribe(&self, req: SubscribeRequest<T>) -> Result<()>;
 
-    fn un_subscribe(&self, req: UnSubRequest) -> Result<()>;
+    fn unsubscribe(&self, req: UnsubscribeRequest) -> Result<()>;
 
-    fn un_subscribe_all(&self) -> Result<()>;
+    fn unsubscribe_all(&self) -> Result<()>;
 }
 
-pub type SubscribeManagerRef = Arc<dyn SubscribeManager<Sender<Message>>>;
+pub type SubscriptionManagerRef = Arc<dyn SubscriptionManager<Sender<Message>>>;
 
-pub struct AddSubRequest<T> {
-    pub topic_list: Vec<Topic>,
+pub struct SubscribeRequest<T> {
+    pub topics: Vec<Topic>,
     pub subscriber: Subscriber<T>,
 }
 
 #[derive(Debug, Clone)]
-pub struct UnSubRequest {
+pub struct UnsubscribeRequest {
     pub subscriber_id: u32,
 }
+
 pub struct DefaultSubscribeManager<T> {
-    topic2sub: DashMap<Topic, Vec<Arc<Subscriber<T>>>>,
+    topic_to_subscribers: DashMap<Topic, Vec<Arc<Subscriber<T>>>>,
 }
 
 impl<T> Default for DefaultSubscribeManager<T> {
     fn default() -> Self {
         Self {
-            topic2sub: DashMap::new(),
+            topic_to_subscribers: DashMap::new(),
         }
     }
 }
 
-impl<T> SubscribeQuery<T> for DefaultSubscribeManager<T>
+impl<T> SubscriptionQuery<T> for DefaultSubscribeManager<T>
 where
     T: Transport,
 {
     fn subscribers_by_topic(&self, topic: &Topic) -> Vec<SubscriberRef<T>> {
-        self.topic2sub
+        self.topic_to_subscribers
             .get(topic)
             .map(|list_ref| list_ref.clone())
             .unwrap_or_default()
     }
 }
 
-impl<T> SubscribeManager<T> for DefaultSubscribeManager<T>
+impl<T> SubscriptionManager<T> for DefaultSubscribeManager<T>
 where
     T: Transport,
 {
-    fn subscribe(&self, req: AddSubRequest<T>) -> Result<()> {
-        let AddSubRequest {
-            topic_list,
-            subscriber,
-        } = req;
+    fn subscribe(&self, req: SubscribeRequest<T>) -> Result<()> {
+        let SubscribeRequest { topics, subscriber } = req;
 
         info!(
-            "Add a subscription, subscriber_id: {}, subscriber_name: {}, topic list: {:?}",
+            "Add a subscriber, subscriber_id: {}, subscriber_name: {}, topics: {:?}",
             subscriber.id(),
             subscriber.name(),
-            topic_list
+            topics
         );
 
         let subscriber = Arc::new(subscriber);
 
-        for topic in topic_list {
-            let mut entry = self.topic2sub.entry(topic).or_default();
+        for topic in topics {
+            let mut entry = self.topic_to_subscribers.entry(topic).or_default();
             entry.push(subscriber.clone());
         }
 
         Ok(())
     }
 
-    fn un_subscribe(&self, req: UnSubRequest) -> Result<()> {
-        let UnSubRequest { subscriber_id } = req;
+    fn unsubscribe(&self, req: UnsubscribeRequest) -> Result<()> {
+        let UnsubscribeRequest { subscriber_id } = req;
 
-        info!("Add a un_subscription, subscriber_id: {}", subscriber_id);
+        info!("Remove a subscriber, subscriber_id: {}", subscriber_id);
 
-        for mut sub_list in self.topic2sub.iter_mut() {
-            sub_list.retain(|subscriber| subscriber.id() != subscriber_id)
+        for mut subscribers in self.topic_to_subscribers.iter_mut() {
+            subscribers.retain(|subscriber| subscriber.id() != subscriber_id)
         }
 
         Ok(())
     }
 
-    fn un_subscribe_all(&self) -> Result<()> {
-        self.topic2sub.clear();
+    fn unsubscribe_all(&self) -> Result<()> {
+        self.topic_to_subscribers.clear();
 
         Ok(())
     }

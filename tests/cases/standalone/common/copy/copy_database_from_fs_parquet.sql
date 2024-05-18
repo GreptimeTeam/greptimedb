@@ -20,4 +20,8 @@ COPY DATABASE public FROM '/tmp/demo/export/parquet_range/';
 
 SELECT * FROM demo ORDER BY ts;
 
+DELETE FROM demo;
+
+COPY DATABASE public FROM '/tmp/demo/export/parquet_range/' LIMIT 2;
+
 DROP TABLE demo;

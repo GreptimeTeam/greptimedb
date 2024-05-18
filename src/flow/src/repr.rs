@@ -51,8 +51,9 @@ pub type DiffRow = (Row, Timestamp, Diff);
 /// Row with key-value pair, timestamp and diff
 pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 
-/// broadcast channel capacity
-pub const BROADCAST_CAP: usize = 1024;
+/// broadcast channel capacity, can be important to memory consumption, since this influence how many
+/// updates can be buffered in memory in the entire dataflow
+pub const BROADCAST_CAP: usize = 8192;
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp
 ///
