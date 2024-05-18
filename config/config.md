@@ -1,5 +1,11 @@
 # Configurations
 
+- [Standalone Mode](#standalone-mode)
+- [Distributed Mode](#distributed-mode)
+    - [Frontend](#frontend)
+    - [Metasrv](#metasrv)
+    - [Datanode](#datanode)
+
 ## Standalone Mode
 
 | Key | Type | Default | Descriptions |
@@ -131,7 +137,7 @@
 | `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
 
 
-## Cluster Mode
+## Distributed Mode
 
 ### Frontend
 
