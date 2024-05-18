@@ -52,6 +52,14 @@ impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
     }
 }
 
+impl From<Vec<&[u8]>> for BinaryVector {
+    fn from(data: Vec<&[u8]>) -> Self {
+        Self {
+            array: BinaryArray::from_iter_values(data),
+        }
+    }
+}
+
 impl Vector for BinaryVector {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::binary_datatype()
@@ -257,7 +265,7 @@ mod tests {
 
         let arrow_arr = v.to_arrow_array();
         assert_eq!(2, arrow_arr.len());
-        assert_eq!(&ArrowDataType::LargeBinary, arrow_arr.data_type());
+        assert_eq!(&ArrowDataType::Binary, arrow_arr.data_type());
     }
 
     #[test]

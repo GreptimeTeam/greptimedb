@@ -342,7 +342,7 @@ impl Value {
             Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
             Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
             Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
-            Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
+            Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
@@ -413,7 +413,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
         ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
-        ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
+        ConcreteDataType::Binary(_) => ScalarValue::Binary(None),
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
@@ -2105,7 +2105,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeBinary(Some("world".as_bytes().to_vec())),
+            ScalarValue::Binary(Some("world".as_bytes().to_vec())),
             Value::Binary(Bytes::from("world".as_bytes()))
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
                 .unwrap()
@@ -2187,7 +2187,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeBinary(None),
+            ScalarValue::Binary(None),
             Value::Null
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
                 .unwrap()
