@@ -440,6 +440,7 @@ impl TwcsCompactionTask {
                 let reader = build_sst_reader(
                     metadata.clone(),
                     sst_layer.clone(),
+                    Some(cache_manager.clone()),
                     &output.inputs,
                     append_mode,
                     output.filter_deleted,
@@ -700,12 +701,14 @@ pub(crate) struct CompactionOutput {
 async fn build_sst_reader(
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
+    cache: Option<CacheManagerRef>,
     inputs: &[FileHandle],
     append_mode: bool,
     filter_deleted: bool,
 ) -> error::Result<BoxedBatchReader> {
     let scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
         .with_files(inputs.to_vec())
+        .with_cache(cache)
         .with_append_mode(append_mode)
         .with_filter_deleted(filter_deleted)
         // We ignore file not found error during compaction.
