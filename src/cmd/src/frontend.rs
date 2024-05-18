@@ -45,12 +45,14 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
 };
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
 
 pub struct Instance {
     frontend: FeInstance,
 }
+
+pub const APP_NAME: &str = "greptime-frontend";
 
 impl Instance {
     pub fn new(frontend: FeInstance) -> Self {
@@ -69,7 +71,7 @@ impl Instance {
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-frontend"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -95,11 +97,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -110,13 +112,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -156,17 +158,15 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Frontend(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                FrontendOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+        self.merge_with_cli_options(
+            global_options,
+            FrontendOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -239,7 +239,14 @@ impl StartCommand {
         Ok(opts)
     }
 
-    async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, mut opts: FrontendOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.logging,
+            &opts.tracing,
+            opts.node_id.clone(),
+        );
+
         #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut opts)
             .await
@@ -379,10 +386,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let opts = command.load_options(&GlobalOptions::default()).unwrap();
 
         assert_eq!(opts.http.addr, "127.0.0.1:1234");
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
@@ -430,10 +434,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let fe_opts = command.load_options(&GlobalOptions::default()).unwrap();
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
@@ -486,7 +487,7 @@ mod tests {
             })
             .unwrap();
 
-        let logging_opt = options.logging_options();
+        let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
@@ -562,11 +563,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Frontend(fe_opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let fe_opts = command.load_options(&GlobalOptions::default()).unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(fe_opts.mysql.runtime_size, 11);

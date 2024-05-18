@@ -30,14 +30,16 @@ mod upgrade;
 use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
 use clap::Parser;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 // pub use repl::Repl;
 use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;
 use crate::error::Result;
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
+
+pub const APP_NAME: &str = "greptime-cli";
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -57,7 +59,7 @@ impl Instance {
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-cli"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -80,11 +82,18 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self) -> Result<Instance> {
+    pub async fn build(&self, opts: LoggingOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts,
+            &TracingOptions::default(),
+            None,
+        );
+
         self.cmd.build().await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<LoggingOptions> {
         let mut logging_opts = LoggingOptions::default();
 
         if let Some(dir) = &global_options.log_dir {
@@ -93,7 +102,7 @@ impl Command {
 
         logging_opts.level.clone_from(&global_options.log_level);
 
-        Ok(Options::Cli(Box::new(logging_opts)))
+        Ok(logging_opts)
     }
 }
 
@@ -106,7 +115,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self) -> Result<Instance> {
+    async fn build(&self) -> Result<Instance> {
         match self {
             // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Upgrade(cmd) => cmd.build().await,

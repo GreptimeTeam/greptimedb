@@ -32,8 +32,10 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
+
+pub const APP_NAME: &str = "greptime-datanode";
 
 pub struct Instance {
     datanode: Datanode,
@@ -56,7 +58,7 @@ impl Instance {
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-datanode"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -82,11 +84,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -97,13 +99,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -135,17 +137,15 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Datanode(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                DatanodeOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
+        self.merge_with_cli_options(
+            global_options,
+            DatanodeOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -226,7 +226,14 @@ impl StartCommand {
         Ok(opts)
     }
 
-    async fn build(self, mut opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(&self, mut opts: DatanodeOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.logging,
+            &opts.tracing,
+            opts.node_id.map(|x| x.to_string()),
+        );
+
         let plugins = plugins::setup_datanode_plugins(&mut opts)
             .await
             .context(StartDatanodeSnafu)?;
@@ -337,10 +344,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Datanode(options) = cmd.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
@@ -399,23 +403,19 @@ mod tests {
 
     #[test]
     fn test_try_from_cmd() {
-        if let Options::Datanode(opt) = StartCommand::default()
+        let opt = StartCommand::default()
             .load_options(&GlobalOptions::default())
-            .unwrap()
-        {
-            assert_eq!(Mode::Standalone, opt.mode)
-        }
+            .unwrap();
+        assert_eq!(Mode::Standalone, opt.mode);
 
-        if let Options::Datanode(opt) = (StartCommand {
+        let opt = (StartCommand {
             node_id: Some(42),
             metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
         .load_options(&GlobalOptions::default())
-        .unwrap()
-        {
-            assert_eq!(Mode::Distributed, opt.mode)
-        }
+        .unwrap();
+        assert_eq!(Mode::Distributed, opt.mode);
 
         assert!((StartCommand {
             metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
@@ -447,7 +447,7 @@ mod tests {
             })
             .unwrap();
 
-        let logging_opt = options.logging_options();
+        let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
@@ -527,11 +527,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Datanode(opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let opts = command.load_options(&GlobalOptions::default()).unwrap();
 
                 // Should be read from env, env > default values.
                 let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
