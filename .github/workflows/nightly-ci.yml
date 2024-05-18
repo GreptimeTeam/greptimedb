@@ -25,7 +25,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Run sqlness test
         uses: ./.github/actions/sqlness-test
         with:
@@ -53,22 +52,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Run sqlness
         run: cargo sqlness
-      - name: Report CI status
-        if: always()
-        id: report-ci-status
-        working-directory: cyborg
-        run: pnpm tsx bin/report-ci-failure.ts
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_REPORT_STATUS: ${{ success() }}
-      - name: Notify slack if failed
-        if: failure()
-        uses: slackapi/slack-github-action@v1.23.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
-        with:
-          payload: |
-            {"text": "Nightly CI failed for sqlness tests, please check ${{ steps.report-ci-status.outputs.html_url }}"}
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -123,19 +106,53 @@ jobs:
           GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
           GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
           UNITTEST_LOG_DIR: "__unittest_logs"
+
+  check-status:
+    name: Check status
+    needs: [
+      sqlness-test,
+      sqlness-windows,
+      test-on-windows,
+    ]
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-20.04
+    outputs:
+      check-result: ${{ steps.set-check-result.outputs.check-result }}
+    steps:
+      - name: Set check result
+        id: set-check-result
+        run: |
+          echo "check-result=success" >> $GITHUB_OUTPUT
+
+  notification:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
+    name: Send notification to Greptime team
+    needs: [
+      check-status
+    ]
+    runs-on: ubuntu-20.04
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cyborg
       - name: Report CI status
-        if: always()
         id: report-ci-status
         working-directory: cyborg
         run: pnpm tsx bin/report-ci-failure.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_REPORT_STATUS: ${{ success() }}
-      - name: Notify slack if failed
-        if: failure()
+          CI_REPORT_STATUS: ${{ needs.check-status.outputs.check-result == 'success' }}
+      - name: Notify dev build successful result
         uses: slackapi/slack-github-action@v1.23.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+        if: ${{ needs.check-status.outputs.check-result == 'success' }}
         with:
           payload: |
-            {"text": "Nightly CI failed for cargo test, please check ${{ steps.report-ci-status.outputs.html_url }}"}
+            {"text": "Nightly CI has completed successfully."}
+
+      - name: Notify dev build failed result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.check-status.outputs.check-result != 'success' }}
+        with:
+          payload: |
+            {"text": "Nightly CI failed has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}
