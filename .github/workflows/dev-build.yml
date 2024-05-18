@@ -82,6 +82,9 @@ env:
   # The source code will check out in the following path: '${WORKING_DIR}/dev/greptime'.
   CHECKOUT_GREPTIMEDB_PATH: dev/greptimedb
 
+permissions:
+  issues: write
+
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -330,6 +333,15 @@ jobs:
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cyborg
+      - name: Report CI status
+        id: report-ci-status
+        working-directory: cyborg
+        run: pnpm tsx bin/report-ci-failure.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
       - name: Notifiy dev build successful result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
@@ -342,4 +354,4 @@ jobs:
         if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/${{ env.NEXT_RELEASE_VERSION }}-build.yml'."}
+            {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}
