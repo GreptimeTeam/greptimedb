@@ -306,14 +306,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
-      - name: Notifiy nightly build successful result
+      - name: Notify nightly build successful result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has completed successfully."}
 
-      - name: Notifiy nightly build failed result
+      - name: Notify nightly build failed result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result != 'success' }}
         with:
