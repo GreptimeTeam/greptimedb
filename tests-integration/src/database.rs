@@ -274,9 +274,10 @@ mod tests {
     use clap::Parser;
     use client::Client;
     use cmd::error::Result as CmdResult;
-    use cmd::options::{GlobalOptions, Options};
+    use cmd::options::GlobalOptions;
     use cmd::{cli, standalone, App};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_telemetry::logging::LoggingOptions;
 
     use super::{Database, FlightContext};
 
@@ -312,12 +313,9 @@ mod tests {
             "--data-home",
             &*output_dir.path().to_string_lossy(),
         ]);
-        let Options::Standalone(standalone_opts) =
-            standalone.load_options(&GlobalOptions::default())?
-        else {
-            unreachable!()
-        };
-        let mut instance = standalone.build(*standalone_opts).await?;
+
+        let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
+        let mut instance = standalone.build(standalone_opts).await?;
         instance.start().await?;
 
         let client = Client::with_urls(["127.0.0.1:4001"]);
@@ -348,7 +346,7 @@ mod tests {
             "--target",
             "create-table",
         ]);
-        let mut cli_app = cli.build().await?;
+        let mut cli_app = cli.build(LoggingOptions::default()).await?;
         cli_app.start().await?;
 
         instance.stop().await?;

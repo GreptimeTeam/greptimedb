@@ -13,20 +13,6 @@
 // limitations under the License.
 
 use clap::Parser;
-use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use datanode::config::DatanodeOptions;
-use frontend::frontend::FrontendOptions;
-use meta_srv::metasrv::MetasrvOptions;
-
-use crate::standalone::StandaloneOptions;
-
-pub enum Options {
-    Datanode(Box<DatanodeOptions>),
-    Frontend(Box<FrontendOptions>),
-    Metasrv(Box<MetasrvOptions>),
-    Standalone(Box<StandaloneOptions>),
-    Cli(Box<LoggingOptions>),
-}
 
 #[derive(Parser, Default, Debug, Clone)]
 pub struct GlobalOptions {
@@ -42,33 +28,4 @@ pub struct GlobalOptions {
     #[clap(long, value_name = "TOKIO_CONSOLE_ADDR")]
     #[arg(global = true)]
     pub tokio_console_addr: Option<String>,
-}
-
-impl GlobalOptions {
-    pub fn tracing_options(&self) -> TracingOptions {
-        TracingOptions {
-            #[cfg(feature = "tokio-console")]
-            tokio_console_addr: self.tokio_console_addr.clone(),
-        }
-    }
-}
-
-impl Options {
-    pub fn logging_options(&self) -> &LoggingOptions {
-        match self {
-            Options::Datanode(opts) => &opts.logging,
-            Options::Frontend(opts) => &opts.logging,
-            Options::Metasrv(opts) => &opts.logging,
-            Options::Standalone(opts) => &opts.logging,
-            Options::Cli(opts) => opts,
-        }
-    }
-
-    pub fn node_id(&self) -> Option<String> {
-        match self {
-            Options::Metasrv(_) | Options::Cli(_) | Options::Standalone(_) => None,
-            Options::Datanode(opt) => opt.node_id.map(|x| x.to_string()),
-            Options::Frontend(opt) => opt.node_id.clone(),
-        }
-    }
 }

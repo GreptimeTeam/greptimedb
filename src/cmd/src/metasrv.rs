@@ -24,8 +24,10 @@ use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
+
+pub const APP_NAME: &str = "greptime-metasrv";
 
 pub struct Instance {
     instance: MetasrvInstance,
@@ -40,7 +42,7 @@ impl Instance {
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-metasrv"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -66,11 +68,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: MetasrvOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -81,13 +83,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: MetasrvOptions) -> Result<Instance> {
+    async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -128,17 +130,15 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Metasrv(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                MetasrvOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
+        self.merge_with_cli_options(
+            global_options,
+            MetasrvOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -212,7 +212,10 @@ impl StartCommand {
         Ok(opts)
     }
 
-    async fn build(self, mut opts: MetasrvOptions) -> Result<Instance> {
+    async fn build(&self, mut opts: MetasrvOptions) -> Result<Instance> {
+        let _guard =
+            common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+
         let plugins = plugins::setup_metasrv_plugins(&mut opts)
             .await
             .context(StartMetaServerSnafu)?;
@@ -254,9 +257,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) = cmd.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
+        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!(vec!["127.0.0.1:2380".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -289,9 +290,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Metasrv(options) = cmd.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
+        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!(vec!["127.0.0.1:2379".to_string()], options.store_addrs);
@@ -343,7 +342,7 @@ mod tests {
             })
             .unwrap();
 
-        let logging_opt = options.logging_options();
+        let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
@@ -398,11 +397,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Metasrv(opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let opts = command.load_options(&GlobalOptions::default()).unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.bind_addr, "127.0.0.1:14002");
