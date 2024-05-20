@@ -51,8 +51,8 @@ impl<'a> DatanodeServiceBuilder<'a> {
     }
 
     pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Self {
-        let grpc_serve = Self::grpc_server_builder(self.opts, region_server).build();
-        self.grpc_server = Some(grpc_serve);
+        let grpc_server = Self::grpc_server_builder(self.opts, region_server).build();
+        self.grpc_server = Some(grpc_server);
         self
     }
 
