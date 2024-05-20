@@ -35,14 +35,12 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Routes, TcpIncoming};
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
 use crate::error::{
     AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
-    UnsupportedGrpcCompressionEncodingSnafu,
 };
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::server::Server;
@@ -66,25 +64,6 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
-    // Supported compression encoding for gRPC, e.g: gzip, zstd.
-    pub accept_compressed: Vec<CompressionEncoding>,
-}
-
-pub fn parse_grpc_compression_encoding(
-    encodings: &Vec<String>,
-) -> Result<Vec<CompressionEncoding>> {
-    let mut result = Vec::with_capacity(encodings.len());
-    for encoding in encodings {
-        let encoding = match encoding.to_lowercase().as_str() {
-            "gzip" => CompressionEncoding::Gzip,
-            "zstd" => CompressionEncoding::Zstd,
-            _ => {
-                return UnsupportedGrpcCompressionEncodingSnafu { encoding }.fail();
-            }
-        };
-        result.push(encoding);
-    }
-    Ok(result)
 }
 
 impl Default for GrpcServerConfig {
@@ -92,7 +71,6 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
-            accept_compressed: vec![],
         }
     }
 }
@@ -216,26 +194,5 @@ impl Server for GrpcServer {
 
     fn name(&self) -> &str {
         GRPC_SERVER
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn test_parse_compression_encoding() {
-        let encodings = vec![];
-        let result = super::parse_grpc_compression_encoding(&encodings).unwrap();
-        assert_eq!(result.len(), 0);
-
-        let encodings = vec!["gzip".to_string(), "ZSTD".to_string()];
-        let result = super::parse_grpc_compression_encoding(&encodings).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], tonic::codec::CompressionEncoding::Gzip);
-        assert_eq!(result[1], tonic::codec::CompressionEncoding::Zstd);
-
-        let encodings = vec!["unknown".to_string()];
-        let result = super::parse_grpc_compression_encoding(&encodings);
-        assert!(result.is_err());
     }
 }

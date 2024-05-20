@@ -21,7 +21,7 @@ use common_config::Configurable;
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{parse_grpc_compression_encoding, GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -76,8 +76,6 @@ where
         let grpc_config = GrpcServerConfig {
             max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
-            accept_compressed: parse_grpc_compression_encoding(&opts.accept_compressed)
-                .context(StartServerSnafu)?,
         };
 
         Ok(GrpcServerBuilder::new(grpc_config, grpc_runtime))
