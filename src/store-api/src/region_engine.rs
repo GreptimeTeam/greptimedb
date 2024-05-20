@@ -16,7 +16,7 @@
 
 use std::any::Any;
 use std::fmt::{Debug, Display};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::error::ExecuteRepeatedlySnafu;
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion_physical_plan::{DisplayAs, DisplayFormatType, Partitioning};
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -138,15 +138,6 @@ impl ScannerPartitioning {
             ScannerPartitioning::Unknown(num_partitions) => *num_partitions,
         }
     }
-
-    /// Converts to datafusion's [Partitioning].
-    pub fn to_df_partitioning(&self) -> Partitioning {
-        match self {
-            ScannerPartitioning::Unknown(num_partitions) => {
-                Partitioning::UnknownPartitioning(*num_partitions)
-            }
-        }
-    }
 }
 
 /// Properties of the [RegionScanner].
@@ -170,6 +161,7 @@ impl ScannerProperties {
 
 /// A scanner that provides a way to scan the region concurrently.
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
+/// You can use this trait to implement an [ExecutionPlan](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
@@ -238,7 +230,7 @@ pub type RegionEngineRef = Arc<dyn RegionEngine>;
 
 /// A [RegionScanner] that only scans a single partition.
 pub struct SinglePartitionScanner {
-    stream: std::sync::Mutex<Option<SendableRecordBatchStream>>,
+    stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     properties: ScannerProperties,
 }
@@ -248,7 +240,7 @@ impl SinglePartitionScanner {
     pub fn new(stream: SendableRecordBatchStream) -> Self {
         let schema = stream.schema();
         Self {
-            stream: std::sync::Mutex::new(Some(stream)),
+            stream: Mutex::new(Some(stream)),
             schema,
             properties: ScannerProperties::new(ScannerPartitioning::Unknown(1)),
         }

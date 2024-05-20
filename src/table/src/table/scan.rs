@@ -28,7 +28,7 @@ use datafusion::physical_plan::{
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
-use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use futures::{Stream, StreamExt};
 use store_api::region_engine::RegionScannerRef;
@@ -52,7 +52,7 @@ impl ReadFromRegion {
         let scanner_props = scanner.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
-            scanner_props.partitioning().to_df_partitioning(),
+            Partitioning::UnknownPartitioning(scanner_props.partitioning().num_partitions()),
             ExecutionMode::Bounded,
         );
         Self {
