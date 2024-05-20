@@ -49,10 +49,10 @@ impl<'a> DatanodeServiceBuilder<'a> {
         }
     }
 
-    pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Result<Self> {
-        let grpc_server = Self::grpc_server_builder(self.opts, region_server)?.build();
+    pub fn with_default_grpc_server(mut self, region_server: &RegionServer) -> Self {
+        let grpc_server = Self::grpc_server_builder(self.opts, region_server).build();
         self.grpc_server = Some(grpc_server);
-        Ok(self)
+        self
     }
 
     pub fn enable_http_service(self) -> Self {
@@ -91,14 +91,14 @@ impl<'a> DatanodeServiceBuilder<'a> {
     pub fn grpc_server_builder(
         opts: &DatanodeOptions,
         region_server: &RegionServer,
-    ) -> Result<GrpcServerBuilder> {
+    ) -> GrpcServerBuilder {
         let config = GrpcServerConfig {
             max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
         };
 
-        Ok(GrpcServerBuilder::new(config, region_server.runtime())
+        GrpcServerBuilder::new(config, region_server.runtime())
             .flight_handler(Arc::new(region_server.clone()))
-            .region_server_handler(Arc::new(region_server.clone())))
+            .region_server_handler(Arc::new(region_server.clone()))
     }
 }

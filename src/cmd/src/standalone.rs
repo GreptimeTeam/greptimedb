@@ -654,9 +654,6 @@ mod tests {
             timeout = "33s"
             body_limit = "128MB"
 
-            [grpc]
-            accept_compressed = ["gzip"]
-
             [opentsdb]
             enable = true
 
@@ -686,7 +683,6 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
         assert!(fe_opts.opentsdb.enable);
-        assert_eq!(vec!["gzip"], fe_opts.grpc.accept_compressed);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
             unreachable!()
