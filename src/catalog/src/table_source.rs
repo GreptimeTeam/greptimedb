@@ -33,9 +33,10 @@ use datafusion::catalog::CatalogProvider;
 use memory_catalog::MemoryCatalogProviderList;
 
 use crate::error::{
-    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetTableCacheSnafu, QueryAccessDeniedSnafu,
+    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, QueryAccessDeniedSnafu,
     Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
 };
+use crate::kvbackend::KvBackendCatalogManager;
 use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
@@ -110,7 +111,6 @@ impl DfTableSourceProvider {
             })?;
 
         let provider: Arc<dyn TableProvider> = if table.table_info().table_type == TableType::View {
-            use crate::kvbackend::KvBackendCatalogManager;
             let catalog_manager = self
                 .catalog_manager
                 .as_any()
@@ -121,7 +121,7 @@ impl DfTableSourceProvider {
                 .view_info_cache()?
                 .get(table.table_info().ident.table_id)
                 .await
-                .context(GetTableCacheSnafu)?
+                .context(GetViewCacheSnafu)?
                 .context(ViewInfoNotFoundSnafu {
                     name: &table.table_info().name,
                 })?;
@@ -133,7 +133,7 @@ impl DfTableSourceProvider {
             ));
 
             for table_name in &view_info.table_names {
-                // We don't have a cross-catalog view.
+                // We don't support cross-catalog views.
                 debug_assert_eq!(catalog_name, &table_name.catalog_name);
 
                 let catalog_name = &table_name.catalog_name;
@@ -238,5 +238,99 @@ mod tests {
 
         let table_ref = TableReference::full("greptime", "greptime_private", "columns");
         assert!(table_provider.resolve_table_ref(table_ref).is_ok());
+    }
+
+    use std::collections::HashSet;
+
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+    use common_config::Mode;
+    use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+    use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_query::error::Result as QueryResult;
+    use common_query::logical_plan::SubstraitPlanDecoder;
+    use datafusion::catalog::CatalogProviderList;
+    use datafusion::logical_expr::builder::LogicalTableSource;
+    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+
+    struct MockDecoder;
+    impl MockDecoder {
+        pub fn arc() -> Arc<Self> {
+            Arc::new(MockDecoder)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SubstraitPlanDecoder for MockDecoder {
+        async fn decode(
+            &self,
+            _message: bytes::Bytes,
+            _catalog_list: Arc<dyn CatalogProviderList>,
+        ) -> QueryResult<LogicalPlan> {
+            Ok(mock_plan())
+        }
+    }
+
+    fn mock_plan() -> LogicalPlan {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let table_source = LogicalTableSource::new(SchemaRef::new(schema));
+
+        let projection = None;
+
+        let builder =
+            LogicalPlanBuilder::scan("person", Arc::new(table_source), projection).unwrap();
+
+        builder
+            .filter(col("id").gt(lit(500)))
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_resolve_view() {
+        let query_ctx = &QueryContext::with("greptime", "public");
+        let backend = Arc::new(MemoryKvBackend::default());
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(CacheRegistryBuilder::default().build());
+        let fundamental_cache_registry = build_fundamental_cache_registry(backend.clone());
+        let layered_cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
+        let catalog_manager = KvBackendCatalogManager::new(
+            Mode::Standalone,
+            None,
+            backend.clone(),
+            layered_cache_registry,
+        );
+        let table_metadata_manager = TableMetadataManager::new(backend);
+        let mut view_info = common_meta::key::test_utils::new_test_table_info(1024, vec![]);
+        view_info.table_type = TableType::View;
+        let logical_plan = vec![1, 2, 3];
+        // Create view metadata
+        table_metadata_manager
+            .create_view_metadata(view_info.clone().into(), &logical_plan, HashSet::new())
+            .await
+            .unwrap();
+
+        let mut table_provider =
+            DfTableSourceProvider::new(catalog_manager, true, query_ctx, MockDecoder::arc());
+
+        // View not found
+        let table_ref = TableReference::bare("not_exists_view");
+        assert!(table_provider.resolve_table(table_ref).await.is_err());
+
+        let table_ref = TableReference::bare(view_info.name);
+        let source = table_provider.resolve_table(table_ref).await.unwrap();
+        assert_eq!(*source.get_logical_plan().unwrap(), mock_plan());
     }
 }

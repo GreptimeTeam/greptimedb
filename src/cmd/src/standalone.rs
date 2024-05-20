@@ -423,8 +423,7 @@ impl StartCommand {
             None,
             kv_backend.clone(),
             layered_cache_registry.clone(),
-        )
-        .await;
+        );
 
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;

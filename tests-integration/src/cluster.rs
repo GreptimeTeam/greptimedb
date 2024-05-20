@@ -369,8 +369,7 @@ impl GreptimeDbClusterBuilder {
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             cache_registry.clone(),
-        )
-        .await;
+        );
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),

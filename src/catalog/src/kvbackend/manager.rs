@@ -67,7 +67,7 @@ pub struct KvBackendCatalogManager {
 const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
 
 impl KvBackendCatalogManager {
-    pub async fn new(
+    pub fn new(
         mode: Mode,
         meta_client: Option<Arc<MetaClient>>,
         backend: KvBackendRef,

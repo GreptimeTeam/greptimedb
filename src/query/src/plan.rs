@@ -179,9 +179,54 @@ impl TreeNodeVisitor for TableNamesExtractor {
     }
 }
 
-/// Extract fully resolved table names from logical plan
+/// Extract fully resolved table names from logical plan.
+/// Note:: it must be called before optimizing the plan.
 pub fn extract_full_table_names(plan: &DfLogicalPlan) -> Result<HashSet<TableName>> {
     let mut extractor = TableNamesExtractor::default();
     let _ = plan.visit(&mut extractor).context(DataFusionSnafu)?;
     Ok(extractor.table_names)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+    use datafusion::logical_expr::builder::LogicalTableSource;
+    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+
+    use super::*;
+
+    pub(crate) fn mock_plan() -> LogicalPlan {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ]);
+        let table_source = LogicalTableSource::new(SchemaRef::new(schema));
+
+        let projection = None;
+
+        let builder =
+            LogicalPlanBuilder::scan("devices", Arc::new(table_source), projection).unwrap();
+
+        builder
+            .filter(col("id").gt(lit(500)))
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_extract_full_table_names() {
+        let table_names = extract_full_table_names(&mock_plan()).unwrap();
+
+        assert_eq!(1, table_names.len());
+        assert!(table_names.contains(&TableName::new(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "devices".to_string()
+        )));
+    }
 }

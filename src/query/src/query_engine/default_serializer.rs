@@ -165,6 +165,7 @@ impl TreeNodeRewriter for MergeScanRewriter {
                     let session_state = self.session_state.clone();
                     let input = encoded_merge_scan.input.clone();
 
+                    // FIXME(dennis): it's ugly, is there a better way?
                     let input = std::thread::spawn(move || {
                         common_runtime::block_on_bg(async move {
                             DFLogicalSubstraitConvertor
@@ -190,6 +191,60 @@ impl TreeNodeRewriter for MergeScanRewriter {
                 }
             }
             node => Ok(Transformed::no(node)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::dummy_catalog::DummyCatalogList;
+    use crate::optimizer::test_util::mock_table_provider;
+    use crate::plan::tests::mock_plan;
+    use crate::QueryEngineFactory;
+
+    #[tokio::test]
+    async fn test_serializer_decode_plan() {
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+
+        let engine = factory.query_engine();
+
+        let plan = MergeScanLogicalPlan::new(mock_plan(), false);
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(plan),
+        });
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+
+        let plan_decoder = engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+        let table_provider = Arc::new(mock_table_provider(1.into()));
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
+
+        let decode_plan = plan_decoder.decode(bytes, catalog_list).await.unwrap();
+
+        match decode_plan {
+            LogicalPlan::Extension(Extension { node }) => {
+                assert_eq!("MergeScan", node.name());
+
+                let merge_scan = node
+                    .as_any()
+                    .downcast_ref::<MergeScanLogicalPlan>()
+                    .expect("Failed to downcast to MergeScanLogicalPlan");
+                assert_eq!(
+                    "Filter: devices.k0 > Int32(500)
+  TableScan: devices projection=[k0, ts, v0]",
+                    format!("{:?}", *merge_scan.input()),
+                );
+            }
+            _ => unreachable!(),
         }
     }
 }

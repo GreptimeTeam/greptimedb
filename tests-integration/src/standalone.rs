@@ -147,8 +147,7 @@ impl GreptimeDbStandaloneBuilder {
             None,
             kv_backend.clone(),
             cache_registry.clone(),
-        )
-        .await;
+        );
 
         let flow_builder = FlownodeBuilder::new(
             1, // for standalone mode this value is default to one

@@ -304,8 +304,7 @@ impl StartCommand {
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
-        )
-        .await;
+        );
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),

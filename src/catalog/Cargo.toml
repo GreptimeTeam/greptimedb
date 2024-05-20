@@ -49,8 +49,11 @@ table.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+cache.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
+common-query = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 log-store.workspace = true
 object-store.workspace = true
