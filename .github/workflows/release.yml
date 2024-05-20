@@ -93,8 +93,10 @@ env:
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
   NEXT_RELEASE_VERSION: v0.9.0
 
+# Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
 permissions:
-  issues: write
+  issues: write # Allows the action to create issues for cyborg.
+  contents: write # Allows the action to create a release.
 
 jobs:
   allocate-runners:
