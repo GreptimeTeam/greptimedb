@@ -730,7 +730,6 @@ pub(crate) struct ScanPart {
     pub(crate) file_ranges: Vec<FileRange>,
 }
 
-// TODO(yingwen): impl DisplayAs for ScanPart to display more information.
 impl fmt::Debug for ScanPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
