@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_query::logical_plan::SubstraitPlanDecoder;
+use common_telemetry::error;
 use datafusion::catalog::CatalogProviderList;
 use datafusion::common::DataFusionError;
 use datafusion::error::Result;
@@ -118,9 +120,12 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, catalog_list.clone(), self.session_state.clone())
             .await
-            .unwrap();
+            .map_err(|e| BoxedError::new(e))
+            .context(common_query::error::DecodePlanSnafu)?;
 
-        Ok(self.rewrite_merge_scan(logical_plan, catalog_list).unwrap())
+        self.rewrite_merge_scan(logical_plan, catalog_list)
+            .map_err(|e| BoxedError::new(e))
+            .context(common_query::error::DecodePlanSnafu)
     }
 }
 
@@ -154,7 +159,10 @@ impl TreeNodeRewriter for MergeScanRewriter {
                         })
                     })
                     .join()
-                    .unwrap()?;
+                    .map_err(|e| {
+                        error!(e; "Failed to join thread when decoding logical plan");
+                        DataFusionError::Substrait("Failed to decode EncodedMergeScan".to_string())
+                    })??;
 
                     Ok(Transformed::yes(LogicalPlan::Extension(Extension {
                         node: Arc::new(MergeScanLogicalPlan::new(

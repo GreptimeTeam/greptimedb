@@ -113,6 +113,13 @@ pub enum Error {
         error: datafusion::error::DataFusionError,
     },
 
+    #[snafu(display("Failed to extract table names"))]
+    ExtractTableNames {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to convert value to sql value: {}", value))]
     ConvertSqlValue {
         value: Value,
@@ -814,6 +821,7 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
+            | Error::ExtractTableNames { source, .. }
             | Error::PlanStatement { source, .. }
             | Error::ParseQuery { source, .. }
             | Error::ExecLogicalPlan { source, .. }

@@ -29,7 +29,10 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::{DatafusionSnafu, QueryAccessDeniedSnafu, Result, TableNotExistSnafu};
+use crate::error::{
+    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetTableCacheSnafu, QueryAccessDeniedSnafu,
+    Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
+};
 use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
@@ -109,14 +112,16 @@ impl DfTableSourceProvider {
                 .catalog_manager
                 .as_any()
                 .downcast_ref::<KvBackendCatalogManager>()
-                .unwrap();
+                .context(CastManagerSnafu)?;
 
             let view_info = catalog_manager
-                .view_info_cache()
+                .view_info_cache()?
                 .get(table.table_info().ident.table_id)
                 .await
-                .unwrap()
-                .unwrap();
+                .context(GetTableCacheSnafu)?
+                .context(ViewInfoNotFoundSnafu {
+                    name: &table.table_info().name,
+                })?;
 
             // Build the catalog list provider for deserialization.
             let catalog_list = Arc::new(MemoryCatalogProviderList::new());
@@ -167,9 +172,11 @@ impl DfTableSourceProvider {
                 .plan_decoder
                 .decode(Bytes::from(view_info.view_info.clone()), catalog_list)
                 .await
-                .unwrap();
+                .context(DecodePlanSnafu {
+                    name: &table.table_info().name,
+                })?;
 
-            Arc::new(ViewTable::try_new(logical_plan, None).unwrap())
+            Arc::new(ViewTable::try_new(logical_plan, None).context(DatafusionSnafu)?)
         } else {
             Arc::new(DfTableProviderAdapter::new(table))
         };

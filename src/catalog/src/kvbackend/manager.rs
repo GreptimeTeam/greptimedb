@@ -78,7 +78,9 @@ impl KvBackendCatalogManager {
             meta_client,
             partition_manager: Arc::new(PartitionRuleManager::new(
                 backend.clone(),
-                cache_registry.get().expect(""),
+                cache_registry
+                    .get()
+                    .expect("Failed to get table_route_cache"),
             )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             system_catalog: SystemCatalog {
@@ -98,8 +100,10 @@ impl KvBackendCatalogManager {
         &self.mode
     }
 
-    pub fn view_info_cache(&self) -> ViewInfoCacheRef {
-        self.cache_registry.get().unwrap()
+    pub fn view_info_cache(&self) -> Result<ViewInfoCacheRef> {
+        self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "view_info_cache",
+        })
     }
 
     /// Returns the `[MetaClient]`.

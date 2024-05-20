@@ -19,7 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
 use promql::error::Error as PromqlError;
- use promql_parser::parser::token::TokenType;
+use promql_parser::parser::token::TokenType;
 use promql_parser::parser::{Expr as PromExpr, VectorMatchCardinality};
 use snafu::{Location, Snafu};
 

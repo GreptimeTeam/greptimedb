@@ -74,6 +74,7 @@ pub fn create_aggregate_function(
 /// The datafusion `[LogicalPlan]` decoder.
 #[async_trait::async_trait]
 pub trait SubstraitPlanDecoder {
+    /// Decode the `[LogicalPlan]` from bytes with the `[CatalogProviderList]`.
     async fn decode(
         &self,
         message: bytes::Bytes,

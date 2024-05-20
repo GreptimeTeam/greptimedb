@@ -206,6 +206,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to decode logical plan: {source}"))]
+    DecodePlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to do table mutation"))]
     TableMutation {
         source: BoxedError,
@@ -282,11 +289,12 @@ impl ErrorExt for Error {
             | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            Error::ExecutePhysicalPlan { source, .. } => source.status_code(),
-            Error::Execute { source, .. } => source.status_code(),
-            Error::ProcedureService { source, .. } | Error::TableMutation { source, .. } => {
-                source.status_code()
-            }
+
+            Error::DecodePlan { source, .. }
+            | Error::Execute { source, .. }
+            | Error::ExecutePhysicalPlan { source, .. }
+            | Error::ProcedureService { source, .. }
+            | Error::TableMutation { source, .. } => source.status_code(),
 
             Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
         }

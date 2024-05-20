@@ -68,11 +68,12 @@ use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
-    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
-    InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, ExtractTableNamesSnafu,
+    FlowNotFoundSnafu, InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -403,7 +404,7 @@ impl StatementExecutor {
 
         // Extract the table names before optimizing the plan
         let table_names = extract_full_table_names(logical_plan.df_plan())
-            .unwrap()
+            .context(ExtractTableNamesSnafu)?
             .into_iter()
             .map(|t| t.into())
             .collect();

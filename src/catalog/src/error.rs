@@ -211,6 +211,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("View info not found: {}", name))]
+    ViewInfoNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table partitions"))]
     FindPartitions { source: partition::error::Error },
 
@@ -260,6 +267,14 @@ pub enum Error {
 
     #[snafu(display("Failed to execute system catalog table scan"))]
     SystemCatalogTableScanExec {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_query::error::Error,
+    },
+
+    #[snafu(display("Failed to decode logical plan for view: {}", name))]
+    DecodePlan {
+        name: String,
         #[snafu(implicit)]
         location: Location,
         source: common_query::error::Error,
@@ -338,6 +353,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to cast the catalog manager"))]
+    CastManager {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -352,9 +373,12 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::InvalidEntryType { .. }
             | Error::CacheNotFound { .. }
+            | Error::CastManager { .. }
             | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
 
-            Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::ViewInfoNotFound { .. } | Error::TableNotFound { .. } => {
+                StatusCode::TableNotFound
+            }
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }
@@ -389,7 +413,9 @@ impl ErrorExt for Error {
 
             Error::Metasrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source, .. } => source.status_code(),
-            Error::SystemCatalogTableScanExec { source, .. } => source.status_code(),
+            Error::DecodePlan { source, .. } | Error::SystemCatalogTableScanExec { source, .. } => {
+                source.status_code()
+            }
             Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
             Error::CompileScriptInternal { source, .. } | Error::Internal { source, .. } => {
