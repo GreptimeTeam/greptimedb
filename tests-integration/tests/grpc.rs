@@ -70,6 +70,7 @@ macro_rules! grpc_tests {
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
+                test_grpc_zstd_compression,
                 test_grpc_message_size_limit_recv,
                 test_grpc_message_size_limit_send,
                 test_grpc_auth,
@@ -125,6 +126,25 @@ pub async fn test_dbname(store_type: StorageType) {
 }
 
 pub async fn test_grpc_message_size_ok(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    db.sql("show tables;").await.unwrap();
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_grpc_zstd_compression(store_type: StorageType) {
+    // server and client both support gzip
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,

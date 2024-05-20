@@ -34,6 +34,7 @@ use table::TableRef;
 use tests_integration::database::Database;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::codec::CompressionEncoding;
 
 use crate::{create_testing_grpc_query_handler, LOCALHOST_WITH_0};
 
@@ -64,6 +65,10 @@ impl MockGrpcServer {
         )
         .into();
         FlightServiceServer::new(service)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Zstd)
     }
 }
 
