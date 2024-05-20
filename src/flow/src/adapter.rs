@@ -319,7 +319,7 @@ impl FlownodeManager {
                 );
                 // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
                 let ts_col = ColumnSchema::new(
-                    "GREPTIME_TIMESTAMP",
+                    GREPTIME_TIMESTAMP,
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 )
