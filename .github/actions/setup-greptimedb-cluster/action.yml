@@ -22,11 +22,14 @@ inputs:
   image-tag: 
     default: "latest"
     description: 'Image tag'
+  etcd-endpoints:
+    default: "etcd.etcd-cluster.svc.cluster.local:2379"
+    description: "Etcd endpoints"
 
 runs:
   using: composite
   steps:
-  - name: Install greptime operator
+  - name: Install GreptimeDB operator
     shell: bash
     run: |
       helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
@@ -35,44 +38,27 @@ runs:
         --install \
         --create-namespace \
         greptimedb-operator greptime/greptimedb-operator \
-        -n greptimedb-admin
-  - name: Install etcd cluster
-    shell: bash
-    run: | 
-      helm upgrade \
-        --install etcd oci://registry-1.docker.io/bitnamicharts/etcd \
-        --set replicaCount=${{ inputs.etcd-replica-count }} \
-        --set auth.rbac.create=false \
-        --set auth.rbac.token.enabled=false \
-        --set persistence.size=1Gi \
-        --create-namespace \
-        -n etcd-cluster
-  - name: Wait for etcd
-    shell: bash
-    run: |
-      kubectl wait \
-        --for=condition=Ready \
-        pod -l app.kubernetes.io/instance=etcd \
-        --timeout=120s \
-        -n etcd-cluster
-  - name: Print etcd info
-    shell: bash
-    run: kubectl get all --show-labels -n etcd-cluster
+        -n greptimedb-admin \
+        --wait \
+        --wait-for-jobs
   - name: Install GreptimeDB cluster
     shell: bash
     run: | 
       helm upgrade \
         --install my-greptimedb \
-        --set meta.etcdEndpoints=etcd.etcd-cluster.svc.cluster.local:2379 \
+        --set meta.etcdEndpoints=${{ inputs.etcd-endpoints }} \
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
         --set image.tag=${{ inputs.image-tag }} \
         greptime/greptimedb-cluster \
         --create-namespace \
-        -n my-greptimedb
+        -n my-greptimedb \
+        --wait \
+        --wait-for-jobs
   - name: Wait for GreptimeDB
     shell: bash
     run: |
+      kubectl get pods -n my-greptimedb
       kubectl wait \
         --for=condition=Ready \
         pod -l app.greptime.io/component=my-greptimedb-meta \
