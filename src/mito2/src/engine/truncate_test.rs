@@ -55,7 +55,7 @@ async fn test_engine_truncate_region_basic() {
 
     // Scan the region.
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -75,7 +75,7 @@ async fn test_engine_truncate_region_basic() {
 
     // Scan the region.
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "++\n++";
     assert_eq!(expected, batches.pretty_print().unwrap());
@@ -104,7 +104,7 @@ async fn test_engine_put_data_after_truncate() {
 
     // Scan the region
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -131,7 +131,7 @@ async fn test_engine_put_data_after_truncate() {
 
     // Scan the region.
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -261,7 +261,7 @@ async fn test_engine_truncate_reopen() {
 
     // Scan the region.
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "++\n++";
     assert_eq!(expected, batches.pretty_print().unwrap());

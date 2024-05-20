@@ -84,7 +84,7 @@ impl RegionEngine for FileRegionEngine {
             .map_err(BoxedError::new)
     }
 
-    async fn handle_partitioned_query(
+    async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,

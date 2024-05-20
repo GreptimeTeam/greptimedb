@@ -188,7 +188,7 @@ pub trait RegionEngine: Send + Sync {
     ) -> Result<RegionResponse, BoxedError>;
 
     /// Handles query and return a scanner that can be used to scan the region concurrently.
-    async fn handle_partitioned_query(
+    async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,

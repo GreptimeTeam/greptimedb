@@ -170,7 +170,7 @@ impl TableProvider for DummyTableProvider {
 
         let scanner = self
             .engine
-            .handle_partitioned_query(self.region_id, request)
+            .handle_query(self.region_id, request)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         Ok(Arc::new(ReadFromRegion::new(scanner)))

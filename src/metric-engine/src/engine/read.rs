@@ -62,7 +62,7 @@ impl MetricEngineInner {
             .start_timer();
 
         self.mito
-            .handle_query(region_id, request)
+            .scan_to_stream(region_id, request)
             .await
             .context(MitoReadOperationSnafu)
     }
@@ -82,7 +82,7 @@ impl MetricEngineInner {
             .transform_request(physical_region_id, logical_region_id, request)
             .await?;
         self.mito
-            .handle_query(data_region_id, request)
+            .scan_to_stream(data_region_id, request)
             .await
             .context(MitoReadOperationSnafu)
     }

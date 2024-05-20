@@ -117,7 +117,7 @@ impl MitoEngine {
 
     /// Handle substrait query and return a stream of record batches
     #[tracing::instrument(skip_all)]
-    pub async fn handle_query(
+    pub async fn scan_to_stream(
         &self,
         region_id: RegionId,
         request: ScanRequest,
@@ -337,7 +337,7 @@ impl RegionEngine for MitoEngine {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_partitioned_query(
+    async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,

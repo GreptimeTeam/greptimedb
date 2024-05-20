@@ -157,7 +157,7 @@ impl RegionEngine for MetricEngine {
         })
     }
 
-    async fn handle_partitioned_query(
+    async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,

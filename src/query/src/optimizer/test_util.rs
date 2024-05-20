@@ -62,7 +62,7 @@ impl RegionEngine for MetaRegionEngine {
         unimplemented!()
     }
 
-    async fn handle_partitioned_query(
+    async fn handle_query(
         &self,
         _region_id: RegionId,
         _request: ScanRequest,
