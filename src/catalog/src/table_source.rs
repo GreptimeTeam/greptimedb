@@ -18,17 +18,18 @@ use std::sync::Arc;
 use bytes::Bytes;
 use common_catalog::format_full_table_name;
 use common_query::logical_plan::SubstraitPlanDecoderRef;
+use datafusion::catalog::schema::MemorySchemaProvider;
+use datafusion::catalog::{CatalogProviderList, MemoryCatalogProvider, MemoryCatalogProviderList};
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::logical_expr::TableSource;
 use session::context::QueryContext;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dummy_catalog::DummyCatalogList;
-use crate::error::{QueryAccessDeniedSnafu, Result, TableNotExistSnafu};
+use crate::error::{DatafusionSnafu, QueryAccessDeniedSnafu, Result, TableNotExistSnafu};
 use crate::CatalogManagerRef;
 
 pub struct DfTableSourceProvider {
@@ -117,34 +118,50 @@ impl DfTableSourceProvider {
                 .unwrap()
                 .unwrap();
 
-            let mut tables = HashMap::with_capacity(view_info.table_names.len());
+            // Build the catalog list provider for deserialization.
+            let catalog_list = Arc::new(MemoryCatalogProviderList::new());
 
             for table_name in &view_info.table_names {
+                let catalog_name = &table_name.catalog_name;
+                let schema_name = &table_name.schema_name;
+                let table_name = &table_name.table_name;
+
                 let table = self
                     .catalog_manager
-                    .table(
-                        &table_name.catalog_name,
-                        &table_name.schema_name,
-                        &table_name.table_name,
-                    )
+                    .table(catalog_name, schema_name, table_name)
                     .await?
                     .with_context(|| TableNotExistSnafu {
-                        table: format_full_table_name(
-                            &table_name.catalog_name,
-                            &table_name.schema_name,
-                            &table_name.table_name,
-                        ),
+                        table: format_full_table_name(catalog_name, schema_name, table_name),
                     })?;
 
-                let name = &table.table_info().name;
+                let catalog_provider =
+                    if let Some(catalog_provider) = catalog_list.catalog(catalog_name) {
+                        catalog_provider
+                    } else {
+                        let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+                        catalog_list
+                            .register_catalog(catalog_name.to_string(), catalog_provider.clone());
+                        catalog_provider
+                    };
+
+                let schema_provider =
+                    if let Some(schema_provider) = catalog_provider.schema(schema_name) {
+                        schema_provider
+                    } else {
+                        let schema_provider = Arc::new(MemorySchemaProvider::new());
+                        let _ = catalog_provider
+                            .register_schema(schema_name, schema_provider.clone())
+                            .context(DatafusionSnafu)?;
+                        schema_provider
+                    };
 
                 let table_provider: Arc<dyn TableProvider> =
                     Arc::new(DfTableProviderAdapter::new(table));
-                //FIXME: use datafusion::catalog::MemoryCatalogProviderList instead.
-                tables.insert(name.to_string(), table_provider);
-            }
 
-            let catalog_list = Arc::new(DummyCatalogList::with_tables(tables));
+                let _ = schema_provider
+                    .register_table(table_name.to_string(), table_provider)
+                    .context(DatafusionSnafu)?;
+            }
 
             let logical_plan = self
                 .plan_decoder
