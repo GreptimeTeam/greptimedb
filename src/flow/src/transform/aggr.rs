@@ -436,6 +436,106 @@ mod test {
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     #[tokio::test]
+    async fn test_tumble_parse_optional() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour')";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            typ: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ]),
+            // TODO(discord9): mfp indirectly ref to key columns
+            /*
+            .with_key(vec![1])
+            .with_time_index(Some(0)),*/
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(RelationType::new(vec![
+                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                            ])),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                3_600_000_000_000,
+                                            ),
+                                            start_time: None,
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                3_600_000_000_000,
+                                            ),
+                                            start_time: None,
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .project(vec![0, 1])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0)),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::Column(3),
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(flow_plan, expected);
+    }
+
+    #[tokio::test]
     async fn test_tumble_parse() {
         let engine = create_test_query_engine();
         let sql = "SELECT sum(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour', '2021-07-01 00:00:00')";
