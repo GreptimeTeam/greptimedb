@@ -120,11 +120,11 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, catalog_list.clone(), self.session_state.clone())
             .await
-            .map_err(|e| BoxedError::new(e))
+            .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;
 
         self.rewrite_merge_scan(logical_plan, catalog_list)
-            .map_err(|e| BoxedError::new(e))
+            .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)
     }
 }

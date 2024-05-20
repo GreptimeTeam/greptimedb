@@ -76,9 +76,11 @@ fn filter(ident: &CacheIdent) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use moka::future::CacheBuilder;
+    use table::table_name::TableName;
 
     use super::*;
     use crate::ddl::tests::create_view::test_create_view_task;
@@ -95,14 +97,41 @@ mod tests {
         let result = cache.get(1024).await.unwrap();
         assert!(result.is_none());
         let mut task = test_create_view_task("my_view");
+        let table_names = {
+            let mut set = HashSet::new();
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "a_table".to_string(),
+            });
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            });
+            set
+        };
+
         task.view_info.ident.table_id = 1024;
         table_metadata_manager
-            .create_view_metadata(task.view_info.clone(), &task.create_view.logical_plan)
+            .create_view_metadata(
+                task.view_info.clone(),
+                &task.create_view.logical_plan,
+                table_names,
+            )
             .await
             .unwrap();
 
         let view_info = cache.get(1024).await.unwrap().unwrap();
-        assert_eq!((*view_info).view_info, task.create_view.logical_plan);
+        assert_eq!(view_info.view_info, task.create_view.logical_plan);
+        assert_eq!(
+            view_info.table_names,
+            task.create_view
+                .table_names
+                .iter()
+                .map(|t| t.clone().into())
+                .collect::<HashSet<_>>()
+        );
 
         assert!(cache.contains_key(&1024));
         cache

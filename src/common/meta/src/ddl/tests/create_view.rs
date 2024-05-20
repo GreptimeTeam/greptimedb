@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use api::v1::CreateViewExpr;
+use api::v1::{CreateViewExpr, TableName};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
@@ -31,7 +32,35 @@ use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
+fn test_table_names() -> HashSet<table::table_name::TableName> {
+    let mut set = HashSet::new();
+    set.insert(table::table_name::TableName {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "a_table".to_string(),
+    });
+    set.insert(table::table_name::TableName {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "b_table".to_string(),
+    });
+    set
+}
+
 pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
+    let table_names = vec![
+        TableName {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "a_table".to_string(),
+        },
+        TableName {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "b_table".to_string(),
+        },
+    ];
+
     let expr = CreateViewExpr {
         catalog_name: "greptime".to_string(),
         schema_name: "public".to_string(),
@@ -39,6 +68,7 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
         or_replace: false,
         create_if_not_exists: false,
         logical_plan: vec![1, 2, 3],
+        table_names,
     };
 
     let view_info = RawTableInfo {
@@ -70,7 +100,11 @@ async fn test_on_prepare_view_exists_err() {
     // Puts a value to table name key.
     ddl_context
         .table_metadata_manager
-        .create_view_metadata(task.view_info.clone(), &task.create_view.logical_plan)
+        .create_view_metadata(
+            task.view_info.clone(),
+            &task.create_view.logical_plan,
+            test_table_names(),
+        )
         .await
         .unwrap();
     let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context);
@@ -90,7 +124,11 @@ async fn test_on_prepare_with_create_if_view_exists() {
     // Puts a value to table name key.
     ddl_context
         .table_metadata_manager
-        .create_view_metadata(task.view_info.clone(), &task.create_view.logical_plan)
+        .create_view_metadata(
+            task.view_info.clone(),
+            &task.create_view.logical_plan,
+            test_table_names(),
+        )
         .await
         .unwrap();
     let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context);

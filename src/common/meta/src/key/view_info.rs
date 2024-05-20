@@ -267,9 +267,25 @@ mod tests {
 
     #[test]
     fn test_value_serialization() {
+        let table_names = {
+            let mut set = HashSet::new();
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "a_table".to_string(),
+            });
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            });
+            set
+        };
+
         let value = ViewInfoValue {
             view_info: vec![1, 2, 3],
             version: 1,
+            table_names,
         };
         let serialized = value.try_as_raw_value().unwrap();
         let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();

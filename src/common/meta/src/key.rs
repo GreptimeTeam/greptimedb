@@ -1176,7 +1176,7 @@ impl_optional_meta_value! {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -1250,6 +1250,21 @@ mod tests {
 
     fn new_test_table_info(region_numbers: impl Iterator<Item = u32>) -> TableInfo {
         test_utils::new_test_table_info(10, region_numbers)
+    }
+
+    fn new_test_table_names() -> HashSet<TableName> {
+        let mut set = HashSet::new();
+        set.insert(TableName {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "a_table".to_string(),
+        });
+        set.insert(TableName {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "b_table".to_string(),
+        });
+        set
     }
 
     async fn create_physical_table_metadata(
@@ -1963,9 +1978,11 @@ mod tests {
 
         let logical_plan: Vec<u8> = vec![1, 2, 3];
 
+        let table_names = new_test_table_names();
+
         // Create metadata
         table_metadata_manager
-            .create_view_metadata(view_info.clone(), &logical_plan)
+            .create_view_metadata(view_info.clone(), &logical_plan, table_names.clone())
             .await
             .unwrap();
 
@@ -1979,6 +1996,7 @@ mod tests {
                 .unwrap()
                 .into_inner();
             assert_eq!(current_view_info.view_info, logical_plan);
+            assert_eq!(current_view_info.table_names, table_names);
             // assert table info
             let current_table_info = table_metadata_manager
                 .table_info_manager()
@@ -1991,16 +2009,41 @@ mod tests {
         }
 
         let new_logical_plan: Vec<u8> = vec![4, 5, 6];
+        let new_table_names = {
+            let mut set = HashSet::new();
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            });
+            set.insert(TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "c_table".to_string(),
+            });
+            set
+        };
+
         let current_view_info_value =
-            DeserializedValueWithBytes::from_inner(ViewInfoValue::new(&logical_plan));
+            DeserializedValueWithBytes::from_inner(ViewInfoValue::new(&logical_plan, table_names));
         // should be ok.
         table_metadata_manager
-            .update_view_info(view_id, &current_view_info_value, new_logical_plan.clone())
+            .update_view_info(
+                view_id,
+                &current_view_info_value,
+                new_logical_plan.clone(),
+                new_table_names.clone(),
+            )
             .await
             .unwrap();
         // if table info was updated, it should be ok.
         table_metadata_manager
-            .update_view_info(view_id, &current_view_info_value, new_logical_plan.clone())
+            .update_view_info(
+                view_id,
+                &current_view_info_value,
+                new_logical_plan.clone(),
+                new_table_names.clone(),
+            )
             .await
             .unwrap();
 
@@ -2013,14 +2056,21 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(updated_view_info.view_info, new_logical_plan);
+        assert_eq!(updated_view_info.table_names, new_table_names);
 
         let wrong_view_info = logical_plan.clone();
-        let wrong_view_info_value =
-            DeserializedValueWithBytes::from_inner(current_view_info_value.update(wrong_view_info));
+        let wrong_view_info_value = DeserializedValueWithBytes::from_inner(
+            current_view_info_value.update(wrong_view_info, new_table_names.clone()),
+        );
         // if the current_view_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
-            .update_view_info(view_id, &wrong_view_info_value, new_logical_plan.clone())
+            .update_view_info(
+                view_id,
+                &wrong_view_info_value,
+                new_logical_plan.clone(),
+                new_table_names.clone(),
+            )
             .await
             .is_err());
 
@@ -2033,5 +2083,6 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(current_view_info.view_info, new_logical_plan);
+        assert_eq!(current_view_info.table_names, new_table_names);
     }
 }

@@ -104,7 +104,7 @@ impl LogicalPlan {
     /// Returns the DataFusion logical plan reference
     pub fn df_plan(&self) -> &DfLogicalPlan {
         match self {
-            LogicalPlan::DfPlan(plan) => &plan,
+            LogicalPlan::DfPlan(plan) => plan,
         }
     }
 }

@@ -189,6 +189,7 @@ impl DfTableSourceProvider {
 
 #[cfg(test)]
 mod tests {
+    use common_query::test_util::DummyDecoder;
     use session::context::QueryContext;
 
     use super::*;
@@ -198,8 +199,12 @@ mod tests {
     fn test_validate_table_ref() {
         let query_ctx = &QueryContext::with("greptime", "public");
 
-        let table_provider =
-            DfTableSourceProvider::new(MemoryCatalogManager::with_default_setup(), true, query_ctx);
+        let table_provider = DfTableSourceProvider::new(
+            MemoryCatalogManager::with_default_setup(),
+            true,
+            query_ctx,
+            DummyDecoder::arc(),
+        );
 
         let table_ref = TableReference::bare("table_name");
         let result = table_provider.resolve_table_ref(table_ref);

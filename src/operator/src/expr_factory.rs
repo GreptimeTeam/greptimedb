@@ -791,6 +791,21 @@ mod tests {
         assert!(change_column_type.target_type_extension.is_none());
     }
 
+    fn new_test_table_names() -> Vec<TableName> {
+        vec![
+            TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "a_table".to_string(),
+            },
+            TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn test_to_create_view_expr() {
         let sql = "CREATE VIEW test AS SELECT * FROM NUMBERS";
@@ -805,8 +820,15 @@ mod tests {
         };
 
         let logical_plan = vec![1, 2, 3];
+        let table_names = new_test_table_names();
 
-        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+        let expr = to_create_view_expr(
+            stmt,
+            logical_plan.clone(),
+            table_names.clone(),
+            QueryContext::arc(),
+        )
+        .unwrap();
 
         assert_eq!("greptime", expr.catalog_name);
         assert_eq!("public", expr.schema_name);
@@ -814,6 +836,7 @@ mod tests {
         assert!(!expr.create_if_not_exists);
         assert!(!expr.or_replace);
         assert_eq!(logical_plan, expr.logical_plan);
+        assert_eq!(table_names, expr.table_names);
     }
 
     #[test]
@@ -830,8 +853,15 @@ mod tests {
         };
 
         let logical_plan = vec![1, 2, 3];
+        let table_names = new_test_table_names();
 
-        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+        let expr = to_create_view_expr(
+            stmt,
+            logical_plan.clone(),
+            table_names.clone(),
+            QueryContext::arc(),
+        )
+        .unwrap();
 
         assert_eq!("greptime", expr.catalog_name);
         assert_eq!("test", expr.schema_name);
@@ -839,5 +869,6 @@ mod tests {
         assert!(expr.create_if_not_exists);
         assert!(expr.or_replace);
         assert_eq!(logical_plan, expr.logical_plan);
+        assert_eq!(table_names, expr.table_names);
     }
 }

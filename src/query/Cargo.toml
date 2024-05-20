@@ -68,6 +68,7 @@ approx_eq = "0.1"
 arrow.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-macro.workspace = true
+common-query = { workspace = true, features = ["testing"] }
 format_num = "0.1"
 num = "0.4"
 num-traits = "0.2"

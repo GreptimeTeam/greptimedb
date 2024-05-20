@@ -2186,6 +2186,7 @@ mod test {
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::test_util::DummyDecoder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
@@ -2252,7 +2253,12 @@ mod test {
                 .is_ok());
         }
 
-        DfTableSourceProvider::new(catalog_list, false, QueryContext::arc().as_ref())
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc().as_ref(),
+            DummyDecoder::arc(),
+        )
     }
 
     // {
@@ -3075,7 +3081,12 @@ mod test {
             .is_ok());
 
         let plan = PromPlanner::stmt_to_plan(
-            DfTableSourceProvider::new(catalog_list.clone(), false, QueryContext::arc().as_ref()),
+            DfTableSourceProvider::new(
+                catalog_list.clone(),
+                false,
+                QueryContext::arc().as_ref(),
+                DummyDecoder::arc(),
+            ),
             EvalStmt {
                 expr: parser::parse("metrics{tag = \"1\"}").unwrap(),
                 start: UNIX_EPOCH,
@@ -3098,7 +3109,12 @@ mod test {
         \n            TableScan: metrics [tag:Utf8, timestamp:Timestamp(Nanosecond, None), field:Float64;N]"
         );
         let plan = PromPlanner::stmt_to_plan(
-            DfTableSourceProvider::new(catalog_list.clone(), false, QueryContext::arc().as_ref()),
+            DfTableSourceProvider::new(
+                catalog_list.clone(),
+                false,
+                QueryContext::arc().as_ref(),
+                DummyDecoder::arc(),
+            ),
             EvalStmt {
                 expr: parser::parse("avg_over_time(metrics{tag = \"1\"}[5s])").unwrap(),
                 start: UNIX_EPOCH,
