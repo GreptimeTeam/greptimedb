@@ -653,21 +653,20 @@ impl FlownodeManager {
 ///
 /// TODO(discord9): better way to do it, and not expose flow tick even to other flow to avoid
 /// TSO coord mess
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FlowTickManager {
     start: Instant,
-}
-
-impl std::fmt::Debug for FlowTickManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FlowTickManager").finish()
-    }
+    start_timestamp: repr::Timestamp,
 }
 
 impl FlowTickManager {
     pub fn new() -> Self {
         FlowTickManager {
             start: Instant::now(),
+            start_timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as repr::Timestamp,
         }
     }
 

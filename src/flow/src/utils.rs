@@ -208,7 +208,9 @@ impl Arrangement {
         for ((key, val), update_ts, diff) in updates {
             // check if the key is expired
             if let Some(s) = &mut self.expire_state {
+                dbg!(now, &key, &s);
                 if let Some(expired_by) = s.update_event_ts(now, &key)? {
+                    dbg!(expired_by, &key);
                     max_expired_by = max_expired_by.max(Some(expired_by));
                     continue;
                 }
