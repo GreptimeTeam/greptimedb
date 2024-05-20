@@ -349,7 +349,6 @@ def a(cpu, mem, **kwargs):
             &HashMap::from([("a".to_string(), "1".to_string())]),
             &EvalContext::default(),
         );
-        dbg!(&ret);
         let _ = ret.unwrap();
     }
 }

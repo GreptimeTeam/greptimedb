@@ -166,18 +166,10 @@ fn eval_rspy(case: CodeBlockTestCase) {
         }
         let code_obj = vm
             .compile(&case.script, Mode::BlockExpr, "<embedded>".to_owned())
-            .map_err(|err| {
-                dbg!(&err);
-                vm.new_syntax_error(&err)
-            })
+            .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();
         let result_vector = vm
             .run_code_obj(code_obj, scope)
-            .map_err(|e| {
-                dbg!(&e);
-                dbg!(&case.script);
-                e
-            })
             .unwrap()
             .downcast::<PyVector>()
             .unwrap();
@@ -211,10 +203,6 @@ fn eval_pyo3(case: CodeBlockTestCase) {
             .unwrap()
             .unwrap()
             .extract::<PyVector>()
-            .map_err(|e| {
-                dbg!(&case.script);
-                e
-            })
             .unwrap();
         if !check_equal(res_vec.as_vector_ref(), case.expect.clone()) {
             panic!(

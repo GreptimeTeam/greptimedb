@@ -106,7 +106,7 @@ impl TypedExpr {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(dbg!(exprs))
+        Ok(exprs)
     }
 }
 

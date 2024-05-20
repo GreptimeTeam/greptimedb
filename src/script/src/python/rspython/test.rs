@@ -184,7 +184,6 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
 "#;
     let pyast = parse(python_source, Mode::Interactive, "<embedded>").unwrap();
     let copr = parse_and_compile_copr(python_source, None);
-    dbg!(copr);
 }
 
 #[test]
@@ -265,10 +264,6 @@ def calc_rvs(open_time, close):
             "copr.py",
         );
         info!("{res}");
-    } else if let Ok(res) = ret {
-        dbg!(&res);
-    } else {
-        dbg!(ret);
     }
 }
 
@@ -311,9 +306,5 @@ def a(cpu, mem):
             "copr.py",
         );
         info!("{res}");
-    } else if let Ok(res) = ret {
-        dbg!(&res);
-    } else {
-        dbg!(ret);
     }
 }
