@@ -71,6 +71,7 @@ license = "Apache-2.0"
 [workspace.lints]
 clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
+clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
 clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"

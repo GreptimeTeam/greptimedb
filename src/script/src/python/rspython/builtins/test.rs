@@ -455,7 +455,6 @@ sin(values)"#,
             }
             Ok(obj) => {
                 let _ser = PyValue::from_py_obj(&obj, vm);
-                dbg!(_ser);
             }
         }
     });
