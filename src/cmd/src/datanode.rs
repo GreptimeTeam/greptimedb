@@ -27,7 +27,6 @@ use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::service::DatanodeServiceBuilder;
 use meta_client::MetaClientOptions;
-use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -143,12 +142,6 @@ struct StartCommand {
     http_timeout: Option<u64>,
     #[clap(long, default_value = "GREPTIMEDB_DATANODE")]
     env_prefix: String,
-    #[clap(long)]
-    tls_mode: Option<TlsMode>,
-    #[clap(long)]
-    tls_cert_path: Option<String>,
-    #[clap(long)]
-    tls_key_path: Option<String>,
 }
 
 impl StartCommand {
@@ -235,11 +228,6 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout)
         }
 
-        opts.tls = TlsOption::new(
-            self.tls_mode.clone(),
-            self.tls_cert_path.clone(),
-            self.tls_key_path.clone(),
-        );
         // Disable dashboard in datanode.
         opts.http.disable_dashboard = true;
 
@@ -287,7 +275,6 @@ impl StartCommand {
 
         let services = DatanodeServiceBuilder::new(&opts)
             .with_default_grpc_server(&datanode.region_server())
-            .context(StartDatanodeSnafu)?
             .enable_http_service()
             .build()
             .await
