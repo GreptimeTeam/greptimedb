@@ -62,8 +62,11 @@ impl QueryEngineContext {
     }
 
     /// Creates a `[LogicalPlan]` decoder
-    pub fn new_plan_decoder(&self) -> SubstraitPlanDecoderRef {
-        Arc::new(DefaultPlanDecoder::new(self.state.clone()))
+    pub fn new_plan_decoder(&self) -> crate::error::Result<SubstraitPlanDecoderRef> {
+        Ok(Arc::new(DefaultPlanDecoder::new(
+            self.state.clone(),
+            &self.query_ctx,
+        )?))
     }
 
     /// Mock an engine context for unit tests.

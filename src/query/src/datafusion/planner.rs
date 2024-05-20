@@ -64,7 +64,7 @@ impl DfContextProviderAdapter {
             engine_state.catalog_manager().clone(),
             engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
-            Arc::new(DefaultPlanDecoder::new(session_state.clone())),
+            Arc::new(DefaultPlanDecoder::new(session_state.clone(), &query_ctx)?),
         );
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;

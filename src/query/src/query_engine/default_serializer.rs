@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
+use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::SubstraitPlanDecoder;
 use common_telemetry::error;
 use datafusion::catalog::CatalogProviderList;
@@ -22,11 +24,13 @@ use datafusion::common::DataFusionError;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
+use datafusion::execution::FunctionRegistry;
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use prost::Message;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -91,8 +95,18 @@ pub struct DefaultPlanDecoder {
 }
 
 impl DefaultPlanDecoder {
-    pub fn new(session_state: SessionState) -> Self {
-        Self { session_state }
+    pub fn new(
+        mut session_state: SessionState,
+        query_ctx: &QueryContextRef,
+    ) -> crate::error::Result<Self> {
+        // Substrait decoder will look up the UDFs in SessionState, so we need to register them
+        // Note: the query context must be passed to set the timezone
+        for func in FUNCTION_REGISTRY.functions() {
+            let udf = Arc::new(create_udf(func, query_ctx.clone(), Default::default()).into());
+            session_state.register_udf(udf).context(DataFusionSnafu)?;
+        }
+
+        Ok(Self { session_state })
     }
 
     /// Rewrites `[EncodedMergeScan]` to `[MergeScanLogicalPlan]`.

@@ -69,7 +69,10 @@ impl DfLogicalPlanner {
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
-            Arc::new(DefaultPlanDecoder::new(self.session_state.clone())),
+            Arc::new(DefaultPlanDecoder::new(
+                self.session_state.clone(),
+                &query_ctx,
+            )?),
         );
 
         let context_provider = DfContextProviderAdapter::try_new(
@@ -141,7 +144,10 @@ impl DfLogicalPlanner {
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
-            Arc::new(DefaultPlanDecoder::new(self.session_state.clone())),
+            Arc::new(DefaultPlanDecoder::new(
+                self.session_state.clone(),
+                &query_ctx,
+            )?),
         );
         PromPlanner::stmt_to_plan(table_provider, stmt)
             .await

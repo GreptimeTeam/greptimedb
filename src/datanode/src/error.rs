@@ -64,6 +64,13 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to create plan decoder"))]
+    NewPlanDecoder {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to decode logical plan"))]
     DecodeLogicalPlan {
         #[snafu(implicit)]
@@ -388,7 +395,9 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            ExecuteLogicalPlan { source, .. } => source.status_code(),
+            NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
+                source.status_code()
+            }
 
             BuildRegionRequests { source, .. } => source.status_code(),
             HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {

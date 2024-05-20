@@ -55,8 +55,9 @@ use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
     self, BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
-    FindLogicalRegionsSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
-    RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    FindLogicalRegionsSnafu, HandleRegionRequestSnafu, NewPlanDecoderSnafu,
+    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu,
+    UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -652,7 +653,9 @@ impl RegionServerInner {
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
         let query_engine_ctx = self.query_engine.engine_context(ctx.clone());
-        let plan_decoder = query_engine_ctx.new_plan_decoder();
+        let plan_decoder = query_engine_ctx
+            .new_plan_decoder()
+            .context(NewPlanDecoderSnafu)?;
 
         // decode substrait plan to logical plan and execute it
         let logical_plan = plan_decoder
