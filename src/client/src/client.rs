@@ -174,7 +174,12 @@ impl Client {
 
     pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {
         let (_, channel) = self.find_channel()?;
-        Ok(PrometheusGatewayClient::new(channel))
+        let client = PrometheusGatewayClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Zstd);
+        Ok(client)
     }
 
     pub async fn health_check(&self) -> Result<()> {
