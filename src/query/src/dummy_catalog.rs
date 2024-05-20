@@ -18,8 +18,9 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-pub use catalog::dummy_catalog::DummyCatalogList;
 use common_recordbatch::OrderOption;
+use datafusion::catalog::schema::SchemaProvider;
+use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
@@ -33,6 +34,97 @@ use store_api::storage::{RegionId, ScanRequest};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
+
+/// Resolve to the given region (specified by [RegionId]) unconditionally.
+#[derive(Clone)]
+pub struct DummyCatalogList {
+    catalog: DummyCatalogProvider,
+}
+
+impl DummyCatalogList {
+    /// Creates a new catalog list with the given table provider.
+    pub fn with_table_provider(table_provider: Arc<dyn TableProvider>) -> Self {
+        let schema_provider = DummySchemaProvider {
+            table: table_provider,
+        };
+        let catalog_provider = DummyCatalogProvider {
+            schema: schema_provider,
+        };
+        Self {
+            catalog: catalog_provider,
+        }
+    }
+}
+
+impl CatalogProviderList for DummyCatalogList {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn register_catalog(
+        &self,
+        _name: String,
+        _catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<Arc<dyn CatalogProvider>> {
+        None
+    }
+
+    fn catalog_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn catalog(&self, _name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        Some(Arc::new(self.catalog.clone()))
+    }
+}
+
+/// A dummy catalog provider for [DummyCatalogList].
+#[derive(Clone)]
+struct DummyCatalogProvider {
+    schema: DummySchemaProvider,
+}
+
+impl CatalogProvider for DummyCatalogProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn schema(&self, _name: &str) -> Option<Arc<dyn SchemaProvider>> {
+        Some(Arc::new(self.schema.clone()))
+    }
+}
+
+/// A dummy schema provider for [DummyCatalogList].
+#[derive(Clone)]
+struct DummySchemaProvider {
+    table: Arc<dyn TableProvider>,
+}
+
+#[async_trait]
+impl SchemaProvider for DummySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    async fn table(
+        &self,
+        _name: &str,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        Ok(Some(self.table.clone()))
+    }
+
+    fn table_exist(&self, _name: &str) -> bool {
+        true
+    }
+}
 
 /// For [TableProvider] and [DummyCatalogList]
 #[derive(Clone)]
@@ -112,6 +204,8 @@ impl DummyTableProvider {
     }
 }
 
+pub struct DummyTableProviderFactory;
+
 #[async_trait]
 impl TableProviderFactory for DummyTableProviderFactory {
     async fn create(
@@ -135,8 +229,6 @@ impl TableProviderFactory for DummyTableProviderFactory {
         }))
     }
 }
-
-pub struct DummyTableProviderFactory;
 
 #[async_trait]
 pub trait TableProviderFactory: Send + Sync {
