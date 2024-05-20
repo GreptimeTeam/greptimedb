@@ -27,6 +27,7 @@ pub mod mock {
     use common_runtime::{Builder as RuntimeBuilder, Runtime};
     use servers::grpc::region_server::{RegionServerHandler, RegionServerRequestHandler};
     use tokio::sync::mpsc;
+    use tonic::codec::CompressionEncoding;
     use tonic::transport::Server;
     use tower::service_fn;
 
@@ -57,7 +58,13 @@ pub mod mock {
 
             tokio::spawn(async move {
                 Server::builder()
-                    .add_service(RegionServer::new(handler))
+                    .add_service(
+                        RegionServer::new(handler)
+                            .accept_compressed(CompressionEncoding::Gzip)
+                            .accept_compressed(CompressionEncoding::Zstd)
+                            .send_compressed(CompressionEncoding::Gzip)
+                            .send_compressed(CompressionEncoding::Zstd),
+                    )
                     .serve_with_incoming(futures::stream::iter(vec![Ok::<_, Error>(server)]))
                     .await
             });

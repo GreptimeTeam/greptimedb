@@ -22,7 +22,6 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
-use tonic::codec::CompressionEncoding;
 use tonic::transport::{
     Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
 };
@@ -262,8 +261,6 @@ pub struct ChannelConfig {
     pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
-    // Supported compression encoding for gRPC, e.g: gzip, zstd.
-    pub accept_compressed: Vec<CompressionEncoding>,
 }
 
 impl Default for ChannelConfig {
@@ -284,7 +281,6 @@ impl Default for ChannelConfig {
             client_tls: None,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-            accept_compressed: vec![],
         }
     }
 }
@@ -384,16 +380,6 @@ impl ChannelConfig {
     pub fn client_tls_config(mut self, client_tls_option: ClientTlsOption) -> Self {
         self.client_tls = Some(client_tls_option);
         self
-    }
-
-    /// Enable compression for gRPC
-    ///
-    /// Disabled by default.
-    pub fn accept_compressed(self, compression: Vec<CompressionEncoding>) -> Self {
-        Self {
-            accept_compressed: compression,
-            ..self
-        }
     }
 }
 
@@ -535,7 +521,6 @@ mod tests {
                 client_tls: None,
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-                accept_compressed: vec![]
             },
             default_cfg
         );
@@ -557,8 +542,7 @@ mod tests {
                 server_ca_cert_path: "some_server_path".to_string(),
                 client_cert_path: "some_cert_path".to_string(),
                 client_key_path: "some_key_path".to_string(),
-            })
-            .accept_compressed(vec![CompressionEncoding::Gzip]);
+            });
 
         assert_eq!(
             ChannelConfig {
@@ -581,7 +565,6 @@ mod tests {
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-                accept_compressed: vec![CompressionEncoding::Gzip]
             },
             cfg
         );

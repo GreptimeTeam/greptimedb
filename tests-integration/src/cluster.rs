@@ -53,6 +53,7 @@ use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
 use tempfile::TempDir;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tower::service_fn;
 use uuid::Uuid;
@@ -436,8 +437,20 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
     let _handle = tokio::spawn(async move {
         Server::builder()
-            .add_service(FlightServiceServer::new(flight_handler))
-            .add_service(RegionServer::new(region_server_handler))
+            .add_service(
+                FlightServiceServer::new(flight_handler)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Zstd)
+                    .send_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Zstd),
+            )
+            .add_service(
+                RegionServer::new(region_server_handler)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Zstd)
+                    .send_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Zstd),
+            )
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

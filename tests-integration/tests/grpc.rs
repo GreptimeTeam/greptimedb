@@ -22,7 +22,6 @@ use api::v1::{
 use auth::user_provider_from_option;
 use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
@@ -71,8 +70,7 @@ macro_rules! grpc_tests {
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
-                test_grpc_gzip_compression,
-                test_grpc_client_plain_with_server_compression,
+                test_grpc_zstd_compression,
                 test_grpc_message_size_limit_recv,
                 test_grpc_message_size_limit_send,
                 test_grpc_auth,
@@ -145,7 +143,7 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_grpc_gzip_compression(store_type: StorageType) {
+pub async fn test_grpc_zstd_compression(store_type: StorageType) {
     // server and client both support gzip
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
@@ -154,43 +152,12 @@ pub async fn test_grpc_gzip_compression(store_type: StorageType) {
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
 
-    let cm = ChannelManager::with_config(ChannelConfig {
-        ..Default::default()
-    });
-
-    let grpc_client = Client::with_manager_and_urls(cm, vec![addr]);
+    let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
         format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
         grpc_client,
     );
     db.sql("show tables;").await.unwrap();
-    let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
-}
-
-pub async fn test_grpc_client_plain_with_server_compression(store_type: StorageType) {
-    // set server compression to gzip
-    let config = GrpcServerConfig {
-        max_recv_message_size: 1024,
-        max_send_message_size: 1024,
-    };
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
-
-    // set client compression to true
-    let cm = ChannelManager::with_config(ChannelConfig {
-        accept_compressed: vec![],
-        ..Default::default()
-    });
-
-    let grpc_client = Client::with_manager_and_urls(cm, vec![addr]);
-    let db = Database::new_with_dbname(
-        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
-        grpc_client,
-    );
-    let re = db.sql("show tables;").await;
-    assert!(re.is_ok());
-
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
 }

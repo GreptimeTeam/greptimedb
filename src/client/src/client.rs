@@ -150,39 +150,25 @@ impl Client {
             .as_bytes() as usize
     }
 
-    pub fn accept_compressed(&self) -> &Vec<CompressionEncoding> {
-        self.inner
-            .channel_manager
-            .config()
-            .accept_compressed
-            .as_ref()
-    }
-
     pub fn make_flight_client(&self) -> Result<FlightClient> {
         let (addr, channel) = self.find_channel()?;
 
-        let mut client = FlightServiceClient::new(channel)
+        let client = FlightServiceClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size());
+            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
 
-        for encoding in self.accept_compressed() {
-            client = client
-                .accept_compressed(*encoding)
-                .send_compressed(*encoding);
-        }
         Ok(FlightClient { addr, client })
     }
 
     pub(crate) fn raw_region_client(&self) -> Result<PbRegionClient<Channel>> {
         let (_, channel) = self.find_channel()?;
-        let mut client = PbRegionClient::new(channel)
+        let client = PbRegionClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size());
-        for encoding in self.accept_compressed() {
-            client = client
-                .accept_compressed(*encoding)
-                .send_compressed(*encoding);
-        }
+            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
         Ok(client)
     }
 
