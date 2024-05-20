@@ -26,6 +26,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
+use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
@@ -281,7 +282,7 @@ impl FlownodeManager {
                 let schema = meta.schema.column_schemas;
                 let is_auto_create = schema
                     .last()
-                    .map(|s| s.name == "__ts_placeholder")
+                    .map(|s| s.name == GREPTIME_TIMESTAMP)
                     .unwrap_or(false);
                 (primary_keys, schema, is_auto_create)
             } else {
@@ -318,7 +319,7 @@ impl FlownodeManager {
                 );
                 // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
                 let ts_col = ColumnSchema::new(
-                    "__ts_placeholder",
+                    "GREPTIME_TIMESTAMP",
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 )
@@ -676,6 +677,6 @@ impl FlowTickManager {
     pub fn tick(&self) -> repr::Timestamp {
         let current = Instant::now();
         let since_the_epoch = current - self.start;
-        since_the_epoch.as_millis() as repr::Timestamp
+        since_the_epoch.as_millis() as repr::Timestamp + self.start_timestamp
     }
 }
