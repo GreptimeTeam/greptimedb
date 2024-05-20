@@ -246,6 +246,11 @@ lto = "thin"
 debug = false
 incremental = false
 
+[profile.ci]
+inherits = "dev"
+debug = false
+strip = true
+
 [profile.dev.package.sqlness-runner]
 debug = false
 strip = true

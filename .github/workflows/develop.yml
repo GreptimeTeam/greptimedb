@@ -231,86 +231,65 @@ jobs:
           path: /tmp/unstable-greptime/
           retention-days: 3
 
-  e2e: 
-    runs-on: ubuntu-latest
+  build-greptime-ci:
+    name: Build GreptimeDB binary (profile-CI)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04 ]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Install Kind
-        run: |
-          [ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-      - name: Create kind cluster
-        run: |
-          ./.github/scripts/kind-with-registry.sh
-      - name: Install greptime operator
-        run: |
-          helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
-          helm repo update
-          helm upgrade \
-            --install \
-            --create-namespace \
-            greptimedb-operator greptime/greptimedb-operator \
-            -n greptimedb-admin
-      - name: Install etcd cluster
-        run: | 
-          helm upgrade \
-            --install etcd oci://registry-1.docker.io/bitnamicharts/etcd \
-            --set replicaCount=1 \
-            --set auth.rbac.create=false \
-            --set auth.rbac.token.enabled=false \
-            --set persistence.size=1Gi \
-            --create-namespace \
-            -n etcd-cluster
-      - name: Wait for etcd
-        run: |
-          kubectl wait \
-            --for=condition=Ready \
-            pod -l app.kubernetes.io/instance=etcd \
-            --timeout=120s \
-            -n etcd-cluster
-      - name: Print etcd info
-        run: kubectl get all --show-labels -n etcd-cluster
-      - name: Install GreptimeDB cluster
-        run: | 
-          helm upgrade \
-            --install my-greptimedb \
-            --set meta.etcdEndpoints=etcd.etcd-cluster.svc.cluster.local:2379 \
-            greptime/greptimedb-cluster \
-            --create-namespace \
-            -n my-greptimedb
-      - name: Wait for GreptimeDB
-        run: |
-          kubectl wait \
-            --for=condition=Ready \
-            pod -l app.greptime.io/component=my-greptimedb-meta \
-            --timeout=120s \
-            -n my-greptimedb
-          kubectl wait \
-            --for=condition=Ready \
-            pod -l app.greptime.io/component=my-greptimedb-datanode \
-            --timeout=120s \
-            -n my-greptimedb
-          kubectl wait \
-            --for=condition=Ready \
-            pod -l app.greptime.io/component=my-greptimedb-frontend \
-            --timeout=120s \
-            -n my-greptimedb
-      - name: Print GreptimeDB info
-        if: always()
-        run: | 
-          kubectl get all --show-labels -n my-greptimedb
-      - name: Export kind logs
-        if: failure()
-        run: | 
-          kind export logs /tmp/kind
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - uses: arduino/setup-protoc@v3
         with:
-          name: kind-logs
-          path: /tmp/kind
-          retention-days: 3
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-greptime-ci"
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin
+      - name: Build greptime bianry
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: cargo build --bin greptime --profile ci
+      - name: Pack greptime binary
+        shell: bash
+        run: |
+          mkdir bin && \
+          mv ./target/ci/greptime bin
+      - name: Print greptime binaries info
+        run: ls -lh bin
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bin
+          version: current
+
+  e2e: 
+    runs-on: ubuntu-latest
+    needs:  build-greptime-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: tar -xvf ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
 
   sqlness:
     name: Sqlness Test
