@@ -24,7 +24,7 @@ async function main() {
     core.info(`CI_REPORT_STATUS=${process.env["CI_REPORT_STATUS"]}, resolved to ${success}`)
 
     const client = obtainClient("GITHUB_TOKEN")
-    const title = `Workflow run '${context.action}' failed`
+    const title = `Workflow run '${context.workflow}' failed`
     const url = `${process.env["GITHUB_SERVER_URL"]}/${process.env["GITHUB_REPOSITORY"]}/actions/runs/${process.env["GITHUB_RUN_ID"]}`
     const failure_comment = `@GreptimeTeam/db-approver\nNew failure: ${url} `
     const success_comment = `@GreptimeTeam/db-approver\nBack to success: ${url}`

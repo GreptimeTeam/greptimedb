@@ -305,7 +305,7 @@ jobs:
         run: pnpm tsx bin/report-ci-failure.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
       - name: Notify nightly build successful result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
