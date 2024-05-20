@@ -157,6 +157,7 @@ impl CompactionTaskImpl {
                 let reader = build_sst_reader(
                     metadata.clone(),
                     sst_layer.clone(),
+                    Some(cache_manager.clone()),
                     &output.inputs,
                     append_mode,
                     output.filter_deleted,

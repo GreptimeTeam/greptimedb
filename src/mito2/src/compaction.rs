@@ -425,6 +425,7 @@ pub(crate) struct CompactionOutput {
 async fn build_sst_reader(
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
+    cache: Option<CacheManagerRef>,
     inputs: &[FileHandle],
     append_mode: bool,
     filter_deleted: bool,
@@ -433,6 +434,7 @@ async fn build_sst_reader(
     let mut scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
         .with_files(inputs.to_vec())
         .with_append_mode(append_mode)
+        .with_cache(cache)
         .with_filter_deleted(filter_deleted)
         // We ignore file not found error during compaction.
         .with_ignore_file_not_found(true);
