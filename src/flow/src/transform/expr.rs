@@ -102,7 +102,7 @@ impl TypedExpr {
 
         match arg_len {
             // because variadic function can also have 1 arguments, we need to check if it's a variadic function first
-            1 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
+            1 if UnaryFunc::from_str_and_type(fn_name, None).is_ok() => {
                 let func = UnaryFunc::from_str_and_type(fn_name, None)?;
                 let arg = arg_exprs[0].clone();
                 let ret_type = ColumnType::new_nullable(func.signature().output.clone());
@@ -125,7 +125,13 @@ impl TypedExpr {
                 Ok(TypedExpr::new(arg.call_unary(func), ret_type))
             }
             // because variadic function can also have 2 arguments, we need to check if it's a variadic function first
-            2 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
+            2 if BinaryFunc::from_str_expr_and_type(
+                fn_name,
+                &arg_exprs,
+                arg_types.get(0..2).expect("arg have 2 elements"),
+            )
+            .is_ok() =>
+            {
                 let (func, signature) =
                     BinaryFunc::from_str_expr_and_type(fn_name, &arg_exprs, &arg_types[0..2])?;
 
