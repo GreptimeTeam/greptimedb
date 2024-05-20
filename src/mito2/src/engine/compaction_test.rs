@@ -133,9 +133,7 @@ async fn test_compaction_region() {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Compact(RegionCompactRequest {
-                compact_type: Default::default(),
-            }),
+            RegionRequest::Compact(RegionCompactRequest::default()),
         )
         .await
         .unwrap();
@@ -186,9 +184,7 @@ async fn test_compaction_region_with_overlapping() {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Compact(RegionCompactRequest {
-                compact_type: Default::default(),
-            }),
+            RegionRequest::Compact(RegionCompactRequest::default()),
         )
         .await
         .unwrap();
@@ -239,9 +235,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Compact(RegionCompactRequest {
-                compact_type: Default::default(),
-            }),
+            RegionRequest::Compact(RegionCompactRequest::default()),
         )
         .await
         .unwrap();

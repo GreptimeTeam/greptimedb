@@ -18,8 +18,8 @@ use std::fmt;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{
-    alter_request, region_request, AlterRequest, AlterRequests, CloseRequest, CompactRequest,
-    CompactType, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
+    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{self, Rows, SemanticType};
@@ -199,10 +199,12 @@ fn make_region_flush(flush: FlushRequest) -> Result<Vec<(RegionId, RegionRequest
 
 fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = compact.region_id.into();
-    let compact_type = compact.compact_type.unwrap_or_default();
+    let options = compact
+        .options
+        .unwrap_or(compact_request::Options::Regular(Default::default()));
     Ok(vec![(
         region_id,
-        RegionRequest::Compact(RegionCompactRequest { compact_type }),
+        RegionRequest::Compact(RegionCompactRequest { options }),
     )])
 }
 
@@ -644,7 +646,16 @@ pub struct RegionFlushRequest {
 
 #[derive(Debug)]
 pub struct RegionCompactRequest {
-    pub compact_type: CompactType,
+    pub options: compact_request::Options,
+}
+
+impl Default for RegionCompactRequest {
+    fn default() -> Self {
+        Self {
+            // Default to regular compaction.
+            options: compact_request::Options::Regular(Default::default()),
+        }
+    }
 }
 
 /// Truncate region request.

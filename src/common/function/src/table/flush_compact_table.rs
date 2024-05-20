@@ -15,8 +15,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use api::v1::region::compact_type::Ty;
-use api::v1::region::{CompactType, StrictWindow};
+use api::v1::region::{compact_request, StrictWindow};
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::Error::ThreadJoin;
@@ -132,7 +131,10 @@ fn parse_compact_params(
     );
 
     let (table_name, compact_type) = match params {
-        [ValueRef::String(table_name)] => (table_name, CompactType::default()),
+        [ValueRef::String(table_name)] => (
+            table_name,
+            compact_request::Options::Regular(Default::default()),
+        ),
         [ValueRef::String(table_name), ValueRef::String(compact_ty_str)] => {
             let compact_type = parse_compact_type(compact_ty_str, None)?;
             (table_name, compact_type)
@@ -160,18 +162,18 @@ fn parse_compact_params(
         catalog_name,
         schema_name,
         table_name,
-        compact_type,
+        compact_options: compact_type,
     })
 }
 
-fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<CompactType> {
+fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<compact_request::Options> {
     if type_str.eq_ignore_ascii_case("strict_window") {
-        let window = option.and_then(|v| i64::from_str(v).ok()).unwrap_or(0);
-        Ok(CompactType {
-            ty: Some(Ty::StrictWindow(StrictWindow { window })),
-        })
+        let window_seconds = option.and_then(|v| i64::from_str(v).ok()).unwrap_or(0);
+        Ok(compact_request::Options::StrictWindow(StrictWindow {
+            window_seconds,
+        }))
     } else {
-        Ok(CompactType::default())
+        Ok(compact_request::Options::Regular(Default::default()))
     }
 }
 

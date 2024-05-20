@@ -14,7 +14,6 @@
 
 //! Tests for append mode.
 
-use api::v1::region::CompactType;
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
@@ -140,9 +139,7 @@ async fn test_append_mode_compaction() {
     let output = engine
         .handle_request(
             region_id,
-            RegionRequest::Compact(RegionCompactRequest {
-                compact_type: CompactType::default(),
-            }),
+            RegionRequest::Compact(RegionCompactRequest::default()),
         )
         .await
         .unwrap();

@@ -16,8 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::greptime_proto::v1::region::CompactType;
-use api::v1::region::compact_type::Ty;
+use api::v1::region::compact_request;
 use common_query::logical_plan::DfExpr;
 use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
@@ -68,7 +67,7 @@ pub struct CompactionRequest {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) compact_type: CompactType,
+    pub(crate) compact_options: compact_request::Options,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
@@ -141,7 +140,7 @@ impl CompactionScheduler {
     pub(crate) fn schedule_compaction(
         &mut self,
         region_id: RegionId,
-        compact_type: CompactType,
+        compact_options: compact_request::Options,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
@@ -162,7 +161,7 @@ impl CompactionScheduler {
             file_purger.clone(),
         );
         let request = status.new_compaction_request(
-            compact_type,
+            compact_options,
             self.request_sender.clone(),
             waiter,
             self.engine_config.clone(),
@@ -186,7 +185,7 @@ impl CompactionScheduler {
 
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
-            CompactType::default(), // todo(hl): we should not trigger a regular compaction after major compaction.
+            compact_request::Options::Regular(Default::default()), // todo(hl): we should not trigger a regular compaction after major compaction.
             self.request_sender.clone(),
             OptionOutputTx::none(),
             self.engine_config.clone(),
@@ -237,16 +236,17 @@ impl CompactionScheduler {
     ///
     /// If the region has nothing to compact, it removes the region from the status map.
     fn schedule_compaction_request(&mut self, request: CompactionRequest) -> Result<()> {
-        let picker = if let Some(Ty::StrictWindow(window)) = &request.compact_type.ty {
-            let window = if window.window == 0 {
-                None
+        let picker =
+            if let compact_request::Options::StrictWindow(window) = &request.compact_options {
+                let window = if window.window_seconds == 0 {
+                    None
+                } else {
+                    Some(window.window_seconds)
+                };
+                Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
             } else {
-                Some(window.window)
+                compaction_options_to_picker(&request.current_version.options.compaction)
             };
-            Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
-        } else {
-            compaction_options_to_picker(&request.current_version.options.compaction)
-        };
 
         let region_id = request.region_id();
         debug!(
@@ -374,7 +374,7 @@ impl CompactionStatus {
     #[allow(clippy::too_many_arguments)]
     fn new_compaction_request(
         &mut self,
-        compact_type: CompactType,
+        compact_options: compact_request::Options,
         request_sender: Sender<WorkerRequest>,
         waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
@@ -388,7 +388,7 @@ impl CompactionStatus {
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
-            compact_type,
+            compact_options,
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
@@ -562,7 +562,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 builder.region_id(),
-                CompactType::default(),
+                compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -581,7 +581,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 builder.region_id(),
-                CompactType::default(),
+                compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -644,7 +644,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 region_id,
-                CompactType::default(),
+                compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -673,7 +673,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 region_id,
-                CompactType::default(),
+                compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
                 &purger,
@@ -705,7 +705,7 @@ mod tests {
         scheduler
             .schedule_compaction(
                 region_id,
-                CompactType::default(),
+                compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
                 &purger,

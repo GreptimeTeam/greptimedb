@@ -15,8 +15,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use api::v1::region::compact_type::Ty;
-use api::v1::region::CompactType;
+use api::v1::region::compact_request;
 use common_telemetry::info;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -53,13 +52,13 @@ impl WindowedCompactionPicker {
     fn calculate_time_window(
         &self,
         region_id: RegionId,
-        compact_type: CompactType,
+        options: compact_request::Options,
         current_version: &VersionRef,
     ) -> i64 {
-        let window = if let Some(Ty::StrictWindow(w)) = &compact_type.ty {
-            if w.window != 0 {
+        let window = if let compact_request::Options::StrictWindow(w) = &options {
+            if w.window_seconds != 0 {
                 // 0 means window is not provided.
-                Some(w.window)
+                Some(w.window_seconds)
             } else {
                 None
             }
@@ -90,7 +89,7 @@ impl Picker for WindowedCompactionPicker {
             engine_config,
             current_version,
             access_layer,
-            compact_type,
+            compact_options: compact_type,
             request_sender,
             waiters,
             file_purger,

@@ -109,7 +109,7 @@ impl Requester {
             .map(|partition| {
                 RegionRequestBody::Compact(CompactRequest {
                     region_id: partition.id.into(),
-                    compact_type: Some(request.compact_type.clone()),
+                    options: Some(request.compact_options.clone()),
                 })
             })
             .collect();
@@ -146,7 +146,7 @@ impl Requester {
     ) -> Result<AffectedRows> {
         let request = RegionRequestBody::Compact(CompactRequest {
             region_id: region_id.into(),
-            compact_type: None, // todo(hl): maybe also support parameters in region compaction.
+            options: None, // todo(hl): maybe also support parameters in region compaction.
         });
 
         info!("Handle region manual compaction request: {region_id}");

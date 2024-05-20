@@ -25,7 +25,7 @@ use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
-use greptime_proto::v1::region::CompactType;
+use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
@@ -239,53 +239,24 @@ pub struct FlushTableRequest {
     pub table_name: String,
 }
 
-// #[derive(Debug, Clone, Default)]
-// pub enum CompactType {
-//     #[default]
-//     Regular,
-//     StrictWindow(StrictWindowOptions),
-// }
-
-// #[derive(Debug, Clone, Default)]
-// pub struct StrictWindowOptions {
-//     pub window_size: Option<i64>,
-// }
-
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub compact_type: CompactType,
+    pub compact_options: compact_request::Options,
 }
 
-// impl From<&CompactType> for greptime_proto::v1::region::CompactType {
-//     fn from(value: &CompactType) -> Self {
-//         let compact_type = match value {
-//             CompactType::Regular => Ty::Regular(Regular::default()),
-//             CompactType::StrictWindow(window) => Ty::StrictWindow(StrictWindow {
-//                 window: window.window_size.unwrap_or(0),
-//             }),
-//         };
-//         greptime_proto::v1::region::CompactType {
-//             ty: Some(compact_type),
-//         }
-//     }
-// }
-//
-// impl From<&greptime_proto::v1::region::CompactType> for CompactType {
-//     fn from(value: &greptime_proto::v1::region::CompactType) -> Self {
-//         match &value.ty {
-//             None => CompactType::Regular,
-//             Some(t) => match t {
-//                 Ty::Regular(_) => CompactType::Regular,
-//                 Ty::StrictWindow(window) => CompactType::StrictWindow(StrictWindowOptions {
-//                     window_size: Some(window.window),
-//                 }),
-//             },
-//         }
-//     }
-// }
+impl Default for CompactTableRequest {
+    fn default() -> Self {
+        Self {
+            catalog_name: Default::default(),
+            schema_name: Default::default(),
+            table_name: Default::default(),
+            compact_options: compact_request::Options::Regular(Default::default()),
+        }
+    }
+}
 
 /// Truncate table request
 #[derive(Debug, Clone, Serialize, Deserialize)]

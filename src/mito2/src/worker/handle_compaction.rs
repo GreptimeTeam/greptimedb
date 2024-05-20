@@ -35,7 +35,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         COMPACTION_REQUEST_COUNT.inc();
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
-            req.compact_type,
+            req.options,
             &region.version_control,
             &region.access_layer,
             &region.file_purger,
