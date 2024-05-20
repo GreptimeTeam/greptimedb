@@ -203,10 +203,6 @@ fn eval_pyo3(case: CodeBlockTestCase) {
             .unwrap()
             .unwrap()
             .extract::<PyVector>()
-            .map_err(|e| {
-                dbg!(&case.script);
-                e
-            })
             .unwrap();
         if !check_equal(res_vec.as_vector_ref(), case.expect.clone()) {
             panic!(
