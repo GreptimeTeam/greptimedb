@@ -44,8 +44,7 @@ SHOW FULL COLUMNS FROM test_view;
 
 SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'test_view';
 
---- FIXED in the following PR ---
-SELECT * FROM test_view;
+SELECT * FROM test_view LIMIT 10;
 
 USE public;
 

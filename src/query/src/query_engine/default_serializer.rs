@@ -105,6 +105,7 @@ impl DefaultPlanDecoder {
             session_state: self.session_state.clone(),
             catalog_list,
         };
+
         Ok(plan.rewrite(&mut rewriter).context(DataFusionSnafu)?.data)
     }
 }

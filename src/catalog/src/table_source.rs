@@ -19,7 +19,7 @@ use bytes::Bytes;
 use common_catalog::format_full_table_name;
 use common_query::logical_plan::SubstraitPlanDecoderRef;
 use datafusion::catalog::schema::MemorySchemaProvider;
-use datafusion::catalog::{CatalogProviderList, MemoryCatalogProvider, MemoryCatalogProviderList};
+use datafusion::catalog::MemoryCatalogProvider;
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{provider_as_source, TableProvider};
@@ -28,6 +28,9 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
+mod memory_catalog;
+use datafusion::catalog::CatalogProvider;
+use memory_catalog::MemoryCatalogProviderList;
 
 use crate::error::{
     CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetTableCacheSnafu, QueryAccessDeniedSnafu,
@@ -124,9 +127,15 @@ impl DfTableSourceProvider {
                 })?;
 
             // Build the catalog list provider for deserialization.
-            let catalog_list = Arc::new(MemoryCatalogProviderList::new());
+            let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+            let catalog_list = Arc::new(MemoryCatalogProviderList::with_catalog_provider(
+                catalog_provider.clone(),
+            ));
 
             for table_name in &view_info.table_names {
+                // We don't have a cross-catalog view.
+                debug_assert_eq!(catalog_name, &table_name.catalog_name);
+
                 let catalog_name = &table_name.catalog_name;
                 let schema_name = &table_name.schema_name;
                 let table_name = &table_name.table_name;
@@ -138,16 +147,6 @@ impl DfTableSourceProvider {
                     .with_context(|| TableNotExistSnafu {
                         table: format_full_table_name(catalog_name, schema_name, table_name),
                     })?;
-
-                let catalog_provider =
-                    if let Some(catalog_provider) = catalog_list.catalog(catalog_name) {
-                        catalog_provider
-                    } else {
-                        let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-                        catalog_list
-                            .register_catalog(catalog_name.to_string(), catalog_provider.clone());
-                        catalog_provider
-                    };
 
                 let schema_provider =
                     if let Some(schema_provider) = catalog_provider.schema(schema_name) {
@@ -182,6 +181,7 @@ impl DfTableSourceProvider {
         };
 
         let source = provider_as_source(provider);
+
         let _ = self.resolved_tables.insert(resolved_name, source.clone());
         Ok(source)
     }
