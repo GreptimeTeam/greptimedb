@@ -434,7 +434,7 @@ mod test {
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
-
+    /// TODO(discord9): add more illegal sql tests
     #[tokio::test]
     async fn test_tumble_compsite() {
         let engine = create_test_query_engine();
