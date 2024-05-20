@@ -57,7 +57,7 @@ async fn scan_in_parallel(
         .unwrap();
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+

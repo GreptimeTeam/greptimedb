@@ -53,7 +53,7 @@ async fn check_prune_row_groups(expr: DfExpr, expected: &str) {
     flush_region(&engine, region_id, Some(5)).await;
 
     let stream = engine
-        .handle_query(
+        .scan_to_stream(
             region_id,
             ScanRequest {
                 filters: vec![Expr::from(expr)],
@@ -186,7 +186,7 @@ async fn test_prune_memtable() {
     .await;
 
     let stream = engine
-        .handle_query(
+        .scan_to_stream(
             region_id,
             ScanRequest {
                 filters: vec![time_range_expr(0, 20)],
@@ -238,7 +238,7 @@ async fn test_prune_memtable_complex_expr() {
     let filters = vec![time_range_expr(4, 7), Expr::from(col("tag_0").lt(lit("6")))];
 
     let stream = engine
-        .handle_query(
+        .scan_to_stream(
             region_id,
             ScanRequest {
                 filters,

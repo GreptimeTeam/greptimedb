@@ -26,9 +26,10 @@ use datafusion_expr::expr::Expr as DfExpr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
+use store_api::region_engine::SinglePartitionScanner;
 use store_api::storage::ScanRequest;
 
-use crate::table::scan::StreamScanAdapter;
+use crate::table::scan::RegionScanExec;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
@@ -110,11 +111,12 @@ impl TableProvider for DfTableProviderAdapter {
                 .collect::<Vec<_>>()
         });
 
-        let mut stream_adapter = StreamScanAdapter::new(stream);
+        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        let mut plan = RegionScanExec::new(scanner);
         if let Some(sort_expr) = sort_expr {
-            stream_adapter = stream_adapter.with_output_ordering(sort_expr);
+            plan = plan.with_output_ordering(sort_expr);
         }
-        Ok(Arc::new(stream_adapter))
+        Ok(Arc::new(plan))
     }
 
     fn supports_filters_pushdown(

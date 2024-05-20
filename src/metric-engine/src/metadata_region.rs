@@ -300,7 +300,7 @@ impl MetadataRegion {
         let scan_req = Self::build_read_request(key);
         let record_batch_stream = self
             .mito
-            .handle_query(region_id, scan_req)
+            .scan_to_stream(region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
         let scan_result = collect(record_batch_stream)
@@ -317,7 +317,7 @@ impl MetadataRegion {
         let scan_req = Self::build_read_request(key);
         let record_batch_stream = self
             .mito
-            .handle_query(region_id, scan_req)
+            .scan_to_stream(region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
         let scan_result = collect(record_batch_stream)
@@ -351,7 +351,7 @@ impl MetadataRegion {
         };
         let record_batch_stream = self
             .mito
-            .handle_query(region_id, scan_req)
+            .scan_to_stream(region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
         let scan_result = collect(record_batch_stream)
@@ -590,7 +590,7 @@ mod test {
         let scan_req = MetadataRegion::build_read_request("test_key");
         let record_batch_stream = metadata_region
             .mito
-            .handle_query(region_id, scan_req)
+            .scan_to_stream(region_id, scan_req)
             .await
             .unwrap();
         let scan_result = collect(record_batch_stream).await.unwrap();

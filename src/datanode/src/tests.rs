@@ -23,7 +23,6 @@ use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
-use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use query::dataframe::DataFrame;
 use query::plan::LogicalPlan;
@@ -32,7 +31,7 @@ use query::query_engine::DescribeResult;
 use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
@@ -193,7 +192,7 @@ impl RegionEngine for MockRegionEngine {
         &self,
         _region_id: RegionId,
         _request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
+    ) -> Result<RegionScannerRef, BoxedError> {
         unimplemented!()
     }
 

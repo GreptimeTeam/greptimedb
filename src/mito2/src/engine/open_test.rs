@@ -276,7 +276,7 @@ async fn test_open_region_skip_wal_replay() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -305,7 +305,7 @@ async fn test_open_region_skip_wal_replay() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+

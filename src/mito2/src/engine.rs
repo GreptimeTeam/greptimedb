@@ -62,7 +62,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -115,9 +115,33 @@ impl MitoEngine {
         Ok(region.region_usage().await)
     }
 
+    /// Handle substrait query and return a stream of record batches
+    #[tracing::instrument(skip_all)]
+    pub async fn scan_to_stream(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+        self.scanner(region_id, request)
+            .map_err(BoxedError::new)?
+            .scan()
+            .await
+            .map_err(BoxedError::new)
+    }
+
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.scan_region(region_id, request)?.scanner()
+    }
+
+    /// Returns a region scanner to scan the region for `request`.
+    async fn region_scanner(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RegionScannerRef> {
+        let scanner = self.scanner(region_id, request)?;
+        scanner.region_scanner().await
     }
 
     /// Scans a region.
@@ -312,16 +336,13 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
-    /// Handle substrait query and return a stream of record batches
     #[tracing::instrument(skip_all)]
     async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        self.scanner(region_id, request)
-            .map_err(BoxedError::new)?
-            .scan()
+    ) -> Result<RegionScannerRef, BoxedError> {
+        self.region_scanner(region_id, request)
             .await
             .map_err(BoxedError::new)
     }

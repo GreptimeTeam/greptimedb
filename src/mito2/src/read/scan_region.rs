@@ -20,6 +20,7 @@ use std::time::Instant;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
+use store_api::region_engine::{RegionScannerRef, SinglePartitionScanner};
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 use tokio::sync::{mpsc, Semaphore};
@@ -56,6 +57,14 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
+    }
+
+    /// Returns a [RegionScanner] to scan the region.
+    pub(crate) async fn region_scanner(&self) -> Result<RegionScannerRef> {
+        let stream = self.scan().await?;
+        let scanner = SinglePartitionScanner::new(stream);
+
+        Ok(Arc::new(scanner))
     }
 }
 
