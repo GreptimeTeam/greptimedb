@@ -37,7 +37,7 @@ use crate::table::metrics::MemoryUsageMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Debug)]
-pub struct ReadFromRegion {
+pub struct RegionScanExec {
     scanner: RegionScannerRef,
     arrow_schema: ArrowSchemaRef,
     /// The expected output ordering for the plan.
@@ -46,7 +46,7 @@ pub struct ReadFromRegion {
     properties: PlanProperties,
 }
 
-impl ReadFromRegion {
+impl RegionScanExec {
     pub fn new(scanner: RegionScannerRef) -> Self {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
@@ -71,7 +71,7 @@ impl ReadFromRegion {
     }
 }
 
-impl ExecutionPlan for ReadFromRegion {
+impl ExecutionPlan for RegionScanExec {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -121,7 +121,7 @@ impl ExecutionPlan for ReadFromRegion {
     }
 }
 
-impl DisplayAs for ReadFromRegion {
+impl DisplayAs for RegionScanExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // The scanner contains all information needed to display the plan.
         write!(f, "{:?}", self.scanner)
@@ -211,7 +211,7 @@ mod test {
         let stream = recordbatches.as_stream();
 
         let scanner = Arc::new(SinglePartitionScanner::new(stream));
-        let plan = ReadFromRegion::new(scanner);
+        let plan = RegionScanExec::new(scanner);
         let actual: SchemaRef = Arc::new(
             plan.properties
                 .eq_properties

@@ -31,7 +31,7 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{RegionId, ScanRequest};
-use table::table::scan::ReadFromRegion;
+use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
 
@@ -173,7 +173,7 @@ impl TableProvider for DummyTableProvider {
             .handle_query(self.region_id, request)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        Ok(Arc::new(ReadFromRegion::new(scanner)))
+        Ok(Arc::new(RegionScanExec::new(scanner)))
     }
 
     fn supports_filters_pushdown(
