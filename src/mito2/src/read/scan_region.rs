@@ -40,7 +40,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{compat, Batch, Source};
 use crate::region::version::VersionRef;
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
@@ -629,7 +629,7 @@ impl ScanInput {
                 .map(|(row_group_idx, row_selection)| {
                     FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection)
                 });
-            part_builder.append_file_ranges(file_ranges)
+            part_builder.append_file_ranges(file.meta_ref(), file_ranges);
         }
 
         READ_SST_COUNT.observe(self.files.len() as f64);
@@ -718,7 +718,11 @@ pub(crate) trait ScanPartBuilder {
     fn set_parallelism(&mut self, parallelism: usize);
 
     /// Appends file ranges from the **same file** to the builder.
-    fn append_file_ranges(&mut self, file_ranges: impl Iterator<Item = FileRange>);
+    fn append_file_ranges(
+        &mut self,
+        file_meta: &FileMeta,
+        file_ranges: impl Iterator<Item = FileRange>,
+    );
 
     /// Builds a list of [ScanPart].
     fn build_parts(self, memtables: &[MemtableRef]) -> Vec<ScanPart>;

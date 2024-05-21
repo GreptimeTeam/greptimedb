@@ -175,8 +175,14 @@ impl FileHandle {
         self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
 
+    /// Returns a copy of the [FileMeta].
     pub fn meta(&self) -> FileMeta {
         self.inner.meta.clone()
+    }
+
+    /// Returns a reference to the [FileMeta].
+    pub fn meta_ref(&self) -> &FileMeta {
+        &self.inner.meta
     }
 }
 

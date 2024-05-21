@@ -36,6 +36,7 @@ use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{ScanInput, ScanPart, ScanPartBuilder};
 use crate::read::Source;
+use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -284,7 +285,11 @@ impl ScanPartBuilder for UnorderedPartBuilder {
         self.parallelism = parallelism;
     }
 
-    fn append_file_ranges(&mut self, file_ranges: impl Iterator<Item = FileRange>) {
+    fn append_file_ranges(
+        &mut self,
+        _file_meta: &FileMeta,
+        file_ranges: impl Iterator<Item = FileRange>,
+    ) {
         self.file_ranges.extend(file_ranges);
     }
 
