@@ -31,6 +31,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
+use common_version::{short_version, version};
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
@@ -46,7 +47,7 @@ use crate::error::{
     self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{log_versions, App};
 
 pub struct Instance {
     frontend: FeInstance,
@@ -246,6 +247,7 @@ impl StartCommand {
             &opts.tracing,
             opts.node_id.clone(),
         );
+        log_versions(version!(), short_version!());
 
         #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut opts)
