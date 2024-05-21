@@ -158,7 +158,6 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
                             table.to_string(),
                         ));
                     }
-                    // TODO(ruihang): Maybe the following two cases should not be valid
                     TableReference::Partial { schema, table } => {
                         self.table_names.insert(TableName::new(
                             self.query_ctx.current_catalog(),
@@ -202,6 +201,8 @@ impl TableNamesExtractAndRewriter {
     }
 }
 
+/// Extracts and rewrites the table names in the plan in the fully qualified style,
+/// return the table names and new plan.
 pub fn extract_and_rewrite_full_table_names(
     plan: DfLogicalPlan,
     query_ctx: QueryContextRef,

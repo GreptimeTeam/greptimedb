@@ -402,7 +402,8 @@ impl StatementExecutor {
             }
         };
 
-        // Extract the table names and rewrite the table names into full-qulified.
+        // Extract the table names from the origin plan
+        // and rewrite them as fully qualified names.
         let (table_names, plan) =
             extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
                 .context(ExtractTableNamesSnafu)?;
@@ -410,8 +411,8 @@ impl StatementExecutor {
         let table_names = table_names.into_iter().map(|t| t.into()).collect();
 
         // TODO(dennis): we don't save the optimized plan yet,
-        // because of our own defined plan node(such as `user`) serialization issue.
-        // When the issue is fixed, we can use the `optimized_plan` instead.
+        // because there are some serialization issue with our own defined plan node (such as `MergeScanLogicalPlan`).
+        // When the issues are fixed, we can use the `optimized_plan` instead.
         // let optimized_plan = self.optimize_logical_plan(logical_plan)?.unwrap_df_plan();
 
         // encode logical plan
@@ -426,6 +427,7 @@ impl StatementExecutor {
             ctx.clone(),
         )?;
 
+        //TODO(dennis): validate the logical plan
         self.create_view_by_expr(expr, ctx).await
     }
 
