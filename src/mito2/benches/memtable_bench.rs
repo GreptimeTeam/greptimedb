@@ -273,7 +273,7 @@ impl CpuDataGenerator {
     fn random_host_filter(&self) -> Predicate {
         let host = self.random_hostname();
         let expr = Expr::Column(Column::from_name("hostname")).eq(lit(host));
-        Predicate::new(vec![expr.into()])
+        Predicate::new(vec![expr])
     }
 
     fn random_hostname(&self) -> String {

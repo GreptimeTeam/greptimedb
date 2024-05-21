@@ -14,10 +14,10 @@
 
 use arrow::array::StringArray;
 use arrow::compute::kernels::comparison;
-use common_query::logical_plan::DfExpr;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::expr::Like;
 use datafusion::logical_expr::Operator;
+use datafusion::prelude::Expr;
 use datatypes::value::Value;
 use store_api::storage::ScanRequest;
 
@@ -118,12 +118,12 @@ impl Predicate {
     }
 
     /// Try to create a predicate from datafusion [`Expr`], return None if fails.
-    fn from_expr(expr: DfExpr) -> Option<Predicate> {
+    fn from_expr(expr: Expr) -> Option<Predicate> {
         match expr {
             // NOT expr
-            DfExpr::Not(expr) => Some(Predicate::Not(Box::new(Self::from_expr(*expr)?))),
+            Expr::Not(expr) => Some(Predicate::Not(Box::new(Self::from_expr(*expr)?))),
             // expr LIKE pattern
-            DfExpr::Like(Like {
+            Expr::Like(Like {
                 negated,
                 expr,
                 pattern,
@@ -131,10 +131,10 @@ impl Predicate {
                 ..
             }) if is_column(&expr) && is_string_literal(&pattern) => {
                 // Safety: ensured by gurad
-                let DfExpr::Column(c) = *expr else {
+                let Expr::Column(c) = *expr else {
                     unreachable!();
                 };
-                let DfExpr::Literal(ScalarValue::Utf8(Some(pattern))) = *pattern else {
+                let Expr::Literal(ScalarValue::Utf8(Some(pattern))) = *pattern else {
                     unreachable!();
                 };
 
@@ -147,10 +147,10 @@ impl Predicate {
                 }
             }
             // left OP right
-            DfExpr::BinaryExpr(bin) => match (*bin.left, bin.op, *bin.right) {
+            Expr::BinaryExpr(bin) => match (*bin.left, bin.op, *bin.right) {
                 // left == right
-                (DfExpr::Literal(scalar), Operator::Eq, DfExpr::Column(c))
-                | (DfExpr::Column(c), Operator::Eq, DfExpr::Literal(scalar)) => {
+                (Expr::Literal(scalar), Operator::Eq, Expr::Column(c))
+                | (Expr::Column(c), Operator::Eq, Expr::Literal(scalar)) => {
                     let Ok(v) = Value::try_from(scalar) else {
                         return None;
                     };
@@ -158,8 +158,8 @@ impl Predicate {
                     Some(Predicate::Eq(c.name, v))
                 }
                 // left != right
-                (DfExpr::Literal(scalar), Operator::NotEq, DfExpr::Column(c))
-                | (DfExpr::Column(c), Operator::NotEq, DfExpr::Literal(scalar)) => {
+                (Expr::Literal(scalar), Operator::NotEq, Expr::Column(c))
+                | (Expr::Column(c), Operator::NotEq, Expr::Literal(scalar)) => {
                     let Ok(v) = Value::try_from(scalar) else {
                         return None;
                     };
@@ -183,14 +183,14 @@ impl Predicate {
                 _ => None,
             },
             // [NOT] IN (LIST)
-            DfExpr::InList(list) => {
+            Expr::InList(list) => {
                 match (*list.expr, list.list, list.negated) {
                     // column [NOT] IN (v1, v2, v3, ...)
-                    (DfExpr::Column(c), list, negated) if is_all_scalars(&list) => {
+                    (Expr::Column(c), list, negated) if is_all_scalars(&list) => {
                         let mut values = Vec::with_capacity(list.len());
                         for scalar in list {
                             // Safety: checked by `is_all_scalars`
-                            let DfExpr::Literal(scalar) = scalar else {
+                            let Expr::Literal(scalar) = scalar else {
                                 unreachable!();
                             };
 
@@ -237,12 +237,12 @@ fn like_utf8(s: &str, pattern: &str, case_insensitive: &bool) -> Option<bool> {
     Some(booleans.value(0))
 }
 
-fn is_string_literal(expr: &DfExpr) -> bool {
-    matches!(expr, DfExpr::Literal(ScalarValue::Utf8(Some(_))))
+fn is_string_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(ScalarValue::Utf8(Some(_))))
 }
 
-fn is_column(expr: &DfExpr) -> bool {
-    matches!(expr, DfExpr::Column(_))
+fn is_column(expr: &Expr) -> bool {
+    matches!(expr, Expr::Column(_))
 }
 
 /// A list of predicate
@@ -257,7 +257,7 @@ impl Predicates {
             let mut predicates = Vec::with_capacity(request.filters.len());
 
             for filter in &request.filters {
-                if let Some(predicate) = Predicate::from_expr(filter.df_expr().clone()) {
+                if let Some(predicate) = Predicate::from_expr(filter.clone()) {
                     predicates.push(predicate);
                 }
             }
@@ -286,8 +286,8 @@ impl Predicates {
 }
 
 /// Returns true when the values are all [`DfExpr::Literal`].
-fn is_all_scalars(list: &[DfExpr]) -> bool {
-    list.iter().all(|v| matches!(v, DfExpr::Literal(_)))
+fn is_all_scalars(list: &[Expr]) -> bool {
+    list.iter().all(|v| matches!(v, Expr::Literal(_)))
 }
 
 #[cfg(test)]
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn test_predicate_like() {
         // case insensitive
-        let expr = DfExpr::Like(Like {
+        let expr = Expr::Like(Like {
             negated: false,
             expr: Box::new(column("a")),
             pattern: Box::new(string_literal("%abc")),
@@ -403,7 +403,7 @@ mod tests {
         assert!(p.eval(&[]).is_none());
 
         // case sensitive
-        let expr = DfExpr::Like(Like {
+        let expr = Expr::Like(Like {
             negated: false,
             expr: Box::new(column("a")),
             pattern: Box::new(string_literal("%abc")),
@@ -423,7 +423,7 @@ mod tests {
         assert!(p.eval(&[]).is_none());
 
         // not like
-        let expr = DfExpr::Like(Like {
+        let expr = Expr::Like(Like {
             negated: true,
             expr: Box::new(column("a")),
             pattern: Box::new(string_literal("%abc")),
@@ -437,15 +437,15 @@ mod tests {
         assert!(p.eval(&[]).is_none());
     }
 
-    fn column(name: &str) -> DfExpr {
-        DfExpr::Column(Column {
+    fn column(name: &str) -> Expr {
+        Expr::Column(Column {
             relation: None,
             name: name.to_string(),
         })
     }
 
-    fn string_literal(v: &str) -> DfExpr {
-        DfExpr::Literal(ScalarValue::Utf8(Some(v.to_string())))
+    fn string_literal(v: &str) -> Expr {
+        Expr::Literal(ScalarValue::Utf8(Some(v.to_string())))
     }
 
     fn match_string_value(v: &Value, expected: &str) -> bool {
@@ -463,14 +463,14 @@ mod tests {
         result
     }
 
-    fn mock_exprs() -> (DfExpr, DfExpr) {
-        let expr1 = DfExpr::BinaryExpr(BinaryExpr {
+    fn mock_exprs() -> (Expr, Expr) {
+        let expr1 = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(column("a")),
             op: Operator::Eq,
             right: Box::new(string_literal("a_value")),
         });
 
-        let expr2 = DfExpr::BinaryExpr(BinaryExpr {
+        let expr2 = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(column("b")),
             op: Operator::NotEq,
             right: Box::new(string_literal("b_value")),
@@ -491,17 +491,17 @@ mod tests {
         assert!(matches!(&p2, Predicate::NotEq(column, v) if column == "b"
                          && match_string_value(v, "b_value")));
 
-        let and_expr = DfExpr::BinaryExpr(BinaryExpr {
+        let and_expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(expr1.clone()),
             op: Operator::And,
             right: Box::new(expr2.clone()),
         });
-        let or_expr = DfExpr::BinaryExpr(BinaryExpr {
+        let or_expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(expr1.clone()),
             op: Operator::Or,
             right: Box::new(expr2.clone()),
         });
-        let not_expr = DfExpr::Not(Box::new(expr1.clone()));
+        let not_expr = Expr::Not(Box::new(expr1.clone()));
 
         let and_p = Predicate::from_expr(and_expr).unwrap();
         assert!(matches!(and_p, Predicate::And(left, right) if *left == p1 && *right == p2));
@@ -510,7 +510,7 @@ mod tests {
         let not_p = Predicate::from_expr(not_expr).unwrap();
         assert!(matches!(not_p, Predicate::Not(p) if *p == p1));
 
-        let inlist_expr = DfExpr::InList(InList {
+        let inlist_expr = Expr::InList(InList {
             expr: Box::new(column("a")),
             list: vec![string_literal("a1"), string_literal("a2")],
             negated: false,
@@ -520,7 +520,7 @@ mod tests {
         assert!(matches!(&inlist_p, Predicate::InList(c, values) if c == "a"
                          && match_string_values(values, &["a1", "a2"])));
 
-        let inlist_expr = DfExpr::InList(InList {
+        let inlist_expr = Expr::InList(InList {
             expr: Box::new(column("a")),
             list: vec![string_literal("a1"), string_literal("a2")],
             negated: true,
@@ -540,7 +540,7 @@ mod tests {
         let (expr1, expr2) = mock_exprs();
 
         let request = ScanRequest {
-            filters: vec![expr1.into(), expr2.into()],
+            filters: vec![expr1, expr2],
             ..Default::default()
         };
         let predicates = Predicates::from_scan_request(&Some(request));
@@ -578,7 +578,7 @@ mod tests {
 
         let (expr1, expr2) = mock_exprs();
         let request = ScanRequest {
-            filters: vec![expr1.into(), expr2.into()],
+            filters: vec![expr1, expr2],
             ..Default::default()
         };
         let predicates = Predicates::from_scan_request(&Some(request));

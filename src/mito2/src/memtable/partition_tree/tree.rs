@@ -215,7 +215,7 @@ impl PartitionTree {
                 predicate
                     .exprs()
                     .iter()
-                    .filter_map(|f| SimpleFilterEvaluator::try_new(f.df_expr()))
+                    .filter_map(SimpleFilterEvaluator::try_new)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();

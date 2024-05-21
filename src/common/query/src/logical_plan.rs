@@ -23,7 +23,6 @@ use datatypes::prelude::ConcreteDataType;
 pub use expr::build_filter_from_timestamp;
 
 pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
-pub use self::expr::{DfExpr, Expr};
 pub use self::udaf::AggregateFunction;
 pub use self::udf::ScalarUdf;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
