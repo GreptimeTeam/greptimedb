@@ -144,6 +144,11 @@ async fn execute_unstable_create_table(
                 info!("Create table: {sql}, result: {result:?}");
             }
             Err(err) => {
+                // FIXME(weny): support to retry it later.
+                if matches!(err, sqlx::Error::PoolTimedOut { .. }) {
+                    warn!("ignore pool timeout, sql: {sql}");
+                    continue;
+                }
                 let state = *rx.borrow();
                 ensure!(
                     !state.health(),
