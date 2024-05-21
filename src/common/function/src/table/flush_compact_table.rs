@@ -203,6 +203,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::compact_request::Options;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::prelude::TypeSignature;
     use datatypes::vectors::{StringVector, UInt64Vector};
     use session::context::QueryContext;
@@ -288,35 +289,38 @@ mod tests {
             (
                 &["table"],
                 CompactTableRequest {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "public".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                 },
             ),
             (
-                &["a.table"],
+                &[&format!("{}.table", DEFAULT_SCHEMA_NAME)],
                 CompactTableRequest {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "a".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                 },
             ),
             (
-                &["a.b.c"],
+                &[&format!(
+                    "{}.{}.table",
+                    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME
+                )],
                 CompactTableRequest {
-                    catalog_name: "a".to_string(),
-                    schema_name: "b".to_string(),
-                    table_name: "c".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                 },
             ),
             (
                 &["table", "regular"],
                 CompactTableRequest {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "public".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                 },
@@ -324,8 +328,8 @@ mod tests {
             (
                 &["table", "strict_window"],
                 CompactTableRequest {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "public".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::StrictWindow(StrictWindow { window_seconds: 0 }),
                 },
@@ -333,8 +337,8 @@ mod tests {
             (
                 &["table", "strict_window", "3600"],
                 CompactTableRequest {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "public".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::StrictWindow(StrictWindow {
                         window_seconds: 3600,
@@ -344,8 +348,8 @@ mod tests {
             (
                 &["table", "regular", "abcd"],
                 CompactTableRequest {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "public".to_string(),
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
                 },
@@ -354,6 +358,15 @@ mod tests {
 
         assert!(parse_compact_params(
             &["table", "strict_window", "abc"]
+                .into_iter()
+                .map(ValueRef::String)
+                .collect::<Vec<_>>(),
+            &QueryContext::arc(),
+        )
+        .is_err());
+
+        assert!(parse_compact_params(
+            &["a.b.table", "strict_window", "abc"]
                 .into_iter()
                 .map(ValueRef::String)
                 .collect::<Vec<_>>(),
