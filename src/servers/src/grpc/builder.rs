@@ -46,6 +46,7 @@ macro_rules! add_service {
         let max_recv_message_size = $builder.config().max_recv_message_size;
         let max_send_message_size = $builder.config().max_send_message_size;
 
+        use tonic::codec::CompressionEncoding;
         let service_builder = $service
             .max_decoding_message_size(max_recv_message_size)
             .max_encoding_message_size(max_send_message_size)
