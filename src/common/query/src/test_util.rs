@@ -35,6 +35,7 @@ impl SubstraitPlanDecoder for DummyDecoder {
         &self,
         _message: bytes::Bytes,
         _catalog_list: Arc<dyn CatalogProviderList>,
+        _optimize: bool,
     ) -> Result<LogicalPlan> {
         unreachable!()
     }

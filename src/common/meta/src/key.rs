@@ -805,6 +805,33 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    fn view_info_keys(&self, view_id: TableId, view_name: &TableName) -> Result<Vec<Vec<u8>>> {
+        let mut keys = Vec::with_capacity(3);
+        let view_name = TableNameKey::new(
+            &view_name.catalog_name,
+            &view_name.schema_name,
+            &view_name.table_name,
+        );
+        let table_info_key = TableInfoKey::new(view_id);
+        let view_info_key = ViewInfoKey::new(view_id);
+        keys.push(view_name.to_bytes());
+        keys.push(table_info_key.to_bytes());
+        keys.push(view_info_key.to_bytes());
+
+        Ok(keys)
+    }
+
+    /// Deletes metadata for view **permanently**.
+    /// The caller MUST ensure it has the exclusive access to `ViewNameKey`.
+    pub async fn destroy_view_info(&self, view_id: TableId, view_name: &TableName) -> Result<()> {
+        let keys = self.view_info_keys(view_id, view_name)?;
+        let _ = self
+            .kv_backend
+            .batch_delete(BatchDeleteRequest::new().with_keys(keys))
+            .await?;
+        Ok(())
+    }
+
     /// Renames the table name and returns an error if different metadata exists.
     /// The caller MUST ensure it has the exclusive access to old and new `TableNameKey`s,
     /// and the new `TableNameKey` MUST be empty.

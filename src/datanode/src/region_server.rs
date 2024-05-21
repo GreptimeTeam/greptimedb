@@ -659,7 +659,7 @@ impl RegionServerInner {
 
         // decode substrait plan to logical plan and execute it
         let logical_plan = plan_decoder
-            .decode(Bytes::from(plan), catalog_list)
+            .decode(Bytes::from(plan), catalog_list, false)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 

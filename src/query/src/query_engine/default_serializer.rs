@@ -18,15 +18,13 @@ use common_error::ext::BoxedError;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::SubstraitPlanDecoder;
-use common_telemetry::error;
 use datafusion::catalog::CatalogProviderList;
 use datafusion::common::DataFusionError;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
 use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::{Extension, LogicalPlan};
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use prost::Message;
@@ -35,7 +33,7 @@ use snafu::ResultExt;
 use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
-use crate::dist_plan::{EncodedMergeScan, MergeScanLogicalPlan};
+use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::DataFusionSnafu;
 
 /// Extended `[substrait::extension_serializer::ExtensionSerializer]` but supports `[MergeScanLogicalPlan]` serialization.
@@ -72,17 +70,11 @@ impl SerializerRegistry for DefaultSerializer {
         bytes: &[u8],
     ) -> Result<Arc<dyn UserDefinedLogicalNode>> {
         if name == MergeScanLogicalPlan::name() {
-            let pb_merge_scan =
-                PbMergeScan::decode(bytes).map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            let input = pb_merge_scan.input;
-            let is_placeholder = pb_merge_scan.is_placeholder;
-
-            // Use `EncodedMergeScan` as a temporary container,
-            // it will be rewritten into `MergeScanLogicalPlan` by `SubstraitPlanDecoder`.
-            // We can't decode the logical plan here because we don't have
-            // the `SessionState` and `CatalogProviderList`.
-            Ok(Arc::new(EncodedMergeScan::new(input, is_placeholder)))
+            // TODO(dennis): missing `session_state` to decode the logical plan in `MergeScanLogicalPlan`,
+            // so we only save the unoptimized logical plan for view currently.
+            Err(DataFusionError::Substrait(format!(
+                "Unsupported plan node: {name}"
+            )))
         } else {
             ExtensionSerializer.deserialize_logical_plan(name, bytes)
         }
@@ -108,20 +100,6 @@ impl DefaultPlanDecoder {
 
         Ok(Self { session_state })
     }
-
-    /// Rewrites `[EncodedMergeScan]` to `[MergeScanLogicalPlan]`.
-    fn rewrite_merge_scan(
-        &self,
-        plan: LogicalPlan,
-        catalog_list: Arc<dyn CatalogProviderList>,
-    ) -> crate::error::Result<LogicalPlan> {
-        let mut rewriter = MergeScanRewriter {
-            session_state: self.session_state.clone(),
-            catalog_list,
-        };
-
-        Ok(plan.rewrite(&mut rewriter).context(DataFusionSnafu)?.data)
-    }
 }
 
 #[async_trait::async_trait]
@@ -130,6 +108,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         &self,
         message: bytes::Bytes,
         catalog_list: Arc<dyn CatalogProviderList>,
+        optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
         // The session_state already has the `DefaultSerialzier` as `SerializerRegistry`.
         let logical_plan = DFLogicalSubstraitConvertor
@@ -138,59 +117,12 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;
 
-        self.rewrite_merge_scan(logical_plan, catalog_list)
-            .map_err(BoxedError::new)
-            .context(common_query::error::DecodePlanSnafu)
-    }
-}
-
-struct MergeScanRewriter {
-    catalog_list: Arc<dyn CatalogProviderList>,
-    session_state: SessionState,
-}
-
-impl TreeNodeRewriter for MergeScanRewriter {
-    type Node = LogicalPlan;
-
-    /// descend
-    fn f_down<'a>(&mut self, node: Self::Node) -> Result<Transformed<Self::Node>> {
-        match node {
-            LogicalPlan::Extension(Extension { node }) => {
-                if node.name() == EncodedMergeScan::name() {
-                    let encoded_merge_scan = node
-                        .as_any()
-                        .downcast_ref::<EncodedMergeScan>()
-                        .expect("Failed to downcast to EncodedMergeScan");
-                    let catalog_list = self.catalog_list.clone();
-                    let session_state = self.session_state.clone();
-                    let input = encoded_merge_scan.input.clone();
-
-                    // FIXME(dennis): it's ugly, is there a better way?
-                    let input = std::thread::spawn(move || {
-                        common_runtime::block_on_bg(async move {
-                            DFLogicalSubstraitConvertor
-                                .decode(&input[..], catalog_list, session_state)
-                                .await
-                                .map_err(|e| DataFusionError::External(Box::new(e)))
-                        })
-                    })
-                    .join()
-                    .map_err(|e| {
-                        error!(e; "Failed to join thread when decoding logical plan");
-                        DataFusionError::Substrait("Failed to decode EncodedMergeScan".to_string())
-                    })??;
-
-                    Ok(Transformed::yes(LogicalPlan::Extension(Extension {
-                        node: Arc::new(MergeScanLogicalPlan::new(
-                            input,
-                            encoded_merge_scan.is_placeholder,
-                        )),
-                    })))
-                } else {
-                    Ok(Transformed::no(LogicalPlan::Extension(Extension { node })))
-                }
-            }
-            node => Ok(Transformed::no(node)),
+        if optimize {
+            self.session_state
+                .optimize(&logical_plan)
+                .context(common_query::error::GeneralDataFusionSnafu)
+        } else {
+            Ok(logical_plan)
         }
     }
 }
@@ -212,10 +144,7 @@ mod tests {
 
         let engine = factory.query_engine();
 
-        let plan = MergeScanLogicalPlan::new(mock_plan(), false);
-        let plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(plan),
-        });
+        let plan = mock_plan();
 
         let bytes = DFLogicalSubstraitConvertor
             .encode(&plan, DefaultSerializer)
@@ -228,23 +157,15 @@ mod tests {
         let table_provider = Arc::new(mock_table_provider(1.into()));
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
 
-        let decode_plan = plan_decoder.decode(bytes, catalog_list).await.unwrap();
+        let decode_plan = plan_decoder
+            .decode(bytes, catalog_list, false)
+            .await
+            .unwrap();
 
-        match decode_plan {
-            LogicalPlan::Extension(Extension { node }) => {
-                assert_eq!("MergeScan", node.name());
-
-                let merge_scan = node
-                    .as_any()
-                    .downcast_ref::<MergeScanLogicalPlan>()
-                    .expect("Failed to downcast to MergeScanLogicalPlan");
-                assert_eq!(
-                    "Filter: devices.k0 > Int32(500)
+        assert_eq!(
+            "Filter: devices.k0 > Int32(500)
   TableScan: devices projection=[k0, ts, v0]",
-                    format!("{:?}", *merge_scan.input()),
-                );
-            }
-            _ => unreachable!(),
-        }
+            format!("{:?}", decode_plan),
+        );
     }
 }

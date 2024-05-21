@@ -18,8 +18,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use common_catalog::format_full_table_name;
 use common_query::logical_plan::SubstraitPlanDecoderRef;
-use datafusion::catalog::schema::MemorySchemaProvider;
-use datafusion::catalog::MemoryCatalogProvider;
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{provider_as_source, TableProvider};
@@ -28,9 +26,8 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
-mod memory_catalog;
-use datafusion::catalog::CatalogProvider;
-use memory_catalog::MemoryCatalogProviderList;
+mod dummy_catalog;
+use dummy_catalog::DummyCatalogList;
 
 use crate::error::{
     CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, QueryAccessDeniedSnafu,
@@ -127,49 +124,10 @@ impl DfTableSourceProvider {
                 })?;
 
             // Build the catalog list provider for deserialization.
-            let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-            let catalog_list = Arc::new(MemoryCatalogProviderList::with_catalog_provider(
-                catalog_provider.clone(),
-            ));
-
-            for table_name in &view_info.table_names {
-                // We don't support cross-catalog views.
-                debug_assert_eq!(catalog_name, &table_name.catalog_name);
-
-                let catalog_name = &table_name.catalog_name;
-                let schema_name = &table_name.schema_name;
-                let table_name = &table_name.table_name;
-
-                let table = self
-                    .catalog_manager
-                    .table(catalog_name, schema_name, table_name)
-                    .await?
-                    .with_context(|| TableNotExistSnafu {
-                        table: format_full_table_name(catalog_name, schema_name, table_name),
-                    })?;
-
-                let schema_provider =
-                    if let Some(schema_provider) = catalog_provider.schema(schema_name) {
-                        schema_provider
-                    } else {
-                        let schema_provider = Arc::new(MemorySchemaProvider::new());
-                        let _ = catalog_provider
-                            .register_schema(schema_name, schema_provider.clone())
-                            .context(DatafusionSnafu)?;
-                        schema_provider
-                    };
-
-                let table_provider: Arc<dyn TableProvider> =
-                    Arc::new(DfTableProviderAdapter::new(table));
-
-                let _ = schema_provider
-                    .register_table(table_name.to_string(), table_provider)
-                    .context(DatafusionSnafu)?;
-            }
-
+            let catalog_list = Arc::new(DummyCatalogList::new(self.catalog_manager.clone()));
             let logical_plan = self
                 .plan_decoder
-                .decode(Bytes::from(view_info.view_info.clone()), catalog_list)
+                .decode(Bytes::from(view_info.view_info.clone()), catalog_list, true)
                 .await
                 .context(DecodePlanSnafu {
                     name: &table.table_info().name,
@@ -267,6 +225,7 @@ mod tests {
             &self,
             _message: bytes::Bytes,
             _catalog_list: Arc<dyn CatalogProviderList>,
+            _optimize: bool,
         ) -> QueryResult<LogicalPlan> {
             Ok(mock_plan())
         }

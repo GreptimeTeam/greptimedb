@@ -43,7 +43,7 @@ use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
-use query::plan::extract_full_table_names;
+use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
 use regex::Regex;
@@ -402,18 +402,21 @@ impl StatementExecutor {
             }
         };
 
-        // Extract the table names before optimizing the plan
-        let table_names = extract_full_table_names(logical_plan.df_plan())
-            .context(ExtractTableNamesSnafu)?
-            .into_iter()
-            .map(|t| t.into())
-            .collect();
+        // Extract the table names and rewrite the table names into full-qulified.
+        let (table_names, plan) =
+            extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
+                .context(ExtractTableNamesSnafu)?;
 
-        let optimized_plan = self.optimize_logical_plan(logical_plan)?.unwrap_df_plan();
+        let table_names = table_names.into_iter().map(|t| t.into()).collect();
+
+        // TODO(dennis): we don't save the optimized plan yet,
+        // because of our own defined plan node(such as `user`) serialization issue.
+        // When the issue is fixed, we can use the `optimized_plan` instead.
+        // let optimized_plan = self.optimize_logical_plan(logical_plan)?.unwrap_df_plan();
 
         // encode logical plan
         let encoded_plan = DFLogicalSubstraitConvertor
-            .encode(&optimized_plan, DefaultSerializer)
+            .encode(&plan, DefaultSerializer)
             .context(SubstraitCodecSnafu)?;
 
         let expr = expr_factory::to_create_view_expr(

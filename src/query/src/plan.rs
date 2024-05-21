@@ -15,15 +15,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::table_name::TableName;
 use common_query::prelude::ScalarValue;
 use datafusion::datasource::DefaultTableSource;
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{ParamValues, TableReference};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -115,18 +115,21 @@ impl From<DfLogicalPlan> for LogicalPlan {
     }
 }
 
-/// Visitor to extract table names from logical plan (TableScan node)
-#[derive(Default)]
-pub struct TableNamesExtractor {
-    pub table_names: HashSet<TableName>,
+struct TableNamesExtractAndRewriter {
+    pub(crate) table_names: HashSet<TableName>,
+    query_ctx: QueryContextRef,
 }
 
-impl TreeNodeVisitor for TableNamesExtractor {
+impl TreeNodeRewriter for TableNamesExtractAndRewriter {
     type Node = DfLogicalPlan;
 
-    fn f_down(&mut self, node: &Self::Node) -> datafusion::error::Result<TreeNodeRecursion> {
+    /// descend
+    fn f_down<'a>(
+        &mut self,
+        node: Self::Node,
+    ) -> datafusion::error::Result<Transformed<Self::Node>> {
         match node {
-            DfLogicalPlan::TableScan(scan) => {
+            DfLogicalPlan::TableScan(mut scan) => {
                 if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
                     if let Some(provider) = source
                         .table_provider
@@ -158,33 +161,54 @@ impl TreeNodeVisitor for TableNamesExtractor {
                     // TODO(ruihang): Maybe the following two cases should not be valid
                     TableReference::Partial { schema, table } => {
                         self.table_names.insert(TableName::new(
-                            DEFAULT_CATALOG_NAME.to_string(),
+                            self.query_ctx.current_catalog(),
                             schema.to_string(),
                             table.to_string(),
                         ));
+
+                        scan.table_name = TableReference::Full {
+                            catalog: self.query_ctx.current_catalog().into(),
+                            schema: schema.clone(),
+                            table: table.clone(),
+                        };
                     }
                     TableReference::Bare { table } => {
                         self.table_names.insert(TableName::new(
-                            DEFAULT_CATALOG_NAME.to_string(),
-                            DEFAULT_SCHEMA_NAME.to_string(),
+                            self.query_ctx.current_catalog(),
+                            self.query_ctx.current_schema(),
                             table.to_string(),
                         ));
+
+                        scan.table_name = TableReference::Full {
+                            catalog: self.query_ctx.current_catalog().into(),
+                            schema: self.query_ctx.current_schema().into(),
+                            table: table.clone(),
+                        };
                     }
                 }
-
-                Ok(TreeNodeRecursion::Continue)
+                Ok(Transformed::yes(DfLogicalPlan::TableScan(scan)))
             }
-            _ => Ok(TreeNodeRecursion::Continue),
+            node => Ok(Transformed::no(node)),
         }
     }
 }
 
-/// Extract fully resolved table names from logical plan.
-/// Note:: it must be called before optimizing the plan.
-pub fn extract_full_table_names(plan: &DfLogicalPlan) -> Result<HashSet<TableName>> {
-    let mut extractor = TableNamesExtractor::default();
-    let _ = plan.visit(&mut extractor).context(DataFusionSnafu)?;
-    Ok(extractor.table_names)
+impl TableNamesExtractAndRewriter {
+    fn new(query_ctx: QueryContextRef) -> Self {
+        Self {
+            query_ctx,
+            table_names: HashSet::new(),
+        }
+    }
+}
+
+pub fn extract_and_rewrite_full_table_names(
+    plan: DfLogicalPlan,
+    query_ctx: QueryContextRef,
+) -> Result<(HashSet<TableName>, DfLogicalPlan)> {
+    let mut extractor = TableNamesExtractAndRewriter::new(query_ctx);
+    let plan = plan.rewrite(&mut extractor).context(DataFusionSnafu)?;
+    Ok((extractor.table_names, plan.data))
 }
 
 #[cfg(test)]
@@ -193,8 +217,10 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+    use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use datafusion::logical_expr::builder::LogicalTableSource;
     use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use session::context::QueryContextBuilder;
 
     use super::*;
 
@@ -220,13 +246,23 @@ pub(crate) mod tests {
 
     #[test]
     fn test_extract_full_table_names() {
-        let table_names = extract_full_table_names(&mock_plan()).unwrap();
+        let ctx = QueryContextBuilder::default()
+            .current_schema("test".to_string())
+            .build();
+
+        let (table_names, plan) =
+            extract_and_rewrite_full_table_names(mock_plan(), Arc::new(ctx)).unwrap();
 
         assert_eq!(1, table_names.len());
         assert!(table_names.contains(&TableName::new(
             DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
+            "test".to_string(),
             "devices".to_string()
         )));
+
+        assert_eq!(
+            "Filter: devices.id > Int32(500)\n  TableScan: greptime.test.devices",
+            format!("{:?}", plan)
+        );
     }
 }
