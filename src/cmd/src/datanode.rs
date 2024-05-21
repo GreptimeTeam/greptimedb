@@ -43,7 +43,6 @@ pub struct Instance {
     datanode: Datanode,
 
     // Keep the logging guard to prevent the worker from being dropped.
-    #[allow(dead_code)]
     _guard: Vec<WorkerGuard>,
 }
 

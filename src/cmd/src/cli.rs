@@ -51,7 +51,6 @@ pub struct Instance {
     tool: Box<dyn Tool>,
 
     // Keep the logging guard to prevent the worker from being dropped.
-    #[allow(dead_code)]
     _guard: Vec<WorkerGuard>,
 }
 
