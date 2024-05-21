@@ -110,7 +110,6 @@ impl StatementExecutor {
                     req.timestamp_range.as_ref(),
                 )
             })
-            .map(|filter| filter.df_expr().clone())
             .into_iter()
             .collect::<Vec<_>>();
 

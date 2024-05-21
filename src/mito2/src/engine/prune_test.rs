@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use api::v1::Rows;
-use common_query::logical_plan::DfExpr;
-use common_query::prelude::Expr;
 use common_recordbatch::RecordBatches;
 use datafusion_common::ScalarValue;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::{col, lit};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
@@ -27,7 +26,7 @@ use crate::test_util::{
     build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };
 
-async fn check_prune_row_groups(expr: DfExpr, expected: &str) {
+async fn check_prune_row_groups(expr: Expr, expected: &str) {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -56,7 +55,7 @@ async fn check_prune_row_groups(expr: DfExpr, expected: &str) {
         .scan_to_stream(
             region_id,
             ScanRequest {
-                filters: vec![Expr::from(expr)],
+                filters: vec![expr],
                 ..Default::default()
             },
         )
@@ -134,17 +133,15 @@ async fn test_prune_tag_and_field() {
 
 /// Creates a time range `[start_sec, end_sec)`
 fn time_range_expr(start_sec: i64, end_sec: i64) -> Expr {
-    Expr::from(
-        col("ts")
-            .gt_eq(lit(ScalarValue::TimestampMillisecond(
-                Some(start_sec * 1000),
-                None,
-            )))
-            .and(col("ts").lt(lit(ScalarValue::TimestampMillisecond(
-                Some(end_sec * 1000),
-                None,
-            )))),
-    )
+    col("ts")
+        .gt_eq(lit(ScalarValue::TimestampMillisecond(
+            Some(start_sec * 1000),
+            None,
+        )))
+        .and(col("ts").lt(lit(ScalarValue::TimestampMillisecond(
+            Some(end_sec * 1000),
+            None,
+        ))))
 }
 
 #[tokio::test]
@@ -235,7 +232,7 @@ async fn test_prune_memtable_complex_expr() {
     .await;
 
     // ts filter will be ignored when pruning time series in memtable.
-    let filters = vec![time_range_expr(4, 7), Expr::from(col("tag_0").lt(lit("6")))];
+    let filters = vec![time_range_expr(4, 7), col("tag_0").lt(lit("6"))];
 
     let stream = engine
         .scan_to_stream(

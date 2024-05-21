@@ -15,8 +15,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion_expr::expr::Expr;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use snafu::ResultExt;
 use store_api::data_source::DataSourceRef;

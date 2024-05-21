@@ -233,7 +233,7 @@ impl ParquetReaderBuilder {
                     SimpleFilterContext::new_opt(
                         &region_meta,
                         self.expected_metadata.as_deref(),
-                        expr.df_expr(),
+                        expr,
                     )
                 })
                 .collect::<Vec<_>>()
