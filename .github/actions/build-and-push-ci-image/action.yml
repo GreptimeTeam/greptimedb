@@ -11,7 +11,7 @@ runs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./docker/ci/ubuntu/Dockerfile.ci
+        file: ./docker/ci/ubuntu/Dockerfile.fuzztests
         push: true
         tags: localhost:5001/greptime/greptimedb:latest
         build-args: |
