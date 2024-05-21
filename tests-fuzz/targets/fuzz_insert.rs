@@ -33,7 +33,8 @@ use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_value_for_mysql, CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator,
+    generate_random_value_for_mysql, replace_default, CreateTableExpr, InsertIntoExpr,
+    MySQLTsColumnTypeGenerator,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
@@ -141,17 +142,29 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     );
 
     // Validate inserted rows
-    let ts_column_idx = create_expr
+    // The order of inserted rows are random, so we need to sort the inserted rows by primary keys and time index for comparison
+    let primary_keys_names = create_expr
         .columns
         .iter()
-        .position(|c| c.is_time_index())
-        .unwrap();
-    let ts_column_name = create_expr.columns[ts_column_idx].name.clone();
-    let ts_column_idx_in_insert = insert_expr
+        .filter(|c| c.is_primary_key() || c.is_time_index())
+        .map(|c| c.name.clone())
+        .collect::<Vec<_>>();
+
+    // Not all primary keys are in insert_expr
+    let primary_keys_idxs_in_insert_expr = insert_expr
         .columns
         .iter()
-        .position(|c| c.name == ts_column_name)
-        .unwrap();
+        .enumerate()
+        .filter(|(_, c)| primary_keys_names.contains(&c.name))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    let primary_keys_column_list = primary_keys_idxs_in_insert_expr
+        .iter()
+        .map(|&i| insert_expr.columns[i].name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .to_string();
+
     let column_list = insert_expr
         .columns
         .iter()
@@ -159,16 +172,29 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .collect::<Vec<_>>()
         .join(", ")
         .to_string();
+
     let select_sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
-        column_list, create_expr.table_name, ts_column_name
+        column_list, create_expr.table_name, primary_keys_column_list
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
-    let mut expected_rows = insert_expr.values_list;
+    let mut expected_rows = replace_default(&insert_expr.values_list, &create_expr);
     expected_rows.sort_by(|a, b| {
-        a[ts_column_idx_in_insert]
-            .cmp(&b[ts_column_idx_in_insert])
-            .unwrap()
+        let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
+            .iter()
+            .map(|&i| &a[i])
+            .collect();
+        let b_keys: Vec<_> = primary_keys_idxs_in_insert_expr
+            .iter()
+            .map(|&i| &b[i])
+            .collect();
+        for (a_key, b_key) in a_keys.iter().zip(b_keys.iter()) {
+            match a_key.cmp(b_key) {
+                Some(std::cmp::Ordering::Equal) => continue,
+                non_eq => return non_eq.unwrap(),
+            }
+        }
+        std::cmp::Ordering::Equal
     });
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 

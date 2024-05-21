@@ -34,6 +34,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use self::insert_expr::{RowValue, RowValues};
 use crate::generator::Random;
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
@@ -435,6 +436,24 @@ pub fn generate_columns<R: Rng + 'static>(
             }
         })
         .collect()
+}
+
+/// Replace Value::Default with the corresponding default value in the rows for comparison.
+pub fn replace_default(rows: &[RowValues], create_expr: &CreateTableExpr) -> Vec<RowValues> {
+    let mut new_rows = Vec::new();
+    for row in rows {
+        let mut new_row = Vec::new();
+        for (idx, value) in row.iter().enumerate() {
+            if let RowValue::Default = value {
+                let column = &create_expr.columns[idx];
+                new_row.push(RowValue::Value(column.default_value().unwrap().clone()));
+            } else {
+                new_row.push(value.clone());
+            }
+        }
+        new_rows.push(new_row);
+    }
+    new_rows
 }
 
 #[cfg(test)]
