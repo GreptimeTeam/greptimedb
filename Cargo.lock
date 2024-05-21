@@ -10169,6 +10169,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-wal",
+ "datafusion-expr 37.0.0",
  "datafusion-physical-plan 37.0.0",
  "datatypes",
  "derive_builder 0.12.0",

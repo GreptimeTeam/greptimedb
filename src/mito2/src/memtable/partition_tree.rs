@@ -553,7 +553,7 @@ mod tests {
                 right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
             });
             let iter = memtable
-                .iter(None, Some(Predicate::new(vec![expr.into()])))
+                .iter(None, Some(Predicate::new(vec![expr])))
                 .unwrap();
             let read = collect_iter_timestamps(iter);
             assert_eq!(timestamps, read);

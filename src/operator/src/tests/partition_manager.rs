@@ -23,7 +23,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_query::prelude::Expr;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::expr_fn::{and, binary_expr, col, or};
 use datafusion_expr::{lit, Operator};
 use datatypes::prelude::ConcreteDataType;
@@ -285,50 +285,50 @@ async fn test_find_regions() {
 
     // test simple filter
     test(
-        vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()], // a < 10
+        vec![binary_expr(col("a"), Operator::Lt, lit(10))], // a < 10
         vec![0],
     );
     test(
-        vec![binary_expr(col("a"), Operator::LtEq, lit(10)).into()], // a <= 10
+        vec![binary_expr(col("a"), Operator::LtEq, lit(10))], // a <= 10
         vec![0, 1],
     );
     test(
-        vec![binary_expr(lit(20), Operator::Gt, col("a")).into()], // 20 > a
+        vec![binary_expr(lit(20), Operator::Gt, col("a"))], // 20 > a
         vec![0, 1],
     );
     test(
-        vec![binary_expr(lit(20), Operator::GtEq, col("a")).into()], // 20 >= a
+        vec![binary_expr(lit(20), Operator::GtEq, col("a"))], // 20 >= a
         vec![0, 1, 2],
     );
     test(
-        vec![binary_expr(lit(45), Operator::Eq, col("a")).into()], // 45 == a
+        vec![binary_expr(lit(45), Operator::Eq, col("a"))], // 45 == a
         vec![2],
     );
     test(
-        vec![binary_expr(col("a"), Operator::NotEq, lit(45)).into()], // a != 45
+        vec![binary_expr(col("a"), Operator::NotEq, lit(45))], // a != 45
         vec![0, 1, 2, 3],
     );
     test(
-        vec![binary_expr(col("a"), Operator::Gt, lit(50)).into()], // a > 50
+        vec![binary_expr(col("a"), Operator::Gt, lit(50))], // a > 50
         vec![3],
     );
 
     // test multiple filters
     test(
         vec![
-            binary_expr(col("a"), Operator::Gt, lit(10)).into(),
-            binary_expr(col("a"), Operator::Gt, lit(50)).into(),
+            binary_expr(col("a"), Operator::Gt, lit(10)),
+            binary_expr(col("a"), Operator::Gt, lit(50)),
         ], // [a > 10, a > 50]
         vec![3],
     );
 
     // test finding all regions when provided with not supported filters or not partition column
     test(
-        vec![binary_expr(col("row_id"), Operator::LtEq, lit(123)).into()], // row_id <= 123
+        vec![binary_expr(col("row_id"), Operator::LtEq, lit(123))], // row_id <= 123
         vec![0, 1, 2, 3],
     );
     test(
-        vec![binary_expr(col("c"), Operator::Gt, lit(123)).into()], // c > 789
+        vec![binary_expr(col("c"), Operator::Gt, lit(123))], // c > 789
         vec![0, 1, 2, 3],
     );
 
@@ -340,24 +340,21 @@ async fn test_find_regions() {
                 binary_expr(col("row_id"), Operator::Lt, lit(1)),
                 binary_expr(col("a"), Operator::Lt, lit(1)),
             ),
-        )
-        .into()], // row_id < 1 OR (row_id < 1 AND a > 1)
+        )], // row_id < 1 OR (row_id < 1 AND a > 1)
         vec![0, 1, 2, 3],
     );
     test(
         vec![or(
             binary_expr(col("a"), Operator::Lt, lit(20)),
             binary_expr(col("a"), Operator::GtEq, lit(20)),
-        )
-        .into()], // a < 20 OR a >= 20
+        )], // a < 20 OR a >= 20
         vec![0, 1, 2, 3],
     );
     test(
         vec![and(
             binary_expr(col("a"), Operator::Lt, lit(20)),
             binary_expr(col("a"), Operator::Lt, lit(50)),
-        )
-        .into()], // a < 20 AND a < 50
+        )], // a < 20 AND a < 50
         vec![0, 1],
     );
 
@@ -367,8 +364,7 @@ async fn test_find_regions() {
         vec![and(
             binary_expr(col("a"), Operator::Lt, lit(20)),
             binary_expr(col("a"), Operator::GtEq, lit(20)),
-        )
-        .into()]
+        )]
         .as_slice(),
     ); // a < 20 AND a >= 20
     assert!(matches!(

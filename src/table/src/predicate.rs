@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_query::logical_plan::{DfExpr, Expr};
 use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -22,7 +21,7 @@ use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
 use datafusion_common::ToDFSchema;
-use datafusion_expr::expr::InList;
+use datafusion_expr::expr::{Expr, InList};
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
@@ -88,9 +87,7 @@ impl Predicate {
         Ok(self
             .exprs
             .iter()
-            .filter_map(|expr| {
-                create_physical_expr(expr.df_expr(), df_schema.as_ref(), execution_props).ok()
-            })
+            .filter_map(|expr| create_physical_expr(expr, df_schema.as_ref(), execution_props).ok())
             .collect::<Vec<_>>())
     }
 
@@ -154,7 +151,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         let mut res = TimestampRange::min_to_max();
         for expr in self.filters {
             let range = self
-                .extract_time_range_from_expr(expr.df_expr())
+                .extract_time_range_from_expr(expr)
                 .unwrap_or_else(TimestampRange::min_to_max);
             res = res.and(&range);
         }
@@ -163,18 +160,18 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
     /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
     /// Return None if no time range can be found in expr.
-    fn extract_time_range_from_expr(&self, expr: &DfExpr) -> Option<TimestampRange> {
+    fn extract_time_range_from_expr(&self, expr: &Expr) -> Option<TimestampRange> {
         match expr {
-            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
                 self.extract_from_binary_expr(left, op, right)
             }
-            DfExpr::Between(Between {
+            Expr::Between(Between {
                 expr,
                 negated,
                 low,
                 high,
             }) => self.extract_from_between_expr(expr, negated, low, high),
-            DfExpr::InList(InList {
+            Expr::InList(InList {
                 expr,
                 list,
                 negated,
@@ -185,9 +182,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
     fn extract_from_binary_expr(
         &self,
-        left: &DfExpr,
+        left: &Expr,
         op: &Operator,
-        right: &DfExpr,
+        right: &Expr,
     ) -> Option<TimestampRange> {
         match op {
             Operator::Eq => self
@@ -291,10 +288,10 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         }
     }
 
-    fn get_timestamp_filter(&self, left: &DfExpr, right: &DfExpr) -> Option<(Timestamp, bool)> {
+    fn get_timestamp_filter(&self, left: &Expr, right: &Expr) -> Option<(Timestamp, bool)> {
         let (col, lit, reverse) = match (left, right) {
-            (DfExpr::Column(column), DfExpr::Literal(scalar)) => (column, scalar, false),
-            (DfExpr::Literal(scalar), DfExpr::Column(column)) => (column, scalar, true),
+            (Expr::Column(column), Expr::Literal(scalar)) => (column, scalar, false),
+            (Expr::Literal(scalar), Expr::Column(column)) => (column, scalar, true),
             _ => {
                 return None;
             }
@@ -309,12 +306,12 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
     fn extract_from_between_expr(
         &self,
-        expr: &DfExpr,
+        expr: &Expr,
         negated: &bool,
-        low: &DfExpr,
-        high: &DfExpr,
+        low: &Expr,
+        high: &Expr,
     ) -> Option<TimestampRange> {
-        let DfExpr::Column(col) = expr else {
+        let Expr::Column(col) = expr else {
             return None;
         };
         if col.name != self.ts_col_name {
@@ -326,7 +323,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         }
 
         match (low, high) {
-            (DfExpr::Literal(low), DfExpr::Literal(high)) => {
+            (Expr::Literal(low), Expr::Literal(high)) => {
                 return_none_if_utf8!(low);
                 return_none_if_utf8!(high);
 
@@ -343,14 +340,14 @@ impl<'a> TimeRangePredicateBuilder<'a> {
     /// Extract time range filter from `IN (...)` expr.
     fn extract_from_in_list_expr(
         &self,
-        expr: &DfExpr,
+        expr: &Expr,
         negated: bool,
-        list: &[DfExpr],
+        list: &[Expr],
     ) -> Option<TimestampRange> {
         if negated {
             return None;
         }
-        let DfExpr::Column(col) = expr else {
+        let Expr::Column(col) = expr else {
             return None;
         };
         if col.name != self.ts_col_name {
@@ -362,7 +359,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         }
         let mut init_range = TimestampRange::empty();
         for expr in list {
-            if let DfExpr::Literal(scalar) = expr {
+            if let Expr::Literal(scalar) = expr {
                 return_none_if_utf8!(scalar);
                 if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
                     init_range = init_range.or(&TimestampRange::single(timestamp))
@@ -395,11 +392,10 @@ mod tests {
     use super::*;
     use crate::predicate::stats::RowGroupPruningStatistics;
 
-    fn check_build_predicate(expr: DfExpr, expect: TimestampRange) {
+    fn check_build_predicate(expr: Expr, expect: TimestampRange) {
         assert_eq!(
             expect,
-            TimeRangePredicateBuilder::new("ts", TimeUnit::Millisecond, &[Expr::from(expr)])
-                .build()
+            TimeRangePredicateBuilder::new("ts", TimeUnit::Millisecond, &[expr]).build()
         );
     }
 
@@ -598,11 +594,7 @@ mod tests {
         (path, schema)
     }
 
-    async fn assert_prune(
-        array_cnt: usize,
-        filters: Vec<common_query::logical_plan::Expr>,
-        expect: Vec<bool>,
-    ) {
+    async fn assert_prune(array_cnt: usize, filters: Vec<Expr>, expect: Vec<bool>) {
         let dir = create_temp_dir("prune_parquet");
         let (path, arrow_schema) = gen_test_parquet_file(&dir, array_cnt).await;
         let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
@@ -624,16 +616,14 @@ mod tests {
         assert_eq!(expect, res);
     }
 
-    fn gen_predicate(max_val: i32, op: Operator) -> Vec<common_query::logical_plan::Expr> {
-        vec![common_query::logical_plan::Expr::from(
-            datafusion_expr::Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(datafusion_expr::Expr::Column(Column::from_name("cnt"))),
-                op,
-                right: Box::new(datafusion_expr::Expr::Literal(ScalarValue::Int32(Some(
-                    max_val,
-                )))),
-            }),
-        )]
+    fn gen_predicate(max_val: i32, op: Operator) -> Vec<Expr> {
+        vec![datafusion_expr::Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(datafusion_expr::Expr::Column(Column::from_name("cnt"))),
+            op,
+            right: Box::new(datafusion_expr::Expr::Literal(ScalarValue::Int32(Some(
+                max_val,
+            )))),
+        })]
     }
 
     #[tokio::test]
@@ -702,14 +692,14 @@ mod tests {
         let e = datafusion_expr::Expr::Column(Column::from_name("cnt"))
             .gt(30.lit())
             .or(datafusion_expr::Expr::Column(Column::from_name("cnt")).lt(20.lit()));
-        assert_prune(40, vec![e.into()], vec![true, true, false, true]).await;
+        assert_prune(40, vec![e], vec![true, true, false, true]).await;
     }
 
     #[tokio::test]
     async fn test_to_physical_expr() {
         let predicate = Predicate::new(vec![
-            Expr::from(col("host").eq(lit("host_a"))),
-            Expr::from(col("ts").gt(lit(ScalarValue::TimestampMicrosecond(Some(123), None)))),
+            col("host").eq(lit("host_a")),
+            col("ts").gt(lit(ScalarValue::TimestampMicrosecond(Some(123), None))),
         ]);
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(

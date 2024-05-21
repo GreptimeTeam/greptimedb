@@ -15,14 +15,13 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_expr::expr::Expr as DfExpr;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
@@ -82,7 +81,7 @@ impl TableProvider for DfTableProviderAdapter {
         &self,
         _ctx: &SessionState,
         projection: Option<&Vec<usize>>,
-        filters: &[DfExpr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
@@ -121,12 +120,9 @@ impl TableProvider for DfTableProviderAdapter {
 
     fn supports_filters_pushdown(
         &self,
-        filters: &[&DfExpr],
+        filters: &[&Expr],
     ) -> DfResult<Vec<DfTableProviderFilterPushDown>> {
-        let filters = filters
-            .iter()
-            .map(|&x| x.clone().into())
-            .collect::<Vec<_>>();
+        let filters = filters.iter().map(|&x| x.clone()).collect::<Vec<_>>();
         Ok(self
             .table
             .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())

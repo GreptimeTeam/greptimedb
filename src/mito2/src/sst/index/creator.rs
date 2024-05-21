@@ -439,7 +439,7 @@ mod tests {
                 &region_metadata,
                 Default::default(),
             )
-            .build(&[expr.into()])
+            .build(&[expr])
             .unwrap()
             .unwrap();
             Box::pin(async move {

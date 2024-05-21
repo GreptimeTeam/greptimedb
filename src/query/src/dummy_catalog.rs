@@ -162,10 +162,7 @@ impl TableProvider for DummyTableProvider {
             Some(x) if !x.is_empty() => Some(x.clone()),
             _ => None,
         };
-        request.filters = filters
-            .iter()
-            .map(|e| common_query::logical_plan::Expr::from(e.clone()))
-            .collect();
+        request.filters = filters.to_vec();
         request.limit = limit;
 
         let scanner = self

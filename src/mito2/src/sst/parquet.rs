@@ -311,8 +311,7 @@ mod tests {
             })),
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
-        })
-        .into()]));
+        })]));
 
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .predicate(predicate);
@@ -400,8 +399,7 @@ mod tests {
             })),
             op: Operator::GtEq,
             right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
-        })
-        .into()]));
+        })]));
 
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .predicate(predicate);

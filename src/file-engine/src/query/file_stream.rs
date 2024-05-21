@@ -19,7 +19,6 @@ use common_datasource::file_format::json::{JsonFormat, JsonOpener};
 use common_datasource::file_format::orc::{OrcFormat, OrcOpener};
 use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
 use common_datasource::file_format::Format;
-use common_query::prelude::Expr;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::common::{Statistics, ToDFSchema};
@@ -32,6 +31,7 @@ use datafusion::physical_expr::execution_props::ExecutionProps;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::utils::conjunction;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::SchemaRef;
@@ -182,10 +182,7 @@ fn new_parquet_stream_with_exec_plan(
     };
 
     // build predicate filter
-    let filters = filters
-        .iter()
-        .map(|f| f.df_expr().clone())
-        .collect::<Vec<_>>();
+    let filters = filters.to_vec();
     let filters = if let Some(expr) = conjunction(filters) {
         let df_schema = file_schema
             .clone()

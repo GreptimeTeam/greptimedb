@@ -21,10 +21,9 @@ mod regex_match;
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_query::logical_plan::Expr;
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
-use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
+use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
@@ -84,7 +83,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
     /// the expressions provided. If no predicates match, returns `None`.
     pub fn build(mut self, exprs: &[Expr]) -> Result<Option<SstIndexApplier>> {
         for expr in exprs {
-            self.traverse_and_collect(expr.df_expr());
+            self.traverse_and_collect(expr);
         }
 
         if self.output.is_empty() {
@@ -108,12 +107,12 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
     /// Recursively traverses expressions to collect predicates.
     /// Results are stored in `self.output`.
-    fn traverse_and_collect(&mut self, expr: &DfExpr) {
+    fn traverse_and_collect(&mut self, expr: &Expr) {
         let res = match expr {
-            DfExpr::Between(between) => self.collect_between(between),
+            Expr::Between(between) => self.collect_between(between),
 
-            DfExpr::InList(in_list) => self.collect_inlist(in_list),
-            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
+            Expr::InList(in_list) => self.collect_inlist(in_list),
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
                 Operator::And => {
                     self.traverse_and_collect(left);
                     self.traverse_and_collect(right);
@@ -170,17 +169,17 @@ impl<'a> SstIndexApplierBuilder<'a> {
     }
 
     /// Helper function to get a non-null literal.
-    fn nonnull_lit(expr: &DfExpr) -> Option<&ScalarValue> {
+    fn nonnull_lit(expr: &Expr) -> Option<&ScalarValue> {
         match expr {
-            DfExpr::Literal(lit) if !lit.is_null() => Some(lit),
+            Expr::Literal(lit) if !lit.is_null() => Some(lit),
             _ => None,
         }
     }
 
     /// Helper function to get the column name of a column expression.
-    fn column_name(expr: &DfExpr) -> Option<&str> {
+    fn column_name(expr: &Expr) -> Option<&str> {
         match expr {
-            DfExpr::Column(column) => Some(&column.name),
+            Expr::Column(column) => Some(&column.name),
             _ => None,
         }
     }
@@ -247,40 +246,40 @@ mod tests {
         ObjectStore::new(Memory::default()).unwrap().finish()
     }
 
-    pub(crate) fn tag_column() -> DfExpr {
-        DfExpr::Column(Column {
+    pub(crate) fn tag_column() -> Expr {
+        Expr::Column(Column {
             relation: None,
             name: "a".to_string(),
         })
     }
 
-    pub(crate) fn tag_column2() -> DfExpr {
-        DfExpr::Column(Column {
+    pub(crate) fn tag_column2() -> Expr {
+        Expr::Column(Column {
             relation: None,
             name: "b".to_string(),
         })
     }
 
-    pub(crate) fn field_column() -> DfExpr {
-        DfExpr::Column(Column {
+    pub(crate) fn field_column() -> Expr {
+        Expr::Column(Column {
             relation: None,
             name: "c".to_string(),
         })
     }
 
-    pub(crate) fn nonexistent_column() -> DfExpr {
-        DfExpr::Column(Column {
+    pub(crate) fn nonexistent_column() -> Expr {
+        Expr::Column(Column {
             relation: None,
             name: "nonexistent".to_string(),
         })
     }
 
-    pub(crate) fn string_lit(s: impl Into<String>) -> DfExpr {
-        DfExpr::Literal(ScalarValue::Utf8(Some(s.into())))
+    pub(crate) fn string_lit(s: impl Into<String>) -> Expr {
+        Expr::Literal(ScalarValue::Utf8(Some(s.into())))
     }
 
-    pub(crate) fn int64_lit(i: impl Into<i64>) -> DfExpr {
-        DfExpr::Literal(ScalarValue::Int64(Some(i.into())))
+    pub(crate) fn int64_lit(i: impl Into<i64>) -> Expr {
+        Expr::Literal(ScalarValue::Int64(Some(i.into())))
     }
 
     pub(crate) fn encoded_string(s: impl Into<String>) -> Vec<u8> {
@@ -316,14 +315,14 @@ mod tests {
             HashSet::default(),
         );
 
-        let expr = DfExpr::BinaryExpr(BinaryExpr {
-            left: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(tag_column()),
                 op: Operator::RegexMatch,
                 right: Box::new(string_lit("bar")),
             })),
             op: Operator::And,
-            right: Box::new(DfExpr::Between(Between {
+            right: Box::new(Expr::Between(Between {
                 expr: Box::new(tag_column2()),
                 negated: false,
                 low: Box::new(int64_lit(123)),
