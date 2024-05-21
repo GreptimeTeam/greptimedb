@@ -41,6 +41,7 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
+use common_version::{short_version, version};
 use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -69,7 +70,7 @@ use crate::error::{
     StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-standalone";
 
@@ -376,6 +377,7 @@ impl StartCommand {
     async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         let _guard =
             common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+        log_versions(version!(), short_version!());
 
         info!("Standalone start command: {:#?}", self);
         info!("Building standalone instance with {opts:#?}");

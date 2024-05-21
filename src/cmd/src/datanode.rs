@@ -21,6 +21,7 @@ use clap::Parser;
 use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
+use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -33,7 +34,7 @@ use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-datanode";
 
@@ -233,6 +234,7 @@ impl StartCommand {
             &opts.tracing,
             opts.node_id.map(|x| x.to_string()),
         );
+        log_versions(version!(), short_version!());
 
         let plugins = plugins::setup_datanode_plugins(&mut opts)
             .await
