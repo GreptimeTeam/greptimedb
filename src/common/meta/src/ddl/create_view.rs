@@ -30,10 +30,10 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::rpc::ddl::CreateViewTask;
 use crate::{metrics, ClusterId};
 
-// The proceudure to execute `[CreateViewTask]`.
+// The procedure to execute `[CreateViewTask]`.
 pub struct CreateViewProcedure {
     pub context: DdlContext,
-    pub creator: ViewCreator,
+    pub data: CreateViewData,
 }
 
 impl CreateViewProcedure {
@@ -42,24 +42,27 @@ impl CreateViewProcedure {
     pub fn new(cluster_id: ClusterId, task: CreateViewTask, context: DdlContext) -> Self {
         Self {
             context,
-            creator: ViewCreator::new(cluster_id, task),
+            data: CreateViewData {
+                state: CreateViewState::Prepare,
+                cluster_id,
+                task,
+                need_update: false,
+            },
         }
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
 
-        let creator = ViewCreator { data };
-
-        Ok(CreateViewProcedure { context, creator })
+        Ok(CreateViewProcedure { context, data })
     }
 
     fn view_info(&self) -> &RawTableInfo {
-        &self.creator.data.task.view_info
+        &self.data.task.view_info
     }
 
     fn need_update(&self) -> bool {
-        self.creator.data.need_update
+        self.data.need_update
     }
 
     pub(crate) fn view_id(&self) -> TableId {
@@ -68,7 +71,7 @@ impl CreateViewProcedure {
 
     #[cfg(any(test, feature = "testing"))]
     pub fn set_allocated_metadata(&mut self, view_id: TableId) {
-        self.creator.set_allocated_metadata(view_id, false)
+        self.data.set_allocated_metadata(view_id, false)
     }
 
     /// On the prepare step, it performs:
@@ -79,7 +82,7 @@ impl CreateViewProcedure {
     /// - ViewName exists and `create_if_not_exists` is false.
     /// - Failed to allocate [ViewMetadata].
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        let expr = &self.creator.data.task.create_view;
+        let expr = &self.data.task.create_view;
         let view_name_value = self
             .context
             .table_metadata_manager
@@ -102,7 +105,7 @@ impl CreateViewProcedure {
             ensure!(
                 expr.create_if_not_exists || expr.or_replace,
                 error::ViewAlreadyExistsSnafu {
-                    view_name: self.creator.data.table_ref().to_string(),
+                    view_name: self.data.table_ref().to_string(),
                 }
             );
 
@@ -122,18 +125,18 @@ impl CreateViewProcedure {
                 .get(view_id)
                 .await?
                 .with_context(|| error::TableInfoNotFoundSnafu {
-                    table: self.creator.data.table_ref().to_string(),
+                    table: self.data.table_ref().to_string(),
                 })?;
 
             // Ensure the exists one is view, we can't replace a table.
             ensure!(
                 view_info_value.table_info.table_type == TableType::View,
                 error::TableAlreadyExistsSnafu {
-                    table_name: self.creator.data.table_ref().to_string(),
+                    table_name: self.data.table_ref().to_string(),
                 }
             );
 
-            self.creator.set_allocated_metadata(view_id, true);
+            self.data.set_allocated_metadata(view_id, true);
         } else {
             // Allocate the new `view_id`.
             let TableMetadata { table_id, .. } = self
@@ -141,15 +144,15 @@ impl CreateViewProcedure {
                 .table_metadata_allocator
                 .create_view(
                     &TableMetadataAllocatorContext {
-                        cluster_id: self.creator.data.cluster_id,
+                        cluster_id: self.data.cluster_id,
                     },
                     &None,
                 )
                 .await?;
-            self.creator.set_allocated_metadata(table_id, false);
+            self.data.set_allocated_metadata(table_id, false);
         }
 
-        self.creator.data.state = CreateViewState::CreateMetadata;
+        self.data.state = CreateViewState::CreateMetadata;
 
         Ok(Status::executing(true))
     }
@@ -169,9 +172,9 @@ impl CreateViewProcedure {
                 .get(view_id)
                 .await?
                 .with_context(|| error::ViewNotFoundSnafu {
-                    view_name: self.creator.data.table_ref().to_string(),
+                    view_name: self.data.table_ref().to_string(),
                 })?;
-            let new_logical_plan = self.creator.data.task.raw_logical_plan().clone();
+            let new_logical_plan = self.data.task.raw_logical_plan().clone();
             manager
                 .update_view_info(view_id, &current_view_info, new_logical_plan)
                 .await?;
@@ -180,7 +183,7 @@ impl CreateViewProcedure {
         } else {
             let raw_view_info = self.view_info().clone();
             manager
-                .create_view_metadata(raw_view_info, self.creator.data.task.raw_logical_plan())
+                .create_view_metadata(raw_view_info, self.data.task.raw_logical_plan())
                 .await?;
 
             info!(
@@ -200,7 +203,7 @@ impl Procedure for CreateViewProcedure {
     }
 
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let state = &self.creator.data.state;
+        let state = &self.data.state;
 
         let _timer = metrics::METRIC_META_PROCEDURE_CREATE_VIEW
             .with_label_values(&[state.as_ref()])
@@ -214,41 +217,17 @@ impl Procedure for CreateViewProcedure {
     }
 
     fn dump(&self) -> ProcedureResult<String> {
-        serde_json::to_string(&self.creator.data).context(ToJsonSnafu)
+        serde_json::to_string(&self.data).context(ToJsonSnafu)
     }
 
     fn lock_key(&self) -> LockKey {
-        let table_ref = &self.creator.data.table_ref();
+        let table_ref = &self.data.table_ref();
 
         LockKey::new(vec![
             CatalogLock::Read(table_ref.catalog).into(),
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
             TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
         ])
-    }
-}
-
-/// The VIEW creator
-pub struct ViewCreator {
-    /// The serializable data.
-    pub data: CreateViewData,
-}
-
-impl ViewCreator {
-    pub fn new(cluster_id: u64, task: CreateViewTask) -> Self {
-        Self {
-            data: CreateViewData {
-                state: CreateViewState::Prepare,
-                cluster_id,
-                task,
-                need_update: false,
-            },
-        }
-    }
-
-    fn set_allocated_metadata(&mut self, view_id: TableId, need_update: bool) {
-        self.data.task.view_info.ident.table_id = view_id;
-        self.data.need_update = need_update;
     }
 }
 
@@ -270,6 +249,11 @@ pub struct CreateViewData {
 }
 
 impl CreateViewData {
+    fn set_allocated_metadata(&mut self, view_id: TableId, need_update: bool) {
+        self.task.view_info.ident.table_id = view_id;
+        self.need_update = need_update;
+    }
+
     fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
     }
