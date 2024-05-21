@@ -23,6 +23,7 @@ use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::GlobalOptions;
@@ -32,11 +33,18 @@ pub const APP_NAME: &str = "greptime-metasrv";
 
 pub struct Instance {
     instance: MetasrvInstance,
+
+    // Keep the logging guard to prevent the worker from being dropped.
+    #[allow(dead_code)]
+    _guard: Vec<WorkerGuard>,
 }
 
 impl Instance {
-    fn new(instance: MetasrvInstance) -> Self {
-        Self { instance }
+    fn new(instance: MetasrvInstance, guard: Vec<WorkerGuard>) -> Self {
+        Self {
+            instance,
+            _guard: guard,
+        }
     }
 }
 
@@ -214,7 +222,7 @@ impl StartCommand {
     }
 
     async fn build(&self, mut opts: MetasrvOptions) -> Result<Instance> {
-        let _guard =
+        let guard =
             common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
         log_versions(version!(), short_version!());
 
@@ -234,7 +242,7 @@ impl StartCommand {
             .await
             .context(error::BuildMetaServerSnafu)?;
 
-        Ok(Instance::new(instance))
+        Ok(Instance::new(instance, guard))
     }
 }
 

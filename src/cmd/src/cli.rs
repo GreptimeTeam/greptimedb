@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
 use clap::Parser;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use tracing_appender::non_blocking::WorkerGuard;
 // pub use repl::Repl;
 use upgrade::UpgradeCommand;
 
@@ -48,11 +49,18 @@ pub trait Tool: Send + Sync {
 
 pub struct Instance {
     tool: Box<dyn Tool>,
+
+    // Keep the logging guard to prevent the worker from being dropped.
+    #[allow(dead_code)]
+    _guard: Vec<WorkerGuard>,
 }
 
 impl Instance {
-    fn new(tool: Box<dyn Tool>) -> Self {
-        Self { tool }
+    fn new(tool: Box<dyn Tool>, guard: Vec<WorkerGuard>) -> Self {
+        Self {
+            tool,
+            _guard: guard,
+        }
     }
 }
 
@@ -83,14 +91,14 @@ pub struct Command {
 
 impl Command {
     pub async fn build(&self, opts: LoggingOptions) -> Result<Instance> {
-        let _guard = common_telemetry::init_global_logging(
+        let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts,
             &TracingOptions::default(),
             None,
         );
 
-        self.cmd.build().await
+        self.cmd.build(guard).await
     }
 
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<LoggingOptions> {
@@ -115,12 +123,12 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self) -> Result<Instance> {
+    async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
         match self {
             // SubCommand::Attach(cmd) => cmd.build().await,
-            SubCommand::Upgrade(cmd) => cmd.build().await,
-            SubCommand::Bench(cmd) => cmd.build().await,
-            SubCommand::Export(cmd) => cmd.build().await,
+            SubCommand::Upgrade(cmd) => cmd.build(guard).await,
+            SubCommand::Bench(cmd) => cmd.build(guard).await,
+            SubCommand::Export(cmd) => cmd.build(guard).await,
         }
     }
 }
