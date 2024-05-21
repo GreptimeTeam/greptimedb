@@ -19,13 +19,14 @@ use clap::Parser;
 use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
+use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-metasrv";
 
@@ -215,6 +216,7 @@ impl StartCommand {
     async fn build(&self, mut opts: MetasrvOptions) -> Result<Instance> {
         let _guard =
             common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+        log_versions(version!(), short_version!());
 
         let plugins = plugins::setup_metasrv_plugins(&mut opts)
             .await

@@ -17,8 +17,8 @@
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, App};
-use common_version::{short_version, version};
+use cmd::{cli, datanode, frontend, metasrv, standalone, App};
+use common_version::version;
 
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = version!(), about)]
@@ -61,7 +61,6 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     setup_human_panic();
-    log_versions(version!(), short_version!());
     start(Command::parse()).await
 }
 
