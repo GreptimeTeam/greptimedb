@@ -1,0 +1,81 @@
+name: Setup GreptimeDB cluster
+description: Deploy GreptimeDB cluster on Kubernetes
+inputs:
+  frontend-replica-count:
+    default: 1
+    description: "Frontend replica count"
+  datanode-replica-count:
+    default: 2
+    description: "Datanode replica count"
+  metasrv-replica-count:
+    default: 1
+    description: "Metasrv replica count"
+  etcd-replica-count:
+    default: 1
+    description: "Etcd replica count"
+  image-registry: 
+    default: "docker.io"
+    description: "Image registry"
+  image-repository: 
+    default: "greptime/greptimedb"
+    description: "Image repository"
+  image-tag: 
+    default: "latest"
+    description: 'Image tag'
+  etcd-endpoints:
+    default: "etcd.etcd-cluster.svc.cluster.local:2379"
+    description: "Etcd endpoints"
+
+runs:
+  using: composite
+  steps:
+  - name: Install GreptimeDB operator
+    shell: bash
+    run: |
+      helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
+      helm repo update
+      helm upgrade \
+        --install \
+        --create-namespace \
+        greptimedb-operator greptime/greptimedb-operator \
+        -n greptimedb-admin \
+        --wait \
+        --wait-for-jobs
+  - name: Install GreptimeDB cluster
+    shell: bash
+    run: | 
+      helm upgrade \
+        --install my-greptimedb \
+        --set meta.etcdEndpoints=${{ inputs.etcd-endpoints }} \
+        --set image.registry=${{ inputs.image-registry }} \
+        --set image.repository=${{ inputs.image-repository }}  \
+        --set image.tag=${{ inputs.image-tag }} \
+        greptime/greptimedb-cluster \
+        --create-namespace \
+        -n my-greptimedb \
+        --wait \
+        --wait-for-jobs
+  - name: Wait for GreptimeDB
+    shell: bash
+    run: |
+      kubectl get pods -n my-greptimedb
+      kubectl wait \
+        --for=condition=Ready \
+        pod -l app.greptime.io/component=my-greptimedb-meta \
+        --timeout=120s \
+        -n my-greptimedb
+      kubectl wait \
+        --for=condition=Ready \
+        pod -l app.greptime.io/component=my-greptimedb-datanode \
+        --timeout=120s \
+        -n my-greptimedb
+      kubectl wait \
+        --for=condition=Ready \
+        pod -l app.greptime.io/component=my-greptimedb-frontend \
+        --timeout=120s \
+        -n my-greptimedb
+  - name: Print GreptimeDB info
+    if: always()
+    shell: bash
+    run: | 
+      kubectl get all --show-labels -n my-greptimedb
