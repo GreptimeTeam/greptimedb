@@ -28,7 +28,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::TableNotExistSnafu;
 use crate::CatalogManagerRef;
 
-/// Delegate the resolving rquests to the `[CatalogManager]` unconditionally.
+/// Delegate the resolving requests to the `[CatalogManager]` unconditionally.
 #[derive(Clone)]
 pub struct DummyCatalogList {
     catalog_manager: CatalogManagerRef,

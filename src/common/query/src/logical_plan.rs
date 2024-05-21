@@ -75,7 +75,7 @@ pub fn create_aggregate_function(
 #[async_trait::async_trait]
 pub trait SubstraitPlanDecoder {
     /// Decode the `[LogicalPlan]` from bytes with the `[CatalogProviderList]`.
-    /// When `optimzie` is true, it will do the optimization for decoded plan.
+    /// When `optimize` is true, it will do the optimization for decoded plan.
     async fn decode(
         &self,
         message: bytes::Bytes,
