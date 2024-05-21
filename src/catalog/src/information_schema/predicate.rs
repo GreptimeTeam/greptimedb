@@ -16,8 +16,7 @@ use arrow::array::StringArray;
 use arrow::compute::kernels::comparison;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::expr::Like;
-use datafusion::logical_expr::Operator;
-use datafusion::prelude::Expr;
+use datafusion::logical_expr::{Expr, Operator};
 use datatypes::value::Value;
 use store_api::storage::ScanRequest;
 

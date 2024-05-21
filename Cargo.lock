@@ -5701,7 +5701,6 @@ dependencies = [
  "common-test-util",
  "common-time",
  "datafusion 37.0.0",
- "datafusion-expr 37.0.0",
  "datatypes",
  "itertools 0.10.5",
  "lazy_static",
