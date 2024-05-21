@@ -140,8 +140,7 @@ pub fn build_time_range_predicate<'a>(
     let mut res = TimestampRange::min_to_max();
     let mut filters_remain = vec![];
     for expr in std::mem::take(filters) {
-        if let Some(range) = extract_time_range_from_expr(ts_col_name, ts_col_unit, expr.df_expr())
-        {
+        if let Some(range) = extract_time_range_from_expr(ts_col_name, ts_col_unit, &expr) {
             res = res.and(&range);
         } else {
             filters_remain.push(expr);
@@ -283,11 +282,7 @@ fn extract_from_binary_expr(
     }
 }
 
-fn get_timestamp_filter(
-    ts_col_name: &str,
-    left: &Expr,
-    right: &Expr,
-) -> Option<(Timestamp, bool)> {
+fn get_timestamp_filter(ts_col_name: &str, left: &Expr, right: &Expr) -> Option<(Timestamp, bool)> {
     let (col, lit, reverse) = match (left, right) {
         (Expr::Column(column), Expr::Literal(scalar)) => (column, scalar, false),
         (Expr::Literal(scalar), Expr::Column(column)) => (column, scalar, true),
@@ -394,7 +389,7 @@ mod tests {
     fn check_build_predicate(expr: Expr, expect: TimestampRange) {
         assert_eq!(
             expect,
-            build_time_range_predicate("ts", TimeUnit::Millisecond, &mut vec![Expr::from(expr)])
+            build_time_range_predicate("ts", TimeUnit::Millisecond, &mut vec![expr])
         );
     }
 
