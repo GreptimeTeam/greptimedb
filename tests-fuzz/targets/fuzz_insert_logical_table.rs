@@ -201,7 +201,11 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         column_list, create_logical_table_expr.table_name, primary_keys_column_list
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
-    let mut expected_rows = replace_default(&insert_expr.values_list, &create_logical_table_expr);
+    let mut expected_rows = replace_default(
+        &insert_expr.values_list,
+        &create_logical_table_expr,
+        &insert_expr,
+    );
     expected_rows.sort_by(|a, b| {
         let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
             .iter()

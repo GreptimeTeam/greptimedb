@@ -20,6 +20,7 @@ pub(crate) mod insert_expr;
 pub(crate) mod select_expr;
 
 use core::fmt;
+use std::collections::HashMap;
 
 pub use alter_expr::AlterTableExpr;
 use common_time::{Date, DateTime, Timestamp};
@@ -439,13 +440,31 @@ pub fn generate_columns<R: Rng + 'static>(
 }
 
 /// Replace Value::Default with the corresponding default value in the rows for comparison.
-pub fn replace_default(rows: &[RowValues], create_expr: &CreateTableExpr) -> Vec<RowValues> {
+pub fn replace_default(
+    rows: &[RowValues],
+    create_expr: &CreateTableExpr,
+    insert_expr: &InsertIntoExpr,
+) -> Vec<RowValues> {
+    let index_map: HashMap<usize, usize> = insert_expr
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(insert_idx, insert_column)| {
+            let create_idx = create_expr
+                .columns
+                .iter()
+                .position(|create_column| create_column.name == insert_column.name)
+                .expect("Column not found in create_expr");
+            (insert_idx, create_idx)
+        })
+        .collect();
+
     let mut new_rows = Vec::new();
     for row in rows {
         let mut new_row = Vec::new();
         for (idx, value) in row.iter().enumerate() {
             if let RowValue::Default = value {
-                let column = &create_expr.columns[idx];
+                let column = &create_expr.columns[index_map[&idx]];
                 new_row.push(RowValue::Value(column.default_value().unwrap().clone()));
             } else {
                 new_row.push(value.clone());
