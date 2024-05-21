@@ -58,17 +58,22 @@ runs:
   - name: Wait for GreptimeDB
     shell: bash
     run: |
+      sleep 5s
       kubectl get pods -n my-greptimedb
       kubectl wait \
         --for=condition=Ready \
         pod -l app.greptime.io/component=my-greptimedb-meta \
         --timeout=120s \
         -n my-greptimedb
+      sleep 5s
+      kubectl get pods -n my-greptimedb
       kubectl wait \
         --for=condition=Ready \
         pod -l app.greptime.io/component=my-greptimedb-datanode \
         --timeout=120s \
         -n my-greptimedb
+      sleep 5s
+      kubectl get pods -n my-greptimedb
       kubectl wait \
         --for=condition=Ready \
         pod -l app.greptime.io/component=my-greptimedb-frontend \
