@@ -962,5 +962,30 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
+    // also test fallback logic, vmagent could sent data in wrong content-type
+    // we encode it as zstd but send it as snappy
+    let compressed_request =
+        zstd::stream::encode_all(&serialized_request[..], 1).expect("Failed to encode zstd");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // reversed
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request[..]).expect("Failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "zstd")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
     guard.remove_all().await;
 }
