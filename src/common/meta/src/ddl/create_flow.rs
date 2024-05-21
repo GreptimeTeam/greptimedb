@@ -283,7 +283,7 @@ impl From<&CreateFlowData> for CreateRequest {
             sink_table_name: Some(value.task.sink_table_name.clone().into()),
             // Always be true
             create_if_not_exists: true,
-            expire_when: value.task.expire_when.clone(),
+            expire_after: value.task.expire_after.clone(),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
             flow_options: value.task.flow_options.clone(),
@@ -297,7 +297,7 @@ impl From<&CreateFlowData> for FlowInfoValue {
             catalog_name,
             flow_name,
             sink_table_name,
-            expire_when,
+            expire_after,
             comment,
             sql,
             flow_options: options,
@@ -318,7 +318,7 @@ impl From<&CreateFlowData> for FlowInfoValue {
             catalog_name,
             flow_name,
             raw_sql: sql,
-            expire_when,
+            expire_after,
             comment,
             options,
         }

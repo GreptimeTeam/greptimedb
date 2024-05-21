@@ -591,8 +591,8 @@ pub fn to_create_flow_task_expr(
         sink_table_name: Some(sink_table_name),
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
-        expire_when: create_flow
-            .expire_when
+        expire_after: create_flow
+            .expire_after
             .map(|e| e.to_string())
             .unwrap_or_default(),
         comment: create_flow.comment.unwrap_or_default(),

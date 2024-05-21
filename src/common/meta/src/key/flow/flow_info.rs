@@ -123,7 +123,7 @@ pub struct FlowInfoValue {
     /// The raw sql.
     pub(crate) raw_sql: String,
     /// The expr of expire.
-    pub(crate) expire_when: String,
+    pub(crate) expire_after: String,
     /// The comment.
     pub(crate) comment: String,
     /// The options.
