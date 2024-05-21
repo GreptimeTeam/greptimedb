@@ -565,7 +565,7 @@ impl FlownodeManager {
     /// Return task id if a new task is created, otherwise return None
     ///
     /// steps to create task:
-    /// 1. parse query into typed plan(and optional parse expire_when expr)
+    /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
     #[allow(clippy::too_many_arguments)]
     pub async fn create_flow(
@@ -574,7 +574,7 @@ impl FlownodeManager {
         sink_table_name: TableName,
         source_table_ids: &[TableId],
         create_if_not_exist: bool,
-        expire_when: Option<String>,
+        expire_after: Option<String>,
         comment: Option<String>,
         sql: String,
         flow_options: HashMap<String, String>,
@@ -608,7 +608,7 @@ impl FlownodeManager {
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
         node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
 
-        let expire_when = expire_when
+        let expire_after = expire_after
             .and_then(|s| {
                 if s.is_empty() || s.split_whitespace().join("").is_empty() {
                     None
@@ -656,7 +656,7 @@ impl FlownodeManager {
             sink_sender,
             source_ids,
             src_recvs: source_receivers,
-            expire_when,
+            expire_after,
             create_if_not_exist,
             err_collector,
         };

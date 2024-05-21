@@ -232,7 +232,7 @@ impl<'s> Worker<'s> {
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
-        expire_when: Option<repr::Duration>,
+        expire_after: Option<repr::Duration>,
         create_if_not_exist: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
@@ -247,7 +247,7 @@ impl<'s> Worker<'s> {
             err_collector,
             ..Default::default()
         };
-        cur_task_state.state.set_expire_after(expire_when);
+        cur_task_state.state.set_expire_after(expire_after);
 
         {
             let mut ctx = cur_task_state.new_ctx(sink_id);
@@ -319,7 +319,7 @@ impl<'s> Worker<'s> {
                 sink_sender,
                 source_ids,
                 src_recvs,
-                expire_when,
+                expire_after,
                 create_if_not_exist,
                 err_collector,
             } => {
@@ -330,7 +330,7 @@ impl<'s> Worker<'s> {
                     sink_sender,
                     &source_ids,
                     src_recvs,
-                    expire_when,
+                    expire_after,
                     create_if_not_exist,
                     err_collector,
                 );
@@ -368,7 +368,7 @@ pub enum Request {
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: Vec<GlobalId>,
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
-        expire_when: Option<repr::Duration>,
+        expire_after: Option<repr::Duration>,
         create_if_not_exist: bool,
         err_collector: ErrCollector,
     },
@@ -524,7 +524,7 @@ mod test {
             sink_sender: sink_tx,
             source_ids: src_ids,
             src_recvs: vec![rx],
-            expire_when: None,
+            expire_after: None,
             create_if_not_exist: true,
             err_collector: ErrCollector::default(),
         };
