@@ -577,8 +577,16 @@ impl ScanInput {
     }
 
     /// Builds and returns parts to read.
-    pub(crate) async fn build_parts(&self) -> Result<Vec<ScanPart>> {
-        let mut file_ranges = Vec::new();
+    pub(crate) async fn build_parts(
+        &self,
+        mut part_builder: impl ScanPartBuilder,
+    ) -> Result<Vec<ScanPart>> {
+        if !self.parallelism.allow_parallel_scan() {
+            part_builder.set_parallelism(1);
+        } else {
+            part_builder.set_parallelism(self.parallelism.parallelism);
+        }
+
         for file in &self.files {
             let res = self
                 .access_layer
@@ -616,57 +624,17 @@ impl ScanInput {
             }
             // Build ranges from row groups.
             let file_range_ctx = Arc::new(file_range_ctx);
-            file_ranges.reserve(row_groups.len());
-            for (row_group_idx, row_selection) in row_groups {
-                let file_range =
-                    FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection);
-                file_ranges.push(file_range);
-            }
+            let file_ranges = row_groups
+                .into_iter()
+                .map(|(row_group_idx, row_selection)| {
+                    FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection)
+                });
+            part_builder.append_file_ranges(file_ranges)
         }
 
         READ_SST_COUNT.observe(self.files.len() as f64);
 
-        if !self.parallelism.allow_parallel_scan() {
-            // Returns a single part.
-            let part = ScanPart {
-                memtables: self.memtables.clone(),
-                file_ranges,
-            };
-            return Ok(vec![part]);
-        }
-
-        // `enable_parallel_scan()` ensures parallelism > 1.
-        let parallelism = self.parallelism.parallelism;
-        debug_assert!(parallelism > 1);
-
-        let mems_per_part = ((self.memtables.len() + parallelism - 1) / parallelism).max(1);
-        let ranges_per_part = ((file_ranges.len() + parallelism - 1) / parallelism).max(1);
-        common_telemetry::debug!(
-            "Parallel scan is enabled, parallelism: {}, {} memtables, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
-            self.parallelism.parallelism,
-            self.memtables.len(),
-            file_ranges.len(),
-            mems_per_part,
-            ranges_per_part
-        );
-        let mut scan_parts = self
-            .memtables
-            .chunks(mems_per_part)
-            .map(|mems| ScanPart {
-                memtables: mems.to_vec(),
-                file_ranges: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        for (i, ranges) in file_ranges.chunks(ranges_per_part).enumerate() {
-            if i == scan_parts.len() {
-                scan_parts.push(ScanPart {
-                    memtables: Vec::new(),
-                    file_ranges: ranges.to_vec(),
-                });
-            } else {
-                scan_parts[i].file_ranges = ranges.to_vec();
-            }
-        }
+        let scan_parts = part_builder.build_parts(&self.memtables);
 
         Ok(scan_parts)
     }
@@ -722,6 +690,7 @@ impl ScanInput {
 
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
+#[derive(Default)]
 pub(crate) struct ScanPart {
     /// Memtables to scan.
     /// We scan the whole memtable now. We might scan a range of the memtable in the future.
@@ -739,4 +708,18 @@ impl fmt::Debug for ScanPart {
             self.file_ranges.len()
         )
     }
+}
+
+/// Strategy to build [ScanPart] for parallel scan.
+pub(crate) trait ScanPartBuilder {
+    /// Sets the parallelism.
+    ///
+    /// Users must call this method before invoking other methods.
+    fn set_parallelism(&mut self, parallelism: usize);
+
+    /// Appends file ranges from the **same file** to the builder.
+    fn append_file_ranges(&mut self, file_ranges: impl Iterator<Item = FileRange>);
+
+    /// Builds a list of [ScanPart].
+    fn build_parts(self, memtables: &[MemtableRef]) -> Vec<ScanPart>;
 }
