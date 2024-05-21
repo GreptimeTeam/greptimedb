@@ -17,12 +17,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::region::compact_request;
-use common_query::logical_plan::DfExpr;
 use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
+use datafusion_expr::Expr;
 pub use picker::CompactionPickerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -468,23 +468,19 @@ fn time_range_to_predicate(
         (Some(start), Some(end)) => {
             vec![
                 datafusion_expr::col(ts_col.column_schema.name.clone())
-                    .gt_eq(ts_to_lit(*start, ts_col_unit)?)
-                    .into(),
+                    .gt_eq(ts_to_lit(*start, ts_col_unit)?),
                 datafusion_expr::col(ts_col.column_schema.name.clone())
-                    .lt(ts_to_lit(*end, ts_col_unit)?)
-                    .into(),
+                    .lt(ts_to_lit(*end, ts_col_unit)?),
             ]
         }
         (Some(start), None) => {
             vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .gt_eq(ts_to_lit(*start, ts_col_unit)?)
-                .into()]
+                .gt_eq(ts_to_lit(*start, ts_col_unit)?)]
         }
 
         (None, Some(end)) => {
             vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .lt(ts_to_lit(*end, ts_col_unit)?)
-                .into()]
+                .lt(ts_to_lit(*end, ts_col_unit)?)]
         }
         (None, None) => {
             return Ok(None);
@@ -493,7 +489,7 @@ fn time_range_to_predicate(
     Ok(Some(Predicate::new(exprs)))
 }
 
-fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<DfExpr> {
+fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
     let ts = ts
         .convert_to(ts_col_unit)
         .context(TimeRangePredicateOverflowSnafu {

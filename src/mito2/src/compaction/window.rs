@@ -87,7 +87,7 @@ impl WindowedCompactionPicker {
             expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
 
-        let windows = asign_files_to_time_windows(
+        let windows = assign_files_to_time_windows(
             time_window,
             current_version
                 .ssts
@@ -179,7 +179,7 @@ fn build_output(
 /// Assigns files to time windows. If file does not contain a time range in metadata, it will be
 /// assigned to a special bucket `i64::MAX` (normally no timestamp can be aligned to this bucket)
 /// so that all files without timestamp can be compacted together.
-fn asign_files_to_time_windows<'a>(
+fn assign_files_to_time_windows<'a>(
     bucket_sec: i64,
     files: impl Iterator<Item = &'a FileHandle>,
 ) -> BTreeMap<i64, Vec<FileHandle>> {
