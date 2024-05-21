@@ -114,14 +114,14 @@ struct TimeRangeTester {
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
         let _ = exec_selection(self.engine.clone(), sql).await;
-        let mut filters = self.get_filters();
+        let mut filters = self.take_filters();
 
         let range = build_time_range_predicate("ts", TimeUnit::Millisecond, &mut filters);
         assert_eq!(expect, range);
     }
 
-    fn get_filters(&self) -> Vec<Expr> {
-        self.filter.write().unwrap().drain(..).collect()
+    fn take_filters(&self) -> Vec<Expr> {
+        std::mem::take(&mut self.filter.write().unwrap())
     }
 }
 

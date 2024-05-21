@@ -16,7 +16,6 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use common_recordbatch::OrderOption;
-use common_telemetry::info;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
@@ -86,7 +85,6 @@ impl TableProvider for DfTableProviderAdapter {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
-        info!("Filters: {:?}", filters);
         let request = {
             let mut request = self.scan_req.lock().unwrap();
             request.filters = filters;
