@@ -67,7 +67,6 @@ pub struct CompactionRequest {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) compact_options: compact_request::Options,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
@@ -161,7 +160,6 @@ impl CompactionScheduler {
             file_purger.clone(),
         );
         let request = status.new_compaction_request(
-            compact_options,
             self.request_sender.clone(),
             waiter,
             self.engine_config.clone(),
@@ -170,7 +168,7 @@ impl CompactionScheduler {
             self.listener.clone(),
         );
         self.region_status.insert(region_id, status);
-        self.schedule_compaction_request(request)
+        self.schedule_compaction_request(request, compact_options)
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
@@ -185,7 +183,6 @@ impl CompactionScheduler {
 
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
-            compact_request::Options::Regular(Default::default()), // todo(hl): we should not trigger a regular compaction after major compaction.
             self.request_sender.clone(),
             OptionOutputTx::none(),
             self.engine_config.clone(),
@@ -194,7 +191,10 @@ impl CompactionScheduler {
             self.listener.clone(),
         );
         // Try to schedule next compaction task for this region.
-        if let Err(e) = self.schedule_compaction_request(request) {
+        if let Err(e) = self.schedule_compaction_request(
+            request,
+            compact_request::Options::Regular(Default::default()),
+        ) {
             error!(e; "Failed to schedule next compaction for region {}", region_id);
         }
     }
@@ -235,18 +235,21 @@ impl CompactionScheduler {
     /// Schedules a compaction request.
     ///
     /// If the region has nothing to compact, it removes the region from the status map.
-    fn schedule_compaction_request(&mut self, request: CompactionRequest) -> Result<()> {
-        let picker =
-            if let compact_request::Options::StrictWindow(window) = &request.compact_options {
-                let window = if window.window_seconds == 0 {
-                    None
-                } else {
-                    Some(window.window_seconds)
-                };
-                Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
+    fn schedule_compaction_request(
+        &mut self,
+        request: CompactionRequest,
+        options: compact_request::Options,
+    ) -> Result<()> {
+        let picker = if let compact_request::Options::StrictWindow(window) = &options {
+            let window = if window.window_seconds == 0 {
+                None
             } else {
-                compaction_options_to_picker(&request.current_version.options.compaction)
+                Some(window.window_seconds)
             };
+            Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
+        } else {
+            compaction_options_to_picker(&request.current_version.options.compaction)
+        };
 
         let region_id = request.region_id();
         debug!(
@@ -374,7 +377,6 @@ impl CompactionStatus {
     #[allow(clippy::too_many_arguments)]
     fn new_compaction_request(
         &mut self,
-        compact_options: compact_request::Options,
         request_sender: Sender<WorkerRequest>,
         waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
@@ -388,7 +390,6 @@ impl CompactionStatus {
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
-            compact_options,
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),

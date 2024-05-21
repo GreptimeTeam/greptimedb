@@ -36,6 +36,9 @@ use crate::ensure_greptime;
 use crate::function::{Function, FunctionContext};
 use crate::handlers::TableMutationHandlerRef;
 
+/// Compact type: strict window.
+const COMPACT_TYPE_STRICT_WINDOW: &str = "strict_window";
+
 #[admin_fn(
     name = "FlushTableFunction",
     display_name = "flush_table",
@@ -119,6 +122,10 @@ fn compact_signature() -> Signature {
     )
 }
 
+/// Parses `compact_table` UDF parameters. This function accepts following combinations:
+/// - `[<table_name>]`: only tables name provided, using default compaction type: regular
+/// - `[<table_name>, <type>]`: specify table name and compaction type. The compaction options will be default.
+/// - `[<table_name>, <type>, <options>]`: provides both type and type-specific options.
 fn parse_compact_params(
     params: &[ValueRef<'_>],
     query_ctx: &QueryContextRef,
@@ -167,8 +174,22 @@ fn parse_compact_params(
 }
 
 fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<compact_request::Options> {
-    if type_str.eq_ignore_ascii_case("strict_window") {
-        let window_seconds = option.and_then(|v| i64::from_str(v).ok()).unwrap_or(0);
+    if type_str.eq_ignore_ascii_case(COMPACT_TYPE_STRICT_WINDOW) {
+        let window_seconds = option
+            .map(|v| {
+                i64::from_str(v).map_err(|_| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: format!(
+                            "Compact window is expected to be a valid number, provided: {}",
+                            v
+                        ),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+
         Ok(compact_request::Options::StrictWindow(StrictWindow {
             window_seconds,
         }))
@@ -181,8 +202,10 @@ fn parse_compact_type(type_str: &str, option: Option<&str>) -> Result<compact_re
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::region::compact_request::Options;
     use common_query::prelude::TypeSignature;
     use datatypes::vectors::{StringVector, UInt64Vector};
+    use session::context::QueryContext;
 
     use super::*;
 
@@ -244,4 +267,98 @@ mod tests {
     }
 
     define_table_function_test!(flush_table, FlushTableFunction);
+
+    fn check_parse_compact_params(cases: &[(&[&str], CompactTableRequest)]) {
+        for (params, expected) in cases {
+            let params = params
+                .iter()
+                .map(|s| ValueRef::String(s))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                expected,
+                &parse_compact_params(&params, &QueryContext::arc()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_compact_params() {
+        check_parse_compact_params(&[
+            (
+                &["table"],
+                CompactTableRequest {
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "public".to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                },
+            ),
+            (
+                &["a.table"],
+                CompactTableRequest {
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "a".to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                },
+            ),
+            (
+                &["a.b.c"],
+                CompactTableRequest {
+                    catalog_name: "a".to_string(),
+                    schema_name: "b".to_string(),
+                    table_name: "c".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                },
+            ),
+            (
+                &["table", "regular"],
+                CompactTableRequest {
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "public".to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                },
+            ),
+            (
+                &["table", "strict_window"],
+                CompactTableRequest {
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "public".to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow { window_seconds: 0 }),
+                },
+            ),
+            (
+                &["table", "strict_window", "3600"],
+                CompactTableRequest {
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "public".to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 3600,
+                    }),
+                },
+            ),
+            (
+                &["table", "regular", "abcd"],
+                CompactTableRequest {
+                    catalog_name: "greptime".to_string(),
+                    schema_name: "public".to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                },
+            ),
+        ]);
+
+        assert!(parse_compact_params(
+            &["table", "strict_window", "abc"]
+                .into_iter()
+                .map(ValueRef::String)
+                .collect::<Vec<_>>(),
+            &QueryContext::arc(),
+        )
+        .is_err());
+    }
 }

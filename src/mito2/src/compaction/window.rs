@@ -15,7 +15,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use api::v1::region::compact_request;
 use common_telemetry::info;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -49,27 +48,11 @@ impl WindowedCompactionPicker {
     // use persisted window. If persist window is not present, we check the time window
     // provided while creating table. If all of those are absent, we infer the window
     // from files in level0.
-    fn calculate_time_window(
-        &self,
-        region_id: RegionId,
-        options: compact_request::Options,
-        current_version: &VersionRef,
-    ) -> i64 {
-        let window = if let compact_request::Options::StrictWindow(w) = &options {
-            if w.window_seconds != 0 {
-                // 0 means window is not provided.
-                Some(w.window_seconds)
-            } else {
-                None
-            }
-        } else {
-            unreachable!()
-        };
-        window
+    fn calculate_time_window(&self, region_id: RegionId, current_version: &VersionRef) -> i64 {
+        self.compaction_time_window_seconds
             .or(current_version
                 .compaction_time_window
                 .map(|t| t.as_secs() as i64))
-            .or(self.compaction_time_window_seconds)
             .unwrap_or_else(|| {
                 let levels = current_version.ssts.levels();
                 let inferred = infer_time_bucket(levels[0].files());
@@ -80,6 +63,45 @@ impl WindowedCompactionPicker {
                 inferred
             })
     }
+
+    fn pick_inner(
+        &self,
+        region_id: RegionId,
+        current_version: &VersionRef,
+        current_time: Timestamp,
+    ) -> (Vec<CompactionOutput>, Vec<FileHandle>, i64) {
+        let time_window = self.calculate_time_window(region_id, current_version);
+        info!(
+            "Compaction window for region: {} is {} seconds",
+            region_id, time_window
+        );
+
+        let expired_ssts = get_expired_ssts(
+            current_version.ssts.levels(),
+            current_version.options.ttl,
+            current_time,
+        );
+        if !expired_ssts.is_empty() {
+            info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
+            // here we mark expired SSTs as compacting to avoid them being picked.
+            expired_ssts.iter().for_each(|f| f.set_compacting(true));
+        }
+
+        let windows = asign_files_to_time_windows(
+            time_window,
+            current_version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.values()),
+        );
+
+        (
+            build_output(windows, time_window),
+            expired_ssts,
+            time_window,
+        )
+    }
 }
 
 impl Picker for WindowedCompactionPicker {
@@ -89,7 +111,6 @@ impl Picker for WindowedCompactionPicker {
             engine_config,
             current_version,
             access_layer,
-            compact_options: compact_type,
             request_sender,
             waiters,
             file_purger,
@@ -100,33 +121,8 @@ impl Picker for WindowedCompactionPicker {
             listener,
         } = req;
 
-        let time_window = self.calculate_time_window(region_id, compact_type, &current_version);
-        info!(
-            "Compaction window for region: {} is {} seconds",
-            region_id, time_window
-        );
-
-        let expired_ssts = get_expired_ssts(
-            current_version.ssts.levels(),
-            current_version.options.ttl,
-            Timestamp::current_millis(),
-        );
-        if !expired_ssts.is_empty() {
-            info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
-            // here we mark expired SSTs as compacting to avoid them being picked.
-            expired_ssts.iter().for_each(|f| f.set_compacting(true));
-        }
-
-        let windows = calculate_time_buckets(
-            time_window,
-            current_version
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files.values()),
-        );
-
-        let outputs = build_output(windows, time_window);
+        let (outputs, expired_ssts, time_window) =
+            self.pick_inner(region_id, &current_version, Timestamp::current_millis());
 
         let task = CompactionTaskImpl {
             engine_config: engine_config.clone(),
@@ -180,16 +176,19 @@ fn build_output(
     outputs
 }
 
-/// Calculates buckets for files. If file does not contain a time range in metadata, it will be
+/// Assigns files to time windows. If file does not contain a time range in metadata, it will be
 /// assigned to a special bucket `i64::MAX` (normally no timestamp can be aligned to this bucket)
 /// so that all files without timestamp can be compacted together.
-fn calculate_time_buckets<'a>(
+fn asign_files_to_time_windows<'a>(
     bucket_sec: i64,
     files: impl Iterator<Item = &'a FileHandle>,
 ) -> BTreeMap<i64, Vec<FileHandle>> {
     let mut buckets = BTreeMap::new();
 
     for file in files {
+        if file.compacting() {
+            continue;
+        }
         let (start, end) = file.time_range();
         let bounds = file_time_bucket_span(
             start.convert_to(TimeUnit::Second).unwrap().value(),
@@ -222,4 +221,160 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<i
     }
     res.push(end_aligned);
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use common_time::range::TimestampRange;
+    use common_time::Timestamp;
+    use store_api::storage::RegionId;
+
+    use crate::compaction::window::WindowedCompactionPicker;
+    use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
+    use crate::memtable::time_partition::TimePartitions;
+    use crate::memtable::version::MemtableVersion;
+    use crate::region::options::RegionOptions;
+    use crate::region::version::{Version, VersionRef};
+    use crate::sst::file::{FileId, FileMeta, Level};
+    use crate::sst::version::SstVersion;
+    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::NoopFilePurger;
+
+    fn build_version(files: &[(FileId, i64, i64, Level)], ttl: Option<Duration>) -> VersionRef {
+        let metadata = metadata_for_test();
+        let memtables = Arc::new(MemtableVersion::new(Arc::new(TimePartitions::new(
+            metadata.clone(),
+            Arc::new(PartitionTreeMemtableBuilder::new(
+                PartitionTreeConfig::default(),
+                None,
+            )),
+            0,
+            None,
+        ))));
+        let file_purger_ref = Arc::new(NoopFilePurger);
+
+        let mut ssts = SstVersion::new();
+
+        ssts.add_files(
+            file_purger_ref,
+            files.iter().map(|(file_id, start, end, level)| FileMeta {
+                file_id: *file_id,
+                time_range: (
+                    Timestamp::new_millisecond(*start),
+                    Timestamp::new_millisecond(*end),
+                ),
+                level: *level,
+                ..Default::default()
+            }),
+        );
+
+        Arc::new(Version {
+            metadata,
+            memtables,
+            ssts: Arc::new(ssts),
+            flushed_entry_id: 0,
+            flushed_sequence: 0,
+            truncated_entry_id: None,
+            compaction_time_window: None,
+            options: RegionOptions {
+                ttl,
+                compaction: Default::default(),
+                storage: None,
+                append_mode: false,
+                wal_options: Default::default(),
+                index_options: Default::default(),
+                memtable: None,
+            },
+        })
+    }
+
+    #[test]
+    fn test_pick_expired() {
+        let picker = WindowedCompactionPicker::new(None);
+        let files = vec![(FileId::random(), 0, 10, 0)];
+
+        let version = build_version(&files, Some(Duration::from_millis(1)));
+        let (outputs, expired_ssts, _window) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(12),
+        );
+        assert!(outputs.is_empty());
+        assert_eq!(1, expired_ssts.len());
+    }
+
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    #[test]
+    fn test_infer_window() {
+        let picker = WindowedCompactionPicker::new(None);
+
+        let files = vec![
+            (FileId::random(), 0, HOUR, 0),
+            (FileId::random(), HOUR, HOUR * 2 - 1, 0),
+        ];
+
+        let version = build_version(&files, Some(Duration::from_millis(3 * HOUR as u64)));
+
+        let (outputs, expired_ssts, window_seconds) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(HOUR * 2),
+        );
+        assert!(expired_ssts.is_empty());
+        assert_eq!(2 * HOUR / 1000, window_seconds);
+        assert_eq!(1, outputs.len());
+        assert_eq!(2, outputs[0].inputs.len());
+    }
+
+    #[test]
+    fn test_assign_files_to_windows() {
+        let picker = WindowedCompactionPicker::new(Some(HOUR / 1000));
+        let files = vec![
+            (FileId::random(), 0, 2 * HOUR - 1, 0),
+            (FileId::random(), HOUR, HOUR * 3 - 1, 0),
+        ];
+        let version = build_version(&files, Some(Duration::from_millis(3 * HOUR as u64)));
+        let (outputs, expired_ssts, window_seconds) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(HOUR * 3),
+        );
+
+        assert!(expired_ssts.is_empty());
+        assert_eq!(HOUR / 1000, window_seconds);
+        assert_eq!(3, outputs.len());
+
+        assert_eq!(1, outputs[0].inputs.len());
+        assert_eq!(files[0].0, outputs[0].inputs[0].file_id());
+        assert_eq!(
+            TimestampRange::new(
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(HOUR)
+            ),
+            outputs[0].output_time_range
+        );
+
+        assert_eq!(2, outputs[1].inputs.len());
+        assert_eq!(
+            TimestampRange::new(
+                Timestamp::new_millisecond(HOUR),
+                Timestamp::new_millisecond(2 * HOUR)
+            ),
+            outputs[1].output_time_range
+        );
+
+        assert_eq!(1, outputs[2].inputs.len());
+        assert_eq!(files[1].0, outputs[2].inputs[0].file_id());
+        assert_eq!(
+            TimestampRange::new(
+                Timestamp::new_millisecond(2 * HOUR),
+                Timestamp::new_millisecond(3 * HOUR)
+            ),
+            outputs[2].output_time_range
+        );
+    }
 }

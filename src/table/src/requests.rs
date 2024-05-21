@@ -239,7 +239,7 @@ pub struct FlushTableRequest {
     pub table_name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
