@@ -22,7 +22,6 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
-use sql::ast::Value;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -118,14 +117,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to convert value to sql value: {}", value))]
-    ConvertSqlValue {
-        value: Value,
-        #[snafu(implicit)]
-        location: Location,
-        source: sql::error::Error,
     },
 
     #[snafu(display("Column datatype error"))]
@@ -549,13 +540,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to prepare immutable table"))]
-    PrepareImmutableTable {
-        #[snafu(implicit)]
-        location: Location,
-        source: query::error::Error,
-    },
-
     #[snafu(display("Invalid COPY parameter, key: {}, value: {}", key, value))]
     InvalidCopyParameter {
         key: String,
@@ -574,20 +558,6 @@ pub enum Error {
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to read record batch"))]
-    ReadRecordBatch {
-        source: common_recordbatch::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to build column vectors"))]
-    BuildColumnVectors {
-        source: common_recordbatch::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -745,7 +715,6 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
-            | Error::PrepareImmutableTable { .. }
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
@@ -769,9 +738,7 @@ impl ErrorExt for Error {
 
             Error::TableMetadataManager { source, .. } => source.status_code(),
 
-            Error::ConvertSqlValue { source, .. } | Error::ParseSql { source, .. } => {
-                source.status_code()
-            }
+            Error::ParseSql { source, .. } => source.status_code(),
 
             Error::InvalidateTableCache { source, .. } => source.status_code(),
 
@@ -849,10 +816,6 @@ impl ErrorExt for Error {
             Error::ExecuteDdl { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } | Error::InvalidCopyDatabasePath { .. } => {
                 StatusCode::InvalidArguments
-            }
-
-            Error::ReadRecordBatch { source, .. } | Error::BuildColumnVectors { source, .. } => {
-                source.status_code()
             }
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
