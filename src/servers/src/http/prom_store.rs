@@ -239,9 +239,9 @@ pub async fn remote_read(
 
 fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
     Ok(Bytes::from(if is_zstd {
-        zstd_decompress(&body[..])?
+        zstd_decompress(body)?
     } else {
-        snappy_decompress(&body[..])?
+        snappy_decompress(body)?
     }))
 }
 
