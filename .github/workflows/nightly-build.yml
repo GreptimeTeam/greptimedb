@@ -66,6 +66,10 @@ env:
 
   NIGHTLY_RELEASE_PREFIX: nightly
 
+  # Use the different image name to avoid conflict with the release images.
+  # The DockerHub image will be greptime/greptimedb-nightly.
+  IMAGE_NAME: greptimedb-nightly
+
 permissions:
   issues: write
 
@@ -191,6 +195,7 @@ jobs:
         with:
           image-registry: docker.io
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-name: ${{ env.IMAGE_NAME }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
@@ -223,7 +228,7 @@ jobs:
         with:
           src-image-registry: docker.io
           src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          src-image-name: greptimedb
+          src-image-name: ${{ env.IMAGE_NAME }}
           dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
