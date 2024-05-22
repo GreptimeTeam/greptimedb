@@ -65,6 +65,7 @@ use crate::http::prometheus::{
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
+use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
@@ -587,6 +588,17 @@ impl HttpServerBuilder {
         }
     }
 
+    // FIXME(qtang): This is a temporary solution to handle the log ingest metrics.
+    pub fn with_log_ingest_handler(self, handler: ServerGrpcQueryHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/event"),
+                HttpServer::route_log(handler),
+            ),
+            ..self
+        }
+    }
+
     pub fn with_plugins(self, plugins: Plugins) -> Self {
         Self { plugins, ..self }
     }
@@ -697,6 +709,12 @@ impl HttpServer {
         Router::new()
             .route("/metrics", routing::get(handler::metrics))
             .with_state(metrics_handler)
+    }
+
+    fn route_log<S>(grpc_handler: ServerGrpcQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::get(handler::log_ingester))
+            .with_state(grpc_handler)
     }
 
     fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {

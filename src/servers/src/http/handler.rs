@@ -17,6 +17,7 @@ use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
+use api::v1::RowInsertRequests;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -44,6 +45,7 @@ use crate::http::{
     HttpResponse, ResponseFormat,
 };
 use crate::metrics_handler::MetricsHandler;
+use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -63,6 +65,30 @@ pub struct SqlQuery {
     // param too.
     pub epoch: Option<String>,
     pub limit: Option<usize>,
+}
+/// handler to log ingester
+#[axum_macros::debug_handler]
+pub async fn log_ingester(
+    State(_state): State<ServerGrpcQueryHandlerRef>,
+    Query(_query_params): Query<SqlQuery>,
+    Extension(_query_ctx): Extension<QueryContextRef>,
+    Json(_payload): Json<Value>,
+) -> String {
+    // TODO (paomian): implement log ingester
+    // transform payload to RowInsertRequest
+    // maybe we need a new trait for log ingester like `LogIngester` instead of `ServerGrpcQueryHandlerRef`
+    // let request = pileline::transform(payload);
+    // state.do_query(payload, query_ctx).await.to_string();
+    let _processors = _payload["processors"].as_str().unwrap();
+    let _data = _payload["data"].as_array().unwrap();
+
+    let insert_request =
+        api::v1::greptime_request::Request::RowInserts(RowInsertRequests::default());
+    let insert_result = _state.do_query(insert_request, _query_ctx).await;
+    match insert_result {
+        Ok(_) => String::from("ok"),
+        Err(e) => e.to_string(),
+    }
 }
 
 /// Handler to execute sql
