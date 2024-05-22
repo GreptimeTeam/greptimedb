@@ -713,7 +713,7 @@ impl HttpServer {
 
     fn route_log<S>(grpc_handler: ServerGrpcQueryHandlerRef) -> Router<S> {
         Router::new()
-            .route("/logs", routing::get(handler::log_ingester))
+            .route("/logs", routing::post(handler::log_ingester))
             .with_state(grpc_handler)
     }
 

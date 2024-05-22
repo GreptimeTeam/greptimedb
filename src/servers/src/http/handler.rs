@@ -14,10 +14,14 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use aide::transform::TransformOperation;
-use api::v1::RowInsertRequests;
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+    Value as ApiValue,
+};
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -81,13 +85,57 @@ pub async fn log_ingester(
     // state.do_query(payload, query_ctx).await.to_string();
     let _processors = _payload["processors"].as_str().unwrap();
     let _data = _payload["data"].as_array().unwrap();
+    let mut rows = Rows::default();
 
-    let insert_request =
-        api::v1::greptime_request::Request::RowInserts(RowInsertRequests::default());
-    let insert_result = _state.do_query(insert_request, _query_ctx).await;
+    // need a ColumnSchema for rows
+    rows.schema = vec![
+        ColumnSchema {
+            column_name: "log".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            datatype_extension: None,
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampSecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            datatype_extension: None,
+        },
+    ];
+
+    for row in _data {
+        let _row = row.as_str().unwrap();
+        let mut value = ApiValue::default();
+        value.value_data = Some(ValueData::StringValue(_row.to_string()));
+        let start = SystemTime::now();
+        let since_the_epoch = start
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+        let now =
+            since_the_epoch.as_secs();
+        rows.rows.push(Row {
+            values: vec![
+                value,
+                ApiValue {
+                    value_data: Some(ValueData::TimestampSecondValue(now as i64)),
+                },
+            ],
+        })
+    }
+    let mut insert_request = RowInsertRequest::default();
+    insert_request.rows = Some(rows);
+    insert_request.table_name = "log".to_string();
+    let insert_requests = RowInsertRequests {
+        inserts: vec![insert_request],
+    };
+    let test_insert_request = api::v1::greptime_request::Request::RowInserts(insert_requests);
+    let insert_result = _state.do_query(test_insert_request, _query_ctx).await;
     match insert_result {
         Ok(_) => String::from("ok"),
-        Err(e) => e.to_string(),
+        Err(e) => {
+            tracing::error!(error = ?e, "error in log ingester");
+            e.to_string()
+        }
     }
 }
 
