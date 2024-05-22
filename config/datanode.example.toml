@@ -331,7 +331,7 @@ enable_experimental_write_cache = false
 experimental_write_cache_path = ""
 
 ## Capacity for write cache.
-experimental_write_cache_size = "512MiB"
+experimental_write_cache_size = "512MB"
 
 ## TTL for write cache.
 experimental_write_cache_ttl = "1h"

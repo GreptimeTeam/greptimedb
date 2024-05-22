@@ -15,7 +15,7 @@ addr = "127.0.0.1:4000"
 ## HTTP request timeout.
 timeout = "30s"
 ## HTTP request body limit.
-## Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 body_limit = "64MB"
 
 ## The gRPC server options.
@@ -374,7 +374,7 @@ enable_experimental_write_cache = false
 experimental_write_cache_path = ""
 
 ## Capacity for write cache.
-experimental_write_cache_size = "512MiB"
+experimental_write_cache_size = "512MB"
 
 ## TTL for write cache.
 experimental_write_cache_ttl = "1h"
