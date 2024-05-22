@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod buckets;
+mod picker;
+mod task;
+#[cfg(test)]
+mod test_util;
+mod twcs;
+mod window;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,14 +61,6 @@ use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
-
-mod buckets;
-mod picker;
-mod task;
-#[cfg(test)]
-mod test_util;
-mod twcs;
-mod window;
 
 /// Region compaction request.
 pub struct CompactionRequest {

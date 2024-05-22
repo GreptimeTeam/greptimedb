@@ -191,6 +191,7 @@ fn assign_files_to_time_windows<'a>(
         }
         let (start, end) = file.time_range();
         let bounds = file_time_bucket_span(
+            // safety: converting whatever timestamp to seconds will not overflow.
             start.convert_to(TimeUnit::Second).unwrap().value(),
             end.convert_to(TimeUnit::Second).unwrap().value(),
             bucket_sec,

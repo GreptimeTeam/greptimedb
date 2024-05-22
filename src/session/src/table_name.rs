@@ -28,6 +28,7 @@ pub fn table_name_to_full_name(
     let obj_name = ParserContext::parse_table_name(name, query_ctx.sql_dialect())?;
 
     let (catalog, schema, table) = table_idents_to_full_name(&obj_name, query_ctx)?;
+    // todo(hl): also check if schema matches when rbac is ready. https://github.com/GreptimeTeam/greptimedb/pull/3988/files#r1608687652
     ensure!(
         catalog == query_ctx.current_catalog(),
         PermissionDeniedSnafu {
