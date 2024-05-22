@@ -24,9 +24,7 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::error::{InvalidRequestSnafu, RejectWriteSnafu, Result};
-use crate::metrics::{
-    WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
-};
+use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -50,13 +48,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             reject_write_requests(write_requests);
             // Also reject all stalled requests.
             let stalled = std::mem::take(&mut self.stalled_requests);
+            self.stalled_count.sub(stalled.requests.len() as i64);
             reject_write_requests(stalled.requests);
             return;
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
-            WRITE_STALL_TOTAL.inc_by(write_requests.len() as u64);
-
+            self.stalled_count.add(write_requests.len() as i64);
             self.stalled_requests.append(&mut write_requests);
             self.listener.on_write_stall();
             return;
@@ -125,6 +123,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_stalled_requests(&mut self) {
         // Handle stalled requests.
         let stalled = std::mem::take(&mut self.stalled_requests);
+        self.stalled_count.sub(stalled.requests.len() as i64);
         // We already stalled these requests, don't stall them again.
         self.handle_write_requests(stalled.requests, false).await;
     }

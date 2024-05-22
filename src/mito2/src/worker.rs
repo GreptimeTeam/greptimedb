@@ -34,6 +34,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
+use prometheus::IntGauge;
 use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -49,6 +50,7 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
+use crate::metrics::WRITE_STALL_TOTAL;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -398,6 +400,7 @@ impl<S: LogStore> WorkerStarter<S> {
             last_periodical_check_millis: now,
             flush_sender: self.flush_sender,
             flush_receiver: self.flush_receiver,
+            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&self.id.to_string()]),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -564,6 +567,8 @@ struct RegionWorkerLoop<S> {
     flush_sender: watch::Sender<()>,
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
+    /// Gauge of stalled request count.
+    stalled_count: IntGauge,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

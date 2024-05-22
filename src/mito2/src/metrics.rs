@@ -23,6 +23,8 @@ pub const TYPE_LABEL: &str = "type";
 pub const FLUSH_REASON: &str = "reason";
 /// File type label.
 pub const FILE_TYPE_LABEL: &str = "file_type";
+/// Region worker id label.
+pub const WORKER_LABEL: &str = "worker";
 
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -70,9 +72,12 @@ lazy_static! {
 
 
     // ------ Write related metrics
-    /// Counter of stalled write requests.
-    pub static ref WRITE_STALL_TOTAL: IntCounter =
-        register_int_counter!("greptime_mito_write_stall_total", "mito write stall total").unwrap();
+    /// Number of stalled write requests in each worker.
+    pub static ref WRITE_STALL_TOTAL: IntGaugeVec = register_int_gauge_vec!(
+            "greptime_mito_write_stall_total",
+            "mito stalled write request in each worker",
+            &[WORKER_LABEL]
+        ).unwrap();
     /// Counter of rejected write requests.
     pub static ref WRITE_REJECT_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_write_reject_total", "mito write reject total").unwrap();
