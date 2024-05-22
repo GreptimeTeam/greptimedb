@@ -791,7 +791,7 @@ impl IntoResponse for Error {
                 if self.status_code().should_log_error() {
                     error!(self; "Failed to handle HTTP request: ");
                 } else {
-                    debug!("Failed to handle HTTP request: {self}");
+                    debug!("Failed to handle HTTP request: {self:?}");
                 }
 
                 HttpStatusCode::INTERNAL_SERVER_ERROR

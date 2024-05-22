@@ -144,7 +144,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
                 }
                 Err(err) => {
                     warn!(
-                        r#"Failed to compile script "{}"" in `scripts` table: {}"#,
+                        r#"Failed to compile script "{}"" in `scripts` table: {:?}"#,
                         name, err
                     );
                 }
