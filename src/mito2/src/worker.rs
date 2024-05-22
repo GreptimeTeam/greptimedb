@@ -320,6 +320,7 @@ async fn write_cache_from_config(
         &config.experimental_write_cache_path,
         object_store_manager,
         config.experimental_write_cache_size,
+        config.experimental_write_cache_ttl,
         intermediate_manager,
     )
     .await?;

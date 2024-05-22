@@ -377,9 +377,10 @@ impl TestEnv {
             .unwrap();
 
         let object_store_manager = self.get_object_store_manager().unwrap();
-        let write_cache = WriteCache::new(local_store, object_store_manager, capacity, intm_mgr)
-            .await
-            .unwrap();
+        let write_cache =
+            WriteCache::new(local_store, object_store_manager, capacity, None, intm_mgr)
+                .await
+                .unwrap();
 
         Arc::new(write_cache)
     }

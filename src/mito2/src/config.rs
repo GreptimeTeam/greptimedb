@@ -87,6 +87,9 @@ pub struct MitoConfig {
     pub experimental_write_cache_path: String,
     /// Capacity for write cache.
     pub experimental_write_cache_size: ReadableSize,
+    /// TTL for write cache.
+    #[serde(with = "humantime_serde")]
+    pub experimental_write_cache_ttl: Option<Duration>,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -126,6 +129,7 @@ impl Default for MitoConfig {
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
             experimental_write_cache_size: ReadableSize::mb(512),
+            experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60)),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
@@ -228,10 +232,16 @@ impl MitoConfig {
 
     /// Enable experimental write cache.
     #[cfg(test)]
-    pub fn enable_write_cache(mut self, path: String, size: ReadableSize) -> Self {
+    pub fn enable_write_cache(
+        mut self,
+        path: String,
+        size: ReadableSize,
+        ttl: Option<Duration>,
+    ) -> Self {
         self.enable_experimental_write_cache = true;
         self.experimental_write_cache_path = path;
         self.experimental_write_cache_size = size;
+        self.experimental_write_cache_ttl = ttl;
         self
     }
 }
