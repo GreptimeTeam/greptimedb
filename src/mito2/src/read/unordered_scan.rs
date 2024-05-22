@@ -350,6 +350,7 @@ impl UnorderedDistributor {
             let part = ScanPart {
                 memtables: memtables.to_vec(),
                 file_ranges: self.file_ranges,
+                time_range: None,
             };
             return vec![part];
         }
@@ -369,6 +370,7 @@ impl UnorderedDistributor {
             .map(|mems| ScanPart {
                 memtables: mems.to_vec(),
                 file_ranges: Vec::new(),
+                time_range: None,
             })
             .collect::<Vec<_>>();
         for (i, ranges) in self.file_ranges.chunks(ranges_per_part).enumerate() {
@@ -376,6 +378,7 @@ impl UnorderedDistributor {
                 scan_parts.push(ScanPart {
                     memtables: Vec::new(),
                     file_ranges: ranges.to_vec(),
+                    time_range: None,
                 });
             } else {
                 scan_parts[i].file_ranges = ranges.to_vec();

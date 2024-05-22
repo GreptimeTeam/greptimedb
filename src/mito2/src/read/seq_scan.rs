@@ -25,11 +25,14 @@ use snafu::ResultExt;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
+use crate::memtable::MemtableRef;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
-use crate::read::scan_region::ScanInput;
+use crate::read::scan_region::{ScanInput, ScanPart, ScanPartBuilder};
 use crate::read::{BatchReader, BoxedBatchReader};
+use crate::sst::file::FileMeta;
+use crate::sst::parquet::file_range::FileRange;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -181,5 +184,73 @@ impl SeqScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
         &self.input
+    }
+}
+
+/// Builds [ScanPart]s that preserves order.
+#[derive(Default)]
+pub(crate) struct OrderedPartBuilder {
+    parallelism: usize,
+    parts: Vec<ScanPart>,
+}
+
+impl ScanPartBuilder for OrderedPartBuilder {
+    fn set_parallelism(&mut self, parallelism: usize) {
+        self.parallelism = parallelism;
+    }
+
+    fn append_file_ranges(
+        &mut self,
+        file_meta: &FileMeta,
+        file_ranges: impl Iterator<Item = FileRange>,
+    ) {
+        // Creates a [ScanPart] for each file.
+        let part = ScanPart {
+            memtables: Vec::new(),
+            file_ranges: file_ranges.collect(),
+            time_range: Some(file_meta.time_range),
+        };
+        if part.file_ranges.is_empty() {
+            // No ranges to read.
+            return;
+        }
+        self.parts.push(part);
+    }
+
+    fn build_parts(mut self, memtables: &[MemtableRef]) -> Vec<ScanPart> {
+        // Memtables with None time range.
+        let mut unknown_range_memtables = vec![];
+        // Creates a part for each memtable.
+        for mem in memtables {
+            let stats = mem.stats();
+            // TODO(yingwen): Should we consider empty range for memtables? They are
+            // not empty so it should not be None.
+            if stats.time_range().is_none() {
+                unknown_range_memtables.push(mem.clone());
+            } else {
+                let part = ScanPart {
+                    memtables: vec![mem.clone()],
+                    file_ranges: vec![],
+                    time_range: stats.time_range(),
+                };
+                self.parts.push(part);
+            }
+        }
+        if !unknown_range_memtables.is_empty() {
+            let part = ScanPart {
+                memtables: unknown_range_memtables,
+                file_ranges: vec![],
+                time_range: None,
+            };
+            self.parts.push(part);
+
+            // If there are memtables with unknown range, we must merge data from all parts.
+            return self.parts;
+        }
+
+        // TODO(yingwen): parallelism. How to distribute parts?
+        // group by time range.
+
+        self.parts
     }
 }

@@ -22,6 +22,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
+use common_time::Timestamp;
 use store_api::region_engine::{RegionScannerRef, SinglePartitionScanner};
 use store_api::storage::ScanRequest;
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -689,15 +690,18 @@ pub(crate) struct ScanPart {
     pub(crate) memtables: Vec<MemtableRef>,
     /// File ranges to scan.
     pub(crate) file_ranges: Vec<FileRange>,
+    /// Optional time range of the part (inclusive).
+    pub(crate) time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl fmt::Debug for ScanPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ScanPart({} memtables, {} file ranges)",
+            "ScanPart({} memtables, {} file ranges, time range {:?})",
             self.memtables.len(),
-            self.file_ranges.len()
+            self.file_ranges.len(),
+            self.time_range,
         )
     }
 }
