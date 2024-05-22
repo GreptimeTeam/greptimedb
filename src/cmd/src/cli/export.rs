@@ -30,6 +30,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
@@ -80,7 +81,7 @@ pub struct ExportCommand {
 }
 
 impl ExportCommand {
-    pub async fn build(&self) -> Result<Instance> {
+    pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
         let (catalog, schema) = split_database(&self.database)?;
 
         let auth_header = if let Some(basic) = &self.auth_basic {
@@ -90,15 +91,18 @@ impl ExportCommand {
             None
         };
 
-        Ok(Instance::new(Box::new(Export {
-            addr: self.addr.clone(),
-            catalog,
-            schema,
-            output_dir: self.output_dir.clone(),
-            parallelism: self.export_jobs,
-            target: self.target.clone(),
-            auth_header,
-        })))
+        Ok(Instance::new(
+            Box::new(Export {
+                addr: self.addr.clone(),
+                catalog,
+                schema,
+                output_dir: self.output_dir.clone(),
+                parallelism: self.export_jobs,
+                target: self.target.clone(),
+                auth_header,
+            }),
+            guard,
+        ))
     }
 }
 

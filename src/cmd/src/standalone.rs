@@ -62,6 +62,7 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     BuildCacheRegistrySnafu, CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu,
@@ -210,6 +211,9 @@ pub struct Instance {
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
+
+    // Keep the logging guard to prevent the worker from being dropped.
+    _guard: Vec<WorkerGuard>,
 }
 
 #[async_trait]
@@ -375,7 +379,7 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
-        let _guard =
+        let guard =
             common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
         log_versions(version!(), short_version!());
 
@@ -521,6 +525,7 @@ impl StartCommand {
             frontend,
             procedure_manager,
             wal_options_allocator,
+            _guard: guard,
         })
     }
 

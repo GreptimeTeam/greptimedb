@@ -1662,6 +1662,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "toml 0.8.12",
+ "tracing-appender",
 ]
 
 [[package]]

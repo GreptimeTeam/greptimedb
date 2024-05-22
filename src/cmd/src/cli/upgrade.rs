@@ -40,6 +40,7 @@ use etcd_client::Client;
 use futures::TryStreamExt;
 use prost::Message;
 use snafu::ResultExt;
+use tracing_appender::non_blocking::WorkerGuard;
 use v1_helper::{CatalogKey as v1CatalogKey, SchemaKey as v1SchemaKey, TableGlobalValue};
 
 use crate::cli::{Instance, Tool};
@@ -63,7 +64,7 @@ pub struct UpgradeCommand {
 }
 
 impl UpgradeCommand {
-    pub async fn build(&self) -> Result<Instance> {
+    pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
         let client = Client::connect([&self.etcd_addr], None)
             .await
             .context(ConnectEtcdSnafu {
@@ -77,7 +78,7 @@ impl UpgradeCommand {
             skip_schema_keys: self.skip_schema_keys,
             skip_table_route_keys: self.skip_table_route_keys,
         };
-        Ok(Instance::new(Box::new(tool)))
+        Ok(Instance::new(Box::new(tool), guard))
     }
 }
 
