@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -86,8 +87,28 @@ impl KeyExpiryManager {
     ///
     /// - If given key is expired by now (that is less than `now - expiry_duration`), return the amount of time it's expired.
     /// - If it's not expired, return None
-    pub fn update_event_ts(
+    pub fn get_expire_duration_and_update_event_ts(
         &mut self,
+        now: Timestamp,
+        row: &Row,
+    ) -> Result<Option<Duration>, EvalError> {
+        let Some(event_ts) = self.extract_event_ts(row)? else {
+            return Ok(None);
+        };
+
+        self.event_ts_to_key
+            .entry(event_ts)
+            .or_default()
+            .insert(row.clone());
+
+        self.get_expire_duration(now, row)
+    }
+
+    /// Get the expire duration of a key, if it's expired by now.
+    ///
+    /// Return None if the key is not expired
+    pub fn get_expire_duration(
+        &self,
         now: Timestamp,
         row: &Row,
     ) -> Result<Option<Duration>, EvalError> {
@@ -102,10 +123,6 @@ impl KeyExpiryManager {
             }
         }
 
-        self.event_ts_to_key
-            .entry(event_ts)
-            .or_default()
-            .insert(row.clone());
         Ok(None)
     }
 
@@ -189,6 +206,10 @@ impl Arrangement {
         }
     }
 
+    pub fn get_expire_state(&self) -> Option<&KeyExpiryManager> {
+        self.expire_state.as_ref()
+    }
+
     pub fn set_expire_state(&mut self, expire_state: KeyExpiryManager) {
         self.expire_state = Some(expire_state);
     }
@@ -208,8 +229,12 @@ impl Arrangement {
         for ((key, val), update_ts, diff) in updates {
             // check if the key is expired
             if let Some(s) = &mut self.expire_state {
-                if let Some(expired_by) = s.update_event_ts(now, &key)? {
+                if let Some(expired_by) = s.get_expire_duration_and_update_event_ts(now, &key)? {
                     max_expired_by = max_expired_by.max(Some(expired_by));
+                    debug!(
+                        "Expired key: {:?}, expired by: {:?} with time being now={}",
+                        key, expired_by, now
+                    );
                     continue;
                 }
             }
@@ -335,7 +360,9 @@ impl Arrangement {
             for (key, updates) in batch {
                 // check if the key is expired
                 if let Some(s) = &mut self.expire_state {
-                    if let Some(expired_by) = s.update_event_ts(now, &key)? {
+                    if let Some(expired_by) =
+                        s.get_expire_duration_and_update_event_ts(now, &key)?
+                    {
                         max_expired_by = max_expired_by.max(Some(expired_by));
                         continue;
                     }

@@ -26,7 +26,7 @@ use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
-use crate::expr::error::{DataTypeSnafu, InternalSnafu};
+use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
 use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
@@ -397,6 +397,24 @@ fn reduce_accum_subgraph(
     // TODO(discord9): consider key-based lock
     let mut arrange = arrange.write();
     for (key, value_diffs) in key_to_vals {
+        if let Some(expire_man) = &arrange.get_expire_state() {
+            let mut is_expired = false;
+            err_collector.run(|| {
+                if let Some(expired) = expire_man.get_expire_duration(now, &key)? {
+                    is_expired = true;
+                    DataAlreadyExpiredSnafu {
+                        expired_by: expired,
+                    }
+                    .fail()
+                } else {
+                    Ok(())
+                }
+            });
+            if is_expired {
+                // errors already collected, we can just continue to next key
+                continue;
+            }
+        }
         let col_diffs = {
             let row_len = value_diffs[0].0.len();
             let res = err_collector.run(|| get_col_diffs(value_diffs, row_len));
