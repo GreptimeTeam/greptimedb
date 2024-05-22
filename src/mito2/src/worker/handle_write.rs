@@ -120,6 +120,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .with_label_values(&["delete"])
             .inc_by(delete_rows as u64);
     }
+
+    /// Handles all stalled write requests.
+    pub(crate) async fn handle_stalled_requests(&mut self) {
+        // Handle stalled requests.
+        let stalled = std::mem::take(&mut self.stalled_requests);
+        // We already stalled these requests, don't stall them again.
+        self.handle_write_requests(stalled.requests, false).await;
+    }
 }
 
 impl<S> RegionWorkerLoop<S> {

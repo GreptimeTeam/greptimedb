@@ -190,6 +190,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: FlushFinished,
     ) {
+        // Notifies other workers. Even the remaining steps of this method fail we still
+        // wake up other workers as we have released some memory by flush.
+        self.notify_group();
+
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             warn!(
                 "Unable to finish the flush task for a read only region {}",
@@ -229,9 +233,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Handle stalled requests.
-        let stalled = std::mem::take(&mut self.stalled_requests);
-        // We already stalled these requests, don't stall them again.
-        self.handle_write_requests(stalled.requests, false).await;
+        self.handle_stalled_requests().await;
 
         // Schedules compaction.
         if let Err(e) = self.compaction_scheduler.schedule_compaction(

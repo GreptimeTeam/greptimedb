@@ -40,7 +40,7 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
@@ -151,6 +151,7 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
+        let (flush_sender, flush_receiver) = watch::channel(());
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -166,6 +167,8 @@ impl WorkerGroup {
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
+                    flush_sender: flush_sender.clone(),
+                    flush_receiver: flush_receiver.clone(),
                 }
                 .start()
             })
@@ -266,6 +269,7 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let (flush_sender, flush_receiver) = watch::channel(());
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -280,6 +284,8 @@ impl WorkerGroup {
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
+                    flush_sender: flush_sender.clone(),
+                    flush_receiver: flush_receiver.clone(),
                 }
                 .start()
             })
@@ -346,6 +352,10 @@ struct WorkerStarter<S> {
     cache_manager: CacheManagerRef,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
+    /// Watch channel sender to notify workers to handle stalled requests.
+    flush_sender: watch::Sender<()>,
+    /// Watch channel receiver to wait for background flush job.
+    flush_receiver: watch::Receiver<()>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -386,6 +396,8 @@ impl<S: LogStore> WorkerStarter<S> {
             intermediate_manager: self.intermediate_manager,
             time_provider: self.time_provider,
             last_periodical_check_millis: now,
+            flush_sender: self.flush_sender,
+            flush_receiver: self.flush_receiver,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -548,6 +560,10 @@ struct RegionWorkerLoop<S> {
     time_provider: TimeProviderRef,
     /// Last time to check regions periodically.
     last_periodical_check_millis: i64,
+    /// Watch channel sender to notify workers to handle stalled requests.
+    flush_sender: watch::Sender<()>,
+    /// Watch channel receiver to wait for background flush job.
+    flush_receiver: watch::Receiver<()>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -568,11 +584,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             buffer.clear();
 
             let max_wait_time = self.time_provider.wait_duration(CHECK_REGION_INTERVAL);
-            match tokio::time::timeout(max_wait_time, self.receiver.recv()).await {
-                Ok(Some(request)) => buffer.push(request),
-                // The channel is disconnected.
-                Ok(None) => break,
-                Err(_) => {
+            let sleep = tokio::time::sleep(max_wait_time);
+            tokio::pin!(sleep);
+
+            tokio::select! {
+                request_opt = self.receiver.recv() => {
+                    match request_opt {
+                        Some(request) => buffer.push(request),
+                        // The channel is disconnected.
+                        None => break,
+                    }
+                }
+                _ = self.flush_receiver.changed() => {
+                    // A flush job is finished, handles stalled requests.
+                    self.handle_stalled_requests().await;
+                    continue;
+                }
+                _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
                     self.handle_periodical_tasks();
                     continue;
@@ -735,7 +763,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S> RegionWorkerLoop<S> {
-    // Clean up the worker.
+    /// Cleans up the worker.
     async fn clean(&self) {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
@@ -744,6 +772,15 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         self.regions.clear();
+    }
+
+    /// Notifies the whole group that a flush job is finished so other
+    /// workers can handle stalled requests.
+    fn notify_group(&mut self) {
+        // Notifies all receivers.
+        let _ = self.flush_sender.send(());
+        // Marks the receiver in current worker as seen so the loop won't be waked up immediately.
+        self.flush_receiver.borrow_and_update();
     }
 }
 
