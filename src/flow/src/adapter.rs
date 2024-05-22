@@ -303,6 +303,7 @@ impl FlownodeManager {
                     .clone();
                 // TODO(discord9): use default key from schema
                 let primary_keys = schema
+                    .typ()
                     .keys
                     .first()
                     .map(|v| {
@@ -326,11 +327,18 @@ impl FlownodeManager {
                 .with_time_index(true);
 
                 let wout_ts = schema
+                    .typ()
                     .column_types
+                    .clone()
                     .into_iter()
                     .enumerate()
                     .map(|(idx, typ)| {
-                        ColumnSchema::new(format!("Col_{idx}"), typ.scalar_type, typ.nullable)
+                        let name = schema
+                            .names
+                            .get(idx)
+                            .cloned()
+                            .unwrap_or(format!("Col_{}", idx));
+                        ColumnSchema::new(name, typ.scalar_type, typ.nullable)
                     })
                     .collect_vec();
 
