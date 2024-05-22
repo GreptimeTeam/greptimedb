@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::alter_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
@@ -25,6 +27,8 @@ use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_runtime::Runtime;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
@@ -152,6 +156,7 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        tls: TlsOption::default(),
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -766,9 +771,8 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         );
         db.sql("show tables;").await.unwrap();
     }
-
+    // test corrupted client key
     {
-        // test corrupted client key
         client_tls.client_key_path = client_corrupted;
         let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls.clone()).unwrap();
         let db = Database::new_with_dbname(
@@ -778,6 +782,28 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         let re = db.sql("show tables;").await;
         assert!(re.is_err());
     }
+    // test grpc unsupported tls watch
+    {
+        let tls = TlsOption {
+            watch: true,
+            ..Default::default()
+        };
+        let config = GrpcServerConfig {
+            max_recv_message_size: 1024,
+            max_send_message_size: 1024,
+            tls,
+        };
+        let runtime = Arc::new(Runtime::builder().build().unwrap());
+        let grpc_builder =
+            GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
+        assert!(grpc_builder.is_err());
+    }
+
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_grpc() {
+    test_grpc_tls_config(StorageType::File).await;
 }

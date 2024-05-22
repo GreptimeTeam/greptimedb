@@ -78,8 +78,7 @@ where
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
             tls: opts.tls.clone(),
         };
-        let mut builder = GrpcServerBuilder::new(grpc_config, grpc_runtime);
-        builder = builder
+        let builder = GrpcServerBuilder::new(grpc_config, grpc_runtime)
             .with_tls_config(opts.tls.clone())
             .context(error::InvalidTlsConfigSnafu)?;
         Ok(builder)

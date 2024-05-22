@@ -50,7 +50,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 use servers::server::Server;
-use servers::tls::{ReloadableTlsServerConfig, TlsMode};
+use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
 
@@ -512,19 +512,14 @@ pub async fn setup_grpc_server_with(
     let flight_handler = Arc::new(greptime_request_handler.clone());
 
     let grpc_config = grpc_config.unwrap_or_default();
-    let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime);
-    let grpc_builder = match grpc_config.tls.mode {
-        TlsMode::Require => grpc_builder.with_tls_config(grpc_config.tls).unwrap(),
-        _ => grpc_builder,
-    };
+    let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime)
+        .database_handler(greptime_request_handler)
+        .flight_handler(flight_handler)
+        .prometheus_handler(fe_instance_ref.clone(), user_provider)
+        .with_tls_config(grpc_config.tls)
+        .unwrap();
 
-    let fe_grpc_server = Arc::new(
-        grpc_builder
-            .database_handler(greptime_request_handler)
-            .flight_handler(flight_handler)
-            .prometheus_handler(fe_instance_ref.clone(), user_provider)
-            .build(),
-    );
+    let fe_grpc_server = Arc::new(grpc_builder.build());
 
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let fe_grpc_addr = fe_grpc_server
