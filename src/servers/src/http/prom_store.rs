@@ -257,7 +257,7 @@ async fn decode_remote_write_request(
 
     // due to vmagent's limitation, there is a chance that vmagent is
     // sending content type wrong so we have to apply a fallback with decoding
-    // the content is the other method.
+    // the content in another method.
     //
     // see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5301
     // see https://github.com/GreptimeTeam/greptimedb/issues/3929
