@@ -14,13 +14,17 @@
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
 
+use std::collections::HashMap;
+
 use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
+use common_telemetry::debug;
 use itertools::Itertools;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 
 use crate::adapter::FlownodeManager;
 use crate::repr::{self, DiffRow};
@@ -101,12 +105,57 @@ impl Flownode for FlownodeManager {
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
         for write_request in request.requests {
             let region_id = write_request.region_id;
-            let rows_proto = write_request.rows.map(|r| r.rows).unwrap_or(vec![]);
+            let table_id = RegionId::from(region_id).table_id();
+
+            let (insert_schema, rows_proto) = write_request
+                .rows
+                .map(|r| (r.schema, r.rows))
+                .unwrap_or_default();
+
             // TODO(discord9): reconsider time assignment mechanism
             let now = self.tick_manager.tick();
+
+            let fetch_order = {
+                let ctx = self.node_context.lock().await;
+                let table_col_names = ctx
+                    .table_repr
+                    .get_by_table_id(&table_id)
+                    .map(|r| r.1)
+                    .and_then(|id| ctx.schema.get(&id))
+                    .map(|desc| &desc.names)
+                    .context(UnexpectedSnafu {
+                        err_msg: format!("Table not found: {}", table_id),
+                    })?;
+                let name_to_col = HashMap::<_, _>::from_iter(
+                    insert_schema
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (&name.column_name, i)),
+                );
+                let fetch_order: Vec<usize> = table_col_names
+                    .iter()
+                    .map(|names| {
+                        name_to_col.get(names).copied().context(UnexpectedSnafu {
+                            err_msg: format!("Column not found: {}", names),
+                        })
+                    })
+                    .try_collect()?;
+                if !fetch_order.iter().enumerate().all(|(i, &v)| i == v) {
+                    debug!("Reordering columns: {:?}", fetch_order)
+                }
+                fetch_order
+            };
+
             let rows: Vec<DiffRow> = rows_proto
                 .into_iter()
                 .map(repr::Row::from)
+                .map(|r| {
+                    let reordered = fetch_order
+                        .iter()
+                        .map(|&i| r.inner[i].clone())
+                        .collect_vec();
+                    repr::Row::new(reordered)
+                })
                 .map(|r| (r, now, 1))
                 .collect_vec();
             self.handle_write_request(region_id.into(), rows)

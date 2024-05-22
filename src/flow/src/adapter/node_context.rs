@@ -27,7 +27,7 @@ use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::repr::{DiffRow, RelationType, BROADCAST_CAP};
+use crate::repr::{DiffRow, RelationDesc, RelationType, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -54,7 +54,7 @@ pub struct FlownodeContext {
     /// store source in buffer for each source table, in case broadcast channel is full
     pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
     /// the schema of the table, query from metasrv or inferred from TypedPlan
-    pub schema: HashMap<GlobalId, RelationType>,
+    pub schema: HashMap<GlobalId, RelationDesc>,
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
     pub query_context: Option<Arc<QueryContext>>,
@@ -226,7 +226,7 @@ impl FlownodeContext {
     /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationType), Error> {
+    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationDesc), Error> {
         let id = self
             .table_repr
             .get_by_name(name)
@@ -297,7 +297,7 @@ impl FlownodeContext {
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
             .unwrap();
-        self.schema.insert(gid, schema);
+        self.schema.insert(gid, schema.into_named(vec![]));
         Ok(())
     }
 

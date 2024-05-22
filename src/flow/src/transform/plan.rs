@@ -269,7 +269,7 @@ impl TypedPlan {
                         id: crate::expr::Id::Global(table.0),
                     };
                     let get_table = TypedPlan {
-                        typ: table.1,
+                        typ: table.1.typ().clone(),
                         plan: get_table,
                     };
 
