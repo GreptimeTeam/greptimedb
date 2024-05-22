@@ -217,8 +217,9 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<(
         } else {
             (start_aligned % bucket_sec).abs()
         };
-        res.push((start_aligned, start_aligned + window_size));
-        start_aligned += window_size;
+        let upper_bound = start_aligned.checked_add(window_size).unwrap_or(i64::MAX);
+        res.push((start_aligned, upper_bound));
+        start_aligned = upper_bound;
     }
     res
 }
@@ -410,5 +411,10 @@ mod tests {
         );
 
         assert_eq!(vec![(0, 10)], file_time_bucket_span(0, 9, 10));
+
+        assert_eq!(
+            vec![(i64::MAX - (i64::MAX % 10), i64::MAX)],
+            file_time_bucket_span(i64::MAX - 1, i64::MAX, 10)
+        );
     }
 }
