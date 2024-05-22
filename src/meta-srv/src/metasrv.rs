@@ -296,7 +296,7 @@ impl MetaStateHandler {
         if let Some(sub_manager) = self.subscribe_manager.clone() {
             info!("Leader changed, un_subscribe all");
             if let Err(e) = sub_manager.unsubscribe_all() {
-                error!("Failed to un_subscribe all, error: {}", e);
+                error!("Failed to un_subscribe all, error: {:?}", e);
             }
         }
     }
@@ -405,7 +405,7 @@ impl Metasrv {
                     while started.load(Ordering::Relaxed) {
                         let res = election.register_candidate(&node_info).await;
                         if let Err(e) = res {
-                            warn!("Metasrv register candidate error: {}", e);
+                            warn!(e; "Metasrv register candidate error");
                         }
                     }
                 });
@@ -419,7 +419,7 @@ impl Metasrv {
                     while started.load(Ordering::Relaxed) {
                         let res = election.campaign().await;
                         if let Err(e) = res {
-                            warn!("Metasrv election error: {}", e);
+                            warn!(e; "Metasrv election error");
                         }
                         info!("Metasrv re-initiate election");
                     }

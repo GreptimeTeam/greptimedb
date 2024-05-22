@@ -125,7 +125,7 @@ impl AcceptTask {
                 if let Err(error) = join_handle.await {
                     // Couldn't use `error!(e; xxx)` because JoinError doesn't implement ErrorExt.
                     error!(
-                        "Unexpected error during shutdown {} server, error: {}",
+                        "Unexpected error during shutdown {} server, error: {:?}",
                         name, error
                     );
                 } else {

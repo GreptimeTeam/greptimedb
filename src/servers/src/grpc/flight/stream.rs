@@ -62,7 +62,7 @@ impl FlightRecordBatchStream {
     ) {
         let schema = recordbatches.schema();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
-            warn!("stop sending Flight data, err: {e}");
+            warn!("stop sending Flight data, err: {e:?}");
             return;
         }
 
@@ -70,14 +70,14 @@ impl FlightRecordBatchStream {
             match batch_or_err {
                 Ok(recordbatch) => {
                     if let Err(e) = tx.send(Ok(FlightMessage::Recordbatch(recordbatch))).await {
-                        warn!("stop sending Flight data, err: {e}");
+                        warn!("stop sending Flight data, err: {e:?}");
                         return;
                     }
                 }
                 Err(e) => {
                     let e = Err(e).context(error::CollectRecordbatchSnafu);
                     if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
-                        warn!("stop sending Flight data, err: {e}");
+                        warn!("stop sending Flight data, err: {e:?}");
                     }
                     return;
                 }

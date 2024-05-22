@@ -75,13 +75,13 @@ impl FailureDetectRunner {
 
     pub(crate) async fn send_heartbeat(&self, heartbeat: DatanodeHeartbeat) {
         if let Err(e) = self.heartbeat_tx.send(heartbeat).await {
-            error!("FailureDetectRunner is stop receiving heartbeats: {}", e)
+            error!("FailureDetectRunner is stop receiving heartbeats: {:?}", e)
         }
     }
 
     pub(crate) async fn send_control(&self, control: FailureDetectControl) {
         if let Err(e) = self.control_tx.send(control).await {
-            error!("FailureDetectRunner is stop receiving controls: {}", e)
+            error!("FailureDetectRunner is stop receiving controls: {:?}", e)
         }
     }
 

@@ -238,7 +238,7 @@ impl HeartbeatTask {
                                     Some(req)
                                 }
                                 Err(e) => {
-                                    error!(e;"Failed to encode mailbox messages!");
+                                    error!(e; "Failed to encode mailbox messages!");
                                     None
                                 }
                             }
@@ -301,7 +301,7 @@ impl HeartbeatTask {
                                     Instant::now()
                                         + Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
                                 );
-                                error!(e;"Failed to reconnect to metasrv!");
+                                error!(e; "Failed to reconnect to metasrv!");
                             }
                         }
                     }
