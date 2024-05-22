@@ -15,6 +15,7 @@
 //! A write-through cache for remote object stores.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -55,9 +56,10 @@ impl WriteCache {
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        ttl: Option<Duration>,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
-        let file_cache = FileCache::new(local_store, cache_capacity);
+        let file_cache = FileCache::new(local_store, cache_capacity, ttl);
         file_cache.recover().await?;
 
         Ok(Self {
@@ -72,6 +74,7 @@ impl WriteCache {
         cache_dir: &str,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        ttl: Option<Duration>,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
@@ -81,6 +84,7 @@ impl WriteCache {
             local_store,
             object_store_manager,
             cache_capacity,
+            ttl,
             intermediate_manager,
         )
         .await
