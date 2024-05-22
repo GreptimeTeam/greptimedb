@@ -15,7 +15,7 @@ addr = "127.0.0.1:4000"
 ## HTTP request timeout.
 timeout = "30s"
 ## HTTP request body limit.
-## Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 body_limit = "64MB"
 
 ## The gRPC server options.
