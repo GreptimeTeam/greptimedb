@@ -16,7 +16,7 @@
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `30s` | HTTP request timeout. |
-| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`. |
+| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
@@ -104,7 +104,7 @@
 | `region_engine.mito.page_cache_size` | String | `512MB` | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.enable_experimental_write_cache` | Bool | `false` | Whether to enable the experimental write cache. |
 | `region_engine.mito.experimental_write_cache_path` | String | `""` | File system path for write cache, defaults to `{data_home}/write_cache`. |
-| `region_engine.mito.experimental_write_cache_size` | String | `512MiB` | Capacity for write cache. |
+| `region_engine.mito.experimental_write_cache_size` | String | `512MB` | Capacity for write cache. |
 | `region_engine.mito.experimental_write_cache_ttl` | String | `1h` | TTL for write cache. |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
@@ -356,7 +356,7 @@
 | `region_engine.mito.page_cache_size` | String | `512MB` | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.enable_experimental_write_cache` | Bool | `false` | Whether to enable the experimental write cache. |
 | `region_engine.mito.experimental_write_cache_path` | String | `""` | File system path for write cache, defaults to `{data_home}/write_cache`. |
-| `region_engine.mito.experimental_write_cache_size` | String | `512MiB` | Capacity for write cache. |
+| `region_engine.mito.experimental_write_cache_size` | String | `512MB` | Capacity for write cache. |
 | `region_engine.mito.experimental_write_cache_ttl` | String | `1h` | TTL for write cache. |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
