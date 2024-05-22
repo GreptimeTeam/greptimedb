@@ -233,11 +233,11 @@ impl<'s> Worker<'s> {
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
         expire_after: Option<repr::Duration>,
-        create_if_not_exist: bool,
+        create_if_not_exists: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
         let already_exist = self.task_states.contains_key(&flow_id);
-        match (already_exist, create_if_not_exist) {
+        match (already_exist, create_if_not_exists) {
             (true, true) => return Ok(None),
             (true, false) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
             (false, _) => (),
@@ -320,7 +320,7 @@ impl<'s> Worker<'s> {
                 source_ids,
                 src_recvs,
                 expire_after,
-                create_if_not_exist,
+                create_if_not_exists,
                 err_collector,
             } => {
                 let task_create_result = self.create_flow(
@@ -331,7 +331,7 @@ impl<'s> Worker<'s> {
                     &source_ids,
                     src_recvs,
                     expire_after,
-                    create_if_not_exist,
+                    create_if_not_exists,
                     err_collector,
                 );
                 Some((
@@ -369,7 +369,7 @@ pub enum Request {
         source_ids: Vec<GlobalId>,
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         expire_after: Option<repr::Duration>,
-        create_if_not_exist: bool,
+        create_if_not_exists: bool,
         err_collector: ErrCollector,
     },
     Remove {
@@ -525,7 +525,7 @@ mod test {
             source_ids: src_ids,
             src_recvs: vec![rx],
             expire_after: None,
-            create_if_not_exist: true,
+            create_if_not_exists: true,
             err_collector: ErrCollector::default(),
         };
         handle.create_flow(create_reqs).await.unwrap();

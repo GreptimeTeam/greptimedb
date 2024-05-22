@@ -573,14 +573,14 @@ impl FlownodeManager {
         flow_id: FlowId,
         sink_table_name: TableName,
         source_table_ids: &[TableId],
-        create_if_not_exist: bool,
+        create_if_not_exists: bool,
         expire_after: Option<String>,
         comment: Option<String>,
         sql: String,
         flow_options: HashMap<String, String>,
         query_ctx: Option<QueryContext>,
     ) -> Result<Option<FlowId>, Error> {
-        if create_if_not_exist {
+        if create_if_not_exists {
             // check if the task already exists
             for handle in self.worker_handles.iter() {
                 if handle.lock().await.contains_flow(flow_id).await? {
@@ -657,7 +657,7 @@ impl FlownodeManager {
             source_ids,
             src_recvs: source_receivers,
             expire_after,
-            create_if_not_exist,
+            create_if_not_exists,
             err_collector,
         };
         handle.create_flow(create_request).await?;
