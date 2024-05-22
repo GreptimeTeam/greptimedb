@@ -151,7 +151,7 @@ impl HeartbeatTask {
                                     Some(req)
                                 }
                                 Err(e) => {
-                                    error!(e; "Failed to encode mailbox messages!");
+                                    error!(e; "Failed to encode mailbox messages");
                                     None
                                 }
                             }

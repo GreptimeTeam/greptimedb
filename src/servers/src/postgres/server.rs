@@ -86,7 +86,7 @@ impl PostgresServer {
                                 Some(addr)
                             }
                             Err(e) => {
-                                warn!("Failed to get PostgreSQL client addr, err: {:?}", e);
+                                warn!(e; "Failed to get PostgreSQL client addr");
                                 None
                             }
                         };

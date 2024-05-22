@@ -251,7 +251,7 @@ impl Election for EtcdElection {
                                 .leader_watcher
                                 .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
                             {
-                                error!("Failed to send leader change message, error: {e:?}");
+                                error!(e; "Failed to send leader change message");
                             }
                         }
                     } else {

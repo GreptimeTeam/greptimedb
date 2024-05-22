@@ -296,7 +296,7 @@ impl MetaStateHandler {
         if let Some(sub_manager) = self.subscribe_manager.clone() {
             info!("Leader changed, un_subscribe all");
             if let Err(e) = sub_manager.unsubscribe_all() {
-                error!("Failed to un_subscribe all, error: {:?}", e);
+                error!(e; "Failed to un_subscribe all");
             }
         }
     }

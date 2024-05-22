@@ -116,11 +116,11 @@ impl Predicate {
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to prune row groups, error: {:?}", e);
+                        warn!(e; "Failed to prune row groups");
                     }
                 },
                 Err(e) => {
-                    error!("Failed to create predicate for expr, error: {:?}", e);
+                    error!(e; "Failed to create predicate for expr");
                 }
             }
         }

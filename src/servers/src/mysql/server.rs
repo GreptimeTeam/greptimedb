@@ -135,7 +135,7 @@ impl MysqlServer {
 
             async move {
                 match tcp_stream {
-                    Err(error) => warn!("Broken pipe: {:?}", error), // IoError doesn't impl ErrorExt.
+                    Err(e) => warn!(e; "Broken pipe"), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         if let Err(e) = io_stream.set_nodelay(true) {
                             warn!(e; "Failed to set TCP nodelay");
@@ -143,7 +143,7 @@ impl MysqlServer {
                         if let Err(error) =
                             Self::handle(io_stream, io_runtime, spawn_ref, spawn_config).await
                         {
-                            warn!("Unexpected error when handling TcpStream {:?}", error);
+                            warn!(error; "Unexpected error when handling TcpStream");
                         };
                     }
                 };
