@@ -96,11 +96,7 @@ impl WindowedCompactionPicker {
                 .flat_map(|level| level.files.values()),
         );
 
-        (
-            build_output(windows, time_window),
-            expired_ssts,
-            time_window,
-        )
+        (build_output(windows), expired_ssts, time_window)
     }
 }
 
@@ -148,17 +144,14 @@ impl Picker for WindowedCompactionPicker {
     }
 }
 
-fn build_output(
-    windows: BTreeMap<i64, Vec<FileHandle>>,
-    window_size: i64,
-) -> Vec<CompactionOutput> {
+fn build_output(windows: BTreeMap<i64, (i64, Vec<FileHandle>)>) -> Vec<CompactionOutput> {
     let mut outputs = Vec::with_capacity(windows.len());
-    for (window_lower_bound, files) in windows {
+    for (lower_bound, (upper_bound, files)) in windows {
         // safety: the upper bound must > lower bound.
         let output_time_range = Some(
             TimestampRange::new(
-                Timestamp::new_second(window_lower_bound),
-                Timestamp::new_second(window_lower_bound + window_size),
+                Timestamp::new_second(lower_bound),
+                Timestamp::new_second(upper_bound),
             )
             .unwrap(),
         );
@@ -182,7 +175,7 @@ fn build_output(
 fn assign_files_to_time_windows<'a>(
     bucket_sec: i64,
     files: impl Iterator<Item = &'a FileHandle>,
-) -> BTreeMap<i64, Vec<FileHandle>> {
+) -> BTreeMap<i64, (i64, Vec<FileHandle>)> {
     let mut buckets = BTreeMap::new();
 
     for file in files {
@@ -196,31 +189,37 @@ fn assign_files_to_time_windows<'a>(
             end.convert_to(TimeUnit::Second).unwrap().value(),
             bucket_sec,
         );
-        for bound in bounds {
-            buckets
-                .entry(bound)
-                .or_insert_with(Vec::new)
-                .push(file.clone());
+        for (lower_bound, upper_bound) in bounds {
+            let (_, files) = buckets
+                .entry(lower_bound)
+                .or_insert_with(|| (upper_bound, Vec::new()));
+            files.push(file.clone());
         }
     }
     buckets
 }
 
 /// Calculates timestamp span between start and end timestamp.
-fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<i64> {
+fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<(i64, i64)> {
     assert!(start_sec <= end_sec);
 
     // if timestamp is between `[i64::MIN, i64::MIN.align_by_bucket(bucket)]`, which cannot
     // be aligned to a valid i64 bound, simply return `i64::MIN` rather than just underflow.
     let mut start_aligned = start_sec.align_by_bucket(bucket_sec).unwrap_or(i64::MIN);
-    let end_aligned = end_sec.align_by_bucket(bucket_sec).unwrap_or(i64::MIN);
+    let end_aligned = end_sec
+        .align_by_bucket(bucket_sec)
+        .unwrap_or(start_aligned + (end_sec - start_sec));
 
     let mut res = Vec::with_capacity(((end_aligned - start_aligned) / bucket_sec + 1) as usize);
-    while start_aligned < end_aligned {
-        res.push(start_aligned);
-        start_aligned += bucket_sec;
+    while start_aligned <= end_aligned {
+        let window_size = if start_aligned % bucket_sec == 0 {
+            bucket_sec
+        } else {
+            (start_aligned % bucket_sec).abs()
+        };
+        res.push((start_aligned, start_aligned + window_size));
+        start_aligned += window_size;
     }
-    res.push(end_aligned);
     res
 }
 
@@ -233,7 +232,7 @@ mod tests {
     use common_time::Timestamp;
     use store_api::storage::RegionId;
 
-    use crate::compaction::window::WindowedCompactionPicker;
+    use crate::compaction::window::{file_time_bucket_span, WindowedCompactionPicker};
     use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
     use crate::memtable::time_partition::TimePartitions;
     use crate::memtable::version::MemtableVersion;
@@ -377,5 +376,39 @@ mod tests {
             ),
             outputs[2].output_time_range
         );
+    }
+
+    #[test]
+    fn test_file_time_bucket_span() {
+        assert_eq!(
+            vec![(i64::MIN, i64::MIN + 8),],
+            file_time_bucket_span(i64::MIN, i64::MIN + 1, 10)
+        );
+
+        assert_eq!(
+            vec![(i64::MIN, i64::MIN + 8), (i64::MIN + 8, i64::MIN + 18)],
+            file_time_bucket_span(i64::MIN, i64::MIN + 8, 10)
+        );
+
+        assert_eq!(
+            vec![
+                (i64::MIN, i64::MIN + 8),
+                (i64::MIN + 8, i64::MIN + 18),
+                (i64::MIN + 18, i64::MIN + 28)
+            ],
+            file_time_bucket_span(i64::MIN, i64::MIN + 20, 10)
+        );
+
+        assert_eq!(
+            vec![(-10, 0), (0, 10), (10, 20)],
+            file_time_bucket_span(-1, 11, 10)
+        );
+
+        assert_eq!(
+            vec![(-3, 0), (0, 3), (3, 6)],
+            file_time_bucket_span(-1, 3, 3)
+        );
+
+        assert_eq!(vec![(0, 10)], file_time_bucket_span(0, 9, 10));
     }
 }
