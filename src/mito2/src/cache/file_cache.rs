@@ -391,7 +391,7 @@ mod tests {
         let cache = FileCache::new(
             local_store.clone(),
             ReadableSize::mb(10),
-            Some(Duration::from_secs(1)),
+            Some(Duration::from_millis(5)),
         );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
@@ -417,7 +417,8 @@ mod tests {
 
         let exist = cache.reader(key).await;
         assert!(exist.is_some());
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cache.memory_index.run_pending_tasks().await;
         let non = cache.reader(key).await;
         assert!(non.is_none());
     }
