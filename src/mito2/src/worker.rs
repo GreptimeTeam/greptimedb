@@ -600,16 +600,28 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         None => break,
                     }
                 }
-                _ = self.flush_receiver.changed() => {
-                    // A flush job is finished, handles stalled requests.
-                    self.handle_stalled_requests().await;
-                    continue;
+                recv_res = self.flush_receiver.changed() => {
+                    if recv_res.is_err() {
+                        // The channel is disconnected.
+                        break;
+                    } else {
+                        // A flush job is finished, handles stalled requests.
+                        self.handle_stalled_requests().await;
+                        continue;
+                    }
                 }
                 _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
                     self.handle_periodical_tasks();
                     continue;
                 }
+            }
+
+            if self.flush_receiver.has_changed().unwrap_or(false) {
+                // Always checks whether we could process stalled requests to avoid a request
+                // hangs too long.
+                // If the channel is closed, do nothing.
+                self.handle_stalled_requests().await;
             }
 
             // Try to recv more requests from the channel.
