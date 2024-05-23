@@ -537,7 +537,7 @@ mod test {
                             ColumnType::new(CDT::uint32_datatype(), false),   // number(pk)
                             // values
                             ColumnType::new(CDT::uint64_datatype(), true), // avg.sum(number)
-                            ColumnType::new(CDT::uint64_datatype(), true), // avg.count(number)
+                            ColumnType::new(CDT::int64_datatype(), true),  // avg.count(number)
                         ])
                         .with_key(vec![1, 2])
                         .with_time_index(Some(0)),
@@ -545,11 +545,11 @@ mod test {
                 ),
                 mfp: MapFilterProject::new(5)
                     .map(vec![
-                        avg_expr,              // avg(number)
+                        avg_expr,
                         ScalarExpr::Column(2), // number(pk)
-                        ScalarExpr::Column(5),
-                        ScalarExpr::Column(0),
-                        ScalarExpr::Column(1),
+                        ScalarExpr::Column(5), // avg.sum(number)
+                        ScalarExpr::Column(0), // window start
+                        ScalarExpr::Column(1), // window end
                     ])
                     .unwrap()
                     .project(vec![6, 7, 8, 9])
