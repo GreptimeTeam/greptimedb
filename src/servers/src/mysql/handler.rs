@@ -191,7 +191,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     METRIC_AUTH_FAILURE
                         .with_label_values(&[e.status_code().as_ref()])
                         .inc();
-                    warn!("Failed to auth, err: {:?}", e);
+                    warn!(e; "Failed to auth");
                     return false;
                 }
             };

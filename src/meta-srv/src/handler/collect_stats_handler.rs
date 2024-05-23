@@ -45,7 +45,7 @@ impl HeartbeatHandler for CollectStatsHandler {
                 let _ = acc.stat.insert(stat);
             }
             Err(err) => {
-                warn!("Incomplete heartbeat data: {:?}, err: {:?}", req, err);
+                warn!(err; "Incomplete heartbeat data: {:?}", req);
             }
         };
 

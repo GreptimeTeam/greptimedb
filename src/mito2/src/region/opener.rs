@@ -155,9 +155,9 @@ impl RegionOpener {
                 );
             }
             Err(e) => {
-                warn!(
-                    "Failed to open region {} before creating it, region_dir: {}, err: {}",
-                    self.region_id, self.region_dir, e
+                warn!(e;
+                    "Failed to open region {} before creating it, region_dir: {}",
+                    self.region_id, self.region_dir
                 );
             }
         }

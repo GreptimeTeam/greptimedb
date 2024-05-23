@@ -213,6 +213,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Permission denied while operating catalog {} from current catalog {}",
+        target,
+        current
+    ))]
+    PermissionDenied {
+        target: String,
+        current: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -241,7 +253,8 @@ impl ErrorExt for Error {
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
             | InvalidTableOption { .. }
-            | InvalidCast { .. } => StatusCode::InvalidArguments,
+            | InvalidCast { .. }
+            | PermissionDenied { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

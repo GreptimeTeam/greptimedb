@@ -67,7 +67,7 @@ impl HeartbeatHandler for KeepLeaseHandler {
         let res = ctx.in_memory.put(put_req).await;
 
         if let Err(err) = res {
-            warn!("Failed to update lease KV, peer: {peer:?}, {err}");
+            warn!(err; "Failed to update lease KV, peer: {peer:?}");
         }
 
         Ok(HandleControl::Continue)

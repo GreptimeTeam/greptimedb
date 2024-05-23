@@ -367,6 +367,18 @@ vector_cache_size = "512MB"
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 page_cache_size = "512MB"
 
+## Whether to enable the experimental write cache.
+enable_experimental_write_cache = false
+
+## File system path for write cache, defaults to `{data_home}/write_cache`.
+experimental_write_cache_path = ""
+
+## Capacity for write cache.
+experimental_write_cache_size = "512MB"
+
+## TTL for write cache.
+experimental_write_cache_ttl = "1h"
+
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 

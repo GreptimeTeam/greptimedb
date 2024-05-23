@@ -59,7 +59,7 @@ pub trait App: Send {
 
         if self.wait_signal() {
             if let Err(e) = tokio::signal::ctrl_c().await {
-                error!("Failed to listen for ctrl-c signal: {}", e);
+                error!(e; "Failed to listen for ctrl-c signal");
                 // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
                 // the underlying system. So we stop the app instead of running nonetheless to let people
                 // investigate the issue.

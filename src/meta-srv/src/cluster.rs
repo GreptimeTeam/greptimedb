@@ -89,7 +89,7 @@ impl KvBackend for MetaPeerClient {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     if need_retry(&e) {
-                        warn!("Encountered an error that need to retry, err: {:?}", e);
+                        warn!(e; "Encountered an error that need to retry");
                         tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
                     } else {
                         return Err(e);
@@ -138,7 +138,7 @@ impl KvBackend for MetaPeerClient {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     if need_retry(&e) {
-                        warn!("Encountered an error that need to retry, err: {:?}", e);
+                        warn!(e; "Encountered an error that need to retry");
                         tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
                     } else {
                         return Err(e);
