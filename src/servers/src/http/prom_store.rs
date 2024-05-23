@@ -237,6 +237,14 @@ pub async fn remote_read(
     handler.read(request, query_ctx).await
 }
 
+fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
+    Ok(Bytes::from(if is_zstd {
+        zstd_decompress(body)?
+    } else {
+        snappy_decompress(body)?
+    }))
+}
+
 async fn decode_remote_write_request(
     is_zstd: bool,
     body: Body,
@@ -247,11 +255,18 @@ async fn decode_remote_write_request(
         .await
         .context(error::HyperSnafu)?;
 
-    let buf = Bytes::from(if is_zstd {
-        zstd_decompress(&body[..])?
+    // due to vmagent's limitation, there is a chance that vmagent is
+    // sending content type wrong so we have to apply a fallback with decoding
+    // the content in another method.
+    //
+    // see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5301
+    // see https://github.com/GreptimeTeam/greptimedb/issues/3929
+    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
+        buf
     } else {
-        snappy_decompress(&body[..])?
-    });
+        // fallback to the other compression method
+        try_decompress(!is_zstd, &body[..])?
+    };
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
     request
