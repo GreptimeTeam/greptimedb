@@ -15,6 +15,7 @@
 mod common;
 pub mod lease_based;
 pub mod load_based;
+pub mod round_robin;
 mod weight_compute;
 mod weighted_choose;
 
@@ -61,6 +62,7 @@ pub enum SelectorType {
     #[default]
     LoadBased,
     LeaseBased,
+    RoundRobin,
 }
 
 impl TryFrom<&str> for SelectorType {
@@ -70,6 +72,7 @@ impl TryFrom<&str> for SelectorType {
         match value {
             "load_based" | "LoadBased" => Ok(SelectorType::LoadBased),
             "lease_based" | "LeaseBased" => Ok(SelectorType::LeaseBased),
+            "round_robin" | "RoundRobin" => Ok(SelectorType::RoundRobin),
             other => error::UnsupportedSelectorTypeSnafu {
                 selector_type: other,
             }
