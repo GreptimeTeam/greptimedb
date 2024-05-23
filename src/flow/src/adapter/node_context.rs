@@ -51,8 +51,6 @@ pub struct FlownodeContext {
             mpsc::UnboundedReceiver<DiffRow>,
         ),
     >,
-    /// store source in buffer for each source table, in case broadcast channel is full
-    pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
     /// the schema of the table, query from metasrv or inferred from TypedPlan
     pub schema: HashMap<GlobalId, RelationDesc>,
     /// All the tables that have been registered in the worker
@@ -109,6 +107,7 @@ impl SourceSender {
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
+            debug!("Send buf len = {}", self.send_buf.len());
         }
 
         Ok(row_cnt)
@@ -140,11 +139,18 @@ impl FlownodeContext {
     }
 
     /// flush all sender's buf
+    ///
+    /// return numbers being sent
     pub fn flush_all_sender(&mut self) -> Result<usize, Error> {
         self.source_sender
             .iter_mut()
             .map(|(_table_id, src_sender)| src_sender.try_send_all())
             .try_fold(0, |acc, x| x.map(|x| x + acc))
+    }
+
+    /// Return the sum number of rows in all send buf
+    pub fn get_send_buf_size(&self) -> usize {
+        self.source_sender.values().map(|v| v.send_buf.len()).sum()
     }
 }
 

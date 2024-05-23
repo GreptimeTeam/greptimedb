@@ -79,8 +79,8 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 }
                 err_collector.run(|| arrange_handler_inner.write().apply_updates(now, to_arrange));
                 send.give(all);
-                // always schedule source to run at next tick
-                inner_schd.schedule_at(now + 1);
+                // always schedule source to run at now so we can repeatly run source if needed
+                inner_schd.schedule_at(now);
             });
         schd.set_cur_subgraph(sub);
         let arranged = Arranged::new(arrange_handler);
