@@ -103,6 +103,7 @@ impl SeqScan {
                 .context(ExternalSnafu)?
             {
                 let record_batch = mapper.convert(&batch, cache)?;
+                common_telemetry::info!("Record batch is {:?}", record_batch);
                 yield record_batch;
             }
         };
@@ -390,6 +391,8 @@ impl PartsInTimeRange {
                                 .compat_batch(batch)?;
                         }
 
+                        common_telemetry::info!("Source batch is {:?}", batch);
+
                         yield batch;
                     }
                 }
@@ -404,6 +407,7 @@ impl PartsInTimeRange {
 /// Groups parts by time range.
 /// All time ranges are not None.
 fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
+    common_telemetry::info!("group parts, input {:?}", parts);
     if parts.is_empty() {
         return Vec::new();
     }
@@ -435,8 +439,11 @@ fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
             };
         }
     }
+    exclusive_parts.push(parts_in_range);
 
     // TODO(yingwen): split/merge parts according to parallelsim
+
+    common_telemetry::info!("group parts, output {:?}", exclusive_parts);
 
     exclusive_parts
 }
@@ -449,4 +456,77 @@ fn overlaps(l: &(Timestamp, Timestamp), r: &(Timestamp, Timestamp)) -> bool {
     let (r_start, _) = r;
 
     r_start <= l_end
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_time::timestamp::TimeUnit;
+
+    use super::*;
+    use crate::memtable::MemtableId;
+    use crate::test_util::memtable_util::EmptyMemtable;
+
+    type Output = (Vec<MemtableId>, i64, i64);
+
+    fn run_group_parts_test(input: &[(MemtableId, i64, i64)], expect: &[Output]) {
+        let parts = input
+            .iter()
+            .map(|(id, start, end)| {
+                let range = (
+                    Timestamp::new(*start, TimeUnit::Second),
+                    Timestamp::new(*end, TimeUnit::Second),
+                );
+                ScanPart {
+                    memtables: vec![Arc::new(
+                        EmptyMemtable::new(*id).with_time_range(Some(range)),
+                    )],
+                    file_ranges: vec![],
+                    time_range: Some(range),
+                }
+            })
+            .collect();
+        let output = group_parts(parts);
+        let actual: Vec<_> = output
+            .iter()
+            .map(|part| {
+                let ids: Vec<_> = part
+                    .parts
+                    .iter()
+                    .map(|part| part.memtables[0].id())
+                    .collect();
+                let range = part.time_range.unwrap();
+                (ids, range.0.value(), range.1.value())
+            })
+            .collect();
+        assert_eq!(expect, actual);
+    }
+
+    #[test]
+    fn test_group_parts() {
+        // Group 1 part.
+        run_group_parts_test(&[(1, 0, 2000)], &[(vec![1], 0, 2000)]);
+
+        // 1, 2, 3, 4 => [3, 1, 4], [2]
+        run_group_parts_test(
+            &[
+                (1, 1000, 2000),
+                (2, 6000, 7000),
+                (3, 0, 1500),
+                (4, 1500, 3000),
+            ],
+            &[(vec![3, 1, 4], 0, 3000), (vec![2], 6000, 7000)],
+        );
+
+        // 1, 2, 3 => [3], [1], [2],
+        run_group_parts_test(
+            &[(1, 3000, 4000), (2, 4001, 6000), (3, 0, 1000)],
+            &[
+                (vec![3], 0, 1000),
+                (vec![1], 3000, 4000),
+                (vec![2], 4001, 6000),
+            ],
+        );
+    }
 }

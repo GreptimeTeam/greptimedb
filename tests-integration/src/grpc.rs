@@ -652,7 +652,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
-                "SELECT ts, a, b FROM auto_created_table".to_string(),
+                "SELECT ts, a, b FROM auto_created_table order by ts".to_string(),
             )),
         });
         let output = query(instance, request.clone()).await;

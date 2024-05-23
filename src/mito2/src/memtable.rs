@@ -70,6 +70,12 @@ pub struct MemtableStats {
 }
 
 impl MemtableStats {
+    /// Attaches the time range to the stats.
+    pub(crate) fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> Self {
+        self.time_range = time_range;
+        self
+    }
+
     /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
