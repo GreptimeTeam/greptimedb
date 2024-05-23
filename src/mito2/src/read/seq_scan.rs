@@ -70,133 +70,19 @@ impl SeqScan {
 
     /// Builds a stream for the query.
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
-        let mut metrics = Metrics::default();
-        let build_start = Instant::now();
-        let query_start = self.input.query_start.unwrap_or(build_start);
-        metrics.prepare_scan_cost = query_start.elapsed();
-        let use_parallel = self.use_parallel_reader();
-        // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let mut reader = if use_parallel {
-            self.build_parallel_reader().await?
-        } else {
-            self.build_reader().await?
-        };
-        metrics.build_reader_cost = build_start.elapsed();
-        READ_STAGE_ELAPSED
-            .with_label_values(&["prepare_scan"])
-            .observe(metrics.prepare_scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_reader"])
-            .observe(metrics.build_reader_cost.as_secs_f64());
-
-        // Creates a stream to poll the batch reader and convert batch into record batch.
-        let mapper = self.input.mapper.clone();
-        let cache_manager = self.input.cache_manager.clone();
-        let parallelism = self.input.parallelism.parallelism;
-        let stream = try_stream! {
-            let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
-            while let Some(batch) =
-                Self::fetch_record_batch(&mut reader, &mapper, cache, &mut metrics).await?
-            {
-                metrics.num_batches += 1;
-                metrics.num_rows += batch.num_rows();
-                yield batch;
-            }
-
-            // Update metrics.
-            metrics.total_cost = query_start.elapsed();
-            READ_STAGE_ELAPSED.with_label_values(&["convert_rb"]).observe(metrics.convert_cost.as_secs_f64());
-            READ_STAGE_ELAPSED.with_label_values(&["scan"]).observe(metrics.scan_cost.as_secs_f64());
-            READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.total_cost.as_secs_f64());
-            READ_ROWS_RETURN.observe(metrics.num_rows as f64);
-            READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
-            debug!(
-                "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}, parallelism: {}",
-                mapper.metadata().region_id, metrics, use_parallel, parallelism,
-            );
-        };
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
+        let mut sources = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            part.build_sources(
+                Some(self.input.mapper.column_ids()),
+                self.input.predicate.as_ref(),
+                &mut sources,
+            )?;
+        }
+        let stream = self.sources_to_stream(sources);
         Ok(stream)
     }
 
-    /// Builds a [BoxedBatchReader] from sequential scan.
-    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
-        // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let sources = self.input.build_sources().await?;
-        let dedup = !self.input.append_mode;
-        let mut builder =
-            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
-        let reader = builder.build().await?;
-        Ok(Box::new(reader))
-    }
-
-    /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
-    async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
-        let sources = self.input.build_parallel_sources().await?;
-        let dedup = !self.input.append_mode;
-        let mut builder =
-            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
-        let reader = builder.build().await?;
-        Ok(Box::new(reader))
-    }
-
-    /// Returns whether to use a parallel reader.
-    fn use_parallel_reader(&self) -> bool {
-        self.input.parallelism.allow_parallel_scan()
-            && (self.input.files.len() + self.input.memtables.len()) > 1
-    }
-
-    /// Fetch a batch from the reader and convert it into a record batch.
-    #[tracing::instrument(skip_all, level = "trace")]
-    async fn fetch_record_batch(
-        reader: &mut dyn BatchReader,
-        mapper: &ProjectionMapper,
-        cache: Option<&CacheManager>,
-        metrics: &mut Metrics,
-    ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
-        let start = Instant::now();
-
-        let Some(batch) = reader
-            .next_batch()
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?
-        else {
-            metrics.scan_cost += start.elapsed();
-
-            return Ok(None);
-        };
-
-        let convert_start = Instant::now();
-        let record_batch = mapper.convert(&batch, cache)?;
-        metrics.convert_cost += convert_start.elapsed();
-        metrics.scan_cost += start.elapsed();
-
-        Ok(Some(record_batch))
-    }
-}
-
-impl RegionScanner for SeqScan {
-    fn properties(&self) -> &ScannerProperties {
-        &self.properties
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.input.mapper.output_schema()
-    }
-
-    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part = &self.parts[partition];
-        let sources = part
-            .build_sources(
-                Some(self.input.mapper.column_ids()),
-                self.input.predicate.as_ref(),
-            )
-            .map_err(BoxedError::new)?;
+    fn sources_to_stream(&self, sources: Vec<Source>) -> SendableRecordBatchStream {
         let dedup = !self.input.append_mode;
         let mut builder =
             MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
@@ -220,10 +106,143 @@ impl RegionScanner for SeqScan {
             }
         };
 
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
+        Box::pin(RecordBatchStreamWrapper::new(
             self.input.mapper.output_schema(),
             Box::pin(stream),
-        ));
+        ))
+    }
+
+    // /// Builds a stream for the query.
+    // pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
+    //     let mut metrics = Metrics::default();
+    //     let build_start = Instant::now();
+    //     let query_start = self.input.query_start.unwrap_or(build_start);
+    //     metrics.prepare_scan_cost = query_start.elapsed();
+    //     let use_parallel = self.use_parallel_reader();
+    //     // Scans all memtables and SSTs. Builds a merge reader to merge results.
+    //     let mut reader = if use_parallel {
+    //         self.build_parallel_reader().await?
+    //     } else {
+    //         self.build_reader().await?
+    //     };
+    //     metrics.build_reader_cost = build_start.elapsed();
+    //     READ_STAGE_ELAPSED
+    //         .with_label_values(&["prepare_scan"])
+    //         .observe(metrics.prepare_scan_cost.as_secs_f64());
+    //     READ_STAGE_ELAPSED
+    //         .with_label_values(&["build_reader"])
+    //         .observe(metrics.build_reader_cost.as_secs_f64());
+
+    //     // Creates a stream to poll the batch reader and convert batch into record batch.
+    //     let mapper = self.input.mapper.clone();
+    //     let cache_manager = self.input.cache_manager.clone();
+    //     let parallelism = self.input.parallelism.parallelism;
+    //     let stream = try_stream! {
+    //         let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
+    //         while let Some(batch) =
+    //             Self::fetch_record_batch(&mut reader, &mapper, cache, &mut metrics).await?
+    //         {
+    //             metrics.num_batches += 1;
+    //             metrics.num_rows += batch.num_rows();
+    //             yield batch;
+    //         }
+
+    //         // Update metrics.
+    //         metrics.total_cost = query_start.elapsed();
+    //         READ_STAGE_ELAPSED.with_label_values(&["convert_rb"]).observe(metrics.convert_cost.as_secs_f64());
+    //         READ_STAGE_ELAPSED.with_label_values(&["scan"]).observe(metrics.scan_cost.as_secs_f64());
+    //         READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.total_cost.as_secs_f64());
+    //         READ_ROWS_RETURN.observe(metrics.num_rows as f64);
+    //         READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
+    //         debug!(
+    //             "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}, parallelism: {}",
+    //             mapper.metadata().region_id, metrics, use_parallel, parallelism,
+    //         );
+    //     };
+    //     let stream = Box::pin(RecordBatchStreamWrapper::new(
+    //         self.input.mapper.output_schema(),
+    //         Box::pin(stream),
+    //     ));
+
+    //     Ok(stream)
+    // }
+
+    /// Builds a [BoxedBatchReader] from sequential scan.
+    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
+        // Scans all memtables and SSTs. Builds a merge reader to merge results.
+        let sources = self.input.build_sources().await?;
+        let dedup = !self.input.append_mode;
+        let mut builder =
+            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
+        let reader = builder.build().await?;
+        Ok(Box::new(reader))
+    }
+
+    // /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
+    // async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
+    //     let sources = self.input.build_parallel_sources().await?;
+    //     let dedup = !self.input.append_mode;
+    //     let mut builder =
+    //         MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
+    //     let reader = builder.build().await?;
+    //     Ok(Box::new(reader))
+    // }
+
+    // /// Returns whether to use a parallel reader.
+    // fn use_parallel_reader(&self) -> bool {
+    //     self.input.parallelism.allow_parallel_scan()
+    //         && (self.input.files.len() + self.input.memtables.len()) > 1
+    // }
+
+    // /// Fetch a batch from the reader and convert it into a record batch.
+    // #[tracing::instrument(skip_all, level = "trace")]
+    // async fn fetch_record_batch(
+    //     reader: &mut dyn BatchReader,
+    //     mapper: &ProjectionMapper,
+    //     cache: Option<&CacheManager>,
+    //     metrics: &mut Metrics,
+    // ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
+    //     let start = Instant::now();
+
+    //     let Some(batch) = reader
+    //         .next_batch()
+    //         .await
+    //         .map_err(BoxedError::new)
+    //         .context(ExternalSnafu)?
+    //     else {
+    //         metrics.scan_cost += start.elapsed();
+
+    //         return Ok(None);
+    //     };
+
+    //     let convert_start = Instant::now();
+    //     let record_batch = mapper.convert(&batch, cache)?;
+    //     metrics.convert_cost += convert_start.elapsed();
+    //     metrics.scan_cost += start.elapsed();
+
+    //     Ok(Some(record_batch))
+    // }
+}
+
+impl RegionScanner for SeqScan {
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.input.mapper.output_schema()
+    }
+
+    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+        let part = &self.parts[partition];
+        let mut sources = Vec::new();
+        part.build_sources(
+            Some(self.input.mapper.column_ids()),
+            self.input.predicate.as_ref(),
+            &mut sources,
+        )
+        .map_err(BoxedError::new)?;
+        let stream = self.sources_to_stream(sources);
         Ok(stream)
     }
 }
@@ -327,19 +346,29 @@ impl PartsInTimeRange {
             return true;
         };
 
-        todo!()
+        overlaps(&current_range, &part_range)
     }
 
     fn merge(&mut self, part: ScanPart) {
-        todo!()
+        let Some(current_range) = self.time_range else {
+            self.time_range = part.time_range;
+            self.parts.push(part);
+            return;
+        };
+        let part_range = part.time_range.unwrap();
+        let start = current_range.0.min(part_range.0);
+        let end = current_range.1.max(part_range.1);
+        self.time_range = Some((start, end));
+        self.parts.push(part);
     }
 
     fn build_sources(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<&Predicate>,
-    ) -> Result<Vec<Source>> {
-        let mut sources = Vec::with_capacity(self.parts.len());
+        sources: &mut Vec<Source>,
+    ) -> Result<()> {
+        sources.reserve(self.parts.len());
         for part in &self.parts {
             if let Some(mem) = part.memtables.first() {
                 // Each part only has one memtable.
@@ -367,7 +396,7 @@ impl PartsInTimeRange {
             let stream = Box::pin(stream);
             sources.push(Source::Stream(stream));
         }
-        Ok(sources)
+        Ok(())
     }
 }
 
@@ -409,4 +438,14 @@ fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
     // TODO(yingwen): split/merge parts according to parallelsim
 
     exclusive_parts
+}
+
+// FIXME(yingwen): Use overlaps() in twcs mod.
+/// Checks if two inclusive timestamp ranges overlap with each other.
+fn overlaps(l: &(Timestamp, Timestamp), r: &(Timestamp, Timestamp)) -> bool {
+    let (l, r) = if l.0 <= r.0 { (l, r) } else { (r, l) };
+    let (_, l_end) = l;
+    let (r_start, _) = r;
+
+    r_start <= l_end
 }
