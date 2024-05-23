@@ -744,6 +744,12 @@ runtime_size = 8
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 
+[grpc.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+watch = false
+
 [mysql]
 enable = true
 addr = "127.0.0.1:4002"

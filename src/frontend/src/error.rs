@@ -355,6 +355,14 @@ pub enum Error {
         location: Location,
         name: String,
     },
+
+    #[snafu(display("Invalid tls config"))]
+    InvalidTlsConfig {
+        #[snafu(source)]
+        error: common_grpc::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -374,7 +382,8 @@ impl ErrorExt for Error {
             | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::IncompleteGrpcRequest { .. } => StatusCode::InvalidArguments,
+            | Error::IncompleteGrpcRequest { .. }
+            | Error::InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

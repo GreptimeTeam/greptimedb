@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::alter_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
@@ -22,14 +24,18 @@ use api::v1::{
 use auth::user_provider_from_option;
 use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
+use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_runtime::Runtime;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
     PrometheusResponse,
 };
 use servers::server::Server;
+use servers::tls::{TlsMode, TlsOption};
 use tests_integration::database::Database;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
@@ -77,6 +83,7 @@ macro_rules! grpc_tests {
                 test_health_check,
                 test_prom_gateway_query,
                 test_grpc_timezone,
+                test_grpc_tls_config,
             );
         )*
     };
@@ -129,6 +136,7 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -148,6 +156,7 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -166,6 +175,7 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 50,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -185,6 +195,7 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 10,
         max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -663,6 +674,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -718,4 +730,75 @@ async fn to_batch(output: Output) -> String {
     }
     .pretty_print()
     .unwrap()
+}
+
+pub async fn test_grpc_tls_config(store_type: StorageType) {
+    let comm_dir = std::path::PathBuf::from_iter([
+        std::env!("CARGO_RUSTC_CURRENT_DIR"),
+        "src/common/grpc/tests/tls",
+    ]);
+    let ca_path = comm_dir.join("ca.pem").to_str().unwrap().to_string();
+    let server_cert_path = comm_dir.join("server.pem").to_str().unwrap().to_string();
+    let server_key_path = comm_dir.join("server.key").to_str().unwrap().to_string();
+    let client_cert_path = comm_dir.join("client.pem").to_str().unwrap().to_string();
+    let client_key_path = comm_dir.join("client.key").to_str().unwrap().to_string();
+    let client_corrupted = comm_dir.join("corrupted").to_str().unwrap().to_string();
+
+    let tls = TlsOption::new(
+        Some(TlsMode::Require),
+        Some(server_cert_path),
+        Some(server_key_path),
+    );
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+        tls,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
+
+    let mut client_tls = ClientTlsOption {
+        server_ca_cert_path: ca_path,
+        client_cert_path,
+        client_key_path,
+    };
+    {
+        let grpc_client =
+            Client::with_tls_and_urls(vec![addr.clone()], client_tls.clone()).unwrap();
+        let db = Database::new_with_dbname(
+            format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+            grpc_client,
+        );
+        db.sql("show tables;").await.unwrap();
+    }
+    // test corrupted client key
+    {
+        client_tls.client_key_path = client_corrupted;
+        let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls.clone()).unwrap();
+        let db = Database::new_with_dbname(
+            format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+            grpc_client,
+        );
+        let re = db.sql("show tables;").await;
+        assert!(re.is_err());
+    }
+    // test grpc unsupported tls watch
+    {
+        let tls = TlsOption {
+            watch: true,
+            ..Default::default()
+        };
+        let config = GrpcServerConfig {
+            max_recv_message_size: 1024,
+            max_send_message_size: 1024,
+            tls,
+        };
+        let runtime = Arc::new(Runtime::builder().build().unwrap());
+        let grpc_builder =
+            GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
+        assert!(grpc_builder.is_err());
+    }
+
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }

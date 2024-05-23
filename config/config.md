@@ -20,6 +20,11 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
+| `grpc.tls.mode` | String | `disable` | TLS mode. |
+| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
+| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -33,7 +38,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
-| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql_options.tls` section. |
+| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | `None` | Certificate file path. |
 | `postgres.tls.key_path` | String | `None` | Private key file path. |
@@ -159,6 +164,11 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
+| `grpc.tls.mode` | String | `disable` | TLS mode. |
+| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
+| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -172,7 +182,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
-| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql_options.tls` section. |
+| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | `None` | Certificate file path. |
 | `postgres.tls.key_path` | String | `None` | Private key file path. |

@@ -23,9 +23,9 @@ async fn test_mtls_config() {
 
     // test wrong file
     let config = ChannelConfig::new().client_tls_config(ClientTlsOption {
-        server_ca_cert_path: "tests/tls/wrong_server.cert.pem".to_string(),
-        client_cert_path: "tests/tls/wrong_client.cert.pem".to_string(),
-        client_key_path: "tests/tls/wrong_client.key.pem".to_string(),
+        server_ca_cert_path: "tests/tls/wrong_ca.pem".to_string(),
+        client_cert_path: "tests/tls/wrong_client.pem".to_string(),
+        client_key_path: "tests/tls/wrong_client.key".to_string(),
     });
 
     let re = ChannelManager::with_tls_config(config);
@@ -33,8 +33,8 @@ async fn test_mtls_config() {
 
     // test corrupted file content
     let config = ChannelConfig::new().client_tls_config(ClientTlsOption {
-        server_ca_cert_path: "tests/tls/server.cert.pem".to_string(),
-        client_cert_path: "tests/tls/client.cert.pem".to_string(),
+        server_ca_cert_path: "tests/tls/ca.pem".to_string(),
+        client_cert_path: "tests/tls/client.pem".to_string(),
         client_key_path: "tests/tls/corrupted".to_string(),
     });
 
@@ -44,9 +44,9 @@ async fn test_mtls_config() {
 
     // success
     let config = ChannelConfig::new().client_tls_config(ClientTlsOption {
-        server_ca_cert_path: "tests/tls/server.cert.pem".to_string(),
-        client_cert_path: "tests/tls/client.cert.pem".to_string(),
-        client_key_path: "tests/tls/client.key.pem".to_string(),
+        server_ca_cert_path: "tests/tls/ca.pem".to_string(),
+        client_cert_path: "tests/tls/client.pem".to_string(),
+        client_key_path: "tests/tls/client.key".to_string(),
     });
 
     let re = ChannelManager::with_tls_config(config).unwrap();

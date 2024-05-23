@@ -511,13 +511,15 @@ pub async fn setup_grpc_server_with(
 
     let flight_handler = Arc::new(greptime_request_handler.clone());
 
-    let fe_grpc_server = Arc::new(
-        GrpcServerBuilder::new(grpc_config.unwrap_or_default(), runtime)
-            .database_handler(greptime_request_handler)
-            .flight_handler(flight_handler)
-            .prometheus_handler(fe_instance_ref.clone(), user_provider)
-            .build(),
-    );
+    let grpc_config = grpc_config.unwrap_or_default();
+    let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime)
+        .database_handler(greptime_request_handler)
+        .flight_handler(flight_handler)
+        .prometheus_handler(fe_instance_ref.clone(), user_provider)
+        .with_tls_config(grpc_config.tls)
+        .unwrap();
+
+    let fe_grpc_server = Arc::new(grpc_builder.build());
 
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let fe_grpc_addr = fe_grpc_server

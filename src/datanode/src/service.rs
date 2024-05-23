@@ -21,6 +21,7 @@ use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
+use servers::tls::TlsOption;
 use snafu::ResultExt;
 
 use crate::config::DatanodeOptions;
@@ -95,6 +96,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
         let config = GrpcServerConfig {
             max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
+            tls: TlsOption::default(),
         };
 
         GrpcServerBuilder::new(config, region_server.runtime())
