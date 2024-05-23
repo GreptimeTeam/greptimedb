@@ -15,15 +15,20 @@
 use std::sync::atomic::AtomicUsize;
 
 use common_meta::peer::Peer;
+use snafu::ensure;
 
-use crate::error::Result;
+use crate::error::{NoEnoughAvailableDatanodeSnafu, Result};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
+/// Datanodes are ordered by their node_id.
 ///
-/// The datanodes are ordered by their node_id.
+/// This selector is useful when you want to distribute the load evenly across
+/// all datanodes. But **it's not recommended** to use this selector in serious
+/// production environments because it doesn't take into account the load of
+/// each datanode.
 #[derive(Default)]
 pub struct RoundRobinSelector {
     counter: AtomicUsize,
@@ -50,6 +55,13 @@ impl Selector for RoundRobinSelector {
             .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
             .collect();
         peers.sort_by_key(|p| p.id);
+        ensure!(
+            !peers.is_empty(),
+            NoEnoughAvailableDatanodeSnafu {
+                required: opts.min_required_items,
+                available: 0usize,
+            }
+        );
 
         // 3. choose peers
         let mut selected = Vec::with_capacity(opts.min_required_items);
@@ -62,5 +74,65 @@ impl Selector for RoundRobinSelector {
         }
 
         Ok(selected)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_util::{create_selector_context, put_datanodes};
+
+    #[tokio::test]
+    async fn test_round_robin_selector() {
+        let selector = RoundRobinSelector::default();
+        let ctx = create_selector_context();
+        let ns = 0;
+
+        // add three nodes
+        let peer1 = Peer {
+            id: 2,
+            addr: "node1".to_string(),
+        };
+        let peer2 = Peer {
+            id: 5,
+            addr: "node2".to_string(),
+        };
+        let peer3 = Peer {
+            id: 8,
+            addr: "node3".to_string(),
+        };
+        let peers = vec![peer1.clone(), peer2.clone(), peer3.clone()];
+        put_datanodes(ns, &ctx.meta_peer_client, peers).await;
+
+        let peers = selector
+            .select(
+                ns,
+                &ctx,
+                SelectorOptions {
+                    min_required_items: 4,
+                    allow_duplication: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(peers.len(), 4);
+        assert_eq!(
+            peers,
+            vec![peer1.clone(), peer2.clone(), peer3.clone(), peer1.clone()]
+        );
+
+        let peers = selector
+            .select(
+                ns,
+                &ctx,
+                SelectorOptions {
+                    min_required_items: 2,
+                    allow_duplication: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers, vec![peer2.clone(), peer3.clone()]);
     }
 }

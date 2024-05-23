@@ -21,6 +21,7 @@ use crate::selector::common::choose_peers;
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
+/// Select all alive datanodes based using a random weighted choose.
 pub struct LeaseBasedSelector;
 
 #[async_trait::async_trait]
