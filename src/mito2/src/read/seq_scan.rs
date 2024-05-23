@@ -59,6 +59,7 @@ impl SeqScan {
     pub(crate) async fn new(input: ScanInput) -> Result<SeqScan> {
         let parts = input.build_parts(SeqPartBuilder::default()).await?;
         let parts = group_parts(parts);
+        let parts = maybe_split_parts(parts, input.parallelism.parallelism);
         let properties = ScannerProperties::new(ScannerPartitioning::Unknown(parts.len()));
 
         Ok(SeqScan {
@@ -103,7 +104,6 @@ impl SeqScan {
                 .context(ExternalSnafu)?
             {
                 let record_batch = mapper.convert(&batch, cache)?;
-                common_telemetry::info!("Record batch is {:?}", record_batch);
                 yield record_batch;
             }
         };
@@ -364,6 +364,12 @@ impl PartsInTimeRange {
         self.parts.push(part);
     }
 
+    fn can_split(&self) -> bool {
+        self.parts.len() == 1
+            && self.parts[0].memtables.is_empty()
+            && self.parts[0].file_ranges.len() > 1
+    }
+
     fn build_sources(
         &self,
         projection: Option<&[ColumnId]>,
@@ -391,8 +397,6 @@ impl PartsInTimeRange {
                                 .compat_batch(batch)?;
                         }
 
-                        common_telemetry::info!("Source batch is {:?}", batch);
-
                         yield batch;
                     }
                 }
@@ -404,10 +408,9 @@ impl PartsInTimeRange {
     }
 }
 
-/// Groups parts by time range.
+/// Groups parts by time range. It may generate parts more than parallelism.
 /// All time ranges are not None.
 fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
-    common_telemetry::info!("group parts, input {:?}", parts);
     if parts.is_empty() {
         return Vec::new();
     }
@@ -443,9 +446,57 @@ fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
 
     // TODO(yingwen): split/merge parts according to parallelsim
 
-    common_telemetry::info!("group parts, output {:?}", exclusive_parts);
-
     exclusive_parts
+}
+
+/// Splits parts to increase concurrency.
+fn maybe_split_parts(parts: Vec<PartsInTimeRange>, parallelism: usize) -> Vec<PartsInTimeRange> {
+    if parts.len() >= parallelism || parallelism <= 1 {
+        return parts;
+    }
+
+    let num_parts_to_split = parts
+        .iter()
+        .filter(|part| {
+            // Only has one part and no memtable in the part.
+            part.can_split()
+        })
+        .count();
+
+    if num_parts_to_split == 0 {
+        return parts;
+    }
+
+    let parallelism_per_file =
+        ((parallelism - parts.len() + num_parts_to_split) / num_parts_to_split).max(2);
+    let mut split_parts =
+        Vec::with_capacity(parts.len() + num_parts_to_split * parallelism_per_file);
+    for part in parts {
+        if part.can_split() {
+            let num_ranges = part.parts[0].file_ranges.len();
+            let ranges_per_part =
+                ((num_ranges + parallelism_per_file - 1) / parallelism_per_file).max(1);
+            // If there is only one file, we can split the file into multiple parts.
+            part.parts[0]
+                .file_ranges
+                .chunks(ranges_per_part)
+                .map(|ranges| PartsInTimeRange {
+                    parts: vec![ScanPart {
+                        memtables: vec![],
+                        file_ranges: ranges.to_vec(),
+                        time_range: part.time_range,
+                    }],
+                    time_range: part.time_range,
+                })
+                .for_each(|split_part| split_parts.push(split_part));
+
+            continue;
+        }
+
+        split_parts.push(part);
+    }
+
+    split_parts
 }
 
 // FIXME(yingwen): Use overlaps() in twcs mod.
