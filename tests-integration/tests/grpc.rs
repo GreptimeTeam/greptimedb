@@ -136,7 +136,7 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        tls: TlsOption::default(),
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -156,7 +156,7 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        tls: TlsOption::default(),
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -175,7 +175,7 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 50,
-        tls: TlsOption::default(),
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -195,7 +195,7 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 10,
         max_send_message_size: 1024,
-        tls: TlsOption::default(),
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -674,7 +674,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
-        tls: TlsOption::default(),
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -801,9 +801,4 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
 
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_grpc() {
-    test_grpc_tls_config(StorageType::File).await;
 }

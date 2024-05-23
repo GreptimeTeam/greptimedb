@@ -168,7 +168,8 @@ impl GrpcServerBuilder {
         // so we don't support it either for now
         if tls_option.watch {
             return Err(Error::NotSupported {
-                feat: "grpc tls watch".to_string(),
+                feat: "Certificates watch and reloading for gRPC is not supported at the moment"
+                    .to_string(),
             });
         }
         self.tls_config = if tls_option.should_force_tls() {
