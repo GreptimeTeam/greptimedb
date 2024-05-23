@@ -58,7 +58,7 @@ impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build_stream().await.map_err(BoxedError::new),
+            Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
@@ -66,11 +66,7 @@ impl Scanner {
     /// Returns a [RegionScanner] to scan the region.
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
-            Scanner::Seq(seq_scan) => {
-                let stream = seq_scan.build_stream().await?;
-                let scanner = Arc::new(SinglePartitionScanner::new(stream));
-                Ok(scanner)
-            }
+            Scanner::Seq(seq_scan) => Ok(Arc::new(seq_scan)),
             Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
         }
     }

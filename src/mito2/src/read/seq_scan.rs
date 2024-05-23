@@ -69,14 +69,15 @@ impl SeqScan {
     }
 
     /// Builds a stream for the query.
-    pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
+    pub async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut sources = Vec::with_capacity(self.parts.len());
         for part in &self.parts {
             part.build_sources(
                 Some(self.input.mapper.column_ids()),
                 self.input.predicate.as_ref(),
                 &mut sources,
-            )?;
+            )
+            .map_err(BoxedError::new)?;
         }
         let stream = self.sources_to_stream(sources);
         Ok(stream)
