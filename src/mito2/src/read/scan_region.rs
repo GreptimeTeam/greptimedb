@@ -215,16 +215,14 @@ impl ScanRegion {
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
         } else {
-            self.seq_scan().map(Scanner::Seq)
+            self.seq_scan().await.map(Scanner::Seq)
         }
     }
 
     /// Scan sequentially.
-    pub(crate) fn seq_scan(self) -> Result<SeqScan> {
+    pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input(true)?;
-        let seq_scan = SeqScan::new(input);
-
-        Ok(seq_scan)
+        SeqScan::new(input).await
     }
 
     /// Unordered scan.
@@ -234,10 +232,9 @@ impl ScanRegion {
     }
 
     #[cfg(test)]
-    pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
+    pub(crate) async fn scan_without_filter_deleted(self) -> Result<SeqScan> {
         let input = self.scan_input(false)?;
-        let scan = SeqScan::new(input);
-        Ok(scan)
+        SeqScan::new(input).await
     }
 
     /// Creates a scan input.
@@ -264,9 +261,8 @@ impl ScanRegion {
                     return false;
                 }
                 let stats = mem.stats();
-                let Some((start, end)) = stats.time_range() else {
-                    return true;
-                };
+                // Safety: the memtable is not empty.
+                let (start, end) = stats.time_range().unwrap();
 
                 // The time range of the memtable is inclusive.
                 let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));

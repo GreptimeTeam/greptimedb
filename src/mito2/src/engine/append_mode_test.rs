@@ -81,7 +81,7 @@ async fn test_append_mode_write_query() {
     let scan = engine
         .scan_region(region_id, ScanRequest::default())
         .unwrap();
-    let seq_scan = scan.seq_scan().unwrap();
+    let seq_scan = scan.seq_scan().await.unwrap();
     let stream = seq_scan.build_stream().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());

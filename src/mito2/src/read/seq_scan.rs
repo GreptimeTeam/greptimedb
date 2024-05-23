@@ -14,6 +14,7 @@
 
 //! Sequential scan.
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
@@ -21,7 +22,13 @@ use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::{debug, tracing};
+use common_time::Timestamp;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
+use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
+use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
@@ -30,7 +37,7 @@ use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{ScanInput, ScanPart, ScanPartBuilder};
-use crate::read::{BatchReader, BoxedBatchReader};
+use crate::read::{BatchReader, BoxedBatchReader, Source};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
 
@@ -38,14 +45,27 @@ use crate::sst::parquet::file_range::FileRange;
 ///
 /// The output order is always `order by primary key, time index`.
 pub struct SeqScan {
+    /// Input memtable and files.
     input: ScanInput,
+    /// Parts to scan.
+    parts: Vec<PartsInTimeRange>,
+    /// Properties of the scanner.
+    properties: ScannerProperties,
 }
 
 impl SeqScan {
     /// Creates a new [SeqScan].
     #[must_use]
-    pub(crate) fn new(input: ScanInput) -> SeqScan {
-        SeqScan { input }
+    pub(crate) async fn new(input: ScanInput) -> Result<SeqScan> {
+        let parts = input.build_parts(SeqPartBuilder::default()).await?;
+        let parts = group_parts(parts);
+        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(parts.len()));
+
+        Ok(SeqScan {
+            input,
+            parts,
+            properties,
+        })
     }
 
     /// Builds a stream for the query.
@@ -160,6 +180,68 @@ impl SeqScan {
     }
 }
 
+impl RegionScanner for SeqScan {
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.input.mapper.output_schema()
+    }
+
+    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+        let part = &self.parts[partition];
+        let sources = part
+            .build_sources(
+                Some(self.input.mapper.column_ids()),
+                self.input.predicate.as_ref(),
+            )
+            .map_err(BoxedError::new)?;
+        let dedup = !self.input.append_mode;
+        let mut builder =
+            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
+        let mapper = self.input.mapper.clone();
+        let cache_manager = self.input.cache_manager.clone();
+        let stream = try_stream! {
+            let mut reader = builder
+                .build()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let cache = cache_manager.as_deref();
+            while let Some(batch) = reader
+                .next_batch()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+            {
+                let record_batch = mapper.convert(&batch, cache)?;
+                yield record_batch;
+            }
+        };
+
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.input.mapper.output_schema(),
+            Box::pin(stream),
+        ));
+        Ok(stream)
+    }
+}
+
+impl DisplayAs for SeqScan {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SeqScan: [{:?}]", self.parts)
+    }
+}
+
+impl fmt::Debug for SeqScan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SeqScan")
+            .field("parts", &self.parts)
+            .finish()
+    }
+}
+
 /// Metrics for [SeqScan].
 #[derive(Debug, Default)]
 struct Metrics {
@@ -189,15 +271,12 @@ impl SeqScan {
 
 /// Builds [ScanPart]s that preserves order.
 #[derive(Default)]
-pub(crate) struct OrderedPartBuilder {
-    parallelism: usize,
+pub(crate) struct SeqPartBuilder {
     parts: Vec<ScanPart>,
 }
 
-impl ScanPartBuilder for OrderedPartBuilder {
-    fn set_parallelism(&mut self, parallelism: usize) {
-        self.parallelism = parallelism;
-    }
+impl ScanPartBuilder for SeqPartBuilder {
+    fn set_parallelism(&mut self, _parallelism: usize) {}
 
     fn append_file_ranges(
         &mut self,
@@ -218,39 +297,116 @@ impl ScanPartBuilder for OrderedPartBuilder {
     }
 
     fn build_parts(mut self, memtables: &[MemtableRef]) -> Vec<ScanPart> {
-        // Memtables with None time range.
-        let mut unknown_range_memtables = vec![];
         // Creates a part for each memtable.
         for mem in memtables {
             let stats = mem.stats();
-            // TODO(yingwen): Should we consider empty range for memtables? They are
-            // not empty so it should not be None.
-            if stats.time_range().is_none() {
-                unknown_range_memtables.push(mem.clone());
-            } else {
-                let part = ScanPart {
-                    memtables: vec![mem.clone()],
-                    file_ranges: vec![],
-                    time_range: stats.time_range(),
-                };
-                self.parts.push(part);
-            }
-        }
-        if !unknown_range_memtables.is_empty() {
             let part = ScanPart {
-                memtables: unknown_range_memtables,
+                memtables: vec![mem.clone()],
                 file_ranges: vec![],
-                time_range: None,
+                time_range: stats.time_range(),
             };
             self.parts.push(part);
-
-            // If there are memtables with unknown range, we must merge data from all parts.
-            return self.parts;
         }
-
-        // TODO(yingwen): parallelism. How to distribute parts?
-        // group by time range.
 
         self.parts
     }
+}
+
+/// Parts to scan in the same time range.
+#[derive(Debug, Default)]
+struct PartsInTimeRange {
+    /// Parts to scan. Each [ScanPart] scans a file or a memtable.
+    parts: Vec<ScanPart>,
+    /// Inclusive time range of parts.
+    time_range: Option<(Timestamp, Timestamp)>,
+}
+
+impl PartsInTimeRange {
+    fn overlaps(&self, part: &ScanPart) -> bool {
+        let (Some(current_range), Some(part_range)) = (self.time_range, part.time_range) else {
+            return true;
+        };
+
+        todo!()
+    }
+
+    fn merge(&mut self, part: ScanPart) {
+        todo!()
+    }
+
+    fn build_sources(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<&Predicate>,
+    ) -> Result<Vec<Source>> {
+        let mut sources = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            if let Some(mem) = part.memtables.first() {
+                // Each part only has one memtable.
+                let iter = mem.iter(projection, predicate.cloned())?;
+                sources.push(Source::Iter(iter));
+                continue;
+            }
+
+            let ranges = part.file_ranges.clone();
+            let stream = try_stream! {
+                // TODO(yingwen): metrics.
+                for range in ranges {
+                    let mut reader = range.reader().await?;
+                    let compat_batch = range.compat_batch();
+                    while let Some(mut batch) = reader.next_batch().await? {
+                        if let Some(compat) = compat_batch {
+                            batch = compat
+                                .compat_batch(batch)?;
+                        }
+
+                        yield batch;
+                    }
+                }
+            };
+            let stream = Box::pin(stream);
+            sources.push(Source::Stream(stream));
+        }
+        Ok(sources)
+    }
+}
+
+/// Groups parts by time range.
+/// All time ranges are not None.
+fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    // Groups parts by time range.
+    parts.sort_unstable_by(|a, b| {
+        // Safety: time ranges of parts from [SeqPartBuilder] are not None.
+        let a = a.time_range.unwrap();
+        let b = b.time_range.unwrap();
+        a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1))
+    });
+    let mut parts_in_range = PartsInTimeRange::default();
+    let mut exclusive_parts = Vec::new();
+    for part in parts {
+        if parts_in_range.parts.is_empty() {
+            parts_in_range.time_range = part.time_range;
+            parts_in_range.parts.push(part);
+            continue;
+        }
+
+        if parts_in_range.overlaps(&part) {
+            parts_in_range.merge(part);
+        } else {
+            exclusive_parts.push(parts_in_range);
+            let part_range = part.time_range;
+            parts_in_range = PartsInTimeRange {
+                parts: vec![part],
+                time_range: part_range,
+            };
+        }
+    }
+
+    // TODO(yingwen): split/merge parts according to parallelsim
+
+    exclusive_parts
 }
