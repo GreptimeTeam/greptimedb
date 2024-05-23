@@ -313,18 +313,22 @@ fn get_window_start(
         start_time + (ts - start_time) / window_size * window_size
     } else {
         start_time + (ts - start_time) / window_size * window_size
-            - (start_time - ts) % window_size * window_size
+            - if ((start_time - ts) % window_size) != 0 {
+                window_size
+            } else {
+                0
+            }
     }
 }
 
 #[test]
 fn test_get_window_start() {
-    assert_eq!(get_window_start(1, 2, None), 0);
-    assert_eq!(get_window_start(2, 2, None), 2);
-    assert_eq!(get_window_start(0, 2, None), 0);
+    assert_eq!(get_window_start(1, 3, None), 0);
+    assert_eq!(get_window_start(3, 3, None), 3);
+    assert_eq!(get_window_start(0, 3, None), 0);
 
-    assert_eq!(get_window_start(-1, 2, None), -2);
-    assert_eq!(get_window_start(-2, 2, None), -2);
+    assert_eq!(get_window_start(-1, 3, None), -3);
+    assert_eq!(get_window_start(-3, 3, None), -3);
 }
 
 fn get_ts_as_millisecond(arg: Value) -> Result<repr::Timestamp, EvalError> {
