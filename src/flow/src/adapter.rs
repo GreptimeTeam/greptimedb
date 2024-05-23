@@ -521,18 +521,19 @@ impl FlownodeManager {
                 worker.lock().await.run_available(now).await.unwrap();
             }
             // first check how many inputs were sent
-            let send_cnt = match self.node_context.lock().await.flush_all_sender() {
-                Ok(cnt) => cnt,
+            match self.node_context.lock().await.flush_all_sender() {
+                Ok(_) => (),
                 Err(err) => {
                     common_telemetry::error!("Flush send buf errors: {:?}", err);
                     break;
                 }
             };
-            // if no inputs
-            if send_cnt == 0 {
+            // if no thing in send buf then break
+            let buf_len = self.node_context.lock().await.get_send_buf_size();
+            if buf_len == 0 {
                 break;
             } else {
-                debug!("FlownodeManager::run_available: send_cnt={}", send_cnt);
+                debug!("Send buf len = {}", buf_len);
             }
         }
 
