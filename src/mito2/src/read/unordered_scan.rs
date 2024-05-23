@@ -275,7 +275,7 @@ struct Metrics {
 
 /// Builds [ScanPart]s without preserving order.
 #[derive(Default)]
-pub(crate) struct UnorderedPartBuilder {
+struct UnorderedPartBuilder {
     parallelism: usize,
     file_ranges: Vec<FileRange>,
 }
