@@ -39,6 +39,8 @@ mod tests {
 
     use super::*;
     pub use crate::logstore::entry::Id;
+    use crate::logstore::entry::RawEntry;
+    use crate::storage::RegionId;
 
     pub struct SimpleEntry {
         /// Binary data of current entry
@@ -64,7 +66,13 @@ mod tests {
     }
 
     impl Entry for SimpleEntry {
-        type Error = Error;
+        fn into_raw_entry(self) -> RawEntry {
+            RawEntry {
+                region_id: RegionId::from_u64(0),
+                entry_id: 0,
+                data: vec![],
+            }
+        }
 
         fn data(&self) -> &[u8] {
             &self.data
@@ -72,6 +80,10 @@ mod tests {
 
         fn id(&self) -> Id {
             0u64
+        }
+
+        fn region_id(&self) -> RegionId {
+            RegionId::from_u64(0)
         }
 
         fn estimated_size(&self) -> usize {

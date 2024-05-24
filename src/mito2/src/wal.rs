@@ -14,6 +14,13 @@
 
 //! Write ahead log of the engine.
 
+/// TODO(weny): remove it
+#[allow(unused)]
+pub(crate) mod raw_entry_reader;
+/// TODO(weny): remove it
+#[allow(unused)]
+pub(crate) mod wal_entry_reader;
+
 use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
