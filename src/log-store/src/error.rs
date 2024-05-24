@@ -21,12 +21,18 @@ use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
-use crate::kafka::NamespaceImpl as KafkaNamespace;
-
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Invalid namespace type, expected: {}, actual: {}", expected, actual))]
+    UnexpectedNamespaceType {
+        #[snafu(implicit)]
+        location: Location,
+        expected: String,
+        actual: String,
+    },
+
     #[snafu(display("Failed to start log store gc task"))]
     StartGcTask {
         #[snafu(implicit)]
@@ -186,18 +192,18 @@ pub enum Error {
         error: rskafka::client::producer::Error,
     },
 
-    #[snafu(display("Failed to read a record from Kafka, ns: {}", ns))]
+    #[snafu(display("Failed to read a record from Kafka, topic: {}", topic))]
     ConsumeRecord {
-        ns: KafkaNamespace,
+        topic: String,
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to get the latest offset, ns: {}", ns))]
+    #[snafu(display("Failed to get the latest offset, topic: {}", topic))]
     GetOffset {
-        ns: KafkaNamespace,
+        topic: String,
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]

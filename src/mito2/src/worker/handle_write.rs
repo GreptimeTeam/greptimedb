@@ -162,7 +162,7 @@ impl<S> RegionWorkerLoop<S> {
                 let region_ctx = RegionWriteCtx::new(
                     region.region_id,
                     &region.version_control,
-                    region.wal_options.clone(),
+                    region.log_store_namespace.clone(),
                 );
 
                 e.insert(region_ctx);

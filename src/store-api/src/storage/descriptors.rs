@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::ops::Deref;
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,14 @@ pub const MAX_REGION_SEQ: u32 = REGION_SEQ_MASK;
 /// ```
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RegionId(u64);
+
+impl Deref for RegionId {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 impl RegionId {
     /// Construct a new [RegionId] from table id and region number.

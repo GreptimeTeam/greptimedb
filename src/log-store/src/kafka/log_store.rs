@@ -17,17 +17,20 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use common_wal::options::WalOptions;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
-use store_api::logstore::namespace::Id as NamespaceId;
+use store_api::logstore::namespace::{KafkaNamespace, LogStoreNamespace};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
+use store_api::storage::RegionId;
 
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
+use crate::error::{
+    ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result,
+    UnexpectedNamespaceTypeSnafu,
+};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
@@ -56,14 +59,30 @@ impl KafkaLogStore {
 impl LogStore for KafkaLogStore {
     type Error = Error;
     type Entry = EntryImpl;
-    type Namespace = NamespaceImpl;
 
     /// Creates an entry of the associated Entry type.
-    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry {
+    fn entry(
+        &self,
+        data: &mut Vec<u8>,
+        entry_id: EntryId,
+        region_id: RegionId,
+        ns: &LogStoreNamespace,
+    ) -> Self::Entry {
+        let ns = ns
+            .as_kafka_namespace()
+            .with_context(|| UnexpectedNamespaceTypeSnafu {
+                expected: KafkaNamespace::type_name(),
+                actual: ns.type_name(),
+            })
+            .unwrap();
+
         EntryImpl {
             data: std::mem::take(data),
             id: entry_id,
-            ns,
+            ns: NamespaceImpl {
+                region_id: region_id.as_u64(),
+                topic: ns.topic.to_string(),
+            },
         }
     }
 
@@ -126,9 +145,16 @@ impl LogStore for KafkaLogStore {
     /// starting from `entry_id`. The generated entries will be filtered by the namespace.
     async fn read(
         &self,
-        ns: &Self::Namespace,
+        ns: &LogStoreNamespace,
         entry_id: EntryId,
-    ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
+    ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>> {
+        let ns = ns
+            .as_kafka_namespace()
+            .with_context(|| UnexpectedNamespaceTypeSnafu {
+                expected: KafkaNamespace::type_name(),
+                actual: ns.type_name(),
+            })?;
+
         metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
 
@@ -147,7 +173,7 @@ impl LogStore for KafkaLogStore {
         let end_offset = client
             .get_offset(OffsetAt::Latest)
             .await
-            .context(GetOffsetSnafu { ns: ns.clone() })?
+            .context(GetOffsetSnafu { topic: &ns.topic })?
             - 1;
         // Reads entries with offsets in the range [start_offset, end_offset].
         let start_offset = Offset::try_from(entry_id)?.0;
@@ -179,24 +205,23 @@ impl LogStore for KafkaLogStore {
 
         // Key: entry id, Value: the records associated with the entry.
         let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
-        let ns_clone = ns.clone();
+        // TODO(weny): avoid cloning
+        let topic = ns.topic.to_string();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
                 // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
                 // The high watermark offset is the offset of the last record plus one.
                 let (record_and_offset, high_watermark) =
-                    consume_result.with_context(|_| ConsumeRecordSnafu {
-                        ns: ns_clone.clone(),
-                    })?;
+                    consume_result.context(ConsumeRecordSnafu { topic: &topic })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
 
                 metrics::METRIC_KAFKA_READ_RECORD_BYTES_TOTAL
                     .inc_by(kafka_record.approximate_size() as u64);
 
                 debug!(
-                    "Read a record at offset {} for ns {}, high watermark: {}",
-                    offset, ns_clone, high_watermark
+                    "Read a record at offset {} for topic {}, high watermark: {}",
+                    offset, topic, high_watermark
                 );
 
                 // Ignores no-op records.
@@ -207,15 +232,7 @@ impl LogStore for KafkaLogStore {
                     continue;
                 }
 
-                // Filters records by namespace.
                 let record = Record::try_from(kafka_record)?;
-                if record.meta.ns != ns_clone {
-                    if check_termination(offset, end_offset, &entry_records)? {
-                        break;
-                    }
-                    continue;
-                }
-
                 // Tries to construct an entry from records consumed so far.
                 if let Some(mut entry) = maybe_emit_entry(record, &mut entry_records)? {
                     // We don't rely on the EntryId generated by mito2.
@@ -233,39 +250,25 @@ impl LogStore for KafkaLogStore {
         Ok(Box::pin(stream))
     }
 
-    /// Creates a namespace of the associated Namespace type.
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
-        // Safety: upon start, the datanode checks the consistency of the wal providers in the wal config of the
-        // datanode and that of the metasrv. Therefore, the wal options passed into the kafka log store
-        // must be of type WalOptions::Kafka.
-        let WalOptions::Kafka(kafka_options) = wal_options else {
-            unreachable!()
-        };
-        NamespaceImpl {
-            region_id: ns_id,
-            topic: kafka_options.topic.clone(),
-        }
-    }
-
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
+    async fn create_namespace(&self, _ns: &LogStoreNamespace) -> Result<()> {
         Ok(())
     }
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&self, _ns: &LogStoreNamespace) -> Result<()> {
         Ok(())
     }
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
+    async fn list_namespaces(&self) -> Result<Vec<LogStoreNamespace>> {
         Ok(vec![])
     }
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _ns: Self::Namespace, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(&self, _ns: &LogStoreNamespace, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }
 
@@ -308,7 +311,7 @@ mod tests {
 
     // Stores test context for a region.
     struct RegionContext {
-        ns: NamespaceImpl,
+        ns: LogStoreNamespace,
         entry_builder: EntryBuilder,
         expected: Vec<EntryImpl>,
         flushed_entry_id: EntryId,
@@ -422,7 +425,7 @@ mod tests {
                 (
                     i as u64,
                     RegionContext {
-                        ns,
+                        ns: LogStoreNamespace::kafka_namespace(topic.to_string()),
                         entry_builder,
                         expected: Vec::new(),
                         flushed_entry_id: 0,

@@ -21,6 +21,7 @@ use futures::stream::BoxStream;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::entry::{Entry, RawEntry};
+use store_api::logstore::namespace::{KafkaNamespace, LogStoreNamespace, RaftEngineNamespace};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio_stream::StreamExt;
@@ -31,35 +32,9 @@ use crate::wal::EntryId;
 /// A stream that yields [RawEntry].
 pub type RawEntryStream<'a> = BoxStream<'a, Result<RawEntry>>;
 
-// The namespace of kafka log store
-pub struct KafkaNamespace<'a> {
-    topic: &'a str,
-}
-
-// The namespace of raft engine log store
-pub struct RaftEngineNamespace {
-    region_id: RegionId,
-}
-
-impl RaftEngineNamespace {
-    pub fn new(region_id: RegionId) -> Self {
-        Self { region_id }
-    }
-}
-
-/// The namespace of [RawEntryReader].
-pub(crate) enum LogStoreNamespace<'a> {
-    RaftEngine(RaftEngineNamespace),
-    Kafka(KafkaNamespace<'a>),
-}
-
 /// [RawEntryReader] provides the ability to read [RawEntry] from the underlying [LogStore].
 pub(crate) trait RawEntryReader: Send + Sync {
-    fn read<'a>(
-        &'a self,
-        ctx: LogStoreNamespace<'a>,
-        start_id: EntryId,
-    ) -> Result<RawEntryStream<'a>>;
+    fn read(&self, ns: &LogStoreNamespace, start_id: EntryId) -> Result<RawEntryStream<'static>>;
 }
 
 /// Implement the [RawEntryReader] for the [LogStore].
@@ -72,14 +47,17 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
         Self { store }
     }
 
-    fn read_region(&self, ns: RaftEngineNamespace, start_id: EntryId) -> Result<RawEntryStream> {
-        let region_id = ns.region_id;
+    fn read_region(
+        &self,
+        ns: RaftEngineNamespace,
+        start_id: EntryId,
+    ) -> Result<RawEntryStream<'static>> {
+        let region_id = RegionId::from_u64(ns.id);
+        let store = self.store.clone();
+
         let stream = try_stream!({
-            // TODO(weny): refactor the `namespace` method.
-            let namespace = self.store.namespace(region_id.into(), &Default::default());
-            let mut stream = self
-                .store
-                .read(&namespace, start_id)
+            let mut stream = store
+                .read(&LogStoreNamespace::RaftEngine(ns), start_id)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ReadWalSnafu { region_id })?;
@@ -98,32 +76,22 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
         Ok(Box::pin(stream))
     }
 
-    fn read_topic<'a>(
-        &'a self,
-        ns: KafkaNamespace<'a>,
+    fn read_topic(
+        &self,
+        ns: Arc<KafkaNamespace>,
         start_id: EntryId,
-    ) -> Result<RawEntryStream> {
-        let topic = ns.topic;
+    ) -> Result<RawEntryStream<'static>> {
+        let store = self.store.clone();
         let stream = try_stream!({
-            // TODO(weny): refactor the `namespace` method.
-            let namespace = self.store.namespace(
-                RegionId::from_u64(0).into(),
-                &WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.to_string(),
-                }),
-            );
-
-            let mut stream = self
-                .store
-                .read(&namespace, start_id)
+            let mut stream = store
+                .read(&LogStoreNamespace::Kafka(ns.clone()), start_id)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ReadKafkaWalSnafu { topic })?;
-
+                .context(error::ReadKafkaWalSnafu { topic: &ns.topic })?;
             while let Some(entries) = stream.next().await {
                 let entries = entries
                     .map_err(BoxedError::new)
-                    .context(error::ReadKafkaWalSnafu { topic })?;
+                    .context(error::ReadKafkaWalSnafu { topic: &ns.topic })?;
 
                 for entry in entries {
                     yield entry.into_raw_entry()
@@ -136,14 +104,10 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
 }
 
 impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
-    fn read<'a>(
-        &'a self,
-        ctx: LogStoreNamespace<'a>,
-        start_id: EntryId,
-    ) -> Result<RawEntryStream<'a>> {
+    fn read(&self, ctx: &LogStoreNamespace, start_id: EntryId) -> Result<RawEntryStream<'static>> {
         let stream = match ctx {
-            LogStoreNamespace::RaftEngine(ns) => self.read_region(ns, start_id)?,
-            LogStoreNamespace::Kafka(ns) => self.read_topic(ns, start_id)?,
+            LogStoreNamespace::RaftEngine(ns) => self.read_region(*ns, start_id)?,
+            LogStoreNamespace::Kafka(ns) => self.read_topic(ns.clone(), start_id)?,
         };
 
         Ok(Box::pin(stream))
@@ -153,7 +117,7 @@ impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
 /// A filter implement the [RawEntryReader]
 pub struct RawEntryReaderFilter<R, F> {
     reader: R,
-    filter: F,
+    filter: Arc<F>,
 }
 
 impl<R, F> RawEntryReaderFilter<R, F>
@@ -162,22 +126,22 @@ where
     F: Fn(&RawEntry) -> bool + Sync + Send,
 {
     pub fn new(reader: R, filter: F) -> Self {
-        Self { reader, filter }
+        Self {
+            reader,
+            filter: Arc::new(filter),
+        }
     }
 }
 
 impl<R, F> RawEntryReader for RawEntryReaderFilter<R, F>
 where
     R: RawEntryReader,
-    F: Fn(&RawEntry) -> bool + Sync + Send,
+    F: Fn(&RawEntry) -> bool + Sync + Send + 'static,
 {
-    fn read<'a>(
-        &'a self,
-        ctx: LogStoreNamespace<'a>,
-        start_id: EntryId,
-    ) -> Result<RawEntryStream<'a>> {
+    fn read(&self, ctx: &LogStoreNamespace, start_id: EntryId) -> Result<RawEntryStream<'static>> {
         let mut stream = self.reader.read(ctx, start_id)?;
-        let filter = &(self.filter);
+        let filter = self.filter.clone();
+
         let stream = try_stream!({
             while let Some(entry) = stream.next().await {
                 let entry = entry?;
@@ -226,7 +190,6 @@ mod tests {
     impl LogStore for MockLogStore {
         type Entry = RawEntry;
         type Error = error::Error;
-        type Namespace = MockNamespace;
 
         async fn stop(&self) -> Result<(), Self::Error> {
             unreachable!()
@@ -245,38 +208,40 @@ mod tests {
 
         async fn read(
             &self,
-            ns: &Self::Namespace,
+            ns: &LogStoreNamespace,
             id: EntryId,
-        ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error> {
+        ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>, Self::Error> {
             Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
         }
 
-        async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+        async fn create_namespace(&self, ns: &LogStoreNamespace) -> Result<(), Self::Error> {
             unreachable!()
         }
 
-        async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+        async fn delete_namespace(&self, ns: &LogStoreNamespace) -> Result<(), Self::Error> {
             unreachable!()
         }
 
-        async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error> {
+        async fn list_namespaces(&self) -> Result<Vec<LogStoreNamespace>, Self::Error> {
             unreachable!()
         }
 
         async fn obsolete(
             &self,
-            ns: Self::Namespace,
+            ns: &LogStoreNamespace,
             entry_id: EntryId,
         ) -> Result<(), Self::Error> {
             unreachable!()
         }
 
-        fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry {
+        fn entry(
+            &self,
+            data: &mut Vec<u8>,
+            entry_id: EntryId,
+            region_id: RegionId,
+            ns: &LogStoreNamespace,
+        ) -> Self::Entry {
             unreachable!()
-        }
-
-        fn namespace(&self, _ns_id: NamespaceId, _wal_options: &WalOptions) -> Self::Namespace {
-            MockNamespace
         }
     }
 
@@ -294,7 +259,7 @@ mod tests {
         let reader = LogStoreRawEntryReader::new(Arc::new(store));
         let entries = reader
             .read(
-                LogStoreNamespace::RaftEngine(RaftEngineNamespace::new(RegionId::new(1024, 1))),
+                &LogStoreNamespace::raft_engine_namespace(RegionId::new(1024, 1).as_u64()),
                 0,
             )
             .unwrap()
@@ -329,12 +294,12 @@ mod tests {
 
         let expected_region_id = RegionId::new(1024, 3);
         let reader =
-            RawEntryReaderFilter::new(LogStoreRawEntryReader::new(Arc::new(store)), |entry| {
+            RawEntryReaderFilter::new(LogStoreRawEntryReader::new(Arc::new(store)), move |entry| {
                 entry.region_id == expected_region_id
             });
         let entries = reader
             .read(
-                LogStoreNamespace::RaftEngine(RaftEngineNamespace::new(RegionId::new(1024, 1))),
+                &LogStoreNamespace::raft_engine_namespace(RegionId::new(1024, 1).as_u64()),
                 0,
             )
             .unwrap()

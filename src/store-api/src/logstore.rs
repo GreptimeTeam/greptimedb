@@ -17,13 +17,13 @@
 use std::collections::HashMap;
 
 use common_error::ext::ErrorExt;
-use common_wal::options::WalOptions;
 
 use crate::logstore::entry::Entry;
 pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::entry_stream::SendableEntryStream;
 pub use crate::logstore::namespace::Id as NamespaceId;
-use crate::logstore::namespace::Namespace;
+use crate::logstore::namespace::LogStoreNamespace;
+use crate::storage::RegionId;
 
 pub mod entry;
 pub mod entry_stream;
@@ -33,7 +33,6 @@ pub mod namespace;
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync + 'static;
-    type Namespace: Namespace;
     type Entry: Entry;
 
     /// Stops components of the logstore.
@@ -53,29 +52,32 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// starting from `id`.
     async fn read(
         &self,
-        ns: &Self::Namespace,
+        ns: &LogStoreNamespace,
         id: EntryId,
-    ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
+    ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>, Self::Error>;
 
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
+    async fn create_namespace(&self, ns: &LogStoreNamespace) -> Result<(), Self::Error>;
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
+    async fn delete_namespace(&self, ns: &LogStoreNamespace) -> Result<(), Self::Error>;
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
+    async fn list_namespaces(&self) -> Result<Vec<LogStoreNamespace>, Self::Error>;
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
+    async fn obsolete(&self, ns: &LogStoreNamespace, entry_id: EntryId) -> Result<(), Self::Error>;
 
     /// Makes an entry instance of the associated Entry type
-    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry;
-
-    /// Makes a namespace instance of the associated Namespace type
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
+    fn entry(
+        &self,
+        data: &mut Vec<u8>,
+        entry_id: EntryId,
+        region_id: RegionId,
+        ns: &LogStoreNamespace,
+    ) -> Self::Entry;
 }
 
 /// The response of an `append` operation.

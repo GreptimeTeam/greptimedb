@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info, warn};
-use common_wal::options::WalOptions;
 use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
+use store_api::logstore::namespace::LogStoreNamespace;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
@@ -98,8 +98,8 @@ pub(crate) struct MitoRegion {
     pub(crate) manifest_ctx: ManifestContextRef,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
-    /// Wal options of this region.
-    pub(crate) wal_options: WalOptions,
+    /// The namespace of log store.
+    pub(crate) log_store_namespace: LogStoreNamespace,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
     /// Provider to get current time.
