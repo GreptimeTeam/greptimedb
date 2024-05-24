@@ -148,8 +148,8 @@ impl Flownode for FlownodeManager {
 
             let rows: Vec<DiffRow> = rows_proto
                 .into_iter()
-                .map(repr::Row::from)
                 .map(|r| {
+                    let r = repr::Row::from(r);
                     let reordered = fetch_order
                         .iter()
                         .map(|&i| r.inner[i].clone())

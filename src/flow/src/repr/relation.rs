@@ -263,8 +263,17 @@ impl RelationType {
         true
     }
 
+    /// Return relation describe with column names
     pub fn into_named(self, names: Vec<ColumnName>) -> RelationDesc {
         RelationDesc { typ: self, names }
+    }
+
+    /// Return relation describe without column names
+    pub fn into_unnamed(self) -> RelationDesc {
+        RelationDesc {
+            typ: self,
+            names: vec![],
+        }
     }
 }
 

@@ -303,7 +303,7 @@ impl FlownodeContext {
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
             .unwrap();
-        self.schema.insert(gid, schema.into_named(vec![]));
+        self.schema.insert(gid, schema.into_unnamed());
         Ok(())
     }
 

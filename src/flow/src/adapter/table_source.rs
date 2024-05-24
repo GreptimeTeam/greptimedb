@@ -122,17 +122,17 @@ impl TableSource {
         ];
 
         let raw_schema = table_info_value.table_info.meta.schema;
-        let (col_names, column_types): (Vec<_>, Vec<_>) = raw_schema
+        let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
             .column_schemas
             .clone()
             .into_iter()
             .map(|col| {
                 (
-                    col.name.clone(),
                     ColumnType {
                         nullable: col.is_nullable(),
                         scalar_type: col.data_type,
                     },
+                    col.name,
                 )
             })
             .unzip();

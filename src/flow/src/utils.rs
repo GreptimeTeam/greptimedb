@@ -101,7 +101,14 @@ impl KeyExpiryManager {
             .or_default()
             .insert(row.clone());
 
-        self.get_expire_duration(now, row)
+        if let Some(expire_time) = self.compute_expiration_timestamp(now) {
+            if expire_time > event_ts {
+                // return how much time it's expired
+                return Ok(Some(expire_time - event_ts));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get the expire duration of a key, if it's expired by now.
