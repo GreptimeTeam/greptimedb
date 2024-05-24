@@ -15,13 +15,14 @@
 //! code originally from <https://github.com/apache/incubator-opendal/blob/main/core/src/layers/prometheus.rs>, make a tiny change to avoid crash in multi thread env
 
 use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::io;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_telemetry::debug;
-use futures::FutureExt;
+use futures::{FutureExt, TryFutureExt};
 use lazy_static::lazy_static;
 use opendal::raw::*;
 use opendal::{Buffer, ErrorKind};
@@ -461,75 +462,19 @@ impl<R> PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
-    fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize>> {
-        self.inner.poll_read(cx, buf).map(|res| match res {
-            Ok(bytes) => {
-                self.bytes += bytes as u64;
-                Ok(bytes)
-            }
-            Err(e) => {
-                increment_errors_total(self.op, e.kind());
-                Err(e)
-            }
-        })
-    }
-
-    fn poll_seek(&mut self, cx: &mut Context<'_>, pos: io::SeekFrom) -> Poll<Result<u64>> {
-        self.inner.poll_seek(cx, pos).map(|res| match res {
-            Ok(n) => Ok(n),
-            Err(e) => {
-                increment_errors_total(self.op, e.kind());
-                Err(e)
-            }
-        })
-    }
-
-    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes>>> {
-        self.inner.poll_next(cx).map(|res| match res {
-            Some(Ok(bytes)) => {
-                self.bytes += bytes.len() as u64;
-                Some(Ok(bytes))
-            }
-            Some(Err(e)) => {
-                increment_errors_total(self.op, e.kind());
-                Some(Err(e))
-            }
-            None => None,
+    async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
+        self.inner.read_at(offset, limit).await.map_err(|err| {
+            increment_errors_total(self.op, err.kind());
+            err
         })
     }
 }
 
 impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.inner
-            .read(buf)
-            .map(|n| {
-                self.bytes += n as u64;
-                n
-            })
-            .map_err(|e| {
-                increment_errors_total(self.op, e.kind());
-                e
-            })
-    }
-
-    fn seek(&mut self, pos: io::SeekFrom) -> Result<u64> {
-        self.inner.seek(pos).map_err(|err| {
+    fn read_at(&self, offset: u64, limit: usize) -> opendal::Result<Buffer> {
+        self.inner.read_at(offset, limit).map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
-        })
-    }
-
-    fn next(&mut self) -> Option<Result<Bytes>> {
-        self.inner.next().map(|res| match res {
-            Ok(bytes) => {
-                self.bytes += bytes.len() as u64;
-                Ok(bytes)
-            }
-            Err(e) => {
-                increment_errors_total(self.op, e.kind());
-                Err(e)
-            }
         })
     }
 }

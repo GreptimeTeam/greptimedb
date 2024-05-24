@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opendal::raw::oio::Read;
-use opendal::raw::{Access, Accessor, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite};
+use opendal::raw::{
+    Access, Accessor, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList,
+    RpRead, RpWrite,
+};
 use opendal::Result;
 mod read_cache;
 use common_telemetry::info;
