@@ -15,10 +15,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opendal::raw::oio::{Read, ReadDyn};
+use opendal::raw::oio::ReadDyn;
 use opendal::raw::{
-    Access, Accessor, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList,
-    RpRead, RpWrite,
+    Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
+    RpWrite,
 };
 use opendal::Result;
 mod read_cache;
@@ -60,7 +60,7 @@ impl<C: Access + Clone> LruCacheLayer<C> {
 impl<I: Access, C: Access + Clone> Layer<I> for LruCacheLayer<C> {
     type LayeredAccess = LruCacheAccess<I, C>;
 
-    fn layer(&self, inner: I) -> Self::LayeredAccessor {
+    fn layer(&self, inner: I) -> Self::LayeredAccess {
         LruCacheAccess {
             inner,
             read_cache: self.read_cache.clone(),

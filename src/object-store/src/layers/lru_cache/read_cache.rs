@@ -18,8 +18,8 @@ use common_telemetry::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{List, Read, Reader, Write};
-use opendal::raw::{Access, Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
+use opendal::raw::oio::{List, Read, ReadDyn, Reader, Write};
+use opendal::raw::{Access, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, Result};
 
 use crate::metrics::{
@@ -173,7 +173,7 @@ impl<C: Access + Clone> ReadCache<C> {
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Arc<dyn Read>)>
+    ) -> Result<(RpRead, Arc<dyn ReadDyn>)>
     where
         I: Access,
     {

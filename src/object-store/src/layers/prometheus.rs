@@ -15,14 +15,9 @@
 //! code originally from <https://github.com/apache/incubator-opendal/blob/main/core/src/layers/prometheus.rs>, make a tiny change to avoid crash in multi thread env
 
 use std::fmt::{Debug, Formatter};
-use std::future::Future;
-use std::io;
-use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use common_telemetry::debug;
-use futures::{FutureExt, TryFutureExt};
 use lazy_static::lazy_static;
 use opendal::raw::*;
 use opendal::{Buffer, ErrorKind};
@@ -91,13 +86,13 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
 pub struct PrometheusMetricsLayer;
 
 impl<A: Access> Layer<A> for PrometheusMetricsLayer {
-    type LayeredAccess = PrometheusAccessor<A>;
+    type LayeredAccess = PrometheusAccess<A>;
 
-    fn layer(&self, inner: A) -> Self::LayeredAccessor {
+    fn layer(&self, inner: A) -> Self::LayeredAccess {
         let meta = inner.info();
         let scheme = meta.scheme();
 
-        PrometheusAccessor {
+        PrometheusAccess {
             inner,
             scheme: scheme.to_string(),
         }
@@ -105,12 +100,12 @@ impl<A: Access> Layer<A> for PrometheusMetricsLayer {
 }
 
 #[derive(Clone)]
-pub struct PrometheusAccessor<A: Access> {
+pub struct PrometheusAccess<A: Access> {
     inner: A,
     scheme: String,
 }
 
-impl<A: Access> Debug for PrometheusAccessor<A> {
+impl<A: Access> Debug for PrometheusAccess<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrometheusAccessor")
             .field("inner", &self.inner)
@@ -119,7 +114,7 @@ impl<A: Access> Debug for PrometheusAccessor<A> {
 }
 
 #[async_trait]
-impl<A: Access> LayeredAccess for PrometheusAccessor<A> {
+impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     type Inner = A;
     type Reader = PrometheusMetricWrapper<A::Reader>;
     type BlockingReader = PrometheusMetricWrapper<A::BlockingReader>;
@@ -190,27 +185,21 @@ impl<A: Access> LayeredAccess for PrometheusAccessor<A> {
             .with_label_values(&[&self.scheme, Operation::Write.into_static()])
             .start_timer();
 
-        self.inner
-            .write(path, args)
-            .map(|v| {
-                v.map(|(rp, r)| {
-                    (
-                        rp,
-                        PrometheusMetricWrapper::new(
-                            r,
-                            Operation::Write,
-                            BYTES_TOTAL
-                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
-                            timer,
-                        ),
-                    )
-                })
-            })
-            .await
-            .map_err(|e| {
-                increment_errors_total(Operation::Write, e.kind());
-                e
-            })
+        let (rp, r) = self.inner.write(path, args).await.map_err(|e| {
+            increment_errors_total(Operation::Write, e.kind());
+            e
+        })?;
+
+        Ok((
+            rp,
+            PrometheusMetricWrapper::new(
+                r,
+                Operation::Write,
+                BYTES_TOTAL
+                    .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                timer,
+            ),
+        ))
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
