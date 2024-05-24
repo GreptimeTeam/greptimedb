@@ -12,16 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::ErrorExt;
+use crate::storage::RegionId;
 
 /// An entry's id.
 /// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
 
+/// The raw Wal entry.
+pub struct RawEntry {
+    pub region_id: RegionId,
+    pub entry_id: Id,
+    pub data: Vec<u8>,
+}
+
 /// Entry is the minimal data storage unit through which users interact with the log store.
 /// The log store implementation may have larger or smaller data storage unit than an entry.
 pub trait Entry: Send + Sync {
-    type Error: ErrorExt + Send + Sync;
+    /// Consumes [Entry] and converts to [RawEntry].
+    fn into_raw_entry(self) -> RawEntry;
 
     /// Returns the contained data of the entry.
     fn data(&self) -> &[u8];
@@ -29,6 +37,9 @@ pub trait Entry: Send + Sync {
     /// Returns the id of the entry.
     /// Usually the namespace id is identical with the region id.
     fn id(&self) -> Id;
+
+    /// Returns the [RegionId]
+    fn region_id(&self) -> RegionId;
 
     /// Computes the estimated encoded size.
     fn estimated_size(&self) -> usize;
