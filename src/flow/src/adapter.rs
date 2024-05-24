@@ -42,7 +42,6 @@ use tokio::sync::{oneshot, watch, Mutex, RwLock};
 
 use crate::adapter::error::{ExternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::parse_expr::parse_fixed;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
@@ -574,7 +573,7 @@ impl FlownodeManager {
         sink_table_name: TableName,
         source_table_ids: &[TableId],
         create_if_not_exists: bool,
-        expire_after: Option<String>,
+        expire_after: Option<i64>,
         comment: Option<String>,
         sql: String,
         flow_options: HashMap<String, String>,
@@ -608,22 +607,6 @@ impl FlownodeManager {
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
         node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
 
-        let expire_after = expire_after
-            .and_then(|s| {
-                if s.is_empty() || s.split_whitespace().join("").is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
-            })
-            .map(|d| {
-                let d = d.as_ref();
-                parse_fixed(d)
-                    .map(|(_, n)| n)
-                    .map_err(|err| err.to_string())
-            })
-            .transpose()
-            .map_err(|err| UnexpectedSnafu { reason: err }.build())?;
         let _ = comment;
         let _ = flow_options;
 

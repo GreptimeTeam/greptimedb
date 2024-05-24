@@ -256,7 +256,8 @@ pub struct CreateFlow {
     /// Create if not exist
     pub if_not_exists: bool,
     /// `EXPIRE AFTER`
-    pub expire_after: Option<Expr>,
+    /// Duration in second as `i64`
+    pub expire_after: Option<i64>,
     /// Comment string
     pub comment: Option<String>,
     /// SQL statement

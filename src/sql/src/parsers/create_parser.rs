@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
+use datafusion_common::ScalarValue;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
@@ -25,11 +27,12 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 use table::requests::validate_table_option;
 
+use super::utils;
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidTableOptionSnafu,
-    InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu,
-    UnsupportedSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
+    InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu,
+    UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
@@ -239,7 +242,24 @@ impl<'a> ParserContext<'a> {
             .parser
             .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
-            Some(self.parser.parse_expr().context(error::SyntaxSnafu)?)
+            let expire_after_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+            let expire_after_lit = utils::parser_expr_to_scalar_value(expire_after_expr.clone())?
+                .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+                .ok()
+                .with_context(|| InvalidIntervalSnafu {
+                    reason: format!("cannot cast {} to interval type", expire_after_expr),
+                })?;
+            if let ScalarValue::IntervalMonthDayNano(Some(nanoseconds)) = expire_after_lit {
+                Some(
+                    i64::try_from(nanoseconds / 1_000_000_000)
+                        .ok()
+                        .with_context(|| InvalidIntervalSnafu {
+                            reason: format!("interval {} overflows", nanoseconds),
+                        })?,
+                )
+            } else {
+                unreachable!()
+            }
         } else {
             None
         };
@@ -877,7 +897,7 @@ mod tests {
     use common_catalog::consts::FILE_ENGINE;
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
-    use sqlparser::ast::{BinaryOperator, Expr, Interval, ObjectName, Value};
+    use sqlparser::ast::{BinaryOperator, Expr, ObjectName, Value};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -1103,7 +1123,7 @@ mod tests {
         let sql = r"
 CREATE OR REPLACE FLOW IF NOT EXISTS task_1
 SINK TO schema_1.table_1
-EXPIRE AFTER INTERVAL '5m'
+EXPIRE AFTER INTERVAL '5 minutes'
 COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
@@ -1133,13 +1153,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             ]),
             or_replace: true,
             if_not_exists: true,
-            expire_after: Some(Expr::Interval(Interval {
-                value: Box::new(Expr::Value(Value::SingleQuotedString("5m".to_string()))),
-                leading_field: None,
-                leading_precision: None,
-                last_field: None,
-                fractional_seconds_precision: None,
-            })),
+            expire_after: Some(300),
             comment: Some("test comment".to_string()),
             // ignore query parse result
             query: create_task.query.clone(),

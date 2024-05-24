@@ -19,7 +19,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, RenameTable, SemanticType, TableName,
+    DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -591,10 +591,7 @@ pub fn to_create_flow_task_expr(
         sink_table_name: Some(sink_table_name),
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
-        expire_after: create_flow
-            .expire_after
-            .map(|e| e.to_string())
-            .unwrap_or_default(),
+        expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
         flow_options: HashMap::new(),

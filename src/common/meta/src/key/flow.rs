@@ -328,7 +328,7 @@ mod tests {
             sink_table_name,
             flownode_ids,
             raw_sql: "raw".to_string(),
-            expire_after: "expr".to_string(),
+            expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
         }
@@ -420,7 +420,7 @@ mod tests {
             sink_table_name: another_sink_table_name,
             flownode_ids: [(0, 1u64)].into(),
             raw_sql: "raw".to_string(),
-            expire_after: "expr".to_string(),
+            expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
         };
