@@ -36,10 +36,11 @@ use crate::memtable::MemtableRef;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
-use crate::read::scan_region::{ScanInput, ScanPart, ScanPartBuilder};
-use crate::read::{BatchReader, BoxedBatchReader, Source};
+use crate::read::scan_region::{FileRangeCollector, ScanInput, ScanPart};
+use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -47,25 +48,43 @@ use crate::sst::parquet::file_range::FileRange;
 pub struct SeqScan {
     /// Input memtable and files.
     input: ScanInput,
-    /// Parts to scan.
-    parts: Vec<PartsInTimeRange>,
     /// Properties of the scanner.
     properties: ScannerProperties,
+    /// Parts to scan.
+    parts: Vec<PartsInTimeRange>,
+
+    // Metrics:
+    /// The start time of the query.
+    query_start: Instant,
+    /// Time elapsed before creating the scanner.
+    prepare_scan_cost: Duration,
+    /// Duration to build parts to scan.
+    build_parts_cost: Duration,
 }
 
 impl SeqScan {
     /// Creates a new [SeqScan].
-    #[must_use]
     pub(crate) async fn new(input: ScanInput) -> Result<SeqScan> {
-        let parts = input.build_parts(SeqPartBuilder::default()).await?;
-        let parts = group_parts(parts);
+        let build_start = Instant::now();
+        let query_start = input.query_start.unwrap_or(build_start);
+        let prepare_scan_cost = query_start.elapsed();
+        let mut distributor = SeqDistributor::default();
+        input.prune_file_ranges(&mut distributor).await?;
+        let parts = group_parts(distributor.build_parts(&input.memtables));
         let parts = maybe_split_parts(parts, input.parallelism.parallelism);
         let properties = ScannerProperties::new(ScannerPartitioning::Unknown(parts.len()));
+        let build_parts_cost = build_start.elapsed();
+
+        // Observes metrics.
+        ScannerMetrics::observe_metrics_on_create(&prepare_scan_cost, &build_parts_cost);
 
         Ok(SeqScan {
             input,
-            parts,
             properties,
+            parts,
+            query_start,
+            prepare_scan_cost,
+            build_parts_cost,
         })
     }
 
@@ -90,6 +109,12 @@ impl SeqScan {
             MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
         let mapper = self.input.mapper.clone();
         let cache_manager = self.input.cache_manager.clone();
+        let mut metrics = ScannerMetrics {
+            prepare_scan_cost: self.prepare_scan_cost,
+            build_parts_cost: self.build_parts_cost,
+            ..Default::default()
+        };
+        let query_start = self.query_start;
         let stream = try_stream! {
             let mut reader = builder
                 .build()
@@ -97,15 +122,31 @@ impl SeqScan {
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
             let cache = cache_manager.as_deref();
+            let mut fetch_start = Instant::now();
             while let Some(batch) = reader
                 .next_batch()
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?
             {
+                metrics.scan_cost += fetch_start.elapsed();
+                metrics.num_batches += 1;
+                metrics.num_rows += batch.num_rows();
+
+                let convert_start = Instant::now();
                 let record_batch = mapper.convert(&batch, cache)?;
+                metrics.convert_cost += convert_start.elapsed();
                 yield record_batch;
+
+                fetch_start = Instant::now();
             }
+            metrics.scan_cost += fetch_start.elapsed();
+            metrics.total_cost = query_start.elapsed();
+            metrics.observe_metrics_on_finish();
+            // reader metrics?
+            // debug!(
+            //     "Seq scan partition {} finished, region_id: {}, metrics: {:?}",
+            // );
         };
 
         Box::pin(RecordBatchStreamWrapper::new(
@@ -180,50 +221,19 @@ impl SeqScan {
         Ok(Box::new(reader))
     }
 
-    // /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
-    // async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
-    //     let sources = self.input.build_parallel_sources().await?;
-    //     let dedup = !self.input.append_mode;
-    //     let mut builder =
-    //         MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
-    //     let reader = builder.build().await?;
-    //     Ok(Box::new(reader))
-    // }
-
-    // /// Returns whether to use a parallel reader.
-    // fn use_parallel_reader(&self) -> bool {
-    //     self.input.parallelism.allow_parallel_scan()
-    //         && (self.input.files.len() + self.input.memtables.len()) > 1
-    // }
-
-    // /// Fetch a batch from the reader and convert it into a record batch.
-    // #[tracing::instrument(skip_all, level = "trace")]
-    // async fn fetch_record_batch(
-    //     reader: &mut dyn BatchReader,
-    //     mapper: &ProjectionMapper,
-    //     cache: Option<&CacheManager>,
-    //     metrics: &mut Metrics,
-    // ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
-    //     let start = Instant::now();
-
-    //     let Some(batch) = reader
-    //         .next_batch()
-    //         .await
-    //         .map_err(BoxedError::new)
-    //         .context(ExternalSnafu)?
-    //     else {
-    //         metrics.scan_cost += start.elapsed();
-
-    //         return Ok(None);
-    //     };
-
-    //     let convert_start = Instant::now();
-    //     let record_batch = mapper.convert(&batch, cache)?;
-    //     metrics.convert_cost += convert_start.elapsed();
-    //     metrics.scan_cost += start.elapsed();
-
-    //     Ok(Some(record_batch))
-    // }
+    fn observe_metrics_on_finish(metrics: &ScannerMetrics) {
+        READ_STAGE_ELAPSED
+            .with_label_values(&["convert_rb"])
+            .observe(metrics.convert_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan"])
+            .observe(metrics.scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["total"])
+            .observe(metrics.total_cost.as_secs_f64());
+        READ_ROWS_RETURN.observe(metrics.num_rows as f64);
+        READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
+    }
 }
 
 impl RegionScanner for SeqScan {
@@ -263,25 +273,6 @@ impl fmt::Debug for SeqScan {
     }
 }
 
-/// Metrics for [SeqScan].
-#[derive(Debug, Default)]
-struct Metrics {
-    /// Duration to prepare the scan task.
-    prepare_scan_cost: Duration,
-    /// Duration to build the reader.
-    build_reader_cost: Duration,
-    /// Duration to scan data.
-    scan_cost: Duration,
-    /// Duration to convert batches.
-    convert_cost: Duration,
-    /// Duration of the scan.
-    total_cost: Duration,
-    /// Number of batches returned.
-    num_batches: usize,
-    /// Number of rows returned.
-    num_rows: usize,
-}
-
 #[cfg(test)]
 impl SeqScan {
     /// Returns the input.
@@ -292,13 +283,11 @@ impl SeqScan {
 
 /// Builds [ScanPart]s that preserves order.
 #[derive(Default)]
-pub(crate) struct SeqPartBuilder {
+pub(crate) struct SeqDistributor {
     parts: Vec<ScanPart>,
 }
 
-impl ScanPartBuilder for SeqPartBuilder {
-    fn set_parallelism(&mut self, _parallelism: usize) {}
-
+impl FileRangeCollector for SeqDistributor {
     fn append_file_ranges(
         &mut self,
         file_meta: &FileMeta,
@@ -316,7 +305,9 @@ impl ScanPartBuilder for SeqPartBuilder {
         }
         self.parts.push(part);
     }
+}
 
+impl SeqDistributor {
     fn build_parts(mut self, memtables: &[MemtableRef]) -> Vec<ScanPart> {
         // Creates a part for each memtable.
         for mem in memtables {
@@ -387,7 +378,7 @@ impl PartsInTimeRange {
 
             let ranges = part.file_ranges.clone();
             let stream = try_stream! {
-                // TODO(yingwen): metrics.
+                let mut reader_metrics = ReaderMetrics::default();
                 for range in ranges {
                     let mut reader = range.reader().await?;
                     let compat_batch = range.compat_batch();
@@ -399,6 +390,7 @@ impl PartsInTimeRange {
 
                         yield batch;
                     }
+                    reader_metrics.merge_from(reader.metrics());
                 }
             };
             let stream = Box::pin(stream);

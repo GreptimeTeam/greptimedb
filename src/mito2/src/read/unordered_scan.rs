@@ -33,11 +33,11 @@ use tokio::sync::Mutex;
 use crate::cache::CacheManager;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
+use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{FileRangeCollector, ScanInput, ScanPart};
-use crate::read::Source;
+use crate::read::{ScannerMetrics, Source};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
@@ -104,7 +104,7 @@ impl UnorderedScan {
         mapper: &ProjectionMapper,
         cache: Option<&CacheManager>,
         compat_batch: Option<&CompatBatch>,
-        metrics: &mut Metrics,
+        metrics: &mut ScannerMetrics,
     ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
         let start = Instant::now();
 
@@ -133,20 +133,6 @@ impl UnorderedScan {
 
         Ok(Some(record_batch))
     }
-
-    fn observe_metrics_on_finish(metrics: &Metrics) {
-        READ_STAGE_ELAPSED
-            .with_label_values(&["convert_rb"])
-            .observe(metrics.convert_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["scan"])
-            .observe(metrics.scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["total"])
-            .observe(metrics.total_cost.as_secs_f64());
-        READ_ROWS_RETURN.observe(metrics.num_rows as f64);
-        READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
-    }
 }
 
 impl RegionScanner for UnorderedScan {
@@ -159,7 +145,7 @@ impl RegionScanner for UnorderedScan {
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        let mut metrics = Metrics {
+        let mut metrics = ScannerMetrics {
             prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
             ..Default::default()
         };
@@ -216,7 +202,7 @@ impl RegionScanner for UnorderedScan {
             }
 
             metrics.total_cost = query_start.elapsed();
-            Self::observe_metrics_on_finish(&metrics);
+            metrics.observe_metrics_on_finish();
             debug!(
                 "Unordered scan partition {} finished, region_id: {}, metrics: {:?}, reader_metrics: {:?}",
                 partition, mapper.metadata().region_id, metrics, reader_metrics
@@ -260,7 +246,11 @@ struct ScanPartList(Option<Vec<ScanPart>>);
 
 impl ScanPartList {
     /// Initializes parts if they are not built yet.
-    async fn maybe_init_parts(&mut self, input: &ScanInput, metrics: &mut Metrics) -> Result<()> {
+    async fn maybe_init_parts(
+        &mut self,
+        input: &ScanInput,
+        metrics: &mut ScannerMetrics,
+    ) -> Result<()> {
         if self.0.is_none() {
             let now = Instant::now();
             let mut distributor = UnorderedDistributor::default();
