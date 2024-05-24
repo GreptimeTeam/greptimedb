@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use opendal::raw::oio::ReadDyn;
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
@@ -74,7 +73,6 @@ pub struct LruCacheAccess<I, C: Clone> {
     read_cache: ReadCache<C>,
 }
 
-#[async_trait]
 impl<I: Access, C: Access + Clone> LayeredAccess for LruCacheAccess<I, C> {
     type Inner = I;
     type Reader = Arc<dyn ReadDyn>;

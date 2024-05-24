@@ -16,7 +16,6 @@
 
 use std::fmt::{Debug, Formatter};
 
-use async_trait::async_trait;
 use common_telemetry::debug;
 use lazy_static::lazy_static;
 use opendal::raw::*;
@@ -113,7 +112,6 @@ impl<A: Access> Debug for PrometheusAccess<A> {
     }
 }
 
-#[async_trait]
 impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     type Inner = A;
     type Reader = PrometheusMetricWrapper<A::Reader>;
