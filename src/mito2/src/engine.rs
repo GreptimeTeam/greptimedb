@@ -407,7 +407,6 @@ impl EngineInner {
         let cache_manager = self.workers.cache_manager();
         let scan_parallelism = ScanParallism {
             parallelism: self.config.scan_parallelism,
-            channel_size: self.config.parallel_scan_channel_size,
         };
 
         let scan_region = ScanRegion::new(

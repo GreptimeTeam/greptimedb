@@ -570,7 +570,7 @@ impl RowGroupReaderBuilder {
         &self.file_path
     }
 
-    /// Returns the file handle.
+    /// Handle of the file to read.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         &self.file_handle
     }

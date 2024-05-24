@@ -33,12 +33,10 @@ async fn scan_in_parallel(
     region_id: RegionId,
     region_dir: &str,
     parallelism: usize,
-    channel_size: usize,
 ) {
     let engine = env
         .open_engine(MitoConfig {
             scan_parallelism: parallelism,
-            parallel_scan_channel_size: channel_size,
             ..Default::default()
         })
         .await;
@@ -120,15 +118,13 @@ async fn test_parallel_scan() {
 
     engine.stop().await.unwrap();
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 0, 1).await;
+    scan_in_parallel(&mut env, region_id, &region_dir, 0).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 1, 1).await;
+    scan_in_parallel(&mut env, region_id, &region_dir, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 2, 1).await;
+    scan_in_parallel(&mut env, region_id, &region_dir, 2).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 2, 8).await;
+    scan_in_parallel(&mut env, region_id, &region_dir, 4).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 4, 8).await;
-
-    scan_in_parallel(&mut env, region_id, &region_dir, 8, 2).await;
+    scan_in_parallel(&mut env, region_id, &region_dir, 8).await;
 }
