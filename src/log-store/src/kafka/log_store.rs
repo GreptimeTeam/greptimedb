@@ -302,6 +302,7 @@ fn check_termination(
 #[cfg(test)]
 mod tests {
     use common_base::readable_size::ReadableSize;
+    use futures::TryStreamExt;
     use rand::seq::IteratorRandom;
 
     use super::*;
@@ -391,6 +392,7 @@ mod tests {
         aggregated.into_iter().flatten().collect()
     }
 
+    /// TODO(weny): Consider refactoring the code.
     /// Starts a test with:
     /// * `test_name` - The name of the test.
     /// * `num_topics` - Number of topics to be created in the preparation phase.
@@ -448,10 +450,12 @@ mod tests {
                     .await
                     .unwrap();
                 let mut got = stream
-                    .collect::<Vec<_>>()
+                    .try_collect::<Vec<_>>()
                     .await
+                    .unwrap()
                     .into_iter()
-                    .flat_map(|x| x.unwrap())
+                    .flatten()
+                    .filter(|entry| entry.region_id() == region_id)
                     .collect::<Vec<_>>();
                 //FIXME(weny): https://github.com/GreptimeTeam/greptimedb/issues/3152
                 ctx.expected.iter_mut().for_each(|entry| entry.id = 0);
