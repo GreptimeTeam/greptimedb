@@ -278,7 +278,7 @@ struct Metrics {
 }
 
 /// Builds [ScanPart]s without preserving order. It distributes file ranges and memtables
-/// accross partitions. Each partition scans a subset of memtables and file ranges. There
+/// across partitions. Each partition scans a subset of memtables and file ranges. There
 /// is no output ordering guarantee of each partition.
 #[derive(Default)]
 struct UnorderedDistributor {
@@ -296,7 +296,7 @@ impl FileRangeCollector for UnorderedDistributor {
 }
 
 impl UnorderedDistributor {
-    /// Distributes file ranges and memtables accross partitions according to the `parallelism`.
+    /// Distributes file ranges and memtables across partitions according to the `parallelism`.
     fn build_parts(self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
         if parallelism <= 1 {
             // Returns a single part.
