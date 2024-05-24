@@ -857,7 +857,7 @@ impl RowGroupReader {
         }
     }
 
-    /// Gets the metrics and consume the reader.
+    /// Gets the metrics.
     pub(crate) fn metrics(&self) -> &ReaderMetrics {
         &self.metrics
     }
