@@ -576,17 +576,11 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Builds and returns [ScanPart] to read.
-    pub(crate) async fn build_parts(
+    /// Prunes file ranges to scan and adds them tothe `collector`.
+    pub(crate) async fn prune_file_ranges(
         &self,
-        mut part_builder: impl ScanPartBuilder,
-    ) -> Result<Vec<ScanPart>> {
-        if !self.parallelism.allow_parallel_scan() {
-            part_builder.set_parallelism(1);
-        } else {
-            part_builder.set_parallelism(self.parallelism.parallelism);
-        }
-
+        collector: &mut impl FileRangeCollector,
+    ) -> Result<()> {
         for file in &self.files {
             let res = self
                 .access_layer
@@ -629,14 +623,12 @@ impl ScanInput {
                 .map(|(row_group_idx, row_selection)| {
                     FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection)
                 });
-            part_builder.append_file_ranges(file.meta_ref(), file_ranges);
+            collector.append_file_ranges(file.meta_ref(), file_ranges);
         }
 
         READ_SST_COUNT.observe(self.files.len() as f64);
 
-        let scan_parts = part_builder.build_parts(&self.memtables);
-
-        Ok(scan_parts)
+        Ok(())
     }
 
     /// Scans the input source in another task and sends batches to the sender.
@@ -710,20 +702,12 @@ impl fmt::Debug for ScanPart {
     }
 }
 
-/// Strategy to build [ScanPart] for parallel scan.
-pub(crate) trait ScanPartBuilder {
-    /// Sets the parallelism.
-    ///
-    /// Users must call this method before invoking other methods.
-    fn set_parallelism(&mut self, parallelism: usize);
-
-    /// Appends file ranges from the **same file** to the builder.
+/// A trait to collect file ranges to scan.
+pub(crate) trait FileRangeCollector {
+    /// Appends file ranges from the **same file** to the collector.
     fn append_file_ranges(
         &mut self,
         file_meta: &FileMeta,
         file_ranges: impl Iterator<Item = FileRange>,
     );
-
-    /// Builds a list of [ScanPart].
-    fn build_parts(self, memtables: &[MemtableRef]) -> Vec<ScanPart>;
 }

@@ -34,7 +34,7 @@ use crate::memtable::MemtableRef;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
-use crate::read::scan_region::{ScanInput, ScanPart, ScanPartBuilder};
+use crate::read::scan_region::{FileRangeCollector, ScanInput, ScanPart};
 use crate::read::Source;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
@@ -66,7 +66,11 @@ impl UnorderedScan {
         let build_start = Instant::now();
         let query_start = input.query_start.unwrap_or(build_start);
         let prepare_scan_cost = query_start.elapsed();
-        let parts = input.build_parts(UnorderedPartBuilder::default()).await?;
+        // Prunes file ranges.
+        let mut distributor = UnorderedDistributor::default();
+        input.prune_file_ranges(&mut distributor).await?;
+        // Builds parts to scan.
+        let parts = distributor.build_parts(&input.memtables, input.parallelism.parallelism);
         let build_parts_cost = build_start.elapsed();
 
         // Observes metrics.
@@ -273,18 +277,15 @@ struct Metrics {
     num_rows: usize,
 }
 
-/// Builds [ScanPart]s without preserving order.
+/// Builds [ScanPart]s without preserving order. It distributes file ranges and memtables
+/// accross partitions. Each partition scans a subset of memtables and file ranges. There
+/// is no output ordering guarantee of each partition.
 #[derive(Default)]
-struct UnorderedPartBuilder {
-    parallelism: usize,
+struct UnorderedDistributor {
     file_ranges: Vec<FileRange>,
 }
 
-impl ScanPartBuilder for UnorderedPartBuilder {
-    fn set_parallelism(&mut self, parallelism: usize) {
-        self.parallelism = parallelism;
-    }
-
+impl FileRangeCollector for UnorderedDistributor {
     fn append_file_ranges(
         &mut self,
         _file_meta: &FileMeta,
@@ -292,9 +293,12 @@ impl ScanPartBuilder for UnorderedPartBuilder {
     ) {
         self.file_ranges.extend(file_ranges);
     }
+}
 
-    fn build_parts(self, memtables: &[MemtableRef]) -> Vec<ScanPart> {
-        if self.parallelism <= 1 {
+impl UnorderedDistributor {
+    /// Distributes file ranges and memtables accross partitions according to the `parallelism`.
+    fn build_parts(self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
+        if parallelism <= 1 {
             // Returns a single part.
             let part = ScanPart {
                 memtables: memtables.to_vec(),
@@ -303,17 +307,16 @@ impl ScanPartBuilder for UnorderedPartBuilder {
             return vec![part];
         }
 
-        let mems_per_part = ((memtables.len() + self.parallelism - 1) / self.parallelism).max(1);
-        let ranges_per_part =
-            ((self.file_ranges.len() + self.parallelism - 1) / self.parallelism).max(1);
+        let mems_per_part = ((memtables.len() + parallelism - 1) / parallelism).max(1);
+        let ranges_per_part = ((self.file_ranges.len() + parallelism - 1) / parallelism).max(1);
         common_telemetry::debug!(
-            "Parallel scan is enabled, parallelism: {}, {} memtables, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
-            self.parallelism,
-            memtables.len(),
-            self.file_ranges.len(),
-            mems_per_part,
-            ranges_per_part
-        );
+                "Parallel scan is enabled, parallelism: {}, {} memtables, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
+                parallelism,
+                memtables.len(),
+                self.file_ranges.len(),
+                mems_per_part,
+                ranges_per_part
+            );
         let mut scan_parts = memtables
             .chunks(mems_per_part)
             .map(|mems| ScanPart {
