@@ -301,9 +301,13 @@ fn update_reduce_distinct_arrange(
     // Deal with output:
 
     // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
-    let from = arrange.read().last_compaction_time().map(|n| n + 1);
+    let from = arrange.read().last_compaction_time();
     let from = from.unwrap_or(repr::Timestamp::MIN);
-    let output_kv = arrange.read().get_updates_in_range(from..=now);
+    let range = (
+        std::ops::Bound::Excluded(from),
+        std::ops::Bound::Included(now),
+    );
+    let output_kv = arrange.read().get_updates_in_range(range);
 
     // 2. Truncate all updates stored in arrangement within that range.
     let run_compaction = || {

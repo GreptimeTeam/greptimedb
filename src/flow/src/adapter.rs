@@ -513,9 +513,8 @@ impl FlownodeManager {
     /// However this is not blocking and can sometimes return while actual computation is still running in worker thread
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub async fn run_available(&self) -> Result<(), Error> {
-        let now = self.tick_manager.tick();
-
         loop {
+            let now = self.tick_manager.tick();
             for worker in self.worker_handles.iter() {
                 // TODO(discord9): consider how to handle error in individual worker
                 worker.lock().await.run_available(now).await.unwrap();
@@ -553,6 +552,8 @@ impl FlownodeManager {
         );
         let table_id = region_id.table_id();
         self.node_context.lock().await.send(table_id, rows)?;
+        // TODO(discord9): put it in a background task?
+        self.run_available().await?;
         Ok(())
     }
 }

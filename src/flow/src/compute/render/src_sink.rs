@@ -55,9 +55,12 @@ impl<'referred, 'df> Context<'referred, 'df> {
             .df
             .add_subgraph_source("source", send_port, move |_ctx, send| {
                 let now = *now.borrow();
-                let arr = arrange_handler_inner.write().get_updates_in_range(..=now);
-                err_collector.run(|| arrange_handler_inner.write().compact_to(now));
+                // write lock to prevent unexpected mutation
+                let mut arranged = arrange_handler_inner.write();
+                let arr = arranged.get_updates_in_range(..=now);
+                err_collector.run(|| arranged.compact_to(now));
 
+                debug!("Call source");
                 let prev_avail = arr.into_iter().map(|((k, _), t, d)| (k, t, d));
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();
@@ -77,7 +80,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                         to_arrange.len()
                     );
                 }
-                err_collector.run(|| arrange_handler_inner.write().apply_updates(now, to_arrange));
+                err_collector.run(|| arranged.apply_updates(now, to_arrange));
                 send.give(all);
                 // always schedule source to run at now so we can repeatedly run source if needed
                 inner_schd.schedule_at(now);
