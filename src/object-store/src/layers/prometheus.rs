@@ -89,8 +89,8 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
 #[derive(Default, Debug, Clone)]
 pub struct PrometheusMetricsLayer;
 
-impl<A: Accessor> Layer<A> for PrometheusMetricsLayer {
-    type LayeredAccessor = PrometheusAccessor<A>;
+impl<A: Access> Layer<A> for PrometheusMetricsLayer {
+    type LayeredAccess = PrometheusAccessor<A>;
 
     fn layer(&self, inner: A) -> Self::LayeredAccessor {
         let meta = inner.info();
@@ -104,12 +104,12 @@ impl<A: Accessor> Layer<A> for PrometheusMetricsLayer {
 }
 
 #[derive(Clone)]
-pub struct PrometheusAccessor<A: Accessor> {
+pub struct PrometheusAccessor<A: Access> {
     inner: A,
     scheme: String,
 }
 
-impl<A: Accessor> Debug for PrometheusAccessor<A> {
+impl<A: Access> Debug for PrometheusAccessor<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrometheusAccessor")
             .field("inner", &self.inner)
@@ -118,7 +118,7 @@ impl<A: Accessor> Debug for PrometheusAccessor<A> {
 }
 
 #[async_trait]
-impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
+impl<A: Access> LayeredAccess for PrometheusAccessor<A> {
     type Inner = A;
     type Reader = PrometheusMetricWrapper<A::Reader>;
     type BlockingReader = PrometheusMetricWrapper<A::BlockingReader>;

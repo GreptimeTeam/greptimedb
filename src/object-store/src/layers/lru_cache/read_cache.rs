@@ -18,8 +18,8 @@ use common_telemetry::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{ListExt, Read, ReadExt, Reader, WriteExt};
-use opendal::raw::{Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
+use opendal::raw::oio::{List, Read, Reader, Write};
+use opendal::raw::{Access, Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, Result};
 
 use crate::metrics::{
@@ -69,7 +69,7 @@ pub(crate) struct ReadCache<C: Clone> {
     mem_cache: Cache<String, ReadResult>,
 }
 
-impl<C: Accessor + Clone> ReadCache<C> {
+impl<C: Access + Clone> ReadCache<C> {
     /// Create a [`ReadCache`] with capacity in bytes.
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
@@ -173,9 +173,9 @@ impl<C: Accessor + Clone> ReadCache<C> {
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Box<dyn Read>)>
+    ) -> Result<(RpRead, Arc<dyn Read>)>
     where
-        I: Accessor,
+        I: Access,
     {
         if !can_cache(path) {
             return inner.read(path, args).await.map(to_output_reader);
@@ -224,7 +224,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
     async fn try_write_cache<I>(&self, mut reader: I::Reader, read_key: &str) -> Result<usize>
     where
-        I: Accessor,
+        I: Access,
     {
         let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
         let mut total = 0;
@@ -247,7 +247,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
         args: OpRead,
     ) -> Result<ReadResult>
     where
-        I: Accessor,
+        I: Access,
     {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
@@ -282,7 +282,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
 }
 
 fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
-    (input.0, Box::new(input.1))
+    (input.0, Arc::new(input.1))
 }
 
 #[cfg(test)]

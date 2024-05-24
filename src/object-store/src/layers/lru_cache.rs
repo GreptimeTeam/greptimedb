@@ -16,10 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opendal::raw::oio::Read;
-use opendal::raw::{
-    Accessor, Layer, LayeredAccessor, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
-    RpWrite,
-};
+use opendal::raw::{Access, Accessor, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite};
 use opendal::Result;
 mod read_cache;
 use common_telemetry::info;
@@ -32,7 +29,7 @@ pub struct LruCacheLayer<C: Clone> {
     read_cache: ReadCache<C>,
 }
 
-impl<C: Accessor + Clone> LruCacheLayer<C> {
+impl<C: Access + Clone> LruCacheLayer<C> {
     /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
     pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
@@ -57,11 +54,11 @@ impl<C: Accessor + Clone> LruCacheLayer<C> {
     }
 }
 
-impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
-    type LayeredAccessor = LruCacheAccessor<I, C>;
+impl<I: Access, C: Access + Clone> Layer<I> for LruCacheLayer<C> {
+    type LayeredAccess = LruCacheAccess<I, C>;
 
     fn layer(&self, inner: I) -> Self::LayeredAccessor {
-        LruCacheAccessor {
+        LruCacheAccess {
             inner,
             read_cache: self.read_cache.clone(),
         }
@@ -69,15 +66,15 @@ impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
 }
 
 #[derive(Debug)]
-pub struct LruCacheAccessor<I, C: Clone> {
+pub struct LruCacheAccess<I, C: Clone> {
     inner: I,
     read_cache: ReadCache<C>,
 }
 
 #[async_trait]
-impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C> {
+impl<I: Access, C: Access + Clone> LayeredAccess for LruCacheAccess<I, C> {
     type Inner = I;
-    type Reader = Box<dyn Read>;
+    type Reader = Arc<dyn Read>;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;

@@ -18,16 +18,15 @@ futures.workspace = true
 lazy_static.workspace = true
 md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
-opendal = { version = "0.45", features = [
+opendal = { version = "0.46", features = [
     "layers-tracing",
-    "rustls",
     "services-azblob",
     "services-fs",
     "services-gcs",
     "services-http",
     "services-oss",
     "services-s3",
-], default-features = false }
+] }
 prometheus.workspace = true
 uuid.workspace = true
 
@@ -35,5 +34,4 @@ uuid.workspace = true
 anyhow = "1.0"
 common-telemetry.workspace = true
 common-test-util.workspace = true
-opendal = { version = "0.45", features = ["services-memory"] }
 tokio.workspace = true
