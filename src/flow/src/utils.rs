@@ -567,6 +567,10 @@ impl ArrangeHandler {
     pub fn set_full_arrangement(&self, full: bool) {
         self.write().full_arrangement = full;
     }
+
+    pub fn is_full_arrangement(&self) -> bool {
+        self.read().full_arrangement
+    }
 }
 
 #[cfg(test)]

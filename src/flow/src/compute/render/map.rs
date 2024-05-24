@@ -124,9 +124,13 @@ fn mfp_subgraph(
     // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
     // 2. Output the updates.
     // 3. Truncate all updates within that range.
-    let from = arrange.read().last_compaction_time().map(|n| n + 1);
+    let from = arrange.read().last_compaction_time();
     let from = from.unwrap_or(repr::Timestamp::MIN);
-    let output_kv = arrange.read().get_updates_in_range(from..=now);
+    let range = (
+        std::ops::Bound::Excluded(from),
+        std::ops::Bound::Included(now),
+    );
+    let output_kv = arrange.read().get_updates_in_range(range);
     // the output is expected to be key -> empty val
     let output = output_kv
         .into_iter()
