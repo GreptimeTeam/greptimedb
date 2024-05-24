@@ -24,7 +24,7 @@ use common_telemetry::debug;
 use futures::FutureExt;
 use lazy_static::lazy_static;
 use opendal::raw::*;
-use opendal::ErrorKind;
+use opendal::{Buffer, ErrorKind};
 use prometheus::{
     exponential_buckets, histogram_opts, register_histogram_vec, register_int_counter_vec,
     Histogram, HistogramTimer, HistogramVec, IntCounterVec,
@@ -534,30 +534,29 @@ impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
     }
 }
 
-#[async_trait]
 impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
-    fn poll_write(&mut self, cx: &mut Context<'_>, bs: &dyn oio::WriteBuf) -> Poll<Result<usize>> {
-        self.inner
-            .poll_write(cx, bs)
-            .map_ok(|n| {
+    async fn write(&mut self, bs: Buffer) -> Result<usize> {
+        match self.inner.write(bs).await {
+            Ok(n) => {
                 self.bytes += n as u64;
-                n
-            })
-            .map_err(|err| {
+                Ok(n)
+            }
+            Err(err) => {
                 increment_errors_total(self.op, err.kind());
-                err
-            })
+                Err(err)
+            }
+        }
     }
 
-    fn poll_abort(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.inner.poll_abort(cx).map_err(|err| {
+    async fn close(&mut self) -> Result<()> {
+        self.inner.close().await.map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
         })
     }
 
-    fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.inner.poll_close(cx).map_err(|err| {
+    async fn abort(&mut self) -> Result<()> {
+        self.inner.close().await.map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
         })
@@ -565,7 +564,7 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
-    fn write(&mut self, bs: &dyn oio::WriteBuf) -> Result<usize> {
+    fn write(&mut self, bs: Buffer) -> Result<usize> {
         self.inner
             .write(bs)
             .map(|n| {
