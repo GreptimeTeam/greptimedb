@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::{debug, tracing};
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::debug;
 use common_time::Timestamp;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
@@ -30,12 +30,9 @@ use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProper
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::CacheManager;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{FileRangeCollector, ScanInput, ScanPart};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::sst::file::FileMeta;
@@ -143,10 +140,11 @@ impl SeqScan {
             metrics.scan_cost += fetch_start.elapsed();
             metrics.total_cost = query_start.elapsed();
             metrics.observe_metrics_on_finish();
-            // reader metrics?
-            // debug!(
-            //     "Seq scan partition {} finished, region_id: {}, metrics: {:?}",
-            // );
+
+            debug!(
+                "Seq scan finished, region_id: {:?}, metrics: {:?}",
+                mapper.metadata().region_id, metrics,
+            );
         };
 
         Box::pin(RecordBatchStreamWrapper::new(
@@ -154,61 +152,6 @@ impl SeqScan {
             Box::pin(stream),
         ))
     }
-
-    // /// Builds a stream for the query.
-    // pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
-    //     let mut metrics = Metrics::default();
-    //     let build_start = Instant::now();
-    //     let query_start = self.input.query_start.unwrap_or(build_start);
-    //     metrics.prepare_scan_cost = query_start.elapsed();
-    //     let use_parallel = self.use_parallel_reader();
-    //     // Scans all memtables and SSTs. Builds a merge reader to merge results.
-    //     let mut reader = if use_parallel {
-    //         self.build_parallel_reader().await?
-    //     } else {
-    //         self.build_reader().await?
-    //     };
-    //     metrics.build_reader_cost = build_start.elapsed();
-    //     READ_STAGE_ELAPSED
-    //         .with_label_values(&["prepare_scan"])
-    //         .observe(metrics.prepare_scan_cost.as_secs_f64());
-    //     READ_STAGE_ELAPSED
-    //         .with_label_values(&["build_reader"])
-    //         .observe(metrics.build_reader_cost.as_secs_f64());
-
-    //     // Creates a stream to poll the batch reader and convert batch into record batch.
-    //     let mapper = self.input.mapper.clone();
-    //     let cache_manager = self.input.cache_manager.clone();
-    //     let parallelism = self.input.parallelism.parallelism;
-    //     let stream = try_stream! {
-    //         let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
-    //         while let Some(batch) =
-    //             Self::fetch_record_batch(&mut reader, &mapper, cache, &mut metrics).await?
-    //         {
-    //             metrics.num_batches += 1;
-    //             metrics.num_rows += batch.num_rows();
-    //             yield batch;
-    //         }
-
-    //         // Update metrics.
-    //         metrics.total_cost = query_start.elapsed();
-    //         READ_STAGE_ELAPSED.with_label_values(&["convert_rb"]).observe(metrics.convert_cost.as_secs_f64());
-    //         READ_STAGE_ELAPSED.with_label_values(&["scan"]).observe(metrics.scan_cost.as_secs_f64());
-    //         READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.total_cost.as_secs_f64());
-    //         READ_ROWS_RETURN.observe(metrics.num_rows as f64);
-    //         READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
-    //         debug!(
-    //             "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}, parallelism: {}",
-    //             mapper.metadata().region_id, metrics, use_parallel, parallelism,
-    //         );
-    //     };
-    //     let stream = Box::pin(RecordBatchStreamWrapper::new(
-    //         self.input.mapper.output_schema(),
-    //         Box::pin(stream),
-    //     ));
-
-    //     Ok(stream)
-    // }
 
     /// Builds a [BoxedBatchReader] from sequential scan.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
@@ -219,20 +162,6 @@ impl SeqScan {
             MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
         let reader = builder.build().await?;
         Ok(Box::new(reader))
-    }
-
-    fn observe_metrics_on_finish(metrics: &ScannerMetrics) {
-        READ_STAGE_ELAPSED
-            .with_label_values(&["convert_rb"])
-            .observe(metrics.convert_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["scan"])
-            .observe(metrics.scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["total"])
-            .observe(metrics.total_cost.as_secs_f64());
-        READ_ROWS_RETURN.observe(metrics.num_rows as f64);
-        READ_BATCHES_RETURN.observe(metrics.num_batches as f64);
     }
 }
 
@@ -376,9 +305,15 @@ impl PartsInTimeRange {
                 continue;
             }
 
+            if part.file_ranges.is_empty() {
+                continue;
+            }
+
             let ranges = part.file_ranges.clone();
             let stream = try_stream! {
                 let mut reader_metrics = ReaderMetrics::default();
+                let file_id = ranges[0].file_handle().file_id();
+                let region_id = ranges[0].file_handle().region_id();
                 for range in ranges {
                     let mut reader = range.reader().await?;
                     let compat_batch = range.compat_batch();
@@ -392,6 +327,10 @@ impl PartsInTimeRange {
                     }
                     reader_metrics.merge_from(reader.metrics());
                 }
+                debug!(
+                    "Seq scan region {} file {} ranges finished, metrics: {:?}",
+                    region_id, file_id, reader_metrics
+                );
             };
             let stream = Box::pin(stream);
             sources.push(Source::Stream(stream));
@@ -435,8 +374,6 @@ fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
         }
     }
     exclusive_parts.push(parts_in_range);
-
-    // TODO(yingwen): split/merge parts according to parallelsim
 
     exclusive_parts
 }

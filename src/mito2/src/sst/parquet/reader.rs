@@ -570,6 +570,11 @@ impl RowGroupReaderBuilder {
         &self.file_path
     }
 
+    /// Returns the file handle.
+    pub(crate) fn file_handle(&self) -> &FileHandle {
+        &self.file_handle
+    }
+
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
     pub(crate) async fn build(
         &self,
