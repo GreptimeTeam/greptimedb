@@ -94,21 +94,10 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::error::{self, Result};
+    use crate::test_util::wal_util::MockRawEntryStream;
+    use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
     use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
-    use crate::wal::wal_entry_reader::{LogStoreEntryReader, WalEntryReader};
     use crate::wal::EntryId;
-
-    struct MockRawEntryStream {
-        entries: Vec<Entry>,
-    }
-
-    impl RawEntryReader for MockRawEntryStream {
-        fn read(&self, ns: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
-            let entries = self.entries.clone().into_iter().map(Ok);
-
-            Ok(Box::pin(stream::iter(entries)))
-        }
-    }
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {
