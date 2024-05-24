@@ -18,6 +18,7 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_wal::options::{KafkaWalOptions, WalOptions};
 use futures::stream::BoxStream;
+use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::entry::{Entry, RawEntry};
 use store_api::logstore::LogStore;
@@ -55,6 +56,7 @@ pub(crate) trait RawEntryReader: Send + Sync {
     ) -> Result<RawEntryStream<'a>>;
 }
 
+/// Implement the [RawEntryReader] for the [LogStore].
 pub struct LogStoreRawEntryReader<S> {
     store: Arc<S>,
 }
@@ -137,6 +139,37 @@ impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
             LogStoreNamespace::RaftEngine(ns) => self.read_region(ns, start_id)?,
             LogStoreNamespace::Kafka(ns) => self.read_topic(ns, start_id)?,
         };
+
+        Ok(Box::pin(stream))
+    }
+}
+
+/// A filter implement the [RawEntryReader]
+pub struct RawEntryReaderFilter<R, F> {
+    reader: R,
+    filter: F,
+}
+
+impl<R, F> RawEntryReader for RawEntryReaderFilter<R, F>
+where
+    R: RawEntryReader,
+    F: Fn(&RawEntry) -> bool + Sync + Send,
+{
+    fn read<'a>(
+        &'a self,
+        ctx: LogStoreNamespace<'a>,
+        start_id: EntryId,
+    ) -> Result<RawEntryStream<'a>> {
+        let mut stream = self.reader.read(ctx, start_id)?;
+        let filter = &(self.filter);
+        let stream = try_stream!({
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                if filter(&entry) {
+                    yield entry
+                }
+            }
+        });
 
         Ok(Box::pin(stream))
     }
