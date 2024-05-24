@@ -22,17 +22,23 @@ use crate::wal::EntryId;
 /// A stream that yields [RawEntry].
 pub type RawEntryStream<'a> = BoxStream<'a, Result<RawEntry>>;
 
-/// The context of [RawEntryReader].
-pub(crate) enum LogStoreReadCtx {
-    RaftEngine(RegionId),
-    Kafka(String),
+// The namespace of kafka log store
+pub struct KafkaNamespace<'a> {
+    topic: &'a str,
+}
+
+// The namespace of raft engine log store
+pub struct RaftEngineNamespace {
+    region_id: RegionId,
+}
+
+/// The namespace of [RawEntryReader].
+pub(crate) enum LogStoreNamespace<'a> {
+    RaftEngine(RaftEngineNamespace),
+    Kafka(KafkaNamespace<'a>),
 }
 
 /// [RawEntryReader] provides the ability to read [RawEntry] from the underlying [LogStore].
 pub(crate) trait RawEntryReader: Send + Sync {
-    fn read<'a>(
-        &'a self,
-        ctx: &'a LogStoreReadCtx,
-        start_id: EntryId,
-    ) -> Result<RawEntryStream<'static>>;
+    fn read(&self, ctx: LogStoreNamespace, start_id: EntryId) -> Result<RawEntryStream<'static>>;
 }

@@ -14,16 +14,11 @@
 
 use store_api::storage::RegionId;
 
-use super::raw_entry_reader::LogStoreReadCtx;
-use super::{EntryId, WalEntryStream};
 use crate::error::Result;
+use crate::wal::raw_entry_reader::LogStoreNamespace;
+use crate::wal::{EntryId, WalEntryStream};
 
-/// [OneShotWalEntryReader] provides the ability to read and decode entries from the underlying store.
+/// [OneshotWalEntryReader] provides the ability to read and decode entries from the underlying store.
 pub(crate) trait OneshotWalEntryReader: Send + Sync {
-    fn read(
-        self,
-        ctx: &LogStoreReadCtx,
-        region_id: RegionId,
-        start_id: EntryId,
-    ) -> Result<WalEntryStream>;
+    fn read(self, ctx: LogStoreNamespace, start_id: EntryId) -> Result<WalEntryStream>;
 }
