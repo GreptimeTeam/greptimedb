@@ -153,27 +153,20 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             .with_label_values(&[&self.scheme, Operation::Read.into_static()])
             .start_timer();
 
-        self.inner
-            .read(path, args)
-            .map(|v| {
-                v.map(|(rp, r)| {
-                    (
-                        rp,
-                        PrometheusMetricWrapper::new(
-                            r,
-                            Operation::Read,
-                            BYTES_TOTAL
-                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
-                            timer,
-                        ),
-                    )
-                })
-            })
-            .await
-            .map_err(|e| {
-                increment_errors_total(Operation::Read, e.kind());
-                e
-            })
+        let (rp, r) = self.inner.read(path, args).await.map_err(|e| {
+            increment_errors_total(Operation::Read, e.kind());
+            e
+        })?;
+
+        Ok((
+            rp,
+            PrometheusMetricWrapper::new(
+                r,
+                Operation::Read,
+                BYTES_TOTAL.with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                timer,
+            ),
+        ))
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -195,8 +188,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             PrometheusMetricWrapper::new(
                 r,
                 Operation::Write,
-                BYTES_TOTAL
-                    .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                BYTES_TOTAL.with_label_values(&[&self.scheme, Operation::Write.into_static()]),
                 timer,
             ),
         ))
