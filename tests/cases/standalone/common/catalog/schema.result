@@ -120,6 +120,14 @@ SHOW TABLES FROM public WHERE Tables = 'numbers';
 
 DROP SCHEMA test_public_schema;
 
+Error: 1004(InvalidArguments), Schema `test_public_schema` is in use
+
+USE public;
+
+Affected Rows: 0
+
+DROP SCHEMA test_public_schema;
+
 Affected Rows: 0
 
 SELECT * FROM test_public_schema.hello;

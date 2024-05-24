@@ -68,9 +68,9 @@ use crate::error::{
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
     DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
     InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaNotFoundSnafu,
-    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -667,10 +667,14 @@ impl StatementExecutor {
             .await
             .context(CatalogSnafu)?
         {
-            self.drop_database_procedure(catalog, schema, drop_if_exists, query_context)
-                .await?;
+            if schema == query_context.current_schema() {
+                SchemaInUseSnafu { name: schema }.fail()
+            } else {
+                self.drop_database_procedure(catalog, schema, drop_if_exists, query_context)
+                    .await?;
 
-            Ok(Output::new_with_affected_rows(0))
+                Ok(Output::new_with_affected_rows(0))
+            }
         } else if drop_if_exists {
             // DROP TABLE IF EXISTS meets table not found - ignored
             Ok(Output::new_with_affected_rows(0))
