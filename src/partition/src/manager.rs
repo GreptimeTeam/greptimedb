@@ -290,7 +290,7 @@ fn create_partitions_from_region_routes(
         let partition = r
             .region
             .partition
-            .clone()
+            .as_ref()
             .context(error::FindRegionRoutesSnafu {
                 region_id: r.region.id,
                 table_id,

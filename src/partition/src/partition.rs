@@ -99,23 +99,23 @@ impl PartitionDef {
     }
 }
 
-impl TryFrom<MetaPartition> for PartitionDef {
+impl TryFrom<&MetaPartition> for PartitionDef {
     type Error = Error;
 
-    fn try_from(partition: MetaPartition) -> Result<Self> {
+    fn try_from(partition: &MetaPartition) -> Result<Self> {
         let MetaPartition {
             column_list,
             value_list,
         } = partition;
 
         let partition_columns = column_list
-            .into_iter()
-            .map(|x| String::from_utf8_lossy(&x).to_string())
+            .iter()
+            .map(|x| String::from_utf8_lossy(x).to_string())
             .collect::<Vec<String>>();
 
         let partition_bounds = value_list
-            .into_iter()
-            .map(|x| serde_json::from_str(&String::from_utf8_lossy(&x)))
+            .iter()
+            .map(|x| serde_json::from_str(&String::from_utf8_lossy(x)))
             .collect::<std::result::Result<Vec<PartitionBound>, serde_json::Error>>()
             .context(error::DeserializeJsonSnafu)?;
 
@@ -197,7 +197,7 @@ mod tests {
         );
 
         // MetaPartition -> PartitionDef
-        let partition = MetaPartition {
+        let partition = &MetaPartition {
             column_list: vec![b"a".to_vec(), b"b".to_vec()],
             value_list: vec![
                 b"\"MaxValue\"".to_vec(),
