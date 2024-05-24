@@ -19,10 +19,33 @@ use crate::storage::RegionId;
 pub type Id = u64;
 
 /// The raw Wal entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawEntry {
     pub region_id: RegionId,
     pub entry_id: Id,
     pub data: Vec<u8>,
+}
+
+impl Entry for RawEntry {
+    fn into_raw_entry(self) -> RawEntry {
+        self
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn id(&self) -> Id {
+        self.entry_id
+    }
+
+    fn region_id(&self) -> RegionId {
+        self.region_id
+    }
+
+    fn estimated_size(&self) -> usize {
+        std::mem::size_of_val(self)
+    }
 }
 
 /// Entry is the minimal data storage unit through which users interact with the log store.
