@@ -306,6 +306,11 @@ impl MetaPeerClient {
             .map(|election| election.is_leader())
             .unwrap_or(true)
     }
+
+    #[cfg(test)]
+    pub(crate) fn memory_backend(&self) -> ResettableKvBackendRef {
+        self.in_memory.clone()
+    }
 }
 
 fn to_stat_kv_map(kvs: Vec<KeyValue>) -> Result<HashMap<StatKey, StatValue>> {

@@ -46,6 +46,7 @@ use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
+use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::{error, Result};
@@ -228,6 +229,7 @@ pub async fn metasrv_builder(
     let selector = match opts.selector {
         SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+        SelectorType::RoundRobin => Arc::new(RoundRobinSelector::default()) as SelectorRef,
     };
 
     Ok(MetasrvBuilder::new()
