@@ -656,7 +656,7 @@ mod tests {
         let file_metas: Vec<_> = data.version.ssts.levels()[0]
             .files
             .values()
-            .map(|file| file.meta())
+            .map(|file| file.meta_ref().clone())
             .collect();
 
         // 5 files for next compaction and removes old files.

@@ -576,7 +576,7 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Builds and returns parts to read.
+    /// Builds and returns [ScanPart] to read.
     pub(crate) async fn build_parts(
         &self,
         mut part_builder: impl ScanPartBuilder,

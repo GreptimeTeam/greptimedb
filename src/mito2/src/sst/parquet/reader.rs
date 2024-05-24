@@ -165,7 +165,7 @@ impl ParquetReaderBuilder {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
-        let file_size = self.file_handle.meta().file_size;
+        let file_size = self.file_handle.meta_ref().file_size;
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
         // Decodes region metadata.
@@ -340,7 +340,7 @@ impl ParquetReaderBuilder {
             return None;
         };
 
-        if !self.file_handle.meta().inverted_index_available() {
+        if !self.file_handle.meta_ref().inverted_index_available() {
             return None;
         }
 
