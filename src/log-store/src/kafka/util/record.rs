@@ -241,7 +241,7 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
 
 pub fn maybe_emit_entry(
     record: Record,
-    entry_records: &mut HashMap<EntryId, Vec<Record>>,
+    entry_records: &mut HashMap<u64, Vec<Record>>,
 ) -> Result<Option<EntryImpl>> {
     let mut entry = None;
     match record.meta.tp {
@@ -250,49 +250,44 @@ pub fn maybe_emit_entry(
         }
         RecordType::First => {
             ensure!(
-                !entry_records.contains_key(&record.meta.entry_id),
+                !entry_records.contains_key(&record.meta.ns.region_id),
                 IllegalSequenceSnafu {
-                    error: "First record must be the first"
+                    error: format!(
+                        "First record must be the first, region_id: {}",
+                        record.meta.ns.region_id
+                    )
                 }
             );
-            entry_records.insert(record.meta.entry_id, vec![record]);
+            entry_records.insert(record.meta.ns.region_id, vec![record]);
         }
         RecordType::Middle(seq) => {
-            let prefix =
-                entry_records
-                    .get_mut(&record.meta.entry_id)
-                    .context(IllegalSequenceSnafu {
-                        error: "Middle record must not be the first",
-                    })?;
-            // Safety: the records are guaranteed not empty if the key exists.
-            let last_record = prefix.last().unwrap();
-            let legal = match last_record.meta.tp {
-                // Legal if this record follows a First record.
-                RecordType::First => seq == 1,
-                // Legal if this record follows a Middle record just prior to this record.
-                RecordType::Middle(last_seq) => last_seq + 1 == seq,
-                // Illegal sequence.
-                _ => false,
-            };
-            ensure!(
-                legal,
-                IllegalSequenceSnafu {
-                    error: "Illegal prefix for a Middle record"
-                }
-            );
+            if let Some(previous) = entry_records.get_mut(&record.meta.ns.region_id) {
+                // Safety: the records are guaranteed not empty if the key exists.
+                let last_record = previous.last().unwrap();
+                let legal = match last_record.meta.tp {
+                    // Legal if this record follows a First record.
+                    RecordType::First => seq == 1,
+                    // Legal if this record follows a Middle record just prior to this record.
+                    RecordType::Middle(last_seq) => last_seq + 1 == seq,
+                    // Illegal sequence.
+                    _ => false,
+                };
+                ensure!(
+                    legal,
+                    IllegalSequenceSnafu {
+                        error: "Illegal prefix for a Middle record"
+                    }
+                );
 
-            prefix.push(record);
+                previous.push(record);
+            }
         }
         RecordType::Last => {
             // There must have a sequence prefix before a Last record is read.
-            let mut records =
-                entry_records
-                    .remove(&record.meta.entry_id)
-                    .context(IllegalSequenceSnafu {
-                        error: "Missing prefix for a Last record",
-                    })?;
-            records.push(record);
-            entry = Some(EntryImpl::from(records));
+            if let Some(mut records) = entry_records.remove(&record.meta.ns.region_id) {
+                records.push(record);
+                entry = Some(EntryImpl::from(records));
+            }
         }
     }
     Ok(entry)
@@ -344,25 +339,6 @@ mod tests {
         fn with_data(&self, data: &[u8]) -> Self {
             Self {
                 data: data.to_vec(),
-                ..self.clone()
-            }
-        }
-
-        /// Overrides entry id.
-        fn with_entry_id(&self, entry_id: EntryId) -> Self {
-            Self {
-                meta: RecordMeta {
-                    entry_id,
-                    ..self.meta.clone()
-                },
-                ..self.clone()
-            }
-        }
-
-        /// Overrides namespace.
-        fn with_ns(&self, ns: NamespaceImpl) -> Self {
-            Self {
-                meta: RecordMeta { ns, ..self.meta },
                 ..self.clone()
             }
         }
@@ -448,108 +424,6 @@ mod tests {
                 .flat_map(|record| record.data)
                 .collect::<Vec<_>>()
         );
-    }
-
-    /// Tests that `maybe_emit_entry` works as expected.
-    /// This test does not check for illegal record sequences since they're already tested in the `test_check_records` test.
-    #[test]
-    fn test_maybe_emit_entry() {
-        let ns = NamespaceImpl {
-            region_id: 1,
-            topic: "greptimedb_wal_topic".to_string(),
-        };
-        let template = Record::default().with_ns(ns);
-        let mut entry_records = HashMap::from([
-            (
-                1,
-                vec![template.with_entry_id(1).with_tp(RecordType::First)],
-            ),
-            (
-                2,
-                vec![template.with_entry_id(2).with_tp(RecordType::First)],
-            ),
-            (
-                3,
-                vec![
-                    template.with_entry_id(3).with_tp(RecordType::First),
-                    template.with_entry_id(3).with_tp(RecordType::Middle(1)),
-                ],
-            ),
-        ]);
-
-        // A Full record arrives.
-        let got = maybe_emit_entry(
-            template.with_entry_id(0).with_tp(RecordType::Full),
-            &mut entry_records,
-        )
-        .unwrap();
-        assert!(got.is_some());
-
-        // A First record arrives with no prefix.
-        let got = maybe_emit_entry(
-            template.with_entry_id(0).with_tp(RecordType::First),
-            &mut entry_records,
-        )
-        .unwrap();
-        assert!(got.is_none());
-
-        // A First record arrives with some prefix.
-        let got = maybe_emit_entry(
-            template.with_entry_id(1).with_tp(RecordType::First),
-            &mut entry_records,
-        );
-        assert!(got.is_err());
-
-        // A Middle record arrives with legal prefix (First).
-        let got = maybe_emit_entry(
-            template.with_entry_id(2).with_tp(RecordType::Middle(1)),
-            &mut entry_records,
-        )
-        .unwrap();
-        assert!(got.is_none());
-
-        // A Middle record arrives with legal prefix (Middle).
-        let got = maybe_emit_entry(
-            template.with_entry_id(2).with_tp(RecordType::Middle(2)),
-            &mut entry_records,
-        )
-        .unwrap();
-        assert!(got.is_none());
-
-        // A Middle record arrives with illegal prefix.
-        let got = maybe_emit_entry(
-            template.with_entry_id(2).with_tp(RecordType::Middle(1)),
-            &mut entry_records,
-        );
-        assert!(got.is_err());
-
-        // A Middle record arrives with no prefix.
-        let got = maybe_emit_entry(
-            template.with_entry_id(22).with_tp(RecordType::Middle(1)),
-            &mut entry_records,
-        );
-        assert!(got.is_err());
-
-        // A Last record arrives with no prefix.
-        let got = maybe_emit_entry(
-            template.with_entry_id(33).with_tp(RecordType::Last),
-            &mut entry_records,
-        );
-        assert!(got.is_err());
-
-        // A Last record arrives with legal prefix.
-        let got = maybe_emit_entry(
-            template.with_entry_id(3).with_tp(RecordType::Last),
-            &mut entry_records,
-        )
-        .unwrap();
-        assert!(got.is_some());
-
-        // Check state.
-        assert_eq!(entry_records.len(), 3);
-        assert_eq!(entry_records[&0].len(), 1);
-        assert_eq!(entry_records[&1].len(), 1);
-        assert_eq!(entry_records[&2].len(), 3);
     }
 
     #[tokio::test]

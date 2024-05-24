@@ -281,7 +281,7 @@ impl LogStore for KafkaLogStore {
 fn check_termination(
     offset: i64,
     end_offset: i64,
-    entry_records: &HashMap<EntryId, Vec<Record>>,
+    entry_records: &HashMap<u64, Vec<Record>>,
 ) -> Result<bool> {
     // Terminates the stream if the entry with the end offset was read.
     if offset >= end_offset {
@@ -302,6 +302,7 @@ fn check_termination(
 #[cfg(test)]
 mod tests {
     use common_base::readable_size::ReadableSize;
+    use common_telemetry::info;
     use futures::TryStreamExt;
     use rand::seq::IteratorRandom;
 
@@ -409,6 +410,7 @@ mod tests {
         all: bool,
         large: bool,
     ) {
+        common_telemetry::init_default_ut_logging();
         let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
             warn!("The endpoints is empty, skipping the test {test_name}");
             return;
@@ -445,6 +447,11 @@ mod tests {
             // Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
             for region_id in which {
                 let ctx = region_contexts.get_mut(&region_id).unwrap();
+                info!(
+                    "read region:{}, from: {}",
+                    region_id,
+                    ctx.flushed_entry_id + 1
+                );
                 let stream = logstore
                     .read(&ctx.ns, ctx.flushed_entry_id + 1)
                     .await
@@ -467,6 +474,7 @@ mod tests {
             for (region_id, last_entry_id) in last_entry_ids {
                 let ctx = region_contexts.get_mut(&region_id).unwrap();
                 ctx.flushed_entry_id = last_entry_id;
+                info!("region: {region_id}, flushed_entry_id: {last_entry_id}");
             }
         }
     }
