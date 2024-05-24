@@ -19,7 +19,7 @@ use super::{EntryId, WalEntryStream};
 use crate::error::Result;
 
 /// [OneShotWalEntryReader] provides the ability to read and decode entries from the underlying store.
-pub(crate) trait OneShotWalEntryReader: Send + Sync {
+pub(crate) trait OneshotWalEntryReader: Send + Sync {
     fn read(
         self,
         ctx: &LogStoreReadCtx,
