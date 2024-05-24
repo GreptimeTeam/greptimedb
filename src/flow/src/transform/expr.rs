@@ -101,7 +101,6 @@ impl TypedExpr {
             .unzip();
 
         match arg_len {
-            // because variadic function can also have 1 arguments, we need to check if it's a variadic function first
             1 if UnaryFunc::from_str_and_type(fn_name, None).is_ok() => {
                 let func = UnaryFunc::from_str_and_type(fn_name, None)?;
                 let arg = arg_exprs[0].clone();
@@ -124,7 +123,6 @@ impl TypedExpr {
 
                 Ok(TypedExpr::new(arg.call_unary(func), ret_type))
             }
-            // because variadic function can also have 2 arguments, we need to check if it's a variadic function first
             2 if BinaryFunc::from_str_expr_and_type(
                 fn_name,
                 &arg_exprs,
