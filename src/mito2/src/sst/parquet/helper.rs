@@ -164,7 +164,7 @@ where
     }
 }
 
-//  https://github.com/apache/incubator-opendal/blob/7144ab1ca2409dff0c324bfed062ce985997f8ce/core/src/raw/tokio_util.rs#L21-L23
+//  https://github.com/apache/opendal/blob/v0.46.0/core/src/raw/tokio_util.rs#L21-L24
 /// Parse tokio error into opendal::Error.
 fn new_task_join_error(e: tokio::task::JoinError) -> object_store::Error {
     object_store::Error::new(ErrorKind::Unexpected, "tokio task join failed").set_source(e)
