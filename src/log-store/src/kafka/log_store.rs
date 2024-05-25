@@ -205,15 +205,14 @@ impl LogStore for KafkaLogStore {
 
         // Key: entry id, Value: the records associated with the entry.
         let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
-        // TODO(weny): avoid cloning
-        let topic = ns.topic.to_string();
+        let ns = ns.clone();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
                 // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
                 // The high watermark offset is the offset of the last record plus one.
                 let (record_and_offset, high_watermark) =
-                    consume_result.context(ConsumeRecordSnafu { topic: &topic })?;
+                    consume_result.context(ConsumeRecordSnafu { topic: &ns.topic })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
 
                 metrics::METRIC_KAFKA_READ_RECORD_BYTES_TOTAL
@@ -221,7 +220,7 @@ impl LogStore for KafkaLogStore {
 
                 debug!(
                     "Read a record at offset {} for topic {}, high watermark: {}",
-                    offset, topic, high_watermark
+                    offset, ns.topic, high_watermark
                 );
 
                 // Ignores no-op records.
