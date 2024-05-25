@@ -378,7 +378,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     // instead of returning `NotFound` during the reader creation.
     // The entry count is 4, because we have the p2 `NotFound` cache.
     assert!(store.read_with(p2).range(0..4).await.is_err());
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 35));
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 35));
 
     assert_cache_files(
         &cache_store,
@@ -406,7 +406,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert!(store.read(p2).await.is_err());
     // Read p1 with range `1..` , the existing p1 with range `0..` must be evicted.
     let _ = store.read_with(p1).range(1..15).await.unwrap();
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 34));
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 34));
     assert_cache_files(
         &cache_store,
         &[

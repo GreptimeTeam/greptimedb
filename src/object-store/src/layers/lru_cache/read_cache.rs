@@ -19,7 +19,7 @@ use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
 use opendal::raw::oio::{Read, ReadDyn, Reader};
-use opendal::raw::{Access, BytesRange, OpRead, RpRead};
+use opendal::raw::{Access, BytesRange, OpRead, OpStat, RpRead};
 use opendal::{Buffer, Error as OpendalError, ErrorKind, Operator, Result};
 
 use crate::metrics::{
@@ -176,10 +176,13 @@ impl ReadCache {
             return inner.read(path, args).await.map(to_output_reader);
         }
 
+        // FIXME: remove this block after opendal v0.47 released.
+        let meta = inner.stat(path, OpStat::new()).await?;
         let (rp, reader) = inner.read(path, args).await?;
         let reader: ReadCacheReader<I> = ReadCacheReader {
             path: Arc::new(path.to_string()),
             inner_reader: reader,
+            size: meta.into_metadata().content_length(),
             file_cache: self.file_cache.clone(),
             mem_cache: self.mem_cache.clone(),
         };
@@ -192,6 +195,14 @@ pub struct ReadCacheReader<I: Access> {
     path: Arc<String>,
     /// Remote file reader.
     inner_reader: I::Reader,
+    /// FIXME: remove this field after opendal v0.47 released.
+    ///
+    /// OpenDAL's read_at takes `offset, limit` which means the underlying storage
+    /// services could return less data than limit. We store size here as a workaround.
+    ///
+    /// This API has been refactor into `offset, size` instead. After opendal v0.47 released,
+    /// we don't need this anymore.
+    size: u64,
     /// Local file cache backend
     file_cache: Operator,
     /// Local memory cache to track local cache files
@@ -204,7 +215,7 @@ impl<I: Access> ReadCacheReader<I> {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
         let buf = self.inner_reader.read_at(offset, limit).await?;
-        let result = self.try_write_cache(buf, offset, limit).await;
+        let result = self.try_write_cache(buf, offset).await;
 
         match result {
             Ok(read_bytes) => {
@@ -232,9 +243,9 @@ impl<I: Access> ReadCacheReader<I> {
         }
     }
 
-    async fn try_write_cache(&self, buf: Buffer, offset: u64, limit: usize) -> Result<usize> {
+    async fn try_write_cache(&self, buf: Buffer, offset: u64) -> Result<usize> {
         let size = buf.len();
-        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(limit as _)));
+        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(size as _)));
         self.file_cache.write(&read_key, buf).await?;
         Ok(size)
     }
@@ -242,7 +253,8 @@ impl<I: Access> ReadCacheReader<I> {
 
 impl<I: Access> Read for ReadCacheReader<I> {
     async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
-        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(limit as _)));
+        let size = self.size.min(offset + limit as u64) - offset;
+        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(size as _)));
 
         let read_result = self
             .mem_cache
