@@ -321,7 +321,7 @@ impl StatementExecutor {
             }
             FileMetadata::Orc { path, .. } => {
                 let meta = object_store
-                    .stat(&path)
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
 
