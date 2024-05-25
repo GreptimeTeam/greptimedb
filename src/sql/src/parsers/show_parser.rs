@@ -16,10 +16,13 @@ use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result};
+use crate::error::{
+    self, InvalidDatabaseNameSnafu, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result,
+};
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
+    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowTables,
+    ShowVariables,
 };
 use crate::statements::statement::Statement;
 
@@ -61,6 +64,8 @@ impl<'a> ParserContext<'a> {
         } else if self.consume_token("CREATE") {
             if self.consume_token("TABLE") {
                 self.parse_show_create_table()
+            } else if self.consume_token("FLOW") {
+                self.parse_show_create_flow()
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
@@ -104,6 +109,24 @@ impl<'a> ParserContext<'a> {
             }
         );
         Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
+    }
+
+    fn parse_show_create_flow(&mut self) -> Result<Statement> {
+        let raw_flow_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a flow name",
+                actual: self.peek_token_as_string(),
+            })?;
+        let flow_name = Self::canonicalize_object_name(raw_flow_name);
+        ensure!(
+            !flow_name.0.is_empty(),
+            InvalidFlowNameSnafu {
+                name: flow_name.to_string(),
+            }
+        );
+        Ok(Statement::ShowCreateFlow(ShowCreateFlow { flow_name }))
     }
 
     fn parse_show_table_name(&mut self) -> Result<String> {

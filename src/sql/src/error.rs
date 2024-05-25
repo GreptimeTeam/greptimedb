@@ -133,6 +133,9 @@ pub enum Error {
     #[snafu(display("Invalid table name: {}", name))]
     InvalidTableName { name: String },
 
+    #[snafu(display("Invalid flow name: {}", name))]
+    InvalidFlowName { name: String },
+
     #[snafu(display("Invalid default constraint, column: {}", column))]
     InvalidDefault {
         column: String,
@@ -238,6 +241,7 @@ impl ErrorExt for Error {
             | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
+            | InvalidFlowName { .. }
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
             | InvalidTableOption { .. }

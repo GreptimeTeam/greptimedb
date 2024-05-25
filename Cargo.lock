@@ -7920,6 +7920,7 @@ dependencies = [
  "session",
  "snafu 0.8.2",
  "sql",
+ "sqlparser 0.44.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e4e496b8d62416ad50ce70a1b460c7313610cf5d)",
  "statrs",
  "stats-cli",
  "store-api",

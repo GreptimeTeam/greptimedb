@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
+use sqlparser::ast::ObjectName;
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
@@ -93,6 +95,15 @@ impl StatementExecutor {
 
         query::sql::show_create_table(table, partitions, query_ctx)
             .context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_create_flow(
+        &self,
+        obj_name: &ObjectName,
+        flow_val: FlowInfoValue,
+    ) -> Result<Output> {
+        query::sql::show_create_flow(obj_name, flow_val).context(error::ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

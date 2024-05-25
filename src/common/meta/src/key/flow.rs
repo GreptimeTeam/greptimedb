@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod flow_info;
+pub mod flow_info;
 pub(crate) mod flow_name;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;

@@ -31,6 +31,7 @@ use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -40,6 +41,7 @@ use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::{case, col, lit, Expr};
+use sqlparser::ast::ObjectName;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -131,6 +133,13 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
         ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
+    ]))
+});
+
+static SHOW_CREATE_FLOW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("Flow", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Create Flow", ConcreteDataType::string_datatype(), false),
     ]))
 });
 
@@ -585,6 +594,31 @@ pub fn show_create_table(
         Arc::new(StringVector::from(vec![sql])) as _,
     ];
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_flow(obj_name: &ObjectName, flow_val: FlowInfoValue) -> Result<Output> {
+    let mut sql = String::new();
+    sql.push_str(&format!(
+        "CREATE OR REPLACE TASK IF NOT EXISTS {} ",
+        &obj_name
+    ));
+    sql.push_str(&format!("OUTPUT AS {} ", flow_val.sink_table_name()));
+    if !flow_val.expire_when().is_empty() {
+        sql.push_str(&format!("EXPIRE WHEN {} ", flow_val.expire_when()));
+    }
+    if !flow_val.comment().is_empty() {
+        sql.push_str(&format!("COMMENT '{}' ", flow_val.comment()));
+    }
+    sql.push_str(&format!("AS `{}`", flow_val.raw_sql()));
+
+    let columns = vec![
+        Arc::new(StringVector::from(vec![flow_val.flow_name().clone()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_FLOW_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
     Ok(Output::new_with_record_batches(records))
