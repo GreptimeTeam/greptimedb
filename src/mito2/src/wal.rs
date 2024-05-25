@@ -34,11 +34,9 @@ use store_api::logstore::namespace::LogStoreNamespace;
 use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
-use self::raw_entry_reader::RawEntryReaderFilter;
-use self::wal_entry_reader::WalEntryReader;
 use crate::error::{DeleteWalSnafu, EncodeWalSnafu, Result, WriteWalSnafu};
-use crate::wal::raw_entry_reader::LogStoreRawEntryReader;
-use crate::wal::wal_entry_reader::LogStoreEntryReader;
+use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
+use crate::wal::wal_entry_reader::{LogStoreEntryReader, WalEntryReader};
 
 /// WAL entry id.
 pub type EntryId = store_api::logstore::entry::Id;
@@ -96,9 +94,9 @@ impl<S: LogStore> Wal<S> {
                 LogStoreEntryReader::new(LogStoreRawEntryReader::new(self.store.clone()))
                     .read(namespace, start_id)
             }
-            LogStoreNamespace::Kafka(_) => LogStoreEntryReader::new(RawEntryReaderFilter::new(
+            LogStoreNamespace::Kafka(_) => LogStoreEntryReader::new(RegionRawEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
-                move |entry| entry.region_id == region_id,
+                region_id,
             ))
             .read(namespace, start_id),
         }

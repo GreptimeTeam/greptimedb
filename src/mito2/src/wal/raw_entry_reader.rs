@@ -114,38 +114,33 @@ impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
     }
 }
 
-/// A filter implement the [RawEntryReader]
-pub struct RawEntryReaderFilter<R, F> {
+/// A [RawEntryReader] reads [RawEntry] belongs to a specific region.
+pub struct RegionRawEntryReader<R> {
     reader: R,
-    filter: Arc<F>,
+    region_id: RegionId,
 }
 
-impl<R, F> RawEntryReaderFilter<R, F>
+impl<R> RegionRawEntryReader<R>
 where
     R: RawEntryReader,
-    F: Fn(&RawEntry) -> bool + Sync + Send,
 {
-    pub fn new(reader: R, filter: F) -> Self {
-        Self {
-            reader,
-            filter: Arc::new(filter),
-        }
+    pub fn new(reader: R, region_id: RegionId) -> Self {
+        Self { reader, region_id }
     }
 }
 
-impl<R, F> RawEntryReader for RawEntryReaderFilter<R, F>
+impl<R> RawEntryReader for RegionRawEntryReader<R>
 where
     R: RawEntryReader,
-    F: Fn(&RawEntry) -> bool + Sync + Send + 'static,
 {
     fn read(&self, ctx: &LogStoreNamespace, start_id: EntryId) -> Result<RawEntryStream<'static>> {
         let mut stream = self.reader.read(ctx, start_id)?;
-        let filter = self.filter.clone();
+        let region_id = self.region_id;
 
         let stream = try_stream!({
             while let Some(entry) = stream.next().await {
                 let entry = entry?;
-                if filter(&entry) {
+                if entry.region_id == region_id {
                     yield entry
                 }
             }
@@ -293,10 +288,10 @@ mod tests {
         };
 
         let expected_region_id = RegionId::new(1024, 3);
-        let reader =
-            RawEntryReaderFilter::new(LogStoreRawEntryReader::new(Arc::new(store)), move |entry| {
-                entry.region_id == expected_region_id
-            });
+        let reader = RegionRawEntryReader::new(
+            LogStoreRawEntryReader::new(Arc::new(store)),
+            expected_region_id,
+        );
         let entries = reader
             .read(
                 &LogStoreNamespace::raft_engine_namespace(RegionId::new(1024, 1).as_u64()),
