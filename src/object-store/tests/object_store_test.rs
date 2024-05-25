@@ -22,7 +22,7 @@ use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{ObjectStore, ObjectStoreBuilder};
-use opendal::raw::Accessor;
+use opendal::raw::Access;
 use opendal::services::{Azblob, Gcs, Oss};
 use opendal::{EntryMode, Operator, OperatorBuilder};
 
@@ -36,11 +36,11 @@ async fn test_object_crud(store: &ObjectStore) -> Result<()> {
 
     // Read data from object;
     let bs = store.read(file_name).await?;
-    assert_eq!("Hello, World!", String::from_utf8(bs)?);
+    assert_eq!("Hello, World!", String::from_utf8(bs.to_vec())?);
 
     // Read range from object;
     let bs = store.read_with(file_name).range(1..=11).await?;
-    assert_eq!("ello, World", String::from_utf8(bs)?);
+    assert_eq!("ello, World", String::from_utf8(bs.to_vec())?);
 
     // Get object's Metadata
     let meta = store.stat(file_name).await?;
@@ -77,7 +77,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     assert_eq!(p2, entries.first().unwrap().path());
 
     let content = store.read(p2).await?;
-    assert_eq!("Hello, object2!", String::from_utf8(content)?);
+    assert_eq!("Hello, object2!", String::from_utf8(content.to_vec())?);
 
     store.delete(p2).await?;
     let entries = store.list("/").await?;
@@ -253,10 +253,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
     Ok(())
 }
 
-async fn assert_lru_cache<C: Accessor + Clone>(
-    cache_layer: &LruCacheLayer<C>,
-    file_names: &[&str],
-) {
+async fn assert_lru_cache<C: Access + Clone>(cache_layer: &LruCacheLayer<C>, file_names: &[&str]) {
     for file_name in file_names {
         assert!(cache_layer.contains_file(file_name).await);
     }
@@ -278,7 +275,7 @@ async fn assert_cache_files(
         let bs = store.read(o.path()).await.unwrap();
         assert_eq!(
             file_contents[position],
-            String::from_utf8(bs.clone())?,
+            String::from_utf8(bs.to_vec())?,
             "file content not match: {}",
             o.name()
         );
