@@ -1142,7 +1142,7 @@ fn create_table_info(
     };
 
     let desc = if create_table.desc.is_empty() {
-        None
+        create_table.table_options.get("comment").cloned()
     } else {
         Some(create_table.desc.clone())
     };
