@@ -16,7 +16,6 @@ use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
-use sqlparser::ast::ObjectName;
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
@@ -26,6 +25,7 @@ use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
+use sqlparser::ast::ObjectName;
 use table::TableRef;
 
 use crate::error::{self, ExecuteStatementSnafu, Result};

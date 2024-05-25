@@ -41,7 +41,6 @@ use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::{case, col, lit, Expr};
-use sqlparser::ast::ObjectName;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -55,6 +54,7 @@ use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
+use sqlparser::ast::ObjectName;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
