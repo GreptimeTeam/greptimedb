@@ -239,6 +239,7 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
         .collect()
 }
 
+/// TODO(weny): Consider ignoring existing corrupted data instead of throwing an error.
 pub fn maybe_emit_entry(
     record: Record,
     entry_records: &mut HashMap<u64, Vec<Record>>,
@@ -305,46 +306,26 @@ mod tests {
     use super::*;
     use crate::kafka::client_manager::ClientManager;
 
-    // Implements some utility methods for testing.
-    impl Default for Record {
-        fn default() -> Self {
-            Self {
-                meta: RecordMeta {
-                    version: VERSION,
-                    tp: RecordType::Full,
-                    ns: NamespaceImpl {
-                        region_id: 0,
-                        topic: "greptimedb_wal_topic".to_string(),
-                    },
-                    entry_id: 0,
+    fn new_test_record(tp: RecordType, entry_id: EntryId, region_id: u64, data: Vec<u8>) -> Record {
+        Record {
+            meta: RecordMeta {
+                version: VERSION,
+                tp,
+                ns: NamespaceImpl {
+                    region_id,
+                    topic: "greptimedb_wal_topic".to_string(),
                 },
-                data: Vec::new(),
-            }
+                entry_id,
+            },
+            data,
         }
     }
 
-    impl Record {
-        /// Overrides tp.
-        fn with_tp(&self, tp: RecordType) -> Self {
-            Self {
-                meta: RecordMeta {
-                    tp,
-                    ..self.meta.clone()
-                },
-                ..self.clone()
-            }
-        }
-
-        /// Overrides data with the given data.
-        fn with_data(&self, data: &[u8]) -> Self {
-            Self {
-                data: data.to_vec(),
-                ..self.clone()
-            }
-        }
-    }
-
-    fn new_test_entry<D: AsRef<[u8]>>(data: D, entry_id: EntryId, ns: NamespaceImpl) -> EntryImpl {
+    fn new_test_entry_impl<D: AsRef<[u8]>>(
+        data: D,
+        entry_id: EntryId,
+        ns: NamespaceImpl,
+    ) -> EntryImpl {
         EntryImpl {
             data: data.as_ref().to_vec(),
             id: entry_id,
@@ -362,20 +343,20 @@ mod tests {
             region_id: 1,
             topic: "greptimedb_wal_topic".to_string(),
         };
-        let entry = new_test_entry([b'1'; 100], 0, ns.clone());
+        let entry = new_test_entry_impl([b'1'; 100], 0, ns.clone());
         let records = build_records(entry.clone(), max_record_size);
         assert!(records.len() == 1);
         assert_eq!(entry.data, records[0].data);
 
         // On a large entry.
-        let entry = new_test_entry([b'1'; 150], 0, ns.clone());
+        let entry = new_test_entry_impl([b'1'; 150], 0, ns.clone());
         let records = build_records(entry.clone(), max_record_size);
         assert!(records.len() == 2);
         assert_eq!(&records[0].data, &[b'1'; 128]);
         assert_eq!(&records[1].data, &[b'1'; 22]);
 
         // On a way-too large entry.
-        let entry = new_test_entry([b'1'; 5000], 0, ns.clone());
+        let entry = new_test_entry_impl([b'1'; 5000], 0, ns.clone());
         let records = build_records(entry.clone(), max_record_size);
         let matched = entry
             .data
@@ -408,11 +389,10 @@ mod tests {
     /// Tests that the reconstruction of an entry works as expected.
     #[test]
     fn test_reconstruct_entry() {
-        let template = Record::default();
         let records = vec![
-            template.with_data(b"111").with_tp(RecordType::First),
-            template.with_data(b"222").with_tp(RecordType::Middle(1)),
-            template.with_data(b"333").with_tp(RecordType::Last),
+            new_test_record(RecordType::First, 0, 0, vec![1, 1, 1]),
+            new_test_record(RecordType::Middle(1), 0, 0, vec![2, 2, 2]),
+            new_test_record(RecordType::Last, 0, 0, vec![3, 3, 3]),
         ];
         let entry = EntryImpl::from(records.clone());
         assert_eq!(records[0].meta.entry_id, entry.id);
@@ -435,7 +415,7 @@ mod tests {
                     region_id: 1,
                     topic,
                 };
-                let entry = new_test_entry([b'1'; 2000000], 0, ns.clone());
+                let entry = new_test_entry_impl([b'1'; 2000000], 0, ns.clone());
                 let producer = RecordProducer::new(ns.clone()).with_entries(vec![entry]);
                 let config = DatanodeKafkaConfig {
                     broker_endpoints,
@@ -447,5 +427,97 @@ mod tests {
             })
         })
         .await
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_unexpected_first_part() {
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::First, 0, 0, vec![]);
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .is_none());
+
+        let incoming_record = new_test_record(RecordType::First, 0, 0, vec![]);
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap_err()
+            .to_string()
+            .contains("First record must be the first"));
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_ignore_incomplete_part() {
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::Last, 0, 0, vec![]);
+        // Incomplete part will be ignored
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .is_none());
+        assert!(records.is_empty());
+
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::Middle(1), 0, 0, vec![]);
+        // Incomplete part will be ignored
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .is_none());
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_incorrect_order() {
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::Last, 0, 0, vec![]);
+        // Incomplete part will be ignored
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .is_none());
+        assert!(records.is_empty());
+
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::Middle(1), 0, 0, vec![]);
+        // Incomplete part will be ignored
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .is_none());
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_maybe_emit_entry() {
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::Full, 1, 1, vec![1, 1, 1]);
+        let ns = incoming_record.meta.ns.clone();
+        let entry = maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            entry,
+            EntryImpl {
+                data: vec![1, 1, 1],
+                id: 1,
+                ns,
+            }
+        );
+
+        let mut records = HashMap::new();
+        let first_entry = new_test_record(RecordType::First, 1, 1, vec![1, 1, 1]);
+        let mid_entry = new_test_record(RecordType::Middle(1), 1, 1, vec![2, 2, 2]);
+        let last_entry = new_test_record(RecordType::Last, 1, 1, vec![3, 3, 3]);
+        let ns = first_entry.meta.ns.clone();
+        assert!(maybe_emit_entry(first_entry, &mut records)
+            .unwrap()
+            .is_none());
+        assert!(maybe_emit_entry(mid_entry, &mut records).unwrap().is_none());
+        let entry = maybe_emit_entry(last_entry, &mut records).unwrap().unwrap();
+
+        assert_eq!(
+            entry,
+            EntryImpl {
+                data: vec![1, 1, 1, 2, 2, 2, 3, 3, 3],
+                id: 1,
+                ns,
+            }
+        );
     }
 }
