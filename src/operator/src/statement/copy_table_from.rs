@@ -46,6 +46,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
@@ -146,10 +147,16 @@ impl StatementExecutor {
                 path,
             }),
             Format::Parquet(_) => {
+                let meta = object_store
+                    .stat(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?;
                 let mut reader = object_store
                     .reader(&path)
                     .await
-                    .context(error::ReadObjectSnafu { path: &path })?;
+                    .context(error::ReadObjectSnafu { path: &path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .compat();
                 let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default())
                     .await
                     .context(error::ReadParquetMetadataSnafu)?;
@@ -161,10 +168,16 @@ impl StatementExecutor {
                 })
             }
             Format::Orc(_) => {
+                let meta = object_store
+                    .stat(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?;
                 let reader = object_store
                     .reader(&path)
                     .await
-                    .context(error::ReadObjectSnafu { path: &path })?;
+                    .context(error::ReadObjectSnafu { path: &path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .compat();
 
                 let schema = infer_orc_schema(reader)
                     .await
@@ -279,11 +292,17 @@ impl StatementExecutor {
                 )))
             }
             FileMetadata::Parquet { metadata, path, .. } => {
-                let reader = object_store
-                    .reader_with(path)
-                    .buffer(DEFAULT_READ_BUFFER)
+                let meta = object_store
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
+                let reader = object_store
+                    .reader_with(path)
+                    .chunk(DEFAULT_READ_BUFFER)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .compat();
                 let builder =
                     ParquetRecordBatchStreamBuilder::new_with_metadata(reader, metadata.clone());
                 let stream = builder
@@ -302,11 +321,17 @@ impl StatementExecutor {
                 )))
             }
             FileMetadata::Orc { path, .. } => {
-                let reader = object_store
-                    .reader_with(path)
-                    .buffer(DEFAULT_READ_BUFFER)
+                let meta = object_store
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
+                let reader = object_store
+                    .reader_with(path)
+                    .chunk(DEFAULT_READ_BUFFER)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .compat();
                 let stream = new_orc_stream_reader(reader)
                     .await
                     .context(error::ReadOrcSnafu)?;

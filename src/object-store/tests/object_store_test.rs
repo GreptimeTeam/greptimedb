@@ -22,7 +22,6 @@ use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use object_store::{ObjectStore, ObjectStoreBuilder};
-use opendal::raw::Access;
 use opendal::services::{Azblob, Gcs, Oss};
 use opendal::{EntryMode, Operator, OperatorBuilder};
 
@@ -236,11 +235,9 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
         let _ = builder
             .root(&cache_dir.path().to_string_lossy())
             .atomic_write_dir(&cache_dir.path().to_string_lossy());
-        let file_cache = Arc::new(builder.build().unwrap());
+        let file_cache = Operator::new(builder).unwrap().finish();
 
-        LruCacheLayer::new(Arc::new(file_cache.clone()), 32)
-            .await
-            .unwrap()
+        LruCacheLayer::new(file_cache, 32).await.unwrap()
     };
 
     let store = store.layer(cache_layer.clone());
@@ -253,7 +250,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
     Ok(())
 }
 
-async fn assert_lru_cache<C: Access + Clone>(cache_layer: &LruCacheLayer<C>, file_names: &[&str]) {
+async fn assert_lru_cache(cache_layer: &LruCacheLayer, file_names: &[&str]) {
     for file_name in file_names {
         assert!(cache_layer.contains_file(file_name).await);
     }
@@ -309,9 +306,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let cache_store = OperatorBuilder::new(file_cache.clone()).finish();
 
     // create operator for cache dir to verify cache file
-    let cache_layer = LruCacheLayer::new(Arc::new(file_cache.clone()), 38)
-        .await
-        .unwrap();
+    let cache_layer = LruCacheLayer::new(cache_store.clone(), 38).await.unwrap();
     let store = store.layer(cache_layer.clone());
 
     // create several object handler.
@@ -439,7 +434,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
 
     drop(cache_layer);
     // Test recover
-    let cache_layer = LruCacheLayer::new(Arc::new(file_cache), 38).await.unwrap();
+    let cache_layer = LruCacheLayer::new(cache_store, 38).await.unwrap();
 
     // The p2 `NotFound` cache will not be recovered
     assert_eq!(cache_layer.read_cache_stat().await, (3, 34));

@@ -244,7 +244,8 @@ impl ManifestObjectStore {
                 .object_store
                 .read(entry.path())
                 .await
-                .context(OpenDalSnafu)?;
+                .context(OpenDalSnafu)?
+                .to_vec();
             let data = compress_type
                 .decode(bytes)
                 .await
@@ -420,58 +421,59 @@ impl ManifestObjectStore {
         let path = self.checkpoint_file_path(version);
         // Due to backward compatibility, it is possible that the user's checkpoint not compressed,
         // so if we don't find file by compressed type. fall back to checkpoint not compressed find again.
-        let checkpoint_data =
-            match self.object_store.read(&path).await {
-                Ok(checkpoint) => {
-                    let checkpoint_size = checkpoint.len();
-                    let decompress_data = self.compress_type.decode(checkpoint).await.context(
-                        DecompressObjectSnafu {
-                            compress_type: self.compress_type,
-                            path,
-                        },
-                    )?;
-                    verify_checksum(&decompress_data, metadata.checksum)?;
-                    // set the checkpoint size
-                    self.set_checkpoint_file_size(version, checkpoint_size as u64);
-                    Ok(Some(decompress_data))
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::NotFound {
-                        if self.compress_type != FALL_BACK_COMPRESS_TYPE {
-                            let fall_back_path = gen_path(
-                                &self.path,
-                                &checkpoint_file(version),
-                                FALL_BACK_COMPRESS_TYPE,
-                            );
-                            debug!(
-                                "Failed to load checkpoint from path: {}, fall back to path: {}",
-                                path, fall_back_path
-                            );
-                            match self.object_store.read(&fall_back_path).await {
-                                Ok(checkpoint) => {
-                                    let checkpoint_size = checkpoint.len();
-                                    let decompress_data = FALL_BACK_COMPRESS_TYPE
-                                        .decode(checkpoint)
-                                        .await
-                                        .context(DecompressObjectSnafu {
-                                            compress_type: FALL_BACK_COMPRESS_TYPE,
-                                            path,
-                                        })?;
-                                    verify_checksum(&decompress_data, metadata.checksum)?;
-                                    self.set_checkpoint_file_size(version, checkpoint_size as u64);
-                                    Ok(Some(decompress_data))
-                                }
-                                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-                                Err(e) => Err(e).context(OpenDalSnafu),
+        let checkpoint_data = match self.object_store.read(&path).await {
+            Ok(checkpoint) => {
+                let checkpoint_size = checkpoint.len();
+                let decompress_data = self
+                    .compress_type
+                    .decode(checkpoint.to_vec())
+                    .await
+                    .context(DecompressObjectSnafu {
+                        compress_type: self.compress_type,
+                        path,
+                    })?;
+                verify_checksum(&decompress_data, metadata.checksum)?;
+                // set the checkpoint size
+                self.set_checkpoint_file_size(version, checkpoint_size as u64);
+                Ok(Some(decompress_data))
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    if self.compress_type != FALL_BACK_COMPRESS_TYPE {
+                        let fall_back_path = gen_path(
+                            &self.path,
+                            &checkpoint_file(version),
+                            FALL_BACK_COMPRESS_TYPE,
+                        );
+                        debug!(
+                            "Failed to load checkpoint from path: {}, fall back to path: {}",
+                            path, fall_back_path
+                        );
+                        match self.object_store.read(&fall_back_path).await {
+                            Ok(checkpoint) => {
+                                let checkpoint_size = checkpoint.len();
+                                let decompress_data = FALL_BACK_COMPRESS_TYPE
+                                    .decode(checkpoint.to_vec())
+                                    .await
+                                    .context(DecompressObjectSnafu {
+                                        compress_type: FALL_BACK_COMPRESS_TYPE,
+                                        path,
+                                    })?;
+                                verify_checksum(&decompress_data, metadata.checksum)?;
+                                self.set_checkpoint_file_size(version, checkpoint_size as u64);
+                                Ok(Some(decompress_data))
                             }
-                        } else {
-                            Ok(None)
+                            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                            Err(e) => Err(e).context(OpenDalSnafu),
                         }
                     } else {
-                        Err(e).context(OpenDalSnafu)
+                        Ok(None)
                     }
+                } else {
+                    Err(e).context(OpenDalSnafu)
                 }
-            }?;
+            }
+        }?;
         Ok(checkpoint_data.map(|data| (version, data)))
     }
 
@@ -489,7 +491,7 @@ impl ManifestObjectStore {
             }
         };
 
-        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
+        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data.to_vec())?;
 
         debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
@@ -501,7 +503,11 @@ impl ManifestObjectStore {
 
     #[cfg(test)]
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        self.object_store.read(path).await.context(OpenDalSnafu)
+        self.object_store
+            .read(path)
+            .await
+            .context(OpenDalSnafu)
+            .map(|v| v.to_vec())
     }
 
     #[cfg(test)]

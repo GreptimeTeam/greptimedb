@@ -25,6 +25,7 @@ use orc_rust::arrow_reader::ArrowReaderBuilder;
 use orc_rust::async_arrow_reader::ArrowStreamReader;
 use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncSeek};
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
@@ -32,6 +33,7 @@ use crate::file_format::FileFormat;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrcFormat;
 
+/// TODO: it's better to avoid AsyncRead + AsyncSeek, use range based read instead.
 pub async fn new_orc_stream_reader<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
     reader: R,
 ) -> Result<ArrowStreamReader<R>> {
@@ -51,10 +53,16 @@ pub async fn infer_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>
 #[async_trait]
 impl FileFormat for OrcFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
+        let meta = store
+            .stat(path)
+            .await
+            .context(error::ReadObjectSnafu { path })?;
         let reader = store
             .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path })?;
+            .context(error::ReadObjectSnafu { path })?
+            .into_futures_async_read(0..meta.content_length())
+            .compat();
 
         let schema = infer_orc_schema(reader).await?;
 
@@ -100,7 +108,9 @@ impl FileOpener for OrcOpener {
             let reader = object_store
                 .reader(meta.location().to_string().as_str())
                 .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+                .into_futures_async_read(0..meta.object_meta.size as u64)
+                .compat();
 
             let stream_reader = new_orc_stream_reader(reader)
                 .await

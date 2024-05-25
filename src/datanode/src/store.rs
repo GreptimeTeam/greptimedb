@@ -20,16 +20,14 @@ mod gcs;
 mod oss;
 mod s3;
 
-use std::sync::Arc;
-use std::time::Duration;
-use std::{env, path};
+use std::path;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use object_store::layers::{LruCacheLayer, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::{HttpClient, ObjectStore};
 use snafu::prelude::*;
 
 use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -107,13 +105,14 @@ async fn create_object_store_with_cache(
     if let Some(path) = cache_path {
         let atomic_temp_dir = join_dir(path, ".tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
-        let cache_store = Fs::default()
-            .root(path)
-            .atomic_write_dir(&atomic_temp_dir)
-            .build()
-            .context(error::InitBackendSnafu)?;
+        let mut builder = Fs::default();
+        builder.root(path);
+        builder.atomic_write_dir(&atomic_temp_dir);
+        let cache_store = ObjectStore::new(builder)
+            .context(error::InitBackendSnafu)?
+            .finish();
 
-        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
+        let cache_layer = LruCacheLayer::new(cache_store, cache_capacity.0 as usize)
             .await
             .context(error::InitBackendSnafu)?;
 
@@ -138,35 +137,38 @@ pub(crate) fn clean_temp_dir(dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// FIXME: we need to use reqwest 0.12 here.
 pub(crate) fn build_http_client() -> Result<HttpClient> {
-    let http_builder = {
-        let mut builder = reqwest::ClientBuilder::new();
+    // let http_builder = {
+    //     let mut builder = reqwest::ClientBuilder::new();
+    //
+    //     // Pool max idle per host controls connection pool size.
+    //     // Default to no limit, set to `0` for disable it.
+    //     let pool_max_idle_per_host = env::var("_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST")
+    //         .ok()
+    //         .and_then(|v| v.parse::<usize>().ok())
+    //         .unwrap_or(usize::MAX);
+    //     builder = builder.pool_max_idle_per_host(pool_max_idle_per_host);
+    //
+    //     // Connect timeout default to 30s.
+    //     let connect_timeout = env::var("_GREPTIMEDB_HTTP_CONNECT_TIMEOUT")
+    //         .ok()
+    //         .and_then(|v| v.parse::<u64>().ok())
+    //         .unwrap_or(30);
+    //     builder = builder.connect_timeout(Duration::from_secs(connect_timeout));
+    //
+    //     // Pool connection idle timeout default to 90s.
+    //     let idle_timeout = env::var("_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT")
+    //         .ok()
+    //         .and_then(|v| v.parse::<u64>().ok())
+    //         .unwrap_or(90);
+    //
+    //     builder = builder.pool_idle_timeout(Duration::from_secs(idle_timeout));
+    //
+    //     builder
+    // };
+    //
+    // HttpClient::build(http_builder).context(error::InitBackendSnafu)
 
-        // Pool max idle per host controls connection pool size.
-        // Default to no limit, set to `0` for disable it.
-        let pool_max_idle_per_host = env::var("_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
-        builder = builder.pool_max_idle_per_host(pool_max_idle_per_host);
-
-        // Connect timeout default to 30s.
-        let connect_timeout = env::var("_GREPTIMEDB_HTTP_CONNECT_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
-        builder = builder.connect_timeout(Duration::from_secs(connect_timeout));
-
-        // Pool connection idle timeout default to 90s.
-        let idle_timeout = env::var("_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(90);
-
-        builder = builder.pool_idle_timeout(Duration::from_secs(idle_timeout));
-
-        builder
-    };
-
-    HttpClient::build(http_builder).context(error::InitBackendSnafu)
+    HttpClient::new().context(error::InitBackendSnafu)
 }

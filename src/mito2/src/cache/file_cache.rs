@@ -112,6 +112,10 @@ impl FileCache {
         self.memory_index.insert(key, value).await;
     }
 
+    pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
+        self.memory_index.get(&key).await
+    }
+
     /// Reads a file from the cache.
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
         // We must use `get()` to update the estimator of the cache.
@@ -372,7 +376,6 @@ fn parse_index_key(name: &str) -> Option<IndexKey> {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
-    use futures::AsyncReadExt;
     use object_store::services::Fs;
 
     use super::*;
@@ -451,10 +454,9 @@ mod tests {
             .await;
 
         // Read file content.
-        let mut reader = cache.reader(key).await.unwrap();
-        let mut buf = String::new();
-        reader.read_to_string(&mut buf).await.unwrap();
-        assert_eq!("hello", buf);
+        let reader = cache.reader(key).await.unwrap();
+        let buf = reader.read(..).await.unwrap().to_vec();
+        assert_eq!("hello", String::from_utf8(buf).unwrap());
 
         // Get weighted size.
         cache.memory_index.run_pending_tasks().await;
@@ -549,10 +551,9 @@ mod tests {
 
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = IndexKey::new(region_id, *file_id, file_type);
-            let mut reader = cache.reader(key).await.unwrap();
-            let mut buf = String::new();
-            reader.read_to_string(&mut buf).await.unwrap();
-            assert_eq!(i.to_string(), buf);
+            let reader = cache.reader(key).await.unwrap();
+            let buf = reader.read(..).await.unwrap().to_vec();
+            assert_eq!(i.to_string(), String::from_utf8(buf).unwrap());
         }
     }
 

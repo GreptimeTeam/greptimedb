@@ -57,6 +57,7 @@ substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true

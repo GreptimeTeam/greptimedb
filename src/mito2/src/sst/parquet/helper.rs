@@ -121,7 +121,7 @@ async fn fetch_ranges_seq(
                     .read_with(&file_path)
                     .range(range.start..range.end)
                     .call()?;
-                Ok::<_, object_store::Error>(Bytes::from(data))
+                Ok::<_, object_store::Error>(data.to_bytes())
             })
             .collect::<object_store::Result<Vec<_>>>()
     };
@@ -141,7 +141,7 @@ async fn fetch_ranges_concurrent(
         let future_read = object_store.read_with(file_path);
         handles.push(async move {
             let data = future_read.range(range.start..range.end).await?;
-            Ok::<_, object_store::Error>(Bytes::from(data))
+            Ok::<_, object_store::Error>(data.to_bytes())
         });
     }
     let results = futures::future::try_join_all(handles).await?;

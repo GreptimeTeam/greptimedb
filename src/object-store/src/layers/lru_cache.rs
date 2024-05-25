@@ -19,21 +19,21 @@ use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
 };
-use opendal::Result;
+use opendal::{Operator, Result};
 mod read_cache;
 use common_telemetry::info;
 use read_cache::ReadCache;
 
 /// An opendal layer with local LRU file cache supporting.
 #[derive(Clone)]
-pub struct LruCacheLayer<C: Clone> {
+pub struct LruCacheLayer {
     // The read cache
-    read_cache: ReadCache<C>,
+    read_cache: ReadCache,
 }
 
-impl<C: Access + Clone> LruCacheLayer<C> {
+impl LruCacheLayer {
     /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
-    pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
+    pub async fn new(file_cache: Operator, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
         let (entries, bytes) = read_cache.recover_cache().await?;
 
@@ -56,8 +56,8 @@ impl<C: Access + Clone> LruCacheLayer<C> {
     }
 }
 
-impl<I: Access, C: Access + Clone> Layer<I> for LruCacheLayer<C> {
-    type LayeredAccess = LruCacheAccess<I, C>;
+impl<I: Access> Layer<I> for LruCacheLayer {
+    type LayeredAccess = LruCacheAccess<I>;
 
     fn layer(&self, inner: I) -> Self::LayeredAccess {
         LruCacheAccess {
@@ -68,12 +68,12 @@ impl<I: Access, C: Access + Clone> Layer<I> for LruCacheLayer<C> {
 }
 
 #[derive(Debug)]
-pub struct LruCacheAccess<I, C: Clone> {
+pub struct LruCacheAccess<I> {
     inner: I,
-    read_cache: ReadCache<C>,
+    read_cache: ReadCache,
 }
 
-impl<I: Access, C: Access + Clone> LayeredAccess for LruCacheAccess<I, C> {
+impl<I: Access> LayeredAccess for LruCacheAccess<I> {
     type Inner = I;
     type Reader = Arc<dyn ReadDyn>;
     type BlockingReader = I::BlockingReader;
