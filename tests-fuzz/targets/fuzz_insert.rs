@@ -39,7 +39,7 @@ use tests_fuzz::ir::{
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{flush_memtable, init_greptime_connections_via_env, Connections};
 use tests_fuzz::validator;
 
 struct FuzzContext {
@@ -140,6 +140,10 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
             )
         }
     );
+
+    if rng.gen_bool(0.5) {
+        flush_memtable(&ctx.greptime, &create_expr.table_name).await?;
+    }
 
     // Validate inserted rows
     // The order of inserted rows are random, so we need to sort the inserted rows by primary keys and time index for comparison

@@ -40,9 +40,10 @@ use tests_fuzz::ir::{
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{
+    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
+};
 use tests_fuzz::validator;
-
 struct FuzzContext {
     greptime: Pool<MySql>,
 }
@@ -56,15 +57,15 @@ impl FuzzContext {
 #[derive(Copy, Clone, Debug)]
 struct FuzzInput {
     seed: u64,
-    rows: usize,
+    tables: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let rows = rng.gen_range(1..4096);
-        Ok(FuzzInput { rows, seed })
+        let tables = rng.gen_range(1..256);
+        Ok(FuzzInput { tables, seed })
     }
 }
 
@@ -102,26 +103,26 @@ fn generate_create_logical_table_expr<R: Rng + 'static>(
 }
 
 fn generate_insert_expr<R: Rng + 'static>(
-    input: FuzzInput,
+    rows: usize,
     rng: &mut R,
     table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
     let insert_generator = InsertExprGeneratorBuilder::default()
         .omit_column_list(false)
         .table_ctx(table_ctx)
-        .rows(input.rows)
+        .rows(rows)
         .value_generator(Box::new(generate_random_value_for_mysql))
         .build()
         .unwrap();
     insert_generator.generate(rng)
 }
 
-async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
-    info!("input: {input:?}");
-    let mut rng = ChaChaRng::seed_from_u64(input.seed);
-
+async fn create_physical_table<R: Rng + 'static>(
+    ctx: &FuzzContext,
+    rng: &mut R,
+) -> Result<TableContextRef> {
     // Create a physical table and a logical table on top of it
-    let create_physical_table_expr = generate_create_physical_table_expr(&mut rng).unwrap();
+    let create_physical_table_expr = generate_create_physical_table_expr(rng).unwrap();
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&create_physical_table_expr)?;
     let result = sqlx::query(&sql)
@@ -130,10 +131,17 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create physical table: {sql}, result: {result:?}");
 
-    let physical_table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
+    Ok(Arc::new(TableContext::from(&create_physical_table_expr)))
+}
 
+async fn create_logical_table_and_insert_values<R: Rng + 'static>(
+    ctx: &FuzzContext,
+    rng: &mut R,
+    physical_table_ctx: TableContextRef,
+) -> Result<TableContextRef> {
+    let translator = CreateTableExprTranslator;
     let create_logical_table_expr =
-        generate_create_logical_table_expr(physical_table_ctx, &mut rng).unwrap();
+        generate_create_logical_table_expr(physical_table_ctx, rng).unwrap();
     let sql = translator.translate(&create_logical_table_expr)?;
     let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
@@ -141,9 +149,9 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create logical table: {sql}, result: {result:?}");
 
+    let rows = rng.gen_range(1..2048);
     let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
-
-    let insert_expr = generate_insert_expr(input, &mut rng, logical_table_ctx)?;
+    let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
     let result = ctx
@@ -154,11 +162,11 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
 
     ensure!(
-        result.rows_affected() == input.rows as u64,
+        result.rows_affected() == rows as u64,
         error::AssertSnafu {
             reason: format!(
                 "expected rows affected: {}, actual: {}",
-                input.rows,
+                rows,
                 result.rows_affected(),
             )
         }
@@ -225,26 +233,49 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     });
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
+    Ok(logical_table_ctx)
+}
+
+async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
+    info!("input: {input:?}");
+    let mut rng = ChaChaRng::seed_from_u64(input.seed);
+    let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
+
+    let mut tables = Vec::with_capacity(input.tables);
+
+    // Create logical tables
+    for _ in 0..input.tables {
+        let logical_table =
+            create_logical_table_and_insert_values(&ctx, &mut rng, physical_table_ctx.clone())
+                .await?;
+        tables.push(logical_table);
+        if rng.gen_bool(0.1) {
+            flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
+        }
+        if rng.gen_bool(0.1) {
+            compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
+        }
+    }
+
     // Clean up logical table
-    let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
-    let result = sqlx::query(&sql)
-        .execute(&ctx.greptime)
-        .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
-    info!(
-        "Drop table: {}, result: {result:?}",
-        create_logical_table_expr.table_name
-    );
+    for table in tables {
+        let sql = format!("DROP TABLE {}", table.name);
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Drop table: {}, result: {result:?}", table.name);
+    }
 
     // Clean up physical table
-    let sql = format!("DROP TABLE {}", create_physical_table_expr.table_name);
+    let sql = format!("DROP TABLE {}", physical_table_ctx.name);
     let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
     info!(
         "Drop table: {}, result: {result:?}",
-        create_physical_table_expr.table_name
+        physical_table_ctx.name
     );
     ctx.close().await;
 
