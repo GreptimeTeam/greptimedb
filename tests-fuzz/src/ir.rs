@@ -36,6 +36,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use self::insert_expr::{RowValue, RowValues};
+use crate::context::TableContextRef;
 use crate::generator::Random;
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
@@ -442,7 +443,7 @@ pub fn generate_columns<R: Rng + 'static>(
 /// Replace Value::Default with the corresponding default value in the rows for comparison.
 pub fn replace_default(
     rows: &[RowValues],
-    create_expr: &CreateTableExpr,
+    table_ctx_ref: &TableContextRef,
     insert_expr: &InsertIntoExpr,
 ) -> Vec<RowValues> {
     let index_map: HashMap<usize, usize> = insert_expr
@@ -450,7 +451,7 @@ pub fn replace_default(
         .iter()
         .enumerate()
         .map(|(insert_idx, insert_column)| {
-            let create_idx = create_expr
+            let create_idx = table_ctx_ref
                 .columns
                 .iter()
                 .position(|create_column| create_column.name == insert_column.name)
@@ -464,7 +465,7 @@ pub fn replace_default(
         let mut new_row = Vec::new();
         for (idx, value) in row.iter().enumerate() {
             if let RowValue::Default = value {
-                let column = &create_expr.columns[index_map[&idx]];
+                let column = &table_ctx_ref.columns[index_map[&idx]];
                 new_row.push(RowValue::Value(column.default_value().unwrap().clone()));
             } else {
                 new_row.push(value.clone());

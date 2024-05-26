@@ -120,7 +120,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
 
     let table_ctx = Arc::new(TableContext::from(&create_expr));
-    let insert_expr = generate_insert_expr(input, &mut rng, table_ctx)?;
+    let insert_expr = generate_insert_expr(input, &mut rng, table_ctx.clone())?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
     let result = ctx
@@ -182,7 +182,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         column_list, create_expr.table_name, primary_keys_column_list
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
-    let mut expected_rows = replace_default(&insert_expr.values_list, &create_expr, &insert_expr);
+    let mut expected_rows = replace_default(&insert_expr.values_list, &table_ctx, &insert_expr);
     expected_rows.sort_by(|a, b| {
         let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
             .iter()

@@ -14,6 +14,7 @@
 
 #![no_main]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -134,23 +135,12 @@ async fn create_physical_table<R: Rng + 'static>(
     Ok(Arc::new(TableContext::from(&create_physical_table_expr)))
 }
 
-async fn create_logical_table_and_insert_values<R: Rng + 'static>(
+async fn insert_and_validate_values<R: Rng + 'static>(
     ctx: &FuzzContext,
     rng: &mut R,
-    physical_table_ctx: TableContextRef,
-) -> Result<TableContextRef> {
-    let translator = CreateTableExprTranslator;
-    let create_logical_table_expr =
-        generate_create_logical_table_expr(physical_table_ctx, rng).unwrap();
-    let sql = translator.translate(&create_logical_table_expr)?;
-    let result = sqlx::query(&sql)
-        .execute(&ctx.greptime)
-        .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
-    info!("Create logical table: {sql}, result: {result:?}");
-
+    logical_table_ctx: TableContextRef,
+) -> Result<()> {
     let rows = rng.gen_range(1..2048);
-    let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
     let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
@@ -174,7 +164,7 @@ async fn create_logical_table_and_insert_values<R: Rng + 'static>(
 
     // Validate inserted rows
     // The order of inserted rows are random, so we need to sort the inserted rows by primary keys and time index for comparison
-    let primary_keys_names = create_logical_table_expr
+    let primary_keys_names = logical_table_ctx
         .columns
         .iter()
         .filter(|c| c.is_primary_key() || c.is_time_index())
@@ -206,14 +196,11 @@ async fn create_logical_table_and_insert_values<R: Rng + 'static>(
 
     let select_sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
-        column_list, create_logical_table_expr.table_name, primary_keys_column_list
+        column_list, logical_table_ctx.name, primary_keys_column_list
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
-    let mut expected_rows = replace_default(
-        &insert_expr.values_list,
-        &create_logical_table_expr,
-        &insert_expr,
-    );
+    let mut expected_rows =
+        replace_default(&insert_expr.values_list, &logical_table_ctx, &insert_expr);
     expected_rows.sort_by(|a, b| {
         let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
             .iter()
@@ -233,7 +220,7 @@ async fn create_logical_table_and_insert_values<R: Rng + 'static>(
     });
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
-    Ok(logical_table_ctx)
+    Ok(())
 }
 
 async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
@@ -241,14 +228,27 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
 
-    let mut tables = Vec::with_capacity(input.tables);
+    let mut tables = HashMap::with_capacity(input.tables);
 
     // Create logical tables
     for _ in 0..input.tables {
-        let logical_table =
-            create_logical_table_and_insert_values(&ctx, &mut rng, physical_table_ctx.clone())
-                .await?;
-        tables.push(logical_table);
+        let translator = CreateTableExprTranslator;
+        let create_logical_table_expr =
+            generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
+        if tables.contains_key(&create_logical_table_expr.table_name) {
+            // Ignores same name logical table.
+            continue;
+        }
+        let sql = translator.translate(&create_logical_table_expr)?;
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Create logical table: {sql}, result: {result:?}");
+        let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
+
+        insert_and_validate_values(&ctx, &mut rng, logical_table_ctx.clone()).await?;
+        tables.insert(logical_table_ctx.name.clone(), logical_table_ctx);
         if rng.gen_bool(0.1) {
             flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
         }
@@ -258,13 +258,13 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     }
 
     // Clean up logical table
-    for table in tables {
-        let sql = format!("DROP TABLE {}", table.name);
+    for (table_name, _) in tables {
+        let sql = format!("DROP TABLE {}", table_name);
         let result = sqlx::query(&sql)
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Drop table: {}, result: {result:?}", table.name);
+        info!("Drop table: {}, result: {result:?}", table_name);
     }
 
     // Clean up physical table
