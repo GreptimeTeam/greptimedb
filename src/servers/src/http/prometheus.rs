@@ -32,9 +32,10 @@ use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector};
 use futures::StreamExt;
 use promql_parser::label::METRIC_NAME;
+use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
-    UnaryExpr, ValueType, VectorSelector,
+    UnaryExpr, VectorSelector,
 };
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
@@ -642,11 +643,19 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
         PromqlExpr::StringLiteral(_) => Some(String::new()),
         PromqlExpr::Extension(_) => None,
         PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
-            name.clone().or(matchers.find_matcher(METRIC_NAME))
+            name.clone().or(matchers
+                .find_matchers(METRIC_NAME)
+                .into_iter()
+                .next()
+                .map(|m| m.value))
         }
         PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
             let VectorSelector { name, matchers, .. } = vs;
-            name.clone().or(matchers.find_matcher(METRIC_NAME))
+            name.clone().or(matchers
+                .find_matchers(METRIC_NAME)
+                .into_iter()
+                .next()
+                .map(|m| m.value))
         }
         PromqlExpr::Call(Call { args, .. }) => {
             args.args.iter().find_map(|e| promql_expr_to_metric_name(e))
@@ -880,12 +889,18 @@ fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
             let query_metric_name = match plan {
                 PromqlExpr::VectorSelector(vs) => vs
                     .matchers
-                    .find_matcher(promql_parser::label::METRIC_NAME)
+                    .find_matchers(METRIC_NAME)
+                    .into_iter()
+                    .next()
+                    .map(|m| m.value)
                     .or_else(|| vs.name.clone()),
                 PromqlExpr::MatrixSelector(ms) => ms
                     .vs
                     .matchers
-                    .find_matcher(promql_parser::label::METRIC_NAME)
+                    .find_matchers(METRIC_NAME)
+                    .into_iter()
+                    .next()
+                    .map(|m| m.value)
                     .or_else(|| ms.vs.name.clone()),
                 _ => return Ok(true),
             };

@@ -39,10 +39,11 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTi
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::parser::token::TokenType;
 use promql_parser::parser::{
     token, AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
     Expr as PromExpr, Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector,
-    NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, TokenType, UnaryExpr,
+    NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr,
     VectorMatchCardinality, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
@@ -606,15 +607,14 @@ impl PromPlanner {
         if let Some(name) = name.clone() {
             metric_name = Some(name);
             ensure!(
-                label_matchers.find_matcher(METRIC_NAME).is_none(),
+                label_matchers.find_matchers(METRIC_NAME).is_empty(),
                 MultipleMetricMatchersSnafu
             );
         } else {
-            metric_name = Some(
-                label_matchers
-                    .find_matcher(METRIC_NAME)
-                    .context(NoMetricMatcherSnafu)?,
-            );
+            let mut matches = label_matchers.find_matchers(METRIC_NAME);
+            ensure!(!matches.is_empty(), NoMetricMatcherSnafu);
+            ensure!(matches.len() == 1, MultipleMetricMatchersSnafu);
+            metric_name = matches.pop().map(|m| m.value);
         }
 
         self.ctx.table_name = metric_name;
@@ -641,7 +641,10 @@ impl PromPlanner {
             }
         }
         let matchers = matchers.into_iter().collect();
-        Ok(Matchers { matchers })
+        Ok(Matchers {
+            matchers,
+            or_matchers: vec![],
+        })
     }
 
     async fn selector_to_series_normalize_plan(
