@@ -173,11 +173,18 @@ impl MitoRegion {
                 .state
                 .compare_exchange(RegionState::ReadOnly, RegionState::Writable)
             {
-                Ok(_) => info!("Set region {} to writable", self.region_id),
-                Err(state) => warn!(
-                    "Failed to set region {} to writable, current state: {:?}",
+                Ok(state) => info!(
+                    "Set region {} to writable, previous state: {:?}",
                     self.region_id, state
                 ),
+                Err(state) => {
+                    if state != RegionState::Writable {
+                        warn!(
+                            "Failed to set region {} to writable, current state: {:?}",
+                            self.region_id, state
+                        )
+                    }
+                }
             }
         } else {
             self.manifest_ctx.state.store(RegionState::ReadOnly);
