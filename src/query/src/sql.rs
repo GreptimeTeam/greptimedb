@@ -564,6 +564,10 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
     Ok(Output::new_with_record_batches(records))
 }
 
+pub async fn show_status(query_ctx: QueryContextRef) -> Result<Output> {
+    Ok(Output::new_with_affected_rows(0))
+}
+
 pub fn show_create_table(
     table: TableRef,
     partitions: Option<Partitions>,
