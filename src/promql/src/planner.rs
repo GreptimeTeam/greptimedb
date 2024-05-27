@@ -640,11 +640,7 @@ impl PromPlanner {
                 let _ = matchers.insert(matcher.clone());
             }
         }
-        let matchers = matchers.into_iter().collect();
-        Ok(Matchers {
-            matchers,
-            or_matchers: vec![],
-        })
+        Ok(Matchers::new(matchers.into_iter().collect()))
     }
 
     async fn selector_to_series_normalize_plan(
