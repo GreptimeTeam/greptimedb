@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
+use api::v1::ExpireAfter;
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -283,7 +284,7 @@ impl From<&CreateFlowData> for CreateRequest {
             sink_table_name: Some(value.task.sink_table_name.clone().into()),
             // Always be true
             create_if_not_exists: true,
-            expire_when: value.task.expire_when.clone(),
+            expire_after: value.task.expire_after.map(|value| ExpireAfter { value }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
             flow_options: value.task.flow_options.clone(),
@@ -297,7 +298,7 @@ impl From<&CreateFlowData> for FlowInfoValue {
             catalog_name,
             flow_name,
             sink_table_name,
-            expire_when,
+            expire_after,
             comment,
             sql,
             flow_options: options,
@@ -318,7 +319,7 @@ impl From<&CreateFlowData> for FlowInfoValue {
             catalog_name,
             flow_name,
             raw_sql: sql,
-            expire_when,
+            expire_after,
             comment,
             options,
         }

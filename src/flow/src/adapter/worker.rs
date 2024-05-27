@@ -232,12 +232,12 @@ impl<'s> Worker<'s> {
         source_ids: &[GlobalId],
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
         // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
-        expire_when: Option<repr::Duration>,
-        create_if_not_exist: bool,
+        expire_after: Option<repr::Duration>,
+        create_if_not_exists: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
-        let already_exist = self.task_states.contains_key(&flow_id);
-        match (already_exist, create_if_not_exist) {
+        let already_exists = self.task_states.contains_key(&flow_id);
+        match (already_exists, create_if_not_exists) {
             (true, true) => return Ok(None),
             (true, false) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
             (false, _) => (),
@@ -247,7 +247,7 @@ impl<'s> Worker<'s> {
             err_collector,
             ..Default::default()
         };
-        cur_task_state.state.set_expire_after(expire_when);
+        cur_task_state.state.set_expire_after(expire_after);
 
         {
             let mut ctx = cur_task_state.new_ctx(sink_id);
@@ -319,8 +319,8 @@ impl<'s> Worker<'s> {
                 sink_sender,
                 source_ids,
                 src_recvs,
-                expire_when,
-                create_if_not_exist,
+                expire_after,
+                create_if_not_exists,
                 err_collector,
             } => {
                 let task_create_result = self.create_flow(
@@ -330,8 +330,8 @@ impl<'s> Worker<'s> {
                     sink_sender,
                     &source_ids,
                     src_recvs,
-                    expire_when,
-                    create_if_not_exist,
+                    expire_after,
+                    create_if_not_exists,
                     err_collector,
                 );
                 Some((
@@ -368,8 +368,8 @@ pub enum Request {
         sink_sender: mpsc::UnboundedSender<DiffRow>,
         source_ids: Vec<GlobalId>,
         src_recvs: Vec<broadcast::Receiver<DiffRow>>,
-        expire_when: Option<repr::Duration>,
-        create_if_not_exist: bool,
+        expire_after: Option<repr::Duration>,
+        create_if_not_exists: bool,
         err_collector: ErrCollector,
     },
     Remove {
@@ -524,8 +524,8 @@ mod test {
             sink_sender: sink_tx,
             source_ids: src_ids,
             src_recvs: vec![rx],
-            expire_when: None,
-            create_if_not_exist: true,
+            expire_after: None,
+            create_if_not_exists: true,
             err_collector: ErrCollector::default(),
         };
         handle.create_flow(create_reqs).await.unwrap();

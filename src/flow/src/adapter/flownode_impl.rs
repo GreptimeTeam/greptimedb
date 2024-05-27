@@ -45,7 +45,7 @@ impl Flownode for FlownodeManager {
                 source_table_ids,
                 sink_table_name: Some(sink_table_name),
                 create_if_not_exists,
-                expire_when,
+                expire_after,
                 comment,
                 sql,
                 flow_options,
@@ -56,13 +56,14 @@ impl Flownode for FlownodeManager {
                     sink_table_name.schema_name,
                     sink_table_name.table_name,
                 ];
+                let expire_after = expire_after.map(|e| e.value);
                 let ret = self
                     .create_flow(
                         task_id.id as u64,
                         sink_table_name,
                         &source_table_ids,
                         create_if_not_exists,
-                        Some(expire_when),
+                        expire_after,
                         Some(comment),
                         sql,
                         flow_options,

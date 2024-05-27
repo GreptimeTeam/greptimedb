@@ -44,7 +44,7 @@ pub(crate) fn test_create_flow_task(
         sink_table_name,
         or_replace: false,
         create_if_not_exists,
-        expire_when: "".to_string(),
+        expire_after: Some(300),
         comment: "".to_string(),
         sql: "raw_sql".to_string(),
         flow_options: Default::default(),

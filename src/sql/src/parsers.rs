@@ -26,3 +26,4 @@ pub(crate) mod set_var_parser;
 pub(crate) mod show_parser;
 pub(crate) mod tql_parser;
 pub(crate) mod truncate_parser;
+pub(crate) mod utils;
