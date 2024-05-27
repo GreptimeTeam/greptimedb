@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionId;
 
 use crate::error::{
     DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu, IllegalSequenceSnafu,
@@ -242,7 +243,7 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
 /// TODO(weny): Consider ignoring existing corrupted data instead of throwing an error.
 pub fn maybe_emit_entry(
     record: Record,
-    entry_records: &mut HashMap<u64, Vec<Record>>,
+    entry_records: &mut HashMap<RegionId, Vec<Record>>,
 ) -> Result<Option<EntryImpl>> {
     let mut entry = None;
     match record.meta.tp {
@@ -251,7 +252,7 @@ pub fn maybe_emit_entry(
         }
         RecordType::First => {
             ensure!(
-                !entry_records.contains_key(&record.meta.ns.region_id),
+                !entry_records.contains_key(&(record.meta.ns.region_id.into())),
                 IllegalSequenceSnafu {
                     error: format!(
                         "First record must be the first, region_id: {}",
@@ -259,10 +260,10 @@ pub fn maybe_emit_entry(
                     )
                 }
             );
-            entry_records.insert(record.meta.ns.region_id, vec![record]);
+            entry_records.insert(record.meta.ns.region_id.into(), vec![record]);
         }
         RecordType::Middle(seq) => {
-            if let Some(previous) = entry_records.get_mut(&record.meta.ns.region_id) {
+            if let Some(previous) = entry_records.get_mut(&(record.meta.ns.region_id.into())) {
                 // Safety: the records are guaranteed not empty if the key exists.
                 let last_record = previous.last().unwrap();
                 let legal = match last_record.meta.tp {
@@ -285,7 +286,7 @@ pub fn maybe_emit_entry(
         }
         RecordType::Last => {
             // There must have a sequence prefix before a Last record is read.
-            if let Some(mut records) = entry_records.remove(&record.meta.ns.region_id) {
+            if let Some(mut records) = entry_records.remove(&(record.meta.ns.region_id.into())) {
                 records.push(record);
                 entry = Some(EntryImpl::from(records));
             }

@@ -90,5 +90,5 @@ pub struct AppendResponse {
 #[derive(Debug, Default)]
 pub struct AppendBatchResponse {
     /// Key: region id (as u64). Value: the id of the last successfully written entry of the region.
-    pub last_entry_ids: HashMap<u64, EntryId>,
+    pub last_entry_ids: HashMap<RegionId, EntryId>,
 }

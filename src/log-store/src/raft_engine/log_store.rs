@@ -130,20 +130,20 @@ impl RaftEngineLogStore {
     fn entries_to_batch(
         &self,
         entries: Vec<EntryImpl>,
-    ) -> Result<(LogBatch, HashMap<u64, EntryId>)> {
+    ) -> Result<(LogBatch, HashMap<RegionId, EntryId>)> {
         // Records the last entry id for each region's entries.
-        let mut entry_ids: HashMap<u64, EntryId> = HashMap::with_capacity(entries.len());
+        let mut entry_ids: HashMap<RegionId, EntryId> = HashMap::with_capacity(entries.len());
         let mut batch = LogBatch::with_capacity(entries.len());
 
         for e in entries {
-            let ns_id = e.namespace_id;
-            match entry_ids.entry(ns_id) {
+            let region_id = RegionId::from_u64(e.namespace_id);
+            match entry_ids.entry(region_id) {
                 Entry::Occupied(mut o) => {
                     let prev = *o.get();
                     ensure!(
                         e.id == prev + 1,
                         DiscontinuousLogIndexSnafu {
-                            region_id: ns_id,
+                            region_id,
                             last_index: prev,
                             attempt_index: e.id
                         }
@@ -152,23 +152,23 @@ impl RaftEngineLogStore {
                 }
                 Entry::Vacant(v) => {
                     // this entry is the first in batch of given region.
-                    if let Some(first_index) = self.engine.first_index(ns_id) {
+                    if let Some(first_index) = self.engine.first_index(*region_id) {
                         // ensure the first in batch does not override compacted entry.
                         ensure!(
                             e.id > first_index,
                             OverrideCompactedEntrySnafu {
-                                namespace: ns_id,
+                                namespace: region_id,
                                 first_index,
                                 attempt_index: e.id,
                             }
                         );
                     }
                     // ensure the first in batch does not form a hole in raft-engine.
-                    if let Some(last_index) = self.engine.last_index(ns_id) {
+                    if let Some(last_index) = self.engine.last_index(*region_id) {
                         ensure!(
                             e.id == last_index + 1,
                             DiscontinuousLogIndexSnafu {
-                                region_id: ns_id,
+                                region_id,
                                 last_index,
                                 attempt_index: e.id
                             }
@@ -178,7 +178,7 @@ impl RaftEngineLogStore {
                 }
             }
             batch
-                .add_entries::<MessageType>(ns_id, &[e])
+                .add_entries::<MessageType>(*region_id, &[e])
                 .context(AddEntryLogBatchSnafu)?;
         }
 
@@ -768,8 +768,8 @@ mod tests {
 
         // Ensure the last entry id returned for each region is the expected one.
         let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
-        assert_eq!(last_entry_ids[&0], 1);
-        assert_eq!(last_entry_ids[&1], 1);
-        assert_eq!(last_entry_ids[&2], 2);
+        assert_eq!(last_entry_ids[&(0.into())], 1);
+        assert_eq!(last_entry_ids[&(1.into())], 1);
+        assert_eq!(last_entry_ids[&(2.into())], 2);
     }
 }

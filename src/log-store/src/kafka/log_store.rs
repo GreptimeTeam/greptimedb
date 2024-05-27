@@ -131,7 +131,7 @@ impl LogStore for KafkaLogStore {
                     .produce(&self.client_manager)
                     .await
                     .map(TryInto::try_into)??;
-                Ok((region_id, entry_id))
+                Ok((RegionId::from_u64(region_id), entry_id))
             },
         ))
         .await?
@@ -280,7 +280,7 @@ impl LogStore for KafkaLogStore {
 fn check_termination(
     offset: i64,
     end_offset: i64,
-    entry_records: &HashMap<u64, Vec<Record>>,
+    entry_records: &HashMap<RegionId, Vec<Record>>,
 ) -> Result<bool> {
     // Terminates the stream if the entry with the end offset was read.
     if offset >= end_offset {
