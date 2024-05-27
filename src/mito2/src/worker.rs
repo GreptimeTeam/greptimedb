@@ -698,7 +698,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
-                DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
+                DdlRequest::Open(req) => {
+                    self.handle_open_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
                 DdlRequest::Alter(req) => {
                     self.handle_alter_request(ddl.region_id, req, ddl.sender)
