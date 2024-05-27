@@ -151,7 +151,7 @@ async fn execute_unstable_create_table(
             Ok(result) => {
                 let state = *rx.borrow();
                 table_states.insert(table_name, state);
-                validate_columns(&ctx.greptime, FUZZ_TESTS_DATABASE.to_string(), &table_ctx).await;
+                validate_columns(&ctx.greptime, FUZZ_TESTS_DATABASE, &table_ctx).await;
                 info!("Create table: {sql}, result: {result:?}");
             }
             Err(err) => {
@@ -191,14 +191,10 @@ async fn execute_unstable_create_table(
     Ok(())
 }
 
-async fn validate_columns(client: &Pool<MySql>, schema_name: String, table_ctx: &TableContext) {
+async fn validate_columns(client: &Pool<MySql>, schema_name: &str, table_ctx: &TableContext) {
     loop {
-        match validator::column::fetch_columns(
-            client,
-            schema_name.clone().into(),
-            table_ctx.name.clone(),
-        )
-        .await
+        match validator::column::fetch_columns(client, schema_name.into(), table_ctx.name.clone())
+            .await
         {
             Ok(mut column_entries) => {
                 column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
