@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod alter;
+mod catchup;
 mod close;
 mod create;
 mod drop;
@@ -147,8 +148,7 @@ impl RegionEngine for MetricEngine {
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
-            // It always Ok(0), all data is the latest.
-            RegionRequest::Catchup(_) => Ok(0),
+            RegionRequest::Catchup(ref req) => self.inner.catchup_region(region_id, *req).await,
         };
 
         result.map_err(BoxedError::new).map(|rows| RegionResponse {
