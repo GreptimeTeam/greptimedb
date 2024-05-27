@@ -244,8 +244,7 @@ impl ManifestObjectStore {
                 .object_store
                 .read(entry.path())
                 .await
-                .context(OpenDalSnafu)?
-                .to_vec();
+                .context(OpenDalSnafu)?;
             let data = compress_type
                 .decode(bytes)
                 .await

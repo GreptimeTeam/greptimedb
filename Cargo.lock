@@ -82,7 +82,7 @@ checksum = "befdff0b4683a0824fc8719ce639a252d9d62cd89c8d0004c39e2417128c1eb8"
 dependencies = [
  "axum",
  "bytes",
- "cfg-if 1.0.0",
+ "cfg-if",
  "http 0.2.12",
  "indexmap 1.9.3",
  "schemars",
@@ -12719,7 +12719,7 @@ version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if",
  "windows-sys 0.48.0",
 ]
 
