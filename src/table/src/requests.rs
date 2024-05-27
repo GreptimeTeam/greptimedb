@@ -54,6 +54,7 @@ pub fn validate_table_option(key: &str) -> bool {
         WRITE_BUFFER_SIZE_KEY,
         TTL_KEY,
         STORAGE_KEY,
+        COMMENT_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
         FILE_TABLE_FORMAT_KEY,
@@ -80,6 +81,7 @@ pub struct TableOptions {
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
 pub const STORAGE_KEY: &str = "storage";
+pub const COMMENT_KEY: &str = "comment";
 
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(

@@ -81,3 +81,14 @@ DROP TABLE test_like_1;
 DROP TABLE test_like_2;
 
 DROP table `ExcePTuRi`;
+
+CREATE TABLE if not exists monitor (
+  host STRING,
+  ts TIMESTAMP(9) DEFAULT CURRENT_TIMESTAMP() TIME INDEX,
+  cpu FLOAT64 DEFAULT 0,
+  memory FLOAT64,
+  PRIMARY KEY(host)) ENGINE=mito WITH(COMMENT='create by human');
+
+SHOW CREATE TABLE monitor;
+
+DROP TABLE monitor;

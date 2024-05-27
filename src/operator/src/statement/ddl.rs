@@ -59,7 +59,7 @@ use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
-use table::requests::{AlterKind, AlterTableRequest, TableOptions};
+use table::requests::{AlterKind, AlterTableRequest, TableOptions, COMMENT_KEY};
 use table::TableRef;
 
 use super::StatementExecutor;
@@ -1142,7 +1142,7 @@ fn create_table_info(
     };
 
     let desc = if create_table.desc.is_empty() {
-        None
+        create_table.table_options.get(COMMENT_KEY).cloned()
     } else {
         Some(create_table.desc.clone())
     };
