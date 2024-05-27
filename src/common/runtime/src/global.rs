@@ -19,12 +19,35 @@ use std::sync::{Mutex, Once};
 use common_telemetry::info;
 use once_cell::sync::Lazy;
 use paste::paste;
+use serde::{Deserialize, Serialize};
 
 use crate::{Builder, JoinHandle, Runtime};
 
 const READ_WORKERS: usize = 8;
 const WRITE_WORKERS: usize = 8;
 const BG_WORKERS: usize = 8;
+
+/// The options for the global runtimes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeOptions {
+    /// The number of threads to execute the runtime for global read operations.
+    pub read_rt_size: usize,
+    /// The number of threads to execute the runtime for global write operations.
+    pub write_rt_size: usize,
+    /// The number of threads to execute the runtime for global background operations.
+    pub bg_rt_size: usize,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        let two_fold_cpus = num_cpus::get() * 2;
+        Self {
+            read_rt_size: two_fold_cpus,
+            write_rt_size: two_fold_cpus,
+            bg_rt_size: two_fold_cpus,
+        }
+    }
+}
 
 pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usize) -> Runtime {
     info!("Creating runtime with runtime_name: {runtime_name}, thread_name: {thread_name}, work_threads: {worker_threads}.");
@@ -112,18 +135,26 @@ static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
 /// # Panics
 /// Panics when the global runtimes are already initialized.
 /// You should call this function before using any runtime functions.
-pub fn init_global_runtimes(
-    read: Option<Runtime>,
-    write: Option<Runtime>,
-    background: Option<Runtime>,
-) {
+pub fn init_global_runtimes(options: &RuntimeOptions) {
     static START: Once = Once::new();
     START.call_once(move || {
         let mut c = CONFIG_RUNTIMES.lock().unwrap();
         assert!(!c.already_init, "Global runtimes already initialized");
-        c.read_runtime = read;
-        c.write_runtime = write;
-        c.bg_runtime = background;
+        c.read_runtime = Some(create_runtime(
+            "global-read",
+            "global-read-worker",
+            options.read_rt_size,
+        ));
+        c.write_runtime = Some(create_runtime(
+            "global-write",
+            "global-write-worker",
+            options.write_rt_size,
+        ));
+        c.bg_runtime = Some(create_runtime(
+            "global-bg",
+            "global-bg-worker",
+            options.bg_rt_size,
+        ));
     });
 }
 

@@ -29,7 +29,6 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
-use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
@@ -44,8 +43,10 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::error::{
     self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
 };
-use crate::options::GlobalOptions;
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
+
+type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
 pub struct Instance {
     frontend: FeInstance,
@@ -164,22 +165,25 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
-        self.merge_with_cli_options(
-            global_options,
-            FrontendOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
+        let mut opts = FrontendOptions::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
         )
+        .context(LoadLayeredConfigSnafu)?;
+
+        self.merge_with_cli_options(global_options, &mut opts)?;
+
+        Ok(opts)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
     fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
-        mut opts: FrontendOptions,
-    ) -> Result<FrontendOptions> {
+        opts: &mut FrontendOptions,
+    ) -> Result<()> {
+        let opts = &mut opts.component;
+
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -242,10 +246,13 @@ impl StartCommand {
 
         opts.user_provider.clone_from(&self.user_provider);
 
-        Ok(opts)
+        Ok(())
     }
 
-    async fn build(&self, mut opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+        common_runtime::init_global_runtimes(&opts.runtime);
+
+        let mut opts = opts.component;
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.logging,
@@ -380,14 +387,14 @@ mod tests {
             ..Default::default()
         };
 
-        let opts = command.load_options(&GlobalOptions::default()).unwrap();
+        let opts = command.load_options(&Default::default()).unwrap().component;
 
         assert_eq!(opts.http.addr, "127.0.0.1:1234");
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
 
-        let default_opts = FrontendOptions::default();
+        let default_opts = FrontendOptions::default().component;
 
         assert_eq!(opts.grpc.addr, default_opts.grpc.addr);
         assert!(opts.mysql.enable);
@@ -428,7 +435,8 @@ mod tests {
             ..Default::default()
         };
 
-        let fe_opts = command.load_options(&GlobalOptions::default()).unwrap();
+        let fe_opts = command.load_options(&Default::default()).unwrap().component;
+
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
@@ -442,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let mut fe_opts = FrontendOptions {
+        let mut fe_opts = frontend::frontend::FrontendOptions {
             http: HttpOptions {
                 disable_dashboard: false,
                 ..Default::default()
@@ -479,7 +487,8 @@ mod tests {
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .component;
 
         let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
@@ -557,7 +566,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let fe_opts = command.load_options(&GlobalOptions::default()).unwrap();
+                let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(fe_opts.mysql.runtime_size, 11);
