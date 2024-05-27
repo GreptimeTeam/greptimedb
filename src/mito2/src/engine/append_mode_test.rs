@@ -137,7 +137,10 @@ async fn test_append_mode_compaction() {
     flush_region(&engine, region_id, None).await;
 
     let output = engine
-        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
         .await
         .unwrap();
     assert_eq!(output.affected_rows, 0);

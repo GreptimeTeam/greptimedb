@@ -565,7 +565,7 @@ async fn test_engine_with_write_cache() {
 
     let mut env = TestEnv::new();
     let path = env.data_home().to_str().unwrap().to_string();
-    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512));
+    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512), None);
     let engine = env.create_engine(mito_config).await;
 
     let region_id = RegionId::new(1, 1);

@@ -109,13 +109,10 @@ impl HeartbeatTask {
         let mut last_received_lease = Instant::now();
 
         let _handle = common_runtime::spawn_bg(async move {
-            while let Some(res) = match rx.message().await {
-                Ok(m) => m,
-                Err(e) => {
-                    error!(e; "Error while reading heartbeat response");
-                    None
-                }
-            } {
+            while let Some(res) = rx.message().await.unwrap_or_else(|e| {
+                error!(e; "Error while reading heartbeat response");
+                None
+            }) {
                 if let Some(msg) = res.mailbox_message.as_ref() {
                     info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
                 }
@@ -238,7 +235,7 @@ impl HeartbeatTask {
                                     Some(req)
                                 }
                                 Err(e) => {
-                                    error!(e;"Failed to encode mailbox messages!");
+                                    error!(e; "Failed to encode mailbox messages!");
                                     None
                                 }
                             }
@@ -276,7 +273,7 @@ impl HeartbeatTask {
                 if let Some(req) = req {
                     debug!("Sending heartbeat request: {:?}", req);
                     if let Err(e) = tx.send(req).await {
-                        error!("Failed to send heartbeat to metasrv, error: {:?}", e);
+                        error!(e; "Failed to send heartbeat to metasrv");
                         match Self::create_streams(
                             &meta_client,
                             running.clone(),
@@ -301,7 +298,7 @@ impl HeartbeatTask {
                                     Instant::now()
                                         + Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
                                 );
-                                error!(e;"Failed to reconnect to metasrv!");
+                                error!(e; "Failed to reconnect to metasrv!");
                             }
                         }
                     }

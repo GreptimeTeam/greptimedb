@@ -31,10 +31,18 @@ pub struct MetasrvPeerAllocator {
 }
 
 impl MetasrvPeerAllocator {
+    /// Creates a new [`MetasrvPeerAllocator`] with the given [`SelectorContext`] and [`SelectorRef`].
     pub fn new(ctx: SelectorContext, selector: SelectorRef) -> Self {
         Self { ctx, selector }
     }
 
+    /// Allocates a specified number (by `regions`) of [`Peer`] instances based on the given
+    /// [`TableMetadataAllocatorContext`] and number of regions. The returned peers will have
+    /// the same length as the number of regions.
+    ///
+    /// This method is mainly a wrapper around the [`SelectorRef`]::`select` method. There is
+    /// no guarantee that how the returned peers are used, like whether they are from the same
+    /// table or not. So this method isn't idempotent.
     async fn alloc(
         &self,
         ctx: &TableMetadataAllocatorContext,

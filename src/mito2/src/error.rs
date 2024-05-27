@@ -20,6 +20,8 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
@@ -243,6 +245,14 @@ pub enum Error {
     #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
     ReadWal {
         region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to read WAL, topic: {}", topic))]
+    ReadKafkaWal {
+        topic: String,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -693,6 +703,25 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Time range predicate overflows, timestamp: {:?}, target unit: {}",
+        timestamp,
+        unit
+    ))]
+    TimeRangePredicateOverflow {
+        timestamp: Timestamp,
+        unit: TimeUnit,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
+    BuildTimeRangeFilter {
+        timestamp: Timestamp,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -721,6 +750,7 @@ impl ErrorExt for Error {
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }
+            | ReadKafkaWal { .. }
             | DeleteWal { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }
@@ -802,6 +832,8 @@ impl ErrorExt for Error {
             EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
+            TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
+            BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
         }
     }
 

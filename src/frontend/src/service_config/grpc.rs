@@ -17,6 +17,7 @@ use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
 use serde::{Deserialize, Serialize};
+use servers::tls::TlsOption;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrpcOptions {
@@ -26,6 +27,8 @@ pub struct GrpcOptions {
     pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
+    #[serde(default = "Default::default")]
+    pub tls: TlsOption,
 }
 
 impl Default for GrpcOptions {
@@ -35,6 +38,7 @@ impl Default for GrpcOptions {
             runtime_size: 8,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            tls: TlsOption::default(),
         }
     }
 }

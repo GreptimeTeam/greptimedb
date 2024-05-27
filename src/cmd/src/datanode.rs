@@ -29,6 +29,7 @@ use datanode::service::DatanodeServiceBuilder;
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
@@ -40,11 +41,17 @@ pub const APP_NAME: &str = "greptime-datanode";
 
 pub struct Instance {
     datanode: Datanode,
+
+    // Keep the logging guard to prevent the worker from being dropped.
+    _guard: Vec<WorkerGuard>,
 }
 
 impl Instance {
-    pub fn new(datanode: Datanode) -> Self {
-        Self { datanode }
+    pub fn new(datanode: Datanode, guard: Vec<WorkerGuard>) -> Self {
+        Self {
+            datanode,
+            _guard: guard,
+        }
     }
 
     pub fn datanode_mut(&mut self) -> &mut Datanode {
@@ -228,7 +235,7 @@ impl StartCommand {
     }
 
     async fn build(&self, mut opts: DatanodeOptions) -> Result<Instance> {
-        let _guard = common_telemetry::init_global_logging(
+        let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.logging,
             &opts.tracing,
@@ -274,7 +281,7 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
         datanode.setup_services(services);
 
-        Ok(Instance::new(datanode))
+        Ok(Instance::new(datanode, guard))
     }
 }
 

@@ -744,6 +744,12 @@ runtime_size = 8
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 
+[grpc.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+watch = false
+
 [mysql]
 enable = true
 addr = "127.0.0.1:4002"
@@ -814,6 +820,7 @@ auto_flush_interval = "30m"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
 experimental_write_cache_size = "512MiB"
+experimental_write_cache_ttl = "1h"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
@@ -953,6 +960,31 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
     let serialized_request = write_request.encode_to_vec();
     let compressed_request =
         zstd::stream::encode_all(&serialized_request[..], 1).expect("Failed to encode zstd");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "zstd")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // also test fallback logic, vmagent could sent data in wrong content-type
+    // we encode it as zstd but send it as snappy
+    let compressed_request =
+        zstd::stream::encode_all(&serialized_request[..], 1).expect("Failed to encode zstd");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // reversed
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request[..]).expect("Failed to encode snappy");
 
     let res = client
         .post("/v1/prometheus/write")

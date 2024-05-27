@@ -1,18 +1,15 @@
 name: Setup GreptimeDB cluster
 description: Deploy GreptimeDB cluster on Kubernetes
 inputs:
-  frontend-replica-count:
-    default: 1
-    description: "Frontend replica count"
-  datanode-replica-count:
+  frontend-replicas:
     default: 2
-    description: "Datanode replica count"
-  metasrv-replica-count:
-    default: 1
-    description: "Metasrv replica count"
-  etcd-replica-count:
-    default: 1
-    description: "Etcd replica count"
+    description: "Number of Frontend replicas"
+  datanode-replicas:
+    default: 2
+    description: "Number of Datanode replicas"
+  meta-replicas:
+    default: 3
+    description: "Number of Metasrv replicas"
   image-registry: 
     default: "docker.io"
     description: "Image registry"
@@ -50,6 +47,13 @@ runs:
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
         --set image.tag=${{ inputs.image-tag }} \
+        --set base.podTemplate.main.resources.requests.cpu=50m \
+        --set base.podTemplate.main.resources.requests.memory=256Mi \
+        --set base.podTemplate.main.resources.limits.cpu=1000m \
+        --set base.podTemplate.main.resources.limits.memory=2Gi \
+        --set frontend.replicas=${{ inputs.frontend-replicas }} \
+        --set datanode.replicas=${{ inputs.datanode-replicas }} \
+        --set meta.replicas=${{ inputs.meta-replicas }} \
         greptime/greptimedb-cluster \
         --create-namespace \
         -n my-greptimedb \
@@ -74,3 +78,8 @@ runs:
     shell: bash
     run: | 
       kubectl get all --show-labels -n my-greptimedb
+  - name: Describe Nodes
+    if: always()
+    shell: bash
+    run: | 
+      kubectl describe nodes

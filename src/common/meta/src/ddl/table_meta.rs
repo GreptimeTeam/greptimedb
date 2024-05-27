@@ -184,10 +184,10 @@ impl TableMetadataAllocator {
 
 pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
 
-/// [PeerAllocator] allocates [Peer]s for creating regions.
+/// [`PeerAllocator`] allocates [`Peer`]s for creating regions.
 #[async_trait]
 pub trait PeerAllocator: Send + Sync {
-    /// Allocates `regions` size [Peer]s.
+    /// Allocates `regions` size [`Peer`]s.
     async fn alloc(&self, ctx: &TableMetadataAllocatorContext, regions: usize)
         -> Result<Vec<Peer>>;
 }

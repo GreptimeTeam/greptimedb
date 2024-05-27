@@ -57,3 +57,14 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
       run: |
         aws s3 rm s3://${{ inputs.aws-ci-test-bucket }}/${{ inputs.data-root }} --recursive
+    - name: Export kind logs
+      if: failure()
+      shell: bash
+      run: kind export logs -n greptimedb-operator-e2e /tmp/kind
+    - name: Upload logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kind-logs
+        path: /tmp/kind
+        retention-days: 3

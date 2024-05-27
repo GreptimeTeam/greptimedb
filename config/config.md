@@ -20,6 +20,11 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
+| `grpc.tls.mode` | String | `disable` | TLS mode. |
+| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
+| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -33,7 +38,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
-| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql_options.tls` section. |
+| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | `None` | Certificate file path. |
 | `postgres.tls.key_path` | String | `None` | Private key file path. |
@@ -102,6 +107,10 @@
 | `region_engine.mito.sst_meta_cache_size` | String | `128MB` | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
 | `region_engine.mito.vector_cache_size` | String | `512MB` | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.page_cache_size` | String | `512MB` | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `region_engine.mito.enable_experimental_write_cache` | Bool | `false` | Whether to enable the experimental write cache. |
+| `region_engine.mito.experimental_write_cache_path` | String | `""` | File system path for write cache, defaults to `{data_home}/write_cache`. |
+| `region_engine.mito.experimental_write_cache_size` | String | `512MB` | Capacity for write cache. |
+| `region_engine.mito.experimental_write_cache_ttl` | String | `1h` | TTL for write cache. |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
@@ -155,6 +164,11 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
+| `grpc.tls.mode` | String | `disable` | TLS mode. |
+| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
+| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -168,7 +182,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
-| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql_options.tls` section. |
+| `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | `None` | Certificate file path. |
 | `postgres.tls.key_path` | String | `None` | Private key file path. |
@@ -350,6 +364,10 @@
 | `region_engine.mito.sst_meta_cache_size` | String | `128MB` | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
 | `region_engine.mito.vector_cache_size` | String | `512MB` | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.page_cache_size` | String | `512MB` | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `region_engine.mito.enable_experimental_write_cache` | Bool | `false` | Whether to enable the experimental write cache. |
+| `region_engine.mito.experimental_write_cache_path` | String | `""` | File system path for write cache, defaults to `{data_home}/write_cache`. |
+| `region_engine.mito.experimental_write_cache_size` | String | `512MB` | Capacity for write cache. |
+| `region_engine.mito.experimental_write_cache_ttl` | String | `1h` | TTL for write cache. |
 | `region_engine.mito.sst_write_buffer_size` | String | `8MB` | Buffer size for SST writing. |
 | `region_engine.mito.scan_parallelism` | Integer | `0` | Parallelism to scan a region (default: 1/4 of cpu cores).<br/>- `0`: using the default value (1/4 of cpu cores).<br/>- `1`: scan in current thread.<br/>- `n`: scan in parallelism n. |
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |

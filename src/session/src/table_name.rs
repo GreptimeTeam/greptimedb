@@ -12,20 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use snafu::ensure;
 use sql::ast::ObjectName;
-use sql::error::{InvalidSqlSnafu, Result};
+use sql::error::{InvalidSqlSnafu, PermissionDeniedSnafu, Result};
 use sql::parser::ParserContext;
 
 use crate::QueryContextRef;
 
-/// Parse table name into `(catalog, schema, table)` with query context.
+/// Parse table name into `(catalog, schema, table)` with query context and validates
+/// if catalog matches current catalog in query context.
 pub fn table_name_to_full_name(
     name: &str,
     query_ctx: &QueryContextRef,
 ) -> Result<(String, String, String)> {
     let obj_name = ParserContext::parse_table_name(name, query_ctx.sql_dialect())?;
 
-    table_idents_to_full_name(&obj_name, query_ctx)
+    let (catalog, schema, table) = table_idents_to_full_name(&obj_name, query_ctx)?;
+    // todo(hl): also check if schema matches when rbac is ready. https://github.com/GreptimeTeam/greptimedb/pull/3988/files#r1608687652
+    ensure!(
+        catalog == query_ctx.current_catalog(),
+        PermissionDeniedSnafu {
+            target: catalog,
+            current: query_ctx.current_catalog(),
+        }
+    );
+    Ok((catalog, schema, table))
 }
 
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
