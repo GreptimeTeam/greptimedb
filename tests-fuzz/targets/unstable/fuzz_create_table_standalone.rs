@@ -76,7 +76,6 @@ impl Arbitrary<'_> for FuzzInput {
 const DEFAULT_TEMPLATE: &str = "standalone.template.toml";
 const DEFAULT_CONFIG_NAME: &str = "standalone.template.toml";
 const DEFAULT_ROOT_DIR: &str = "/tmp/unstable_greptime/";
-const DEFAULT_DATA_HOME: &str = "/tmp/unstable_greptime/datahome/";
 const DEFAULT_MYSQL_URL: &str = "127.0.0.1:4002";
 const DEFAULT_HTTP_HEALTH_URL: &str = "http://127.0.0.1:4000/health";
 
@@ -219,6 +218,8 @@ fuzz_target!(|input: FuzzInput| {
         let root_dir = variables.root_dir.unwrap_or(DEFAULT_ROOT_DIR.to_string());
         create_dir_all(&root_dir).unwrap();
         let output_config_path = format!("{root_dir}{DEFAULT_CONFIG_NAME}");
+        let data_home = format!("{root_dir}datahome");
+
         let mut conf_path = get_conf_path();
         conf_path.push(DEFAULT_TEMPLATE);
         let template_path = conf_path.to_str().unwrap().to_string();
@@ -228,15 +229,9 @@ fuzz_target!(|input: FuzzInput| {
         struct Context {
             data_home: String,
         }
-        write_config_file(
-            &template_path,
-            &Context {
-                data_home: DEFAULT_DATA_HOME.to_string(),
-            },
-            &output_config_path,
-        )
-        .await
-        .unwrap();
+        write_config_file(&template_path, &Context { data_home }, &output_config_path)
+            .await
+            .unwrap();
 
         let args = vec![
             "standalone".to_string(),
