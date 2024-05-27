@@ -14,8 +14,9 @@
 
 pub use opendal::raw::{normalize_path as raw_normalize_path, HttpClient};
 pub use opendal::{
-    services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Lister, Metakey,
-    Operator as ObjectStore, Reader, Result, Writer,
+    services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind,
+    FuturesAsyncReader, FuturesAsyncWriter, Lister, Metakey, Operator as ObjectStore, Reader,
+    Result, Writer,
 };
 
 pub mod layers;

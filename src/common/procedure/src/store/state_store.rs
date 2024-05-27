@@ -179,7 +179,7 @@ impl StateStore for ObjectStateStore {
                             ))
                         })
                         .context(ListStateSnafu { path: key })?;
-                    yield (key.into(), value);
+                    yield (key.into(), value.to_vec());
                 }
             }
         });

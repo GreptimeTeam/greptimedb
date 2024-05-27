@@ -146,7 +146,7 @@ raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 regex = "1.8"
 regex-automata = { version = "0.4" }
-reqwest = { version = "0.11", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
