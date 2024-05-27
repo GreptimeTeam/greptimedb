@@ -1160,7 +1160,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         assert_eq!(create_task, &expected);
 
-        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE WHEN` and `COMMENT`
+        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
         let sql = r"
 CREATE FLOW task_2
 SINK TO schema_1.table_1
