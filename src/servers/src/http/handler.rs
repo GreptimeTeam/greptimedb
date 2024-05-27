@@ -17,7 +17,7 @@ use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
-use api::v1::{RowInsertRequest, RowInsertRequests};
+use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -73,6 +73,7 @@ pub struct SqlQuery {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
     pub table_name: String,
+    pub db: Option<String>,
 }
 
 fn validate_log_ingester_payload(payload: &Value) -> Result<(), String> {
@@ -80,11 +81,11 @@ fn validate_log_ingester_payload(payload: &Value) -> Result<(), String> {
         return Err("payload must be an object".to_string());
     }
 
-    if payload["processors"].as_str().is_none() {
+    if payload["pipeline_model"].as_str().is_none() {
         return Err("processors field is required".to_string());
     }
 
-    if payload["data"].as_array().is_none() {
+    if payload["data"].as_array().is_none() && payload["data"].as_object().is_none() {
         return Err("data field is required".to_string());
     }
 
@@ -97,7 +98,7 @@ pub async fn log_ingester(
     State(_state): State<LogHandlerRef>,
     Query(_query_params): Query<LogIngesterQueryParams>,
     Extension(_query_ctx): Extension<QueryContextRef>,
-    Json(_payload): Json<Value>,
+    Json(mut _payload): Json<Value>,
 ) -> HttpResponse {
     // TODO (qtang): implement log ingester
     // transform payload to RowInsertRequest
@@ -113,16 +114,17 @@ pub async fn log_ingester(
             ))
         }
     };
-    let processors_ = _payload["processors"].as_str().unwrap();
-    let data = _payload["data"];
-    let yaml_content = Content::Yaml(processors_.into());
+    let processors_ = _payload["pipeline_model"].take();
+    let processors = processors_.as_str().unwrap();
+    let data = _payload["data"].take();
+    let yaml_content = Content::Yaml(processors.into());
     let pipeline_: Result<Pipeline<GreptimeTransformer>, String> = parse(&yaml_content);
     match pipeline_ {
         Ok(pipeline) => {
             let pipeline_data = PipelineValue::try_from(data);
             match pipeline_data {
                 Ok(pipeline_data) => {
-                    let transformed_data = pipeline.exec(pipeline_data);
+                    let transformed_data: Result<Rows, String> = pipeline.exec(pipeline_data);
                     match transformed_data {
                         Ok(rows) => {
                             let insert_request = RowInsertRequest {
@@ -135,43 +137,33 @@ pub async fn log_ingester(
                             let insert_result =
                                 _state.insert_log(insert_requests, _query_ctx).await;
                             match insert_result {
-                                Ok(_) => {
-                                    return HttpResponse::GreptimedbV1(GreptimedbV1Response {
-                                        output: vec![],
-                                        execution_time_ms: 0,
-                                        resp_metrics: HashMap::new(),
-                                    })
-                                }
-                                Err(e) => {
-                                    return HttpResponse::Error(ErrorResponse::from_error_message(
-                                        StatusCode::InvalidArguments,
-                                        e.to_string(),
-                                    ));
-                                }
+                                Ok(_) => HttpResponse::GreptimedbV1(GreptimedbV1Response {
+                                    output: vec![],
+                                    execution_time_ms: 0,
+                                    resp_metrics: HashMap::new(),
+                                }),
+                                Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
+                                    StatusCode::InvalidArguments,
+                                    e.to_string(),
+                                )),
                             }
                         }
-                        Err(e) => {
-                            return HttpResponse::Error(ErrorResponse::from_error_message(
-                                StatusCode::InvalidArguments,
-                                e,
-                            ))
-                        }
+                        Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
+                            StatusCode::InvalidArguments,
+                            e,
+                        )),
                     }
                 }
-                Err(e) => {
-                    return HttpResponse::Error(ErrorResponse::from_error_message(
-                        StatusCode::InvalidArguments,
-                        e,
-                    ))
-                }
+                Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
+                    StatusCode::InvalidArguments,
+                    e,
+                )),
             }
         }
-        Err(e) => {
-            return HttpResponse::Error(ErrorResponse::from_error_message(
-                StatusCode::InvalidArguments,
-                e,
-            ))
-        }
+        Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            e,
+        )),
     }
 }
 

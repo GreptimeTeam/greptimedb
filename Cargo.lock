@@ -222,7 +222,7 @@ dependencies = [
  "common-macro",
  "common-time",
  "datatypes",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "paste",
  "prost 0.12.4",
  "snafu 0.8.2",
@@ -2113,7 +2113,7 @@ dependencies = [
  "backtrace",
  "common-error",
  "console-subscriber",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "lazy_static",
  "once_cell",
  "opentelemetry 0.21.0",
@@ -3846,7 +3846,7 @@ dependencies = [
  "enum-as-inner",
  "enum_dispatch",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "hydroflow",
  "itertools 0.10.5",
  "minstant",
@@ -4218,20 +4218,6 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 name = "greptime-proto"
 version = "0.1.0"
 source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218#902f75fdd170c572e90b1f640161d90995f20218"
-dependencies = [
- "prost 0.12.4",
- "serde",
- "serde_json",
- "strum 0.25.0",
- "strum_macros 0.25.3",
- "tonic 0.11.0",
- "tonic-build 0.11.0",
-]
-
-[[package]]
-name = "greptime-proto"
-version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git#31dd060fc3c84836d0b4997b11c22da122084dae"
 dependencies = [
  "prost 0.12.4",
  "serde",
@@ -4733,7 +4719,7 @@ dependencies = [
  "common-telemetry",
  "fst",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "mockall",
  "pin-project",
  "prost 0.12.4",
@@ -7181,12 +7167,11 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 [[package]]
 name = "pipeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/GreptimeTeam/pipeline.git?rev=d3b700c226abc10b5030b38f2a20cc30c1983970#d3b700c226abc10b5030b38f2a20cc30c1983970"
 dependencies = [
  "chrono",
  "chrono-tz 0.9.0",
  "csv",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git)",
+ "greptime-proto",
  "itertools 0.12.1",
  "serde_json",
  "urlencoding",
@@ -7585,7 +7570,7 @@ dependencies = [
  "datafusion-functions 37.0.0",
  "datatypes",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "itertools 0.10.5",
  "lazy_static",
  "prometheus",
@@ -7926,7 +7911,7 @@ dependencies = [
  "format_num",
  "futures",
  "futures-util",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "humantime",
  "lazy_static",
  "meter-core",
@@ -10562,7 +10547,7 @@ dependencies = [
  "datatypes",
  "derive_builder 0.12.0",
  "futures",
- "greptime-proto 0.1.0 (git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218)",
+ "greptime-proto",
  "humantime",
  "humantime-serde",
  "parquet",
