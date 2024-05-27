@@ -104,8 +104,7 @@ tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 zstd.workspace = true
-#pipeline = { git = "https://github.com/GreptimeTeam/pipeline.git", rev = "3cdbe92239303b3208ddd71a7ff7630730c91ad5" }
-
+pipeline = { git = "ssh://git@github.com/GreptimeTeam/pipeline.git", rev = "d3b700c226abc10b5030b38f2a20cc30c1983970" }
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 

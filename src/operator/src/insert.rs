@@ -67,6 +67,12 @@ pub struct Inserter {
 
 pub type InserterRef = Arc<Inserter>;
 
+enum TableType {
+    Logical(String),
+    Physical,
+    Log,
+}
+
 impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
@@ -109,7 +115,37 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         let table_name_to_ids = self
-            .create_or_alter_tables_on_demand(&requests, &ctx, None, statement_executor)
+            .create_or_alter_tables_on_demand(
+                &requests,
+                &ctx,
+                TableType::Physical,
+                statement_executor,
+            )
+            .await?;
+        let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
+            .convert(requests)
+            .await?;
+
+        self.do_request(inserts, &ctx).await
+    }
+
+    pub async fn handle_log_inserts(
+        &self,
+        mut requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<Output> {
+        // remove empty requests
+        requests.inserts.retain(|req| {
+            req.rows
+                .as_ref()
+                .map(|r| !r.rows.is_empty())
+                .unwrap_or_default()
+        });
+        validate_column_count_match(&requests)?;
+
+        let table_name_to_ids = self
+            .create_or_alter_tables_on_demand(&requests, &ctx, TableType::Log, statement_executor)
             .await?;
         let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
             .convert(requests)
@@ -144,7 +180,7 @@ impl Inserter {
             .create_or_alter_tables_on_demand(
                 &requests,
                 &ctx,
-                Some(physical_table.to_string()),
+                TableType::Logical(physical_table.to_string()),
                 statement_executor,
             )
             .await?;
@@ -366,7 +402,7 @@ impl Inserter {
         &self,
         requests: &RowInsertRequests,
         ctx: &QueryContextRef,
-        on_physical_table: Option<String>,
+        table_type: TableType,
         statement_executor: &StatementExecutor,
     ) -> Result<HashMap<String, TableId>> {
         let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
@@ -394,42 +430,56 @@ impl Inserter {
             }
         }
 
-        if let Some(on_physical_table) = on_physical_table {
-            if !create_tables.is_empty() {
-                // Creates logical tables in batch.
-                let tables = self
-                    .create_logical_tables(
-                        create_tables,
-                        ctx,
-                        &on_physical_table,
-                        statement_executor,
-                    )
-                    .await?;
+        match table_type {
+            TableType::Logical(on_physical_table) => {
+                if !create_tables.is_empty() {
+                    // Creates logical tables in batch.
+                    let tables = self
+                        .create_logical_tables(
+                            create_tables,
+                            ctx,
+                            &on_physical_table,
+                            statement_executor,
+                        )
+                        .await?;
 
-                for table in tables {
+                    for table in tables {
+                        let table_info = table.table_info();
+                        table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    }
+                }
+                if !alter_tables.is_empty() {
+                    // Alter logical tables in batch.
+                    statement_executor
+                        .alter_logical_tables(alter_tables, ctx.clone())
+                        .await?;
+                }
+            }
+            TableType::Physical => {
+                for req in create_tables {
+                    let table = self.create_table(req, ctx, statement_executor).await?;
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                 }
+                for alter_expr in alter_tables.into_iter() {
+                    statement_executor
+                        .alter_table_inner(alter_expr, ctx.clone())
+                        .await?;
+                }
             }
-            if !alter_tables.is_empty() {
-                // Alter logical tables in batch.
-                statement_executor
-                    .alter_logical_tables(alter_tables, ctx.clone())
-                    .await?;
-            }
-        } else {
-            for req in create_tables {
-                let table = self.create_table(req, ctx, statement_executor).await?;
-                let table_info = table.table_info();
-                table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-            }
-            for alter_expr in alter_tables.into_iter() {
-                statement_executor
-                    .alter_table_inner(alter_expr, ctx.clone())
-                    .await?;
+            TableType::Log => {
+                for req in create_tables {
+                    let table = self.create_log_table(req, ctx, statement_executor).await?;
+                    let table_info = table.table_info();
+                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                }
+                for alter_expr in alter_tables.into_iter() {
+                    statement_executor
+                        .alter_table_inner(alter_expr, ctx.clone())
+                        .await?;
+                }
             }
         }
-
         Ok(table_name_to_ids)
     }
 
@@ -549,6 +599,44 @@ impl Inserter {
         info!("Table `{table_ref}` does not exist, try creating table");
 
         // TODO(weny): multiple regions table.
+        let res = statement_executor
+            .create_table_inner(create_table_expr, None, ctx.clone())
+            .await;
+
+        match res {
+            Ok(table) => {
+                info!(
+                    "Successfully created table {}.{}.{}",
+                    table_ref.catalog, table_ref.schema, table_ref.table,
+                );
+                Ok(table)
+            }
+            Err(err) => {
+                error!(
+                    "Failed to create table {}.{}.{}: {}",
+                    table_ref.catalog, table_ref.schema, table_ref.table, err
+                );
+                Err(err)
+            }
+        }
+    }
+
+    async fn create_log_table(
+        &self,
+        req: &RowInsertRequest,
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<TableRef> {
+        let table_ref =
+            TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
+
+        let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
+        let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
+
+        info!("Table `{table_ref}` does not exist, try creating table");
+        create_table_expr
+            .table_options
+            .insert("append_mode".to_string(), "true".to_string());
         let res = statement_executor
             .create_table_inner(create_table_expr, None, ctx.clone())
             .await;

@@ -14,14 +14,10 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use aide::transform::TransformOperation;
-use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value as ApiValue,
-};
+use api::v1::{RowInsertRequest, RowInsertRequests};
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -31,6 +27,9 @@ use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
+use pipeline::transform::GreptimeTransformer;
+use pipeline::value::Value as PipelineValue;
+use pipeline::{parse, Content, Pipeline};
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,8 +48,8 @@ use crate::http::{
     HttpResponse, ResponseFormat,
 };
 use crate::metrics_handler::MetricsHandler;
-use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::LogHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -70,71 +69,108 @@ pub struct SqlQuery {
     pub epoch: Option<String>,
     pub limit: Option<usize>,
 }
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LogIngesterQueryParams {
+    pub table_name: String,
+}
+
+fn validate_log_ingester_payload(payload: &Value) -> Result<(), String> {
+    if !payload.is_object() {
+        return Err("payload must be an object".to_string());
+    }
+
+    if payload["processors"].as_str().is_none() {
+        return Err("processors field is required".to_string());
+    }
+
+    if payload["data"].as_array().is_none() {
+        return Err("data field is required".to_string());
+    }
+
+    Ok(())
+}
+
 /// handler to log ingester
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
-    State(_state): State<ServerGrpcQueryHandlerRef>,
-    Query(_query_params): Query<SqlQuery>,
+    State(_state): State<LogHandlerRef>,
+    Query(_query_params): Query<LogIngesterQueryParams>,
     Extension(_query_ctx): Extension<QueryContextRef>,
     Json(_payload): Json<Value>,
-) -> String {
-    // TODO (paomian): implement log ingester
+) -> HttpResponse {
+    // TODO (qtang): implement log ingester
     // transform payload to RowInsertRequest
     // maybe we need a new trait for log ingester like `LogIngester` instead of `ServerGrpcQueryHandlerRef`
     // let request = pileline::transform(payload);
     // state.do_query(payload, query_ctx).await.to_string();
-    let _processors = _payload["processors"].as_str().unwrap();
-    let _data = _payload["data"].as_array().unwrap();
-    let mut rows = Rows::default();
-
-    // need a ColumnSchema for rows
-    rows.schema = vec![
-        ColumnSchema {
-            column_name: "log".to_string(),
-            datatype: ColumnDataType::String as i32,
-            semantic_type: SemanticType::Tag as i32,
-            datatype_extension: None,
-        },
-        ColumnSchema {
-            column_name: "ts".to_string(),
-            datatype: ColumnDataType::TimestampSecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            datatype_extension: None,
-        },
-    ];
-
-    for row in _data {
-        let _row = row.as_str().unwrap();
-        let mut value = ApiValue::default();
-        value.value_data = Some(ValueData::StringValue(_row.to_string()));
-        let start = SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards");
-        let now =
-            since_the_epoch.as_secs();
-        rows.rows.push(Row {
-            values: vec![
-                value,
-                ApiValue {
-                    value_data: Some(ValueData::TimestampSecondValue(now as i64)),
-                },
-            ],
-        })
-    }
-    let mut insert_request = RowInsertRequest::default();
-    insert_request.rows = Some(rows);
-    insert_request.table_name = "log".to_string();
-    let insert_requests = RowInsertRequests {
-        inserts: vec![insert_request],
-    };
-    let test_insert_request = api::v1::greptime_request::Request::RowInserts(insert_requests);
-    let insert_result = _state.do_query(test_insert_request, _query_ctx).await;
-    match insert_result {
-        Ok(_) => String::from("ok"),
+    match validate_log_ingester_payload(&_payload) {
+        Ok(_) => (),
         Err(e) => {
-            tracing::error!(error = ?e, "error in log ingester");
-            e.to_string()
+            return HttpResponse::Error(ErrorResponse::from_error_message(
+                StatusCode::InvalidArguments,
+                e,
+            ))
+        }
+    };
+    let processors_ = _payload["processors"].as_str().unwrap();
+    let data = _payload["data"];
+    let yaml_content = Content::Yaml(processors_.into());
+    let pipeline_: Result<Pipeline<GreptimeTransformer>, String> = parse(&yaml_content);
+    match pipeline_ {
+        Ok(pipeline) => {
+            let pipeline_data = PipelineValue::try_from(data);
+            match pipeline_data {
+                Ok(pipeline_data) => {
+                    let transformed_data = pipeline.exec(pipeline_data);
+                    match transformed_data {
+                        Ok(rows) => {
+                            let insert_request = RowInsertRequest {
+                                rows: Some(rows),
+                                table_name: _query_params.table_name.clone(),
+                            };
+                            let insert_requests = RowInsertRequests {
+                                inserts: vec![insert_request],
+                            };
+                            let insert_result =
+                                _state.insert_log(insert_requests, _query_ctx).await;
+                            match insert_result {
+                                Ok(_) => {
+                                    return HttpResponse::GreptimedbV1(GreptimedbV1Response {
+                                        output: vec![],
+                                        execution_time_ms: 0,
+                                        resp_metrics: HashMap::new(),
+                                    })
+                                }
+                                Err(e) => {
+                                    return HttpResponse::Error(ErrorResponse::from_error_message(
+                                        StatusCode::InvalidArguments,
+                                        e.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return HttpResponse::Error(ErrorResponse::from_error_message(
+                                StatusCode::InvalidArguments,
+                                e,
+                            ))
+                        }
+                    }
+                }
+                Err(e) => {
+                    return HttpResponse::Error(ErrorResponse::from_error_message(
+                        StatusCode::InvalidArguments,
+                        e,
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            return HttpResponse::Error(ErrorResponse::from_error_message(
+                StatusCode::InvalidArguments,
+                e,
+            ))
         }
     }
 }

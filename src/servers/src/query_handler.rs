@@ -48,6 +48,7 @@ pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + 
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
+pub type LogHandlerRef = Arc<dyn LogHandler + Send + Sync>;
 
 #[async_trait]
 pub trait ScriptHandler {
@@ -117,4 +118,10 @@ pub trait OpenTelemetryProtocolHandler {
         request: ExportTraceServiceRequest,
         ctx: QueryContextRef,
     ) -> Result<Output>;
+}
+
+#[async_trait]
+
+pub trait LogHandler {
+    async fn insert_log(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 }
