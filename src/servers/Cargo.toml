@@ -100,7 +100,7 @@ tokio-rustls = "0.25"
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tonic-reflection = "0.11"
-tower = { version = "0.4", features = ["full"] }
+tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 zstd.workspace = true

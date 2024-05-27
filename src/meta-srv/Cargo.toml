@@ -55,7 +55,7 @@ tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
-tower = "0.4"
+tower.workspace = true
 typetag = "0.2"
 url = "2.3"
 
