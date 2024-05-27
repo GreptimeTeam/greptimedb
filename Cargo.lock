@@ -904,7 +904,6 @@ dependencies = [
  "rskafka",
  "serde",
  "store-api",
- "tests-integration",
  "tokio",
  "toml 0.8.12",
  "uuid",
@@ -9631,7 +9630,7 @@ dependencies = [
  "strum 0.25.0",
  "table",
  "tempfile",
- "tests-integration",
+ "tests-common",
  "tikv-jemalloc-ctl",
  "tokio",
  "tokio-postgres",
@@ -9996,7 +9995,7 @@ dependencies = [
  "serde_json",
  "sqlness",
  "tempfile",
- "tests-integration",
+ "tests-common",
  "tinytemplate",
  "tokio",
 ]
@@ -10669,6 +10668,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 
 [[package]]
+name = "tests-common"
+version = "0.8.0"
+dependencies = [
+ "api",
+ "arrow-flight",
+ "async-stream",
+ "async-trait",
+ "clap 4.5.4",
+ "client",
+ "cmd",
+ "common-catalog",
+ "common-error",
+ "common-grpc",
+ "common-query",
+ "common-recordbatch",
+ "common-telemetry",
+ "futures",
+ "futures-util",
+ "prost 0.12.4",
+ "snafu 0.8.2",
+ "tempfile",
+ "tokio",
+ "tonic 0.11.0",
+]
+
+[[package]]
 name = "tests-fuzz"
 version = "0.8.0"
 dependencies = [
@@ -10765,6 +10790,7 @@ dependencies = [
  "substrait 0.8.0",
  "table",
  "tempfile",
+ "tests-common",
  "time",
  "tokio",
  "tokio-postgres",

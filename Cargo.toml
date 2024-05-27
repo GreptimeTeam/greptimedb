@@ -59,6 +59,7 @@ members = [
     "src/index",
     "tests-fuzz",
     "tests-integration",
+    "tests/common",
     "tests/runner",
 ]
 resolver = "2"
@@ -233,8 +234,7 @@ sql = { path = "src/sql" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
-# TODO some code depends on this
-tests-integration = { path = "tests-integration" }
+tests-common = { path = "tests/common" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"

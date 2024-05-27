@@ -55,8 +55,8 @@ use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
+use tests_common::database::Database;
 
-use crate::database::Database;
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";

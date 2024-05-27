@@ -30,7 +30,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
-use tests_integration::database::Database as DB;
+use tests_common::database::Database as DB;
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
 

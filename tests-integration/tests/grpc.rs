@@ -36,7 +36,7 @@ use servers::http::prometheus::{
 };
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
-use tests_integration::database::Database;
+use tests_common::database::Database;
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
 };

@@ -31,7 +31,7 @@ use servers::server::Server;
 use snafu::ResultExt;
 use table::test_util::MemTable;
 use table::TableRef;
-use tests_integration::database::Database;
+use tests_common::database::Database;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::codec::CompressionEncoding;

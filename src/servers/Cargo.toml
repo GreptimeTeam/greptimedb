@@ -125,8 +125,7 @@ serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
-# TODO depend `Database` client
-tests-integration.workspace = true
+tests-common.workspace = true
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"
