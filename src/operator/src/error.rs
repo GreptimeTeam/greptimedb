@@ -256,6 +256,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Schema `{name}` is in use"))]
+    SchemaInUse {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table occurs error"))]
     Table {
         #[snafu(implicit)]
@@ -727,6 +734,7 @@ impl ErrorExt for Error {
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
+            | Error::SchemaInUse { .. }
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }

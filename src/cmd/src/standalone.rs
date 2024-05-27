@@ -306,7 +306,7 @@ impl StartCommand {
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
+    pub fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
         mut opts: StandaloneOptions,

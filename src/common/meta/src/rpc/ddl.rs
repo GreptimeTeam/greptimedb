@@ -28,8 +28,8 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, QueryContext as PbQueryContext,
-    TruncateTableExpr,
+    DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
+    QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -898,7 +898,8 @@ pub struct CreateFlowTask {
     pub sink_table_name: TableName,
     pub or_replace: bool,
     pub create_if_not_exists: bool,
-    pub expire_when: String,
+    /// Duration in seconds. Data older than this duration will not be used.
+    pub expire_after: Option<i64>,
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -915,7 +916,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             sink_table_name,
             or_replace,
             create_if_not_exists,
-            expire_when,
+            expire_after,
             comment,
             sql,
             flow_options,
@@ -934,7 +935,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
                 .into(),
             or_replace,
             create_if_not_exists,
-            expire_when,
+            expire_after: expire_after.map(|e| e.value),
             comment,
             sql,
             flow_options,
@@ -951,7 +952,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             sink_table_name,
             or_replace,
             create_if_not_exists,
-            expire_when,
+            expire_after,
             comment,
             sql,
             flow_options,
@@ -965,7 +966,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
                 sink_table_name: Some(sink_table_name.into()),
                 or_replace,
                 create_if_not_exists,
-                expire_when,
+                expire_after: expire_after.map(|value| ExpireAfter { value }),
                 comment,
                 sql,
                 flow_options,

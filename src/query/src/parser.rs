@@ -22,8 +22,9 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_telemetry::tracing;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
+use promql_parser::parser::value::ValueType;
 use promql_parser::parser::Expr::Extension;
-use promql_parser::parser::{EvalStmt, Expr, ValueType};
+use promql_parser::parser::{EvalStmt, Expr};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::dialect::GreptimeDbDialect;
@@ -372,8 +373,7 @@ mod test {
             Promql(EvalStmt { \
                 expr: VectorSelector(VectorSelector { \
                     name: Some(\"http_request\"), \
-                    matchers: Matchers { \
-                        matchers: [] }, \
+                    matchers: Matchers { matchers: [], or_matchers: [] }, \
                     offset: None, at: None }), \
                 start: SystemTime { tv_sec: 1644772440, tv_nsec: 0 }, \
                 end: SystemTime { tv_sec: 1676308440, tv_nsec: 0 }, \
@@ -389,7 +389,7 @@ mod test {
             Promql(EvalStmt { \
                 expr: VectorSelector(VectorSelector { \
                     name: Some(\"http_request\"), \
-                    matchers: Matchers { matchers: [] }, \
+                    matchers: Matchers { matchers: [], or_matchers: [] }, \
                     offset: None, at: None }), \
                 start: SystemTime { intervals: 132892460400000000 }, \
                 end: SystemTime { intervals: 133207820400000000 }, \

@@ -204,3 +204,36 @@ DROP table `ExcePTuRi`;
 
 Affected Rows: 0
 
+CREATE TABLE if not exists monitor (
+  host STRING,
+  ts TIMESTAMP(9) DEFAULT CURRENT_TIMESTAMP() TIME INDEX,
+  cpu FLOAT64 DEFAULT 0,
+  memory FLOAT64,
+  PRIMARY KEY(host)) ENGINE=mito WITH(COMMENT='create by human');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE monitor;
+
++---------+-----------------------------------------------------------+
+| Table   | Create Table                                              |
++---------+-----------------------------------------------------------+
+| monitor | CREATE TABLE IF NOT EXISTS "monitor" (                    |
+|         |   "host" STRING NULL,                                     |
+|         |   "ts" TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
+|         |   "cpu" DOUBLE NULL DEFAULT 0,                            |
+|         |   "memory" DOUBLE NULL,                                   |
+|         |   TIME INDEX ("ts"),                                      |
+|         |   PRIMARY KEY ("host")                                    |
+|         | )                                                         |
+|         |                                                           |
+|         | ENGINE=mito                                               |
+|         | WITH(                                                     |
+|         |   comment = 'create by human'                             |
+|         | )                                                         |
++---------+-----------------------------------------------------------+
+
+DROP TABLE monitor;
+
+Affected Rows: 0
+

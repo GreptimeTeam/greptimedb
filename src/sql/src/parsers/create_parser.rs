@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
+use datafusion_common::ScalarValue;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
@@ -25,11 +27,12 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 use table::requests::validate_table_option;
 
+use super::utils;
 use crate::ast::{ColumnDef, Ident, TableConstraint};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidTableOptionSnafu,
-    InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu,
-    UnsupportedSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
+    InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu,
+    UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::statements::create::{
@@ -44,7 +47,7 @@ pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
 pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
-pub const WHEN: &str = "WHEN";
+pub const AFTER: &str = "AFTER";
 
 const DB_OPT_KEY_TTL: &str = "ttl";
 
@@ -235,11 +238,28 @@ impl<'a> ParserContext<'a> {
 
         let output_table_name = self.intern_parse_table_name()?;
 
-        let expire_when = if self
+        let expire_after = if self
             .parser
-            .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(WHEN)])
+            .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
-            Some(self.parser.parse_expr().context(error::SyntaxSnafu)?)
+            let expire_after_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+            let expire_after_lit = utils::parser_expr_to_scalar_value(expire_after_expr.clone())?
+                .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+                .ok()
+                .with_context(|| InvalidIntervalSnafu {
+                    reason: format!("cannot cast {} to interval type", expire_after_expr),
+                })?;
+            if let ScalarValue::IntervalMonthDayNano(Some(nanoseconds)) = expire_after_lit {
+                Some(
+                    i64::try_from(nanoseconds / 1_000_000_000)
+                        .ok()
+                        .with_context(|| InvalidIntervalSnafu {
+                            reason: format!("interval {} overflows", nanoseconds),
+                        })?,
+                )
+            } else {
+                unreachable!()
+            }
         } else {
             None
         };
@@ -272,7 +292,7 @@ impl<'a> ParserContext<'a> {
             sink_table_name: output_table_name,
             or_replace,
             if_not_exists,
-            expire_when,
+            expire_after,
             comment,
             query,
         }))
@@ -877,7 +897,7 @@ mod tests {
     use common_catalog::consts::FILE_ENGINE;
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
-    use sqlparser::ast::{BinaryOperator, Expr, Function, Interval, ObjectName, Value};
+    use sqlparser::ast::{BinaryOperator, Expr, ObjectName, Value};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -1103,7 +1123,7 @@ mod tests {
         let sql = r"
 CREATE OR REPLACE FLOW IF NOT EXISTS task_1
 SINK TO schema_1.table_1
-EXPIRE WHEN timestamp < now() - INTERVAL '5m'
+EXPIRE AFTER INTERVAL '5 minutes'
 COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
@@ -1133,43 +1153,14 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             ]),
             or_replace: true,
             if_not_exists: true,
-            expire_when: Some(Expr::BinaryOp {
-                left: Box::new(Expr::Identifier(Ident {
-                    value: "timestamp".to_string(),
-                    quote_style: None,
-                })),
-                op: BinaryOperator::Lt,
-                right: Box::new(Expr::BinaryOp {
-                    left: Box::new(Expr::Function(Function {
-                        name: ObjectName(vec![Ident {
-                            value: "now".to_string(),
-                            quote_style: None,
-                        }]),
-                        args: vec![],
-                        filter: None,
-                        null_treatment: None,
-                        over: None,
-                        distinct: false,
-                        special: false,
-                        order_by: vec![],
-                    })),
-                    op: BinaryOperator::Minus,
-                    right: Box::new(Expr::Interval(Interval {
-                        value: Box::new(Expr::Value(Value::SingleQuotedString("5m".to_string()))),
-                        leading_field: None,
-                        leading_precision: None,
-                        last_field: None,
-                        fractional_seconds_precision: None,
-                    })),
-                }),
-            }),
+            expire_after: Some(300),
             comment: Some("test comment".to_string()),
             // ignore query parse result
             query: create_task.query.clone(),
         };
         assert_eq!(create_task, &expected);
 
-        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE WHEN` and `COMMENT`
+        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
         let sql = r"
 CREATE FLOW task_2
 SINK TO schema_1.table_1
@@ -1185,7 +1176,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         assert!(!create_task.or_replace);
         assert!(!create_task.if_not_exists);
-        assert!(create_task.expire_when.is_none());
+        assert!(create_task.expire_after.is_none());
         assert!(create_task.comment.is_none());
     }
 

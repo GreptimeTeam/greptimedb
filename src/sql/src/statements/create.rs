@@ -255,8 +255,9 @@ pub struct CreateFlow {
     pub or_replace: bool,
     /// Create if not exist
     pub if_not_exists: bool,
-    /// `EXPIRE_WHEN`
-    pub expire_when: Option<Expr>,
+    /// `EXPIRE AFTER`
+    /// Duration in second as `i64`
+    pub expire_after: Option<i64>,
     /// Comment string
     pub comment: Option<String>,
     /// SQL statement
@@ -275,8 +276,8 @@ impl Display for CreateFlow {
         }
         write!(f, "{} ", &self.flow_name)?;
         write!(f, "OUTPUT AS {} ", &self.sink_table_name)?;
-        if let Some(expire_when) = &self.expire_when {
-            write!(f, "EXPIRE WHEN {} ", expire_when)?;
+        if let Some(expire_after) = &self.expire_after {
+            write!(f, "EXPIRE AFTER {} ", expire_after)?;
         }
         if let Some(comment) = &self.comment {
             write!(f, "COMMENT '{}' ", comment)?;

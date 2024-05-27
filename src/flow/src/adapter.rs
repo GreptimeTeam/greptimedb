@@ -42,7 +42,6 @@ use tokio::sync::{oneshot, watch, Mutex, RwLock};
 
 use crate::adapter::error::{ExternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::parse_expr::parse_fixed;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
@@ -565,7 +564,7 @@ impl FlownodeManager {
     /// Return task id if a new task is created, otherwise return None
     ///
     /// steps to create task:
-    /// 1. parse query into typed plan(and optional parse expire_when expr)
+    /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
     #[allow(clippy::too_many_arguments)]
     pub async fn create_flow(
@@ -573,14 +572,14 @@ impl FlownodeManager {
         flow_id: FlowId,
         sink_table_name: TableName,
         source_table_ids: &[TableId],
-        create_if_not_exist: bool,
-        expire_when: Option<String>,
+        create_if_not_exists: bool,
+        expire_after: Option<i64>,
         comment: Option<String>,
         sql: String,
         flow_options: HashMap<String, String>,
         query_ctx: Option<QueryContext>,
     ) -> Result<Option<FlowId>, Error> {
-        if create_if_not_exist {
+        if create_if_not_exists {
             // check if the task already exists
             for handle in self.worker_handles.iter() {
                 if handle.lock().await.contains_flow(flow_id).await? {
@@ -608,22 +607,6 @@ impl FlownodeManager {
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
         node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
 
-        let expire_when = expire_when
-            .and_then(|s| {
-                if s.is_empty() || s.split_whitespace().join("").is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
-            })
-            .map(|d| {
-                let d = d.as_ref();
-                parse_fixed(d)
-                    .map(|(_, n)| n)
-                    .map_err(|err| err.to_string())
-            })
-            .transpose()
-            .map_err(|err| UnexpectedSnafu { reason: err }.build())?;
         let _ = comment;
         let _ = flow_options;
 
@@ -656,8 +639,8 @@ impl FlownodeManager {
             sink_sender,
             source_ids,
             src_recvs: source_receivers,
-            expire_when,
-            create_if_not_exist,
+            expire_after,
+            create_if_not_exists,
             err_collector,
         };
         handle.create_flow(create_request).await?;

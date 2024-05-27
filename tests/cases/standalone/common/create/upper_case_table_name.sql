@@ -43,3 +43,5 @@ drop table abcdefge;
 drop database upper_case_table_name;
 
 use public;
+
+drop database upper_case_table_name;
