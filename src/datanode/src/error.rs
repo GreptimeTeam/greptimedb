@@ -367,6 +367,19 @@ pub enum Error {
         #[snafu(source(from(common_config::error::Error, Box::new)))]
         source: Box<common_config::error::Error>,
     },
+
+    #[snafu(display(
+        "Failed to get region metadata from engine {} for region_id {}",
+        engine,
+        region_id,
+    ))]
+    GetRegionMetadata {
+        engine: String,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -433,7 +446,9 @@ impl ErrorExt for Error {
             TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
                 StatusCode::Unsupported
             }
-            HandleRegionRequest { source, .. } => source.status_code(),
+            HandleRegionRequest { source, .. } | GetRegionMetadata { source, .. } => {
+                source.status_code()
+            }
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),
