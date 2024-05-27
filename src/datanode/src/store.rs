@@ -106,8 +106,7 @@ async fn create_object_store_with_cache(
         let atomic_temp_dir = join_dir(path, ".tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
         let mut builder = Fs::default();
-        builder.root(path);
-        builder.atomic_write_dir(&atomic_temp_dir);
+        builder.root(path).atomic_write_dir(&atomic_temp_dir);
         let cache_store = ObjectStore::new(builder)
             .context(error::InitBackendSnafu)?
             .finish();
