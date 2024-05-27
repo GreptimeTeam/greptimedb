@@ -135,33 +135,11 @@ async fn create_physical_table<R: Rng + 'static>(
     Ok(Arc::new(TableContext::from(&create_physical_table_expr)))
 }
 
-async fn insert_and_validate_values<R: Rng + 'static>(
+async fn validate_values(
     ctx: &FuzzContext,
-    rng: &mut R,
     logical_table_ctx: TableContextRef,
+    insert_expr: &InsertIntoExpr,
 ) -> Result<()> {
-    let rows = rng.gen_range(1..2048);
-    let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
-    let translator = InsertIntoExprTranslator;
-    let sql = translator.translate(&insert_expr)?;
-    let result = ctx
-        .greptime
-        // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
-        .execute(sql.as_str())
-        .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
-
-    ensure!(
-        result.rows_affected() == rows as u64,
-        error::AssertSnafu {
-            reason: format!(
-                "expected rows affected: {}, actual: {}",
-                rows,
-                result.rows_affected(),
-            )
-        }
-    );
-
     // Validate inserted rows
     // The order of inserted rows are random, so we need to sort the inserted rows by primary keys and time index for comparison
     let primary_keys_names = logical_table_ctx
@@ -200,7 +178,7 @@ async fn insert_and_validate_values<R: Rng + 'static>(
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
     let mut expected_rows =
-        replace_default(&insert_expr.values_list, &logical_table_ctx, &insert_expr);
+        replace_default(&insert_expr.values_list, &logical_table_ctx, insert_expr);
     expected_rows.sort_by(|a, b| {
         let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
             .iter()
@@ -221,6 +199,36 @@ async fn insert_and_validate_values<R: Rng + 'static>(
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
     Ok(())
+}
+
+async fn insert_values<R: Rng + 'static>(
+    ctx: &FuzzContext,
+    rng: &mut R,
+    logical_table_ctx: TableContextRef,
+) -> Result<InsertIntoExpr> {
+    let rows = rng.gen_range(1..2048);
+    let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
+    let translator = InsertIntoExprTranslator;
+    let sql = translator.translate(&insert_expr)?;
+    let result = ctx
+        .greptime
+        // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
+        .execute(sql.as_str())
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+
+    ensure!(
+        result.rows_affected() == rows as u64,
+        error::AssertSnafu {
+            reason: format!(
+                "expected rows affected: {}, actual: {}",
+                rows,
+                result.rows_affected(),
+            )
+        }
+    );
+
+    Ok(insert_expr)
 }
 
 async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
@@ -247,13 +255,16 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         info!("Create logical table: {sql}, result: {result:?}");
         let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
 
-        insert_and_validate_values(&ctx, &mut rng, logical_table_ctx.clone()).await?;
-        tables.insert(logical_table_ctx.name.clone(), logical_table_ctx);
+        let insert_expr = insert_values(&ctx, &mut rng, logical_table_ctx.clone()).await?;
+        validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
+        tables.insert(logical_table_ctx.name.clone(), logical_table_ctx.clone());
         if rng.gen_bool(0.1) {
             flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
+            validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
         }
         if rng.gen_bool(0.1) {
             compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
+            validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
         }
     }
 
