@@ -13,17 +13,7 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::hash::Hash;
 use std::sync::Arc;
-
-/// The namespace id.
-/// Usually the namespace id is identical with the region id.
-pub type Id = u64;
-
-pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + PartialEq + Eq {
-    /// Returns the namespace id.
-    fn id(&self) -> Id;
-}
 
 // The namespace of kafka log store
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,31 +57,31 @@ impl RaftEngineNamespace {
 
 /// The namespace of LogStore
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LogStoreNamespace {
+pub enum Namespace {
     RaftEngine(RaftEngineNamespace),
     Kafka(Arc<KafkaNamespace>),
 }
 
-impl LogStoreNamespace {
-    pub fn raft_engine_namespace(id: u64) -> LogStoreNamespace {
-        LogStoreNamespace::RaftEngine(RaftEngineNamespace { id })
+impl Namespace {
+    pub fn raft_engine_namespace(id: u64) -> Namespace {
+        Namespace::RaftEngine(RaftEngineNamespace { id })
     }
 
-    pub fn kafka_namespace(topic: String) -> LogStoreNamespace {
-        LogStoreNamespace::Kafka(Arc::new(KafkaNamespace { topic }))
+    pub fn kafka_namespace(topic: String) -> Namespace {
+        Namespace::Kafka(Arc::new(KafkaNamespace { topic }))
     }
 
     /// Returns the type name.
     pub fn type_name(&self) -> &'static str {
         match self {
-            LogStoreNamespace::RaftEngine(_) => RaftEngineNamespace::type_name(),
-            LogStoreNamespace::Kafka(_) => KafkaNamespace::type_name(),
+            Namespace::RaftEngine(_) => RaftEngineNamespace::type_name(),
+            Namespace::Kafka(_) => KafkaNamespace::type_name(),
         }
     }
 
     /// Returns the reference of [`RaftEngineNamespace`] if it's the type of [`LogStoreNamespace::RaftEngine`].
     pub fn as_raft_engine_namespace(&self) -> Option<&RaftEngineNamespace> {
-        if let LogStoreNamespace::RaftEngine(ns) = self {
+        if let Namespace::RaftEngine(ns) = self {
             return Some(ns);
         }
         None
@@ -99,7 +89,7 @@ impl LogStoreNamespace {
 
     /// Returns the reference of [`KafkaNamespace`] if it's the type of [`LogStoreNamespace::Kafka`].
     pub fn as_kafka_namespace(&self) -> Option<&KafkaNamespace> {
-        if let LogStoreNamespace::Kafka(ns) = self {
+        if let Namespace::Kafka(ns) = self {
             return Some(ns);
         }
         None

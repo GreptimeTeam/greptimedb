@@ -28,7 +28,7 @@ use rand::distributions::{Alphanumeric, DistString, Uniform};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use store_api::logstore::namespace::LogStoreNamespace;
+use store_api::logstore::namespace::Namespace;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -211,7 +211,7 @@ impl From<Args> for Config {
 pub struct Region {
     id: RegionId,
     schema: Vec<ColumnSchema>,
-    log_store_namespace: LogStoreNamespace,
+    namespace: Namespace,
     next_sequence: AtomicU64,
     next_entry_id: AtomicU64,
     next_timestamp: AtomicI64,
@@ -228,14 +228,14 @@ impl Region {
         num_rows: u32,
         rng_seed: u64,
     ) -> Self {
-        let log_store_namespace = match wal_options {
-            WalOptions::RaftEngine => LogStoreNamespace::raft_engine_namespace(*id),
-            WalOptions::Kafka(opts) => LogStoreNamespace::kafka_namespace(opts.topic),
+        let namespace = match wal_options {
+            WalOptions::RaftEngine => Namespace::raft_engine_namespace(*id),
+            WalOptions::Kafka(opts) => Namespace::kafka_namespace(opts.topic),
         };
         Self {
             id,
             schema,
-            log_store_namespace,
+            namespace,
             next_sequence: AtomicU64::new(1),
             next_entry_id: AtomicU64::new(1),
             next_timestamp: AtomicI64::new(1655276557000),
@@ -263,14 +263,14 @@ impl Region {
                 self.id,
                 self.next_entry_id.fetch_add(1, Ordering::Relaxed),
                 &entry,
-                &self.log_store_namespace,
+                &self.namespace,
             )
             .unwrap();
     }
 
     /// Replays the region.
     pub async fn replay<S: LogStore>(&self, wal: &Arc<Wal<S>>) {
-        let mut wal_stream = wal.scan(self.id, 0, &self.log_store_namespace).unwrap();
+        let mut wal_stream = wal.scan(self.id, 0, &self.namespace).unwrap();
         while let Some(res) = wal_stream.next().await {
             let (_, entry) = res.unwrap();
             metrics::METRIC_WAL_READ_BYTES_TOTAL.inc_by(Self::entry_estimated_size(&entry) as u64);

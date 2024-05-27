@@ -23,7 +23,7 @@ use rskafka::client::partition::OffsetAt;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
-use store_api::logstore::namespace::{KafkaNamespace, LogStoreNamespace};
+use store_api::logstore::namespace::{KafkaNamespace, Namespace};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 use store_api::storage::RegionId;
 
@@ -66,7 +66,7 @@ impl LogStore for KafkaLogStore {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        ns: &LogStoreNamespace,
+        ns: &Namespace,
     ) -> Self::Entry {
         let ns = ns
             .as_kafka_namespace()
@@ -145,7 +145,7 @@ impl LogStore for KafkaLogStore {
     /// starting from `entry_id`. The generated entries will be filtered by the namespace.
     async fn read(
         &self,
-        ns: &LogStoreNamespace,
+        ns: &Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>> {
         let ns = ns
@@ -250,24 +250,24 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, _ns: &LogStoreNamespace) -> Result<()> {
+    async fn create_namespace(&self, _ns: &Namespace) -> Result<()> {
         Ok(())
     }
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, _ns: &LogStoreNamespace) -> Result<()> {
+    async fn delete_namespace(&self, _ns: &Namespace) -> Result<()> {
         Ok(())
     }
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<LogStoreNamespace>> {
+    async fn list_namespaces(&self) -> Result<Vec<Namespace>> {
         Ok(vec![])
     }
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _ns: &LogStoreNamespace, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(&self, _ns: &Namespace, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }
 
@@ -312,7 +312,7 @@ mod tests {
 
     // Stores test context for a region.
     struct RegionContext {
-        ns: LogStoreNamespace,
+        ns: Namespace,
         entry_builder: EntryBuilder,
         expected: Vec<EntryImpl>,
         flushed_entry_id: EntryId,
@@ -428,7 +428,7 @@ mod tests {
                 (
                     i as u64,
                     RegionContext {
-                        ns: LogStoreNamespace::kafka_namespace(topic.to_string()),
+                        ns: Namespace::kafka_namespace(topic.to_string()),
                         entry_builder,
                         expected: Vec::new(),
                         flushed_entry_id: 0,

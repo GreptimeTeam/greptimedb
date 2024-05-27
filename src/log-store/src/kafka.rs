@@ -21,7 +21,6 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::{Entry, Id as EntryId, RawEntry};
-use store_api::logstore::namespace::Namespace;
 use store_api::storage::RegionId;
 
 /// Kafka Namespace implementation.
@@ -29,12 +28,6 @@ use store_api::storage::RegionId;
 pub struct NamespaceImpl {
     pub region_id: u64,
     pub topic: String,
-}
-
-impl Namespace for NamespaceImpl {
-    fn id(&self) -> u64 {
-        self.region_id
-    }
 }
 
 impl Display for NamespaceImpl {

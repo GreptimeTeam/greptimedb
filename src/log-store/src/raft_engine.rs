@@ -16,7 +16,6 @@ use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 
 use store_api::logstore::entry::{Entry, Id as EntryId, RawEntry};
-use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::storage::RegionId;
 
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
@@ -42,15 +41,6 @@ impl EntryImpl {
     }
 }
 
-impl NamespaceImpl {
-    pub fn with_id(id: NamespaceId) -> Self {
-        Self {
-            id,
-            ..Default::default()
-        }
-    }
-}
-
 #[allow(clippy::derived_hash_with_manual_eq)]
 impl Hash for NamespaceImpl {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -59,12 +49,6 @@ impl Hash for NamespaceImpl {
 }
 
 impl Eq for NamespaceImpl {}
-
-impl Namespace for NamespaceImpl {
-    fn id(&self) -> NamespaceId {
-        self.id
-    }
-}
 
 impl Entry for EntryImpl {
     fn into_raw_entry(self) -> RawEntry {

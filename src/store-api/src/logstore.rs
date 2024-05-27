@@ -21,8 +21,7 @@ use common_error::ext::ErrorExt;
 use crate::logstore::entry::Entry;
 pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::entry_stream::SendableEntryStream;
-pub use crate::logstore::namespace::Id as NamespaceId;
-use crate::logstore::namespace::LogStoreNamespace;
+use crate::logstore::namespace::Namespace;
 use crate::storage::RegionId;
 
 pub mod entry;
@@ -52,23 +51,23 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// starting from `id`.
     async fn read(
         &self,
-        ns: &LogStoreNamespace,
+        ns: &Namespace,
         id: EntryId,
     ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>, Self::Error>;
 
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, ns: &LogStoreNamespace) -> Result<(), Self::Error>;
+    async fn create_namespace(&self, ns: &Namespace) -> Result<(), Self::Error>;
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, ns: &LogStoreNamespace) -> Result<(), Self::Error>;
+    async fn delete_namespace(&self, ns: &Namespace) -> Result<(), Self::Error>;
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<LogStoreNamespace>, Self::Error>;
+    async fn list_namespaces(&self) -> Result<Vec<Namespace>, Self::Error>;
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, ns: &LogStoreNamespace, entry_id: EntryId) -> Result<(), Self::Error>;
+    async fn obsolete(&self, ns: &Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 
     /// Makes an entry instance of the associated Entry type
     fn entry(
@@ -76,7 +75,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        ns: &LogStoreNamespace,
+        ns: &Namespace,
     ) -> Self::Entry;
 }
 

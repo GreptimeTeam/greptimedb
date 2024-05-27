@@ -17,7 +17,7 @@ use futures::StreamExt;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::entry::RawEntry;
-use store_api::logstore::namespace::LogStoreNamespace;
+use store_api::logstore::namespace::Namespace;
 use store_api::storage::RegionId;
 
 use crate::error::{DecodeWalSnafu, Result};
@@ -35,7 +35,7 @@ pub(crate) fn decode_raw_entry(raw_entry: RawEntry) -> Result<(EntryId, WalEntry
 
 /// [WalEntryReader] provides the ability to read and decode entries from the underlying store.
 pub(crate) trait WalEntryReader: Send + Sync {
-    fn read(self, ns: &'_ LogStoreNamespace, start_id: EntryId) -> Result<WalEntryStream<'static>>;
+    fn read(self, ns: &'_ Namespace, start_id: EntryId) -> Result<WalEntryStream<'static>>;
 }
 
 /// A Reader reads the [RawEntry] from [RawEntryReader] and decodes [RawEntry] into [WalEntry].
@@ -50,7 +50,7 @@ impl<R> LogStoreEntryReader<R> {
 }
 
 impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
-    fn read(self, ns: &'_ LogStoreNamespace, start_id: EntryId) -> Result<WalEntryStream<'static>> {
+    fn read(self, ns: &'_ Namespace, start_id: EntryId) -> Result<WalEntryStream<'static>> {
         let LogStoreEntryReader { reader } = self;
         let mut stream = reader.read(ns, start_id)?;
         let stream = stream.map(|entry| decode_raw_entry(entry?));

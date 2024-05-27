@@ -24,7 +24,7 @@ use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
 use snafu::{ensure, OptionExt};
-use store_api::logstore::namespace::LogStoreNamespace;
+use store_api::logstore::namespace::Namespace;
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
@@ -251,12 +251,10 @@ impl RegionOpener {
         Ok(region)
     }
 
-    fn log_store_namespace(&self, wal_options: &WalOptions) -> LogStoreNamespace {
+    fn log_store_namespace(&self, wal_options: &WalOptions) -> Namespace {
         match wal_options {
-            WalOptions::RaftEngine => LogStoreNamespace::raft_engine_namespace(*self.region_id),
-            WalOptions::Kafka(options) => {
-                LogStoreNamespace::kafka_namespace(options.topic.to_string())
-            }
+            WalOptions::RaftEngine => Namespace::raft_engine_namespace(*self.region_id),
+            WalOptions::Kafka(options) => Namespace::kafka_namespace(options.topic.to_string()),
         }
     }
 
@@ -440,7 +438,7 @@ pub(crate) fn check_recovered_region(
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
 pub(crate) async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
-    log_store_namespace: &LogStoreNamespace,
+    log_store_namespace: &Namespace,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
