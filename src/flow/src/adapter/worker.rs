@@ -236,8 +236,8 @@ impl<'s> Worker<'s> {
         create_if_not_exists: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
-        let already_exist = self.task_states.contains_key(&flow_id);
-        match (already_exist, create_if_not_exists) {
+        let already_exists = self.task_states.contains_key(&flow_id);
+        match (already_exists, create_if_not_exists) {
             (true, true) => return Ok(None),
             (true, false) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
             (false, _) => (),
