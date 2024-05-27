@@ -25,7 +25,7 @@ prost.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tonic.workspace = true
-tower = "0.4"
+tower.workspace = true
 
 [dev-dependencies]
 criterion = "0.4"

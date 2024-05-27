@@ -121,7 +121,7 @@ async fn fetch_ranges_seq(
                     .read_with(&file_path)
                     .range(range.start..range.end)
                     .call()?;
-                Ok::<_, object_store::Error>(Bytes::from(data))
+                Ok::<_, object_store::Error>(data.to_bytes())
             })
             .collect::<object_store::Result<Vec<_>>>()
     };
@@ -141,7 +141,7 @@ async fn fetch_ranges_concurrent(
         let future_read = object_store.read_with(file_path);
         handles.push(async move {
             let data = future_read.range(range.start..range.end).await?;
-            Ok::<_, object_store::Error>(Bytes::from(data))
+            Ok::<_, object_store::Error>(data.to_bytes())
         });
     }
     let results = futures::future::try_join_all(handles).await?;
@@ -164,7 +164,7 @@ where
     }
 }
 
-//  https://github.com/apache/incubator-opendal/blob/7144ab1ca2409dff0c324bfed062ce985997f8ce/core/src/raw/tokio_util.rs#L21-L23
+//  https://github.com/apache/opendal/blob/v0.46.0/core/src/raw/tokio_util.rs#L21-L24
 /// Parse tokio error into opendal::Error.
 fn new_task_join_error(e: tokio::task::JoinError) -> object_store::Error {
     object_store::Error::new(ErrorKind::Unexpected, "tokio task join failed").set_source(e)

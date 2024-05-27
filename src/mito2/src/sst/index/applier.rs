@@ -121,9 +121,17 @@ impl SstIndexApplier {
             return Ok(None);
         };
 
+        let Some(indexed_value) = file_cache
+            .get(IndexKey::new(self.region_id, file_id, FileType::Puffin))
+            .await
+        else {
+            return Ok(None);
+        };
+
         Ok(file_cache
             .reader(IndexKey::new(self.region_id, file_id, FileType::Puffin))
             .await
+            .map(|v| v.into_futures_async_read(0..indexed_value.file_size as u64))
             .map(PuffinFileReader::new))
     }
 
@@ -190,7 +198,13 @@ mod tests {
         let region_dir = "region_dir".to_string();
         let path = location::index_file_path(&region_dir, file_id);
 
-        let mut puffin_writer = PuffinFileWriter::new(object_store.writer(&path).await.unwrap());
+        let mut puffin_writer = PuffinFileWriter::new(
+            object_store
+                .writer(&path)
+                .await
+                .unwrap()
+                .into_futures_async_write(),
+        );
         puffin_writer
             .add_blob(Blob {
                 blob_type: INDEX_BLOB_TYPE.to_string(),
@@ -236,7 +250,13 @@ mod tests {
         let region_dir = "region_dir".to_string();
         let path = location::index_file_path(&region_dir, file_id);
 
-        let mut puffin_writer = PuffinFileWriter::new(object_store.writer(&path).await.unwrap());
+        let mut puffin_writer = PuffinFileWriter::new(
+            object_store
+                .writer(&path)
+                .await
+                .unwrap()
+                .into_futures_async_write(),
+        );
         puffin_writer
             .add_blob(Blob {
                 blob_type: "invalid_blob_type".to_string(),

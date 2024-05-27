@@ -146,7 +146,7 @@ raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 regex = "1.8"
 regex-automata = { version = "0.4" }
-reqwest = { version = "0.11", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
@@ -172,6 +172,7 @@ tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
+tower = { version = "0.4" }
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
 

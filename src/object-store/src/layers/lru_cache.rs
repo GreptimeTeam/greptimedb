@@ -14,27 +14,26 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use opendal::raw::oio::Read;
+use opendal::raw::oio::ReadDyn;
 use opendal::raw::{
-    Accessor, Layer, LayeredAccessor, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
+    Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
 };
-use opendal::Result;
+use opendal::{Operator, Result};
 mod read_cache;
 use common_telemetry::info;
 use read_cache::ReadCache;
 
 /// An opendal layer with local LRU file cache supporting.
 #[derive(Clone)]
-pub struct LruCacheLayer<C: Clone> {
+pub struct LruCacheLayer {
     // The read cache
-    read_cache: ReadCache<C>,
+    read_cache: ReadCache,
 }
 
-impl<C: Accessor + Clone> LruCacheLayer<C> {
+impl LruCacheLayer {
     /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
-    pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
+    pub async fn new(file_cache: Operator, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
         let (entries, bytes) = read_cache.recover_cache().await?;
 
@@ -57,11 +56,11 @@ impl<C: Accessor + Clone> LruCacheLayer<C> {
     }
 }
 
-impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
-    type LayeredAccessor = LruCacheAccessor<I, C>;
+impl<I: Access> Layer<I> for LruCacheLayer {
+    type LayeredAccess = LruCacheAccess<I>;
 
-    fn layer(&self, inner: I) -> Self::LayeredAccessor {
-        LruCacheAccessor {
+    fn layer(&self, inner: I) -> Self::LayeredAccess {
+        LruCacheAccess {
             inner,
             read_cache: self.read_cache.clone(),
         }
@@ -69,15 +68,14 @@ impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
 }
 
 #[derive(Debug)]
-pub struct LruCacheAccessor<I, C: Clone> {
+pub struct LruCacheAccess<I> {
     inner: I,
-    read_cache: ReadCache<C>,
+    read_cache: ReadCache,
 }
 
-#[async_trait]
-impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C> {
+impl<I: Access> LayeredAccess for LruCacheAccess<I> {
     type Inner = I;
-    type Reader = Box<dyn Read>;
+    type Reader = Arc<dyn ReadDyn>;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;

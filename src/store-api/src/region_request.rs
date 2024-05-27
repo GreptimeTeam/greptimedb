@@ -666,7 +666,7 @@ pub struct RegionTruncateRequest {}
 ///
 /// Makes a readonly region to catch up to leader region changes.
 /// There is no effect if it operating on a leader region.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.
     pub set_writable: bool,
