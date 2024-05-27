@@ -33,8 +33,8 @@ use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_value_for_mysql, replace_default, CreateTableExpr, InsertIntoExpr,
-    MySQLTsColumnTypeGenerator,
+    generate_random_timestamp_for_mysql, generate_random_value, replace_default, CreateTableExpr,
+    InsertIntoExpr, MySQLTsColumnTypeGenerator,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
@@ -101,7 +101,8 @@ fn generate_insert_expr<R: Rng + 'static>(
         .table_ctx(table_ctx)
         .omit_column_list(omit_column_list)
         .rows(input.rows)
-        .value_generator(Box::new(generate_random_value_for_mysql))
+        .value_generator(Box::new(generate_random_value))
+        .ts_value_generator(Box::new(generate_random_timestamp_for_mysql))
         .build()
         .unwrap();
     insert_generator.generate(rng)
