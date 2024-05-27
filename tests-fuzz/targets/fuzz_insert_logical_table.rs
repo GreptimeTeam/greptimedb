@@ -14,6 +14,7 @@
 
 #![no_main]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -40,9 +41,10 @@ use tests_fuzz::ir::{
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{
+    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
+};
 use tests_fuzz::validator;
-
 struct FuzzContext {
     greptime: Pool<MySql>,
 }
@@ -56,15 +58,15 @@ impl FuzzContext {
 #[derive(Copy, Clone, Debug)]
 struct FuzzInput {
     seed: u64,
-    rows: usize,
+    tables: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let rows = rng.gen_range(1..4096);
-        Ok(FuzzInput { rows, seed })
+        let tables = rng.gen_range(1..256);
+        Ok(FuzzInput { tables, seed })
     }
 }
 
@@ -102,26 +104,26 @@ fn generate_create_logical_table_expr<R: Rng + 'static>(
 }
 
 fn generate_insert_expr<R: Rng + 'static>(
-    input: FuzzInput,
+    rows: usize,
     rng: &mut R,
     table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
     let insert_generator = InsertExprGeneratorBuilder::default()
         .omit_column_list(false)
         .table_ctx(table_ctx)
-        .rows(input.rows)
+        .rows(rows)
         .value_generator(Box::new(generate_random_value_for_mysql))
         .build()
         .unwrap();
     insert_generator.generate(rng)
 }
 
-async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
-    info!("input: {input:?}");
-    let mut rng = ChaChaRng::seed_from_u64(input.seed);
-
+async fn create_physical_table<R: Rng + 'static>(
+    ctx: &FuzzContext,
+    rng: &mut R,
+) -> Result<TableContextRef> {
     // Create a physical table and a logical table on top of it
-    let create_physical_table_expr = generate_create_physical_table_expr(&mut rng).unwrap();
+    let create_physical_table_expr = generate_create_physical_table_expr(rng).unwrap();
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&create_physical_table_expr)?;
     let result = sqlx::query(&sql)
@@ -130,43 +132,17 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create physical table: {sql}, result: {result:?}");
 
-    let physical_table_ctx = Arc::new(TableContext::from(&create_physical_table_expr));
+    Ok(Arc::new(TableContext::from(&create_physical_table_expr)))
+}
 
-    let create_logical_table_expr =
-        generate_create_logical_table_expr(physical_table_ctx, &mut rng).unwrap();
-    let sql = translator.translate(&create_logical_table_expr)?;
-    let result = sqlx::query(&sql)
-        .execute(&ctx.greptime)
-        .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
-    info!("Create logical table: {sql}, result: {result:?}");
-
-    let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
-
-    let insert_expr = generate_insert_expr(input, &mut rng, logical_table_ctx)?;
-    let translator = InsertIntoExprTranslator;
-    let sql = translator.translate(&insert_expr)?;
-    let result = ctx
-        .greptime
-        // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
-        .execute(sql.as_str())
-        .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
-
-    ensure!(
-        result.rows_affected() == input.rows as u64,
-        error::AssertSnafu {
-            reason: format!(
-                "expected rows affected: {}, actual: {}",
-                input.rows,
-                result.rows_affected(),
-            )
-        }
-    );
-
+async fn validate_values(
+    ctx: &FuzzContext,
+    logical_table_ctx: TableContextRef,
+    insert_expr: &InsertIntoExpr,
+) -> Result<()> {
     // Validate inserted rows
     // The order of inserted rows are random, so we need to sort the inserted rows by primary keys and time index for comparison
-    let primary_keys_names = create_logical_table_expr
+    let primary_keys_names = logical_table_ctx
         .columns
         .iter()
         .filter(|c| c.is_primary_key() || c.is_time_index())
@@ -198,14 +174,11 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     let select_sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
-        column_list, create_logical_table_expr.table_name, primary_keys_column_list
+        column_list, logical_table_ctx.name, primary_keys_column_list
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
-    let mut expected_rows = replace_default(
-        &insert_expr.values_list,
-        &create_logical_table_expr,
-        &insert_expr,
-    );
+    let mut expected_rows =
+        replace_default(&insert_expr.values_list, &logical_table_ctx, insert_expr);
     expected_rows.sort_by(|a, b| {
         let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
             .iter()
@@ -225,26 +198,95 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     });
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
-    // Clean up logical table
-    let sql = format!("DROP TABLE {}", create_logical_table_expr.table_name);
-    let result = sqlx::query(&sql)
-        .execute(&ctx.greptime)
+    Ok(())
+}
+
+async fn insert_values<R: Rng + 'static>(
+    ctx: &FuzzContext,
+    rng: &mut R,
+    logical_table_ctx: TableContextRef,
+) -> Result<InsertIntoExpr> {
+    let rows = rng.gen_range(1..2048);
+    let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
+    let translator = InsertIntoExprTranslator;
+    let sql = translator.translate(&insert_expr)?;
+    let result = ctx
+        .greptime
+        // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
+        .execute(sql.as_str())
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
-    info!(
-        "Drop table: {}, result: {result:?}",
-        create_logical_table_expr.table_name
+
+    ensure!(
+        result.rows_affected() == rows as u64,
+        error::AssertSnafu {
+            reason: format!(
+                "expected rows affected: {}, actual: {}",
+                rows,
+                result.rows_affected(),
+            )
+        }
     );
 
+    Ok(insert_expr)
+}
+
+async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
+    info!("input: {input:?}");
+    let mut rng = ChaChaRng::seed_from_u64(input.seed);
+    let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
+
+    let mut tables = HashMap::with_capacity(input.tables);
+
+    // Create logical tables
+    for _ in 0..input.tables {
+        let translator = CreateTableExprTranslator;
+        let create_logical_table_expr =
+            generate_create_logical_table_expr(physical_table_ctx.clone(), &mut rng).unwrap();
+        if tables.contains_key(&create_logical_table_expr.table_name) {
+            // Ignores same name logical table.
+            continue;
+        }
+        let sql = translator.translate(&create_logical_table_expr)?;
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Create logical table: {sql}, result: {result:?}");
+        let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
+
+        let insert_expr = insert_values(&ctx, &mut rng, logical_table_ctx.clone()).await?;
+        validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
+        tables.insert(logical_table_ctx.name.clone(), logical_table_ctx.clone());
+        if rng.gen_bool(0.1) {
+            flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
+            validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
+        }
+        if rng.gen_bool(0.1) {
+            compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
+            validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
+        }
+    }
+
+    // Clean up logical table
+    for (table_name, _) in tables {
+        let sql = format!("DROP TABLE {}", table_name);
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Drop table: {}, result: {result:?}", table_name);
+    }
+
     // Clean up physical table
-    let sql = format!("DROP TABLE {}", create_physical_table_expr.table_name);
+    let sql = format!("DROP TABLE {}", physical_table_ctx.name);
     let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
     info!(
         "Drop table: {}, result: {result:?}",
-        create_physical_table_expr.table_name
+        physical_table_ctx.name
     );
     ctx.close().await;
 
