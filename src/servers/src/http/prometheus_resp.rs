@@ -26,7 +26,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use promql_parser::label::METRIC_NAME;
-use promql_parser::parser::ValueType;
+use promql_parser::parser::value::ValueType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

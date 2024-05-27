@@ -76,7 +76,7 @@ pprof = { version = "0.13", features = [
     "protobuf",
 ], optional = true }
 prometheus.workspace = true
-promql-parser = "0.1.1"
+promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true

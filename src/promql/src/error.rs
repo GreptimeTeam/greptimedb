@@ -18,7 +18,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
-use promql_parser::parser::{Expr as PromExpr, TokenType, VectorMatchCardinality};
+use promql_parser::parser::token::TokenType;
+use promql_parser::parser::{Expr as PromExpr, VectorMatchCardinality};
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -49,7 +50,7 @@ pub enum Error {
     #[snafu(display("Internal error during building DataFusion plan"))]
     DataFusionPlanning {
         #[snafu(source)]
-        error: datafusion::error::DataFusionError,
+        error: DataFusionError,
         #[snafu(implicit)]
         location: Location,
     },

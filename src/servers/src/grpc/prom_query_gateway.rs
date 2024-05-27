@@ -25,7 +25,7 @@ use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_time::util::current_time_rfc3339;
-use promql_parser::parser::ValueType;
+use promql_parser::parser::value::ValueType;
 use query::parser::PromQuery;
 use session::context::QueryContext;
 use snafu::OptionExt;
