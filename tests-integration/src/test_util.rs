@@ -695,7 +695,13 @@ pub async fn execute_and_check_output(db: &Database, sql: &str, expected: Expect
 
     match (&output, expected) {
         (OutputData::AffectedRows(x), ExpectedOutput::AffectedRows(y)) => {
-            assert_eq!(*x, y, "actual: \n{}", x)
+            assert_eq!(
+                *x, y,
+                r#"
+expected: {y}
+actual: {x}
+"#
+            )
         }
         (OutputData::RecordBatches(_), ExpectedOutput::QueryResult(x))
         | (OutputData::Stream(_), ExpectedOutput::QueryResult(x)) => {
