@@ -168,10 +168,24 @@ impl MitoRegion {
         if writable {
             // Only sets the region to writable if it is read only.
             // This prevents others updating the manifest.
-            let _ = self
+            match self
                 .manifest_ctx
                 .state
-                .compare_exchange(RegionState::ReadOnly, RegionState::Writable);
+                .compare_exchange(RegionState::ReadOnly, RegionState::Writable)
+            {
+                Ok(state) => info!(
+                    "Set region {} to writable, previous state: {:?}",
+                    self.region_id, state
+                ),
+                Err(state) => {
+                    if state != RegionState::Writable {
+                        warn!(
+                            "Failed to set region {} to writable, current state: {:?}",
+                            self.region_id, state
+                        )
+                    }
+                }
+            }
         } else {
             self.manifest_ctx.state.store(RegionState::ReadOnly);
         }
