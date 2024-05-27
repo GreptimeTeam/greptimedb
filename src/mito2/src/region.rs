@@ -18,7 +18,7 @@ pub(crate) mod opener;
 pub mod options;
 pub(crate) mod version;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -470,6 +470,34 @@ impl RegionMap {
 }
 
 pub(crate) type RegionMapRef = Arc<RegionMap>;
+
+/// Opening regions
+#[derive(Debug, Default)]
+pub(crate) struct OpeningRegions {
+    regions: RwLock<HashSet<RegionId>>,
+}
+
+impl OpeningRegions {
+    /// Returns true if the region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        let regions = self.regions.read().unwrap();
+        regions.contains(&region_id)
+    }
+
+    /// Inserts a new region into the map.
+    pub(crate) fn insert_region(&self, region: RegionId) {
+        let mut regions = self.regions.write().unwrap();
+        regions.insert(region);
+    }
+
+    /// Remove region by id.
+    pub(crate) fn remove_region(&self, region_id: RegionId) {
+        let mut regions = self.regions.write().unwrap();
+        regions.remove(&region_id);
+    }
+}
+
+pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
 
 #[cfg(test)]
 mod tests {

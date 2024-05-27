@@ -66,6 +66,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionOpenRequest,
         sender: OptionOutputTx,
     ) {
+        if self.opening_regions.is_region_exists(region_id) {
+            sender.send(Ok(0));
+            return;
+        };
         if self.regions.is_region_exists(region_id) {
             sender.send(Ok(0));
             return;
@@ -86,9 +90,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.intermediate_manager.clone(),
         )
         .skip_wal_replay(request.skip_wal_replay)
+        .cache(Some(self.cache_manager.clone()))
         .parse_options(request.options)
         {
-            Ok(opener) => opener.cache(Some(self.cache_manager.clone())),
+            Ok(opener) => opener,
             Err(err) => {
                 sender.send(Err(err));
                 return;
@@ -98,6 +103,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let regions = self.regions.clone();
         let wal = self.wal.clone();
         let config = self.config.clone();
+        let opening_regions = self.opening_regions.clone();
+        opening_regions.insert_region(region_id);
         common_runtime::spawn_bg(async move {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
@@ -113,6 +120,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(Err(err));
                 }
             }
+            opening_regions.remove_region(region_id);
         });
     }
 }

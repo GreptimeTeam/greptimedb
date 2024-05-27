@@ -51,7 +51,7 @@ use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_STALL_TOTAL;
-use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
+use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
@@ -373,6 +373,7 @@ impl<S: LogStore> WorkerStarter<S> {
             config: self.config.clone(),
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
+            opening_regions: Arc::new(OpeningRegions::default()),
             sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
@@ -531,6 +532,8 @@ struct RegionWorkerLoop<S> {
     regions: RegionMapRef,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
+    /// Regions that are opening.
+    opening_regions: OpeningRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequest>,
     /// Request receiver.
