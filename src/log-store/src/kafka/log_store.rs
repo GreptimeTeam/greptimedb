@@ -67,23 +67,22 @@ impl LogStore for KafkaLogStore {
         entry_id: EntryId,
         region_id: RegionId,
         ns: &Namespace,
-    ) -> Self::Entry {
+    ) -> Result<Self::Entry> {
         let ns = ns
             .as_kafka_namespace()
             .with_context(|| UnexpectedNamespaceTypeSnafu {
                 expected: KafkaNamespace::type_name(),
                 actual: ns.type_name(),
-            })
-            .unwrap();
+            })?;
 
-        EntryImpl {
+        Ok(EntryImpl {
             data: std::mem::take(data),
             id: entry_id,
             ns: NamespaceImpl {
                 region_id: region_id.as_u64(),
                 topic: ns.topic.to_string(),
             },
-        }
+        })
     }
 
     /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.

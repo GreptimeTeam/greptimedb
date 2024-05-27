@@ -34,7 +34,7 @@ use store_api::logstore::namespace::Namespace;
 use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
-use crate::error::{DeleteWalSnafu, EncodeWalSnafu, Result, WriteWalSnafu};
+use crate::error::{BuildEntrySnafu, DeleteWalSnafu, EncodeWalSnafu, Result, WriteWalSnafu};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 use crate::wal::wal_entry_reader::{LogStoreEntryReader, WalEntryReader};
 
@@ -151,7 +151,9 @@ impl<S: LogStore> WalWriter<S> {
             .context(EncodeWalSnafu { region_id })?;
         let entry = self
             .store
-            .entry(&mut self.entry_encode_buf, entry_id, region_id, namespace);
+            .entry(&mut self.entry_encode_buf, entry_id, region_id, namespace)
+            .map_err(BoxedError::new)
+            .context(BuildEntrySnafu { region_id })?;
 
         self.entries.push(entry);
 

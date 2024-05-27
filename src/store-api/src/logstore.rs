@@ -76,7 +76,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         entry_id: EntryId,
         region_id: RegionId,
         ns: &Namespace,
-    ) -> Self::Entry;
+    ) -> Result<Self::Entry, Self::Error>;
 }
 
 /// The response of an `append` operation.

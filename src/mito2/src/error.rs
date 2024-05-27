@@ -226,6 +226,14 @@ pub enum Error {
         source: datatypes::Error,
     },
 
+    #[snafu(display("Failed to build entry, region_id: {}", region_id))]
+    BuildEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
     EncodeWal {
         region_id: RegionId,
@@ -789,8 +797,10 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. } => StatusCode::Internal,
+            | DecodeWal { .. }
+            | BuildEntry { .. } => StatusCode::Internal,
             OpenRegion { source, .. } => source.status_code(),
+
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),

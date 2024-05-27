@@ -439,13 +439,13 @@ impl LogStore for RaftEngineLogStore {
         entry_id: EntryId,
         region_id: RegionId,
         _ns: &Namespace,
-    ) -> Self::Entry {
-        EntryImpl {
+    ) -> Result<Self::Entry> {
+        Ok(EntryImpl {
             id: entry_id,
             data: std::mem::take(data),
             namespace_id: region_id.as_u64(),
             ..Default::default()
-        }
+        })
     }
 
     async fn obsolete(&self, ns: &Namespace, entry_id: EntryId) -> Result<()> {

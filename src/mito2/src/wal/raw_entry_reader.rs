@@ -219,7 +219,7 @@ mod tests {
             entry_id: EntryId,
             region_id: RegionId,
             ns: &Namespace,
-        ) -> Self::Entry {
+        ) -> Result<Self::Entry, Self::Error> {
             unreachable!()
         }
     }
