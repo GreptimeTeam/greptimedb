@@ -163,6 +163,16 @@ nextest: ## Install nextest tools.
 sqlness-test: ## Run sqlness test.
 	cargo sqlness
 
+# Define the number of tries (runs) before fuzz gives up
+RUNS ?= 10
+.PHONY: fuzz-stable
+fuzz-stable: ## Run all fuzz tests, excluding targets starting with 'unstable'.
+	@FUZZ_TARGETS=$$(cargo fuzz list --fuzz-dir tests-fuzz | grep -v '^unstable'); \
+	for target in $${FUZZ_TARGETS}; do \
+		echo "Running fuzz target: $${target}"; \
+		cargo fuzz run $${target} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}; \
+	done
+
 .PHONY: check
 check: ## Cargo check all the targets.
 	cargo check --workspace --all-targets --all-features
