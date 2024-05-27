@@ -33,11 +33,11 @@ impl MetricEngineInner {
             }
             .fail();
         }
-        let data_region_id = utils::to_data_region_id(region_id);
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
         // TODO(weny): improve the catchup, we can read the wal entries only once.
         self.mito
             .handle_request(
-                data_region_id,
+                metadata_region_id,
                 RegionRequest::Catchup(RegionCatchupRequest {
                     set_writable: req.set_writable,
                     entry_id: None,
