@@ -94,11 +94,11 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> CreateTableExpr 
     create_table_generator.generate(rng).unwrap()
 }
 
-async fn connect_mysql(addr: &str) -> Pool<MySql> {
+async fn connect_mysql(addr: &str, database: &str) -> Pool<MySql> {
     loop {
         match MySqlPoolOptions::new()
             .acquire_timeout(Duration::from_secs(30))
-            .connect(&format!("mysql://{addr}/public"))
+            .connect(&format!("mysql://{addr}/{database}"))
             .await
         {
             Ok(mysql) => return mysql,
@@ -109,6 +109,8 @@ async fn connect_mysql(addr: &str) -> Pool<MySql> {
     }
 }
 
+const FUZZ_TESTS_DATABASE: &str = "fuzz_tests";
+
 async fn execute_unstable_create_table(
     unstable_process_controller: Arc<UnstableProcessController>,
     rx: watch::Receiver<ProcessState>,
@@ -117,10 +119,20 @@ async fn execute_unstable_create_table(
     // Starts the unstable process.
     let moved_unstable_process_controller = unstable_process_controller.clone();
     let handler = tokio::spawn(async move { moved_unstable_process_controller.start().await });
+    let mysql_public = connect_mysql(DEFAULT_MYSQL_URL, "public").await;
+    loop {
+        let sql = format!("CREATE DATABASE IF NOT EXISTS {FUZZ_TESTS_DATABASE}");
+        match sqlx::query(&sql).execute(&mysql_public).await {
+            Ok(result) => {
+                info!("Create database: {}, result: {result:?}", sql);
+                break;
+            }
+            Err(err) => warn!("Failed to create database: {}, error: {err}", sql),
+        }
+    }
+    let mysql = connect_mysql(DEFAULT_MYSQL_URL, FUZZ_TESTS_DATABASE).await;
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
-    let mysql = connect_mysql(DEFAULT_MYSQL_URL).await;
     let ctx = FuzzContext { greptime: mysql };
-
     let mut table_states = HashMap::new();
 
     for _ in 0..input.num {
@@ -163,13 +175,13 @@ async fn execute_unstable_create_table(
     }
 
     loop {
-        let sql = "DROP DATABASE IF EXISTS public";
-        match sqlx::query(sql).execute(&ctx.greptime).await {
+        let sql = format!("DROP DATABASE IF EXISTS {FUZZ_TESTS_DATABASE}");
+        match sqlx::query(&sql).execute(&mysql_public).await {
             Ok(result) => {
-                info!("Drop table: {}, result: {result:?}", sql);
+                info!("Drop database: {}, result: {result:?}", sql);
                 break;
             }
-            Err(err) => warn!("Failed to drop table: {}, error: {err}", sql),
+            Err(err) => warn!("Failed to drop database: {}, error: {err}", sql),
         }
     }
     // Cleans up
