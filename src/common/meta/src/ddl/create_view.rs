@@ -22,9 +22,11 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
+use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{self, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::rpc::ddl::CreateViewTask;
@@ -157,6 +159,25 @@ impl CreateViewProcedure {
         Ok(Status::executing(true))
     }
 
+    async fn invalidate_view_cache(&self) -> Result<()> {
+        let cache_invalidator = &self.context.cache_invalidator;
+        let ctx = Context {
+            subject: Some("Invalidate view cache by creating view".to_string()),
+        };
+
+        cache_invalidator
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::TableName(self.data.table_ref().into()),
+                    CacheIdent::TableId(self.view_id()),
+                ],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// Creates view metadata
     ///
     /// Abort(not-retry):
@@ -197,6 +218,7 @@ impl CreateViewProcedure {
                 ctx.procedure_id
             );
         }
+        self.invalidate_view_cache().await?;
 
         Ok(Status::done_with_output(view_id))
     }
