@@ -438,8 +438,9 @@ impl LogStore for RaftEngineLogStore {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        _ns: &Provider,
+        ns: &Provider,
     ) -> Result<Self::Entry> {
+        debug_assert_eq!(ns.as_raft_engine_provider().unwrap().id, region_id.as_u64());
         Ok(EntryImpl {
             id: entry_id,
             data: std::mem::take(data),
