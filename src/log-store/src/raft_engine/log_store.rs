@@ -116,10 +116,10 @@ impl RaftEngineLogStore {
             .context(StartGcTaskSnafu)
     }
 
-    fn span(&self, ns: &RaftEngineProvider) -> (Option<u64>, Option<u64>) {
+    fn span(&self, provider: &RaftEngineProvider) -> (Option<u64>, Option<u64>) {
         (
-            self.engine.first_index(ns.id),
-            self.engine.last_index(ns.id),
+            self.engine.first_index(provider.id),
+            self.engine.last_index(provider.id),
         )
     }
 
@@ -252,14 +252,14 @@ impl LogStore for RaftEngineLogStore {
     /// determined by the current "last index" of the namespace.
     async fn read(
         &self,
-        ns: &Provider,
+        provider: &Provider,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
-        let ns = ns
+        let ns = provider
             .as_raft_engine_provider()
             .with_context(|| InvalidProviderSnafu {
                 expected: RaftEngineProvider::type_name(),
-                actual: ns.type_name(),
+                actual: provider.type_name(),
             })?;
         let namespace_id = ns.id;
         metrics::METRIC_RAFT_ENGINE_READ_CALLS_TOTAL.inc();
@@ -420,12 +420,12 @@ impl LogStore for RaftEngineLogStore {
         }))
     }
 
-    async fn obsolete(&self, ns: &Provider, entry_id: EntryId) -> Result<()> {
-        let ns = ns
+    async fn obsolete(&self, provider: &Provider, entry_id: EntryId) -> Result<()> {
+        let ns = provider
             .as_raft_engine_provider()
             .with_context(|| InvalidProviderSnafu {
                 expected: RaftEngineProvider::type_name(),
-                actual: ns.type_name(),
+                actual: provider.type_name(),
             })?;
         let namespace_id = ns.id;
         ensure!(self.started(), IllegalStateSnafu);

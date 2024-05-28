@@ -176,14 +176,14 @@ impl LogStore for KafkaLogStore {
     /// starting from `entry_id`. The generated entries will be filtered by the namespace.
     async fn read(
         &self,
-        ns: &Provider,
+        provider: &Provider,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
-        let provider = ns
+        let provider = provider
             .as_kafka_provider()
             .with_context(|| InvalidProviderSnafu {
                 expected: KafkaProvider::type_name(),
-                actual: ns.type_name(),
+                actual: provider.type_name(),
             })?;
 
         metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
@@ -291,12 +291,12 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, _ns: &Provider) -> Result<()> {
+    async fn create_namespace(&self, _provider: &Provider) -> Result<()> {
         Ok(())
     }
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, _ns: &Provider) -> Result<()> {
+    async fn delete_namespace(&self, _provider: &Provider) -> Result<()> {
         Ok(())
     }
 
@@ -308,7 +308,7 @@ impl LogStore for KafkaLogStore {
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _ns: &Provider, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(&self, _provider: &Provider, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }
 

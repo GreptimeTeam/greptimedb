@@ -283,7 +283,7 @@ fn convert_to_multiple_entry(
     })
 }
 
-/// Constructs entry from `buffered_records`
+/// Constructs entries from `buffered_records`
 pub fn remaining_entries(
     provider: &Arc<KafkaProvider>,
     buffered_records: &mut HashMap<RegionId, Vec<Record>>,

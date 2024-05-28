@@ -228,14 +228,14 @@ impl Region {
         num_rows: u32,
         rng_seed: u64,
     ) -> Self {
-        let namespace = match wal_options {
+        let provider = match wal_options {
             WalOptions::RaftEngine => Provider::raft_engine_provider(*id),
             WalOptions::Kafka(opts) => Provider::kafka_provider(opts.topic),
         };
         Self {
             id,
             schema,
-            provider: namespace,
+            provider,
             next_sequence: AtomicU64::new(1),
             next_entry_id: AtomicU64::new(1),
             next_timestamp: AtomicI64::new(1655276557000),

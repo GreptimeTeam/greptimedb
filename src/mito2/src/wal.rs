@@ -79,7 +79,7 @@ impl<S: LogStore> Wal<S> {
             store: self.store.clone(),
             entries: Vec::new(),
             entry_encode_buf: Vec::new(),
-            namespaces: HashMap::new(),
+            providers: HashMap::new(),
         }
     }
 
@@ -108,10 +108,10 @@ impl<S: LogStore> Wal<S> {
         &self,
         region_id: RegionId,
         last_id: EntryId,
-        namespace: &Provider,
+        provider: &Provider,
     ) -> Result<()> {
         self.store
-            .obsolete(namespace, last_id)
+            .obsolete(provider, last_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })
@@ -126,8 +126,8 @@ pub struct WalWriter<S: LogStore> {
     entries: Vec<Entry>,
     /// Buffer to encode WAL entry.
     entry_encode_buf: Vec<u8>,
-    /// Namespaces of regions being written into.
-    namespaces: HashMap<RegionId, Provider>,
+    /// Providers of regions being written into.
+    providers: HashMap<RegionId, Provider>,
 }
 
 impl<S: LogStore> WalWriter<S> {
@@ -137,13 +137,13 @@ impl<S: LogStore> WalWriter<S> {
         region_id: RegionId,
         entry_id: EntryId,
         wal_entry: &WalEntry,
-        namespace: &Provider,
+        provider: &Provider,
     ) -> Result<()> {
-        // Gets or inserts with a newly built namespace.
-        let namespace = self
-            .namespaces
+        // Gets or inserts with a newly built provider.
+        let provider = self
+            .providers
             .entry(region_id)
-            .or_insert_with(|| namespace.clone());
+            .or_insert_with(|| provider.clone());
 
         // Encode wal entry to log store entry.
         self.entry_encode_buf.clear();
@@ -152,7 +152,7 @@ impl<S: LogStore> WalWriter<S> {
             .context(EncodeWalSnafu { region_id })?;
         let entry = self
             .store
-            .entry(&mut self.entry_encode_buf, entry_id, region_id, namespace)
+            .entry(&mut self.entry_encode_buf, entry_id, region_id, provider)
             .map_err(BoxedError::new)
             .context(BuildEntrySnafu { region_id })?;
 

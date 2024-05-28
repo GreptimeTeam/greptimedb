@@ -34,7 +34,7 @@ pub type EntryStream<'a> = BoxStream<'a, Result<Entry>>;
 
 /// [RawEntryReader] provides the ability to read [Entry] from the underlying [LogStore].
 pub(crate) trait RawEntryReader: Send + Sync {
-    fn read(&self, ns: &Provider, start_id: EntryId) -> Result<EntryStream<'static>>;
+    fn read(&self, provider: &Provider, start_id: EntryId) -> Result<EntryStream<'static>>;
 }
 
 /// Implement the [RawEntryReader] for the [LogStore].
@@ -186,7 +186,7 @@ mod tests {
 
         async fn read(
             &self,
-            ns: &Provider,
+            provider: &Provider,
             id: EntryId,
         ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error> {
             Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
@@ -204,7 +204,11 @@ mod tests {
             unreachable!()
         }
 
-        async fn obsolete(&self, ns: &Provider, entry_id: EntryId) -> Result<(), Self::Error> {
+        async fn obsolete(
+            &self,
+            provider: &Provider,
+            entry_id: EntryId,
+        ) -> Result<(), Self::Error> {
             unreachable!()
         }
 
@@ -213,7 +217,7 @@ mod tests {
             data: &mut Vec<u8>,
             entry_id: EntryId,
             region_id: RegionId,
-            ns: &Provider,
+            provider: &Provider,
         ) -> Result<Entry, Self::Error> {
             unreachable!()
         }

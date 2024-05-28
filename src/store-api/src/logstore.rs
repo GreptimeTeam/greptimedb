@@ -44,7 +44,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// starting from `id`.
     async fn read(
         &self,
-        ns: &Provider,
+        provider: &Provider,
         id: EntryId,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>;
 
@@ -60,7 +60,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, ns: &Provider, entry_id: EntryId) -> Result<(), Self::Error>;
+    async fn obsolete(&self, provider: &Provider, entry_id: EntryId) -> Result<(), Self::Error>;
 
     /// Makes an entry instance of the associated Entry type
     fn entry(
@@ -68,7 +68,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        ns: &Provider,
+        provider: &Provider,
     ) -> Result<Entry, Self::Error>;
 }
 
