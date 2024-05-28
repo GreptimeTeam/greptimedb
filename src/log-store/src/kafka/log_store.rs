@@ -30,7 +30,7 @@ use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
 use super::util::record::ESTIMATED_META_SIZE;
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
+use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, remaining_entries, Record, RecordProducer};
@@ -140,11 +140,17 @@ impl LogStore for KafkaLogStore {
         // Groups entries by region id and pushes them to an associated record producer.
         let mut producers = HashMap::with_capacity(entries.len());
         for entry in entries {
+            let provider = entry
+                .provider()
+                .as_kafka_provider()
+                .context(error::InvalidProviderSnafu {
+                    expected: KafkaProvider::type_name(),
+                    actual: entry.provider().type_name(),
+                })?
+                .clone();
             producers
                 .entry(entry.region_id())
-                .or_insert_with(|| {
-                    RecordProducer::new(entry.provider().as_kafka_provider().unwrap().clone())
-                })
+                .or_insert_with(|| RecordProducer::new(provider))
                 .push(entry);
         }
 
