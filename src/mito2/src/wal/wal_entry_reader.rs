@@ -20,7 +20,7 @@ use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
 
-use crate::error::{CorruptedLogEntrySnafu, DecodeWalSnafu, Result};
+use crate::error::{CorruptedEntrySnafu, DecodeWalSnafu, Result};
 use crate::wal::raw_entry_reader::RawEntryReader;
 use crate::wal::{EntryId, WalEntryStream};
 
@@ -32,7 +32,7 @@ pub(crate) fn decode_raw_entry(
     let region_id = raw_entry.region_id();
     ensure!(
         raw_entry.is_complete() || ignore_incomplete_entry,
-        CorruptedLogEntrySnafu { region_id }
+        CorruptedEntrySnafu { region_id }
     );
     // TODO(weny): implement the [Buf] for return value, avoid extra memory allocation.
     let bytes = raw_entry.into_bytes();

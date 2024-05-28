@@ -645,7 +645,7 @@ pub enum Error {
     },
 
     #[snafu(display("Read the corrupted log entry, region_id: {}", region_id))]
-    CorruptedLogEntry {
+    CorruptedEntry {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -854,7 +854,7 @@ impl ErrorExt for Error {
 
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
-            EncodeMemtable { .. } | ReadDataPart { .. } | CorruptedLogEntry { .. } => {
+            EncodeMemtable { .. } | ReadDataPart { .. } | CorruptedEntry { .. } => {
                 StatusCode::Internal
             }
             ChecksumMismatch { .. } => StatusCode::Unexpected,
