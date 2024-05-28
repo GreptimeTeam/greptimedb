@@ -384,11 +384,11 @@ pub(crate) fn validate_proto_value(
 
 /// Oneshot output result sender.
 #[derive(Debug)]
-pub(crate) struct OutputTx(Sender<Result<AffectedRows>>);
+pub(crate) struct OutputTx(Sender<Result<AffectedRows, Error>>);
 
 impl OutputTx {
     /// Creates a new output sender.
-    pub(crate) fn new(sender: Sender<Result<AffectedRows>>) -> OutputTx {
+    pub(crate) fn new(sender: Sender<Result<AffectedRows, Error>>) -> OutputTx {
         OutputTx(sender)
     }
 

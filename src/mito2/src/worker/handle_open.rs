@@ -23,7 +23,9 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{ObjectStoreNotFoundSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{
+    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
+};
 use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
@@ -66,10 +68,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionOpenRequest,
         sender: OptionOutputTx,
     ) {
-        if self.opening_regions.is_region_exists(region_id) {
-            sender.send(Ok(0));
+        let Some(sender) = self
+            .opening_regions
+            .wait_for_opening_region(region_id, sender)
+        else {
             return;
         };
+
         if self.regions.is_region_exists(region_id) {
             sender.send(Ok(0));
             return;
@@ -101,26 +106,32 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let regions = self.regions.clone();
-        let wal = self.wal.clone();
+        let wal: crate::wal::Wal<S> = self.wal.clone();
         let config = self.config.clone();
         let opening_regions = self.opening_regions.clone();
-        opening_regions.insert_region(region_id);
+        opening_regions.insert_sender(region_id, sender);
         common_runtime::spawn_bg(async move {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
                     info!("Region {} is opened", region_id);
                     REGION_COUNT.inc();
 
-                    // Insert the MitoRegion into the RegionMap.
+                    // Insert the Region into the RegionMap.
                     regions.insert_region(Arc::new(region));
 
-                    sender.send(Ok(0));
+                    let senders = opening_regions.remove_sender(region_id);
+                    for sender in senders {
+                        sender.send(Ok(0));
+                    }
                 }
                 Err(err) => {
-                    sender.send(Err(err));
+                    let senders = opening_regions.remove_sender(region_id);
+                    let err = Arc::new(err);
+                    for sender in senders {
+                        sender.send(Err(err.clone()).context(OpenRegionSnafu));
+                    }
                 }
             }
-            opening_regions.remove_region(region_id);
         });
     }
 }
