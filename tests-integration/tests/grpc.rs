@@ -22,7 +22,7 @@ use api::v1::{
     PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
-use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;

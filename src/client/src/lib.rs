@@ -16,12 +16,12 @@
 
 mod client;
 pub mod client_manager;
+#[cfg(feature = "testing")]
+mod database;
 pub mod error;
 pub mod load_balance;
 mod metrics;
 pub mod region;
-#[cfg(feature = "testing")]
-mod database;
 
 pub use api;
 use api::v1::greptime_response::Response;

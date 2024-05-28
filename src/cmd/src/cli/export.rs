@@ -17,21 +17,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::Engine;
 use base64::engine::general_purpose;
+use base64::Engine;
 use clap::{Parser, ValueEnum};
+use client::DEFAULT_SCHEMA_NAME;
+use common_telemetry::{debug, error, info, warn};
 use serde_json::Value;
+use servers::http::greptime_result_v1::GreptimedbV1Response;
+use servers::http::GreptimeQueryOutput;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tracing_appender::non_blocking::WorkerGuard;
-
-use client::DEFAULT_SCHEMA_NAME;
-use common_telemetry::{debug, error, info, warn};
-use servers::http::greptime_result_v1::GreptimedbV1Response;
-use servers::http::GreptimeQueryOutput;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
@@ -439,14 +438,13 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::logging::LoggingOptions;
 
-    use crate::{App, cli, standalone};
     use crate::error::Result as CmdResult;
     use crate::options::GlobalOptions;
+    use crate::{cli, standalone, App};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
