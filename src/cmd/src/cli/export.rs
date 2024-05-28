@@ -441,7 +441,7 @@ mod tests {
     use clap::Parser;
 
     use client::{Client, Database};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::logging::LoggingOptions;
 
     use crate::{App, cli, standalone};

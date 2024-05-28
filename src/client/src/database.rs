@@ -104,8 +104,16 @@ impl Database {
         self.catalog = catalog.into();
     }
 
+    pub fn catalog(&self) -> &String {
+        &self.catalog
+    }
+
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
+    }
+
+    pub fn schema(&self) -> &String {
+        &self.schema
     }
 
     pub fn set_timezone(&mut self, timezone: impl Into<String>) {
@@ -151,6 +159,13 @@ impl Database {
     {
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
+        }))
+        .await
+    }
+
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::LogicalPlan(logical_plan)),
         }))
         .await
     }

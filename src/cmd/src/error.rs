@@ -166,8 +166,10 @@ pub enum Error {
     #[snafu(display("Failed to request database, sql: {sql}"))]
     RequestDatabase {
         sql: String,
-        location: Location,
+        #[snafu(source)]
         source: client::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to collect RecordBatches"))]
