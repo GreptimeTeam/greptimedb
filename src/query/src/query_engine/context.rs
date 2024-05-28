@@ -61,7 +61,7 @@ impl QueryEngineContext {
         ))
     }
 
-    /// Creates a `[LogicalPlan]` decoder
+    /// Creates a [`LogicalPlan`] decoder
     pub fn new_plan_decoder(&self) -> crate::error::Result<SubstraitPlanDecoderRef> {
         Ok(Arc::new(DefaultPlanDecoder::new(
             self.state.clone(),
