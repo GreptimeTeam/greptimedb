@@ -37,7 +37,7 @@ use query::datafusion::DatafusionQueryEngine;
 use query::logical_optimizer::LogicalOptimizer;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
-use query::query_engine::QueryEngineState;
+use query::query_engine::{DefaultSerializer, QueryEngineState};
 use query::QueryEngine;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -185,7 +185,7 @@ impl Repl {
                 .context(PlanStatementSnafu)?;
 
             let plan = DFLogicalSubstraitConvertor {}
-                .encode(&plan)
+                .encode(&plan, DefaultSerializer)
                 .context(SubstraitEncodeLogicalPlanSnafu)?;
 
             self.database.logical_plan(plan.to_vec()).await
@@ -277,24 +277,12 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .build(),
     );
 
-    let table_cache = layered_cache_registry
-        .get()
-        .context(error::CacheRequiredSnafu {
-            name: TABLE_CACHE_NAME,
-        })?;
-    let table_route_cache = layered_cache_registry
-        .get()
-        .context(error::CacheRequiredSnafu {
-            name: TABLE_ROUTE_CACHE_NAME,
-        })?;
     let catalog_manager = KvBackendCatalogManager::new(
         Mode::Distributed,
         Some(meta_client.clone()),
         cached_meta_backend.clone(),
-        table_cache,
-        table_route_cache,
-    )
-    .await;
+        layered_cache_registry,
+    );
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_manager,

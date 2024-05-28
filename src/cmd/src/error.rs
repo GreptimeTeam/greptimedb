@@ -312,6 +312,13 @@ pub enum Error {
         source: common_runtime::error::Error,
     },
 
+    #[snafu(display("Failed to get cache from cache registry: {}", name))]
+    CacheRequired {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
+
     #[snafu(display("Failed to build cache registry"))]
     BuildCacheRegistry {
         #[snafu(implicit)]
@@ -372,7 +379,7 @@ impl ErrorExt for Error {
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 
-            Error::BuildCacheRegistry { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
         }
     }
 
