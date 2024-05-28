@@ -24,9 +24,8 @@ use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
 };
-use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::provider::{KafkaProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, LogStore};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
 use super::util::record::ESTIMATED_META_SIZE;

@@ -24,9 +24,8 @@ use common_wal::config::raft_engine::RaftEngineConfig;
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry, Id as EntryId, NaiveEntry};
-use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::provider::{Provider, RaftEngineProvider};
-use store_api::logstore::{AppendBatchResponse, LogStore};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -461,8 +460,7 @@ mod tests {
     use common_telemetry::debug;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use futures_util::StreamExt;
-    use store_api::logstore::entry_stream::SendableEntryStream;
-    use store_api::logstore::{AppendResponse, LogStore};
+    use store_api::logstore::{AppendResponse, LogStore, SendableEntryStream};
 
     use super::*;
     use crate::error::Error;

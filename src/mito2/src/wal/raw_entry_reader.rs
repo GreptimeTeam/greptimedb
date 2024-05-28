@@ -157,8 +157,9 @@ mod tests {
     use common_wal::options::WalOptions;
     use futures::stream;
     use store_api::logstore::entry::{Entry, NaiveEntry};
-    use store_api::logstore::entry_stream::SendableEntryStream;
-    use store_api::logstore::{AppendBatchResponse, AppendResponse, EntryId, LogStore};
+    use store_api::logstore::{
+        AppendBatchResponse, AppendResponse, EntryId, LogStore, SendableEntryStream,
+    };
     use store_api::storage::RegionId;
 
     use super::*;

@@ -14,19 +14,21 @@
 
 //! LogStore APIs.
 
+pub mod entry;
+pub mod provider;
+
 use std::collections::HashMap;
+use std::pin::Pin;
 
 use common_error::ext::ErrorExt;
 use entry::Entry;
+use futures::Stream;
+
+pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>, E>> + Send + 'a>>;
 
 pub use crate::logstore::entry::Id as EntryId;
-use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
-
-pub mod entry;
-pub mod entry_stream;
-pub mod provider;
 
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
