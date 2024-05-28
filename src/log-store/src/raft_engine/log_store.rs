@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -24,10 +23,10 @@ use common_telemetry::{error, info};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
+use store_api::logstore::entry::{Entry, Id as EntryId, NaiveEntry};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::provider::{Provider, RaftEngineProvider};
-use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
+use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -129,56 +128,65 @@ impl RaftEngineLogStore {
     /// to append in each namespace(region).
     fn entries_to_batch(
         &self,
-        entries: Vec<EntryImpl>,
+        entries: Vec<Entry>,
     ) -> Result<(LogBatch, HashMap<RegionId, EntryId>)> {
         // Records the last entry id for each region's entries.
         let mut entry_ids: HashMap<RegionId, EntryId> = HashMap::with_capacity(entries.len());
         let mut batch = LogBatch::with_capacity(entries.len());
 
         for e in entries {
-            let region_id = RegionId::from_u64(e.namespace_id);
+            let region_id = e.region_id();
+            let entry_id = e.entry_id();
             match entry_ids.entry(region_id) {
-                Entry::Occupied(mut o) => {
+                hash_map::Entry::Occupied(mut o) => {
                     let prev = *o.get();
                     ensure!(
-                        e.id == prev + 1,
+                        entry_id == prev + 1,
                         DiscontinuousLogIndexSnafu {
                             region_id,
                             last_index: prev,
-                            attempt_index: e.id
+                            attempt_index: entry_id
                         }
                     );
-                    o.insert(e.id);
+                    o.insert(entry_id);
                 }
-                Entry::Vacant(v) => {
+                hash_map::Entry::Vacant(v) => {
                     // this entry is the first in batch of given region.
                     if let Some(first_index) = self.engine.first_index(*region_id) {
                         // ensure the first in batch does not override compacted entry.
                         ensure!(
-                            e.id > first_index,
+                            entry_id > first_index,
                             OverrideCompactedEntrySnafu {
                                 namespace: region_id,
                                 first_index,
-                                attempt_index: e.id,
+                                attempt_index: entry_id,
                             }
                         );
                     }
                     // ensure the first in batch does not form a hole in raft-engine.
                     if let Some(last_index) = self.engine.last_index(*region_id) {
                         ensure!(
-                            e.id == last_index + 1,
+                            entry_id == last_index + 1,
                             DiscontinuousLogIndexSnafu {
                                 region_id,
                                 last_index,
-                                attempt_index: e.id
+                                attempt_index: entry_id
                             }
                         );
                     }
-                    v.insert(e.id);
+                    v.insert(entry_id);
                 }
             }
             batch
-                .add_entries::<MessageType>(*region_id, &[e])
+                .add_entries::<MessageType>(
+                    *region_id,
+                    &[EntryImpl {
+                        id: entry_id,
+                        namespace_id: region_id.as_u64(),
+                        data: e.into_bytes(),
+                        ..Default::default()
+                    }],
+                )
                 .context(AddEntryLogBatchSnafu)?;
         }
 
@@ -198,61 +206,19 @@ impl Debug for RaftEngineLogStore {
 #[async_trait::async_trait]
 impl LogStore for RaftEngineLogStore {
     type Error = Error;
-    type Entry = EntryImpl;
 
     async fn stop(&self) -> Result<()> {
         self.gc_task.stop().await.context(StopGcTaskSnafu)
     }
 
-    /// Appends an entry to logstore. Currently the existence of the entry's namespace is not checked.
-    async fn append(&self, e: Self::Entry) -> Result<AppendResponse> {
-        ensure!(self.started(), IllegalStateSnafu);
-        let entry_id = e.id;
-        let namespace_id = e.namespace_id;
-        let mut batch = LogBatch::with_capacity(1);
-        batch
-            .add_entries::<MessageType>(namespace_id, &[e])
-            .context(AddEntryLogBatchSnafu)?;
-
-        if let Some(first_index) = self.engine.first_index(namespace_id) {
-            ensure!(
-                entry_id > first_index,
-                OverrideCompactedEntrySnafu {
-                    namespace: namespace_id,
-                    first_index,
-                    attempt_index: entry_id,
-                }
-            );
-        }
-
-        if let Some(last_index) = self.engine.last_index(namespace_id) {
-            ensure!(
-                entry_id == last_index + 1,
-                DiscontinuousLogIndexSnafu {
-                    region_id: namespace_id,
-                    last_index,
-                    attempt_index: entry_id
-                }
-            );
-        }
-
-        let _ = self
-            .engine
-            .write(&mut batch, self.config.sync_write)
-            .context(RaftEngineSnafu)?;
-        Ok(AppendResponse {
-            last_entry_id: entry_id,
-        })
-    }
-
     /// Appends a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
-    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
+    async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse> {
         metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_CALLS_TOTAL.inc();
         metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_BYTES_TOTAL.inc_by(
             entries
                 .iter()
-                .map(EntryTrait::estimated_size)
+                .map(|entry| entry.estimated_size())
                 .sum::<usize>() as u64,
         );
         let _timer = metrics::METRIC_RAFT_ENGINE_APPEND_BATCH_ELAPSED.start_timer();
@@ -288,7 +254,7 @@ impl LogStore for RaftEngineLogStore {
         &self,
         ns: &Provider,
         entry_id: EntryId,
-    ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>> {
+    ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let ns = ns
             .as_raft_engine_provider()
             .with_context(|| InvalidProviderSnafu {
@@ -350,7 +316,9 @@ impl LogStore for RaftEngineLogStore {
 
         let s = stream!({
             while let Some(res) = rx.recv().await {
-                yield res;
+                let res = res?;
+
+                yield Ok(res.into_iter().map(Entry::from).collect::<Vec<_>>());
             }
         });
         Ok(Box::pin(s))
@@ -438,15 +406,18 @@ impl LogStore for RaftEngineLogStore {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        ns: &Provider,
-    ) -> Result<Self::Entry> {
-        debug_assert_eq!(ns.as_raft_engine_provider().unwrap().id, region_id.as_u64());
-        Ok(EntryImpl {
-            id: entry_id,
+        provider: &Provider,
+    ) -> Result<Entry> {
+        debug_assert_eq!(
+            provider.as_raft_engine_provider().unwrap().id,
+            region_id.as_u64()
+        );
+        Ok(Entry::Naive(NaiveEntry {
+            provider: provider.clone(),
+            region_id,
+            entry_id,
             data: std::mem::take(data),
-            namespace_id: region_id.as_u64(),
-            ..Default::default()
-        })
+        }))
     }
 
     async fn obsolete(&self, ns: &Provider, entry_id: EntryId) -> Result<()> {
@@ -496,7 +467,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::raft_engine::log_store::RaftEngineLogStore;
-    use crate::raft_engine::protos::logstore::EntryImpl as Entry;
+    use crate::raft_engine::protos::logstore::EntryImpl;
 
     #[tokio::test]
     async fn test_open_logstore() {
@@ -551,11 +522,9 @@ mod tests {
         let cnt = 1024;
         for i in 0..cnt {
             let response = logstore
-                .append(Entry::create(
-                    i,
-                    namespace_id,
-                    i.to_string().as_bytes().to_vec(),
-                ))
+                .append(
+                    EntryImpl::create(i, namespace_id, i.to_string().as_bytes().to_vec()).into(),
+                )
                 .await
                 .unwrap();
             assert_eq!(i, response.last_entry_id);
@@ -567,7 +536,7 @@ mod tests {
             .unwrap();
         while let Some(r) = s.next().await {
             let vec = r.unwrap();
-            entries.extend(vec.into_iter().map(|e| e.id));
+            entries.extend(vec.into_iter().map(|e| e.entry_id()));
         }
         assert_eq!((0..cnt).collect::<HashSet<_>>(), entries);
     }
@@ -591,7 +560,7 @@ mod tests {
             .await
             .unwrap();
             assert!(logstore
-                .append(Entry::create(1, 1, "1".as_bytes().to_vec()))
+                .append(EntryImpl::create(1, 1, "1".as_bytes().to_vec()).into())
                 .await
                 .is_ok());
             let entries = logstore
@@ -619,8 +588,8 @@ mod tests {
         )
         .await;
         assert_eq!(1, entries.len());
-        assert_eq!(1, entries[0].id);
-        assert_eq!(1, entries[0].namespace_id);
+        assert_eq!(1, entries[0].entry_id());
+        assert_eq!(1, entries[0].region_id().as_u64());
     }
 
     async fn wal_dir_usage(path: impl AsRef<str>) -> usize {
@@ -662,7 +631,7 @@ mod tests {
         let namespace_id = 42;
         let namespace = Provider::raft_engine_provider(namespace_id);
         for id in 0..4096 {
-            let entry = Entry::create(id, namespace_id, [b'x'; 4096].to_vec());
+            let entry = EntryImpl::create(id, namespace_id, [b'x'; 4096].to_vec()).into();
             let _ = logstore.append(entry).await.unwrap();
         }
 
@@ -687,7 +656,7 @@ mod tests {
         let namespace_id = 42;
         let namespace = Provider::raft_engine_provider(namespace_id);
         for id in 0..1024 {
-            let entry = Entry::create(id, namespace_id, [b'x'; 4096].to_vec());
+            let entry = EntryImpl::create(id, namespace_id, [b'x'; 4096].to_vec()).into();
             let _ = logstore.append(entry).await.unwrap();
         }
 
@@ -696,8 +665,8 @@ mod tests {
 
         let res = logstore.read(&namespace, 100).await.unwrap();
         let mut vec = collect_entries(res).await;
-        vec.sort_by(|a, b| a.id.partial_cmp(&b.id).unwrap());
-        assert_eq!(101, vec.first().unwrap().id);
+        vec.sort_by(|a, b| a.entry_id().partial_cmp(&b.entry_id()).unwrap());
+        assert_eq!(101, vec.first().unwrap().entry_id());
     }
 
     #[tokio::test]
@@ -709,7 +678,7 @@ mod tests {
         let entries = (0..8)
             .flat_map(|ns_id| {
                 let data = [ns_id as u8].repeat(4096);
-                (0..16).map(move |idx| Entry::create(idx, ns_id, data.clone()))
+                (0..16).map(move |idx| EntryImpl::create(idx, ns_id, data.clone()).into())
             })
             .collect();
 
@@ -727,13 +696,12 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("logstore-append-batch-test");
         let logstore = new_test_log_store(&dir).await;
-
         let entries = vec![
-            Entry::create(0, 0, [b'0'; 4096].to_vec()),
-            Entry::create(1, 0, [b'0'; 4096].to_vec()),
-            Entry::create(0, 1, [b'1'; 4096].to_vec()),
-            Entry::create(2, 0, [b'0'; 4096].to_vec()),
-            Entry::create(1, 1, [b'1'; 4096].to_vec()),
+            EntryImpl::create(0, 0, [b'0'; 4096].to_vec()).into(),
+            EntryImpl::create(1, 0, [b'0'; 4096].to_vec()).into(),
+            EntryImpl::create(0, 1, [b'1'; 4096].to_vec()).into(),
+            EntryImpl::create(2, 0, [b'0'; 4096].to_vec()).into(),
+            EntryImpl::create(1, 1, [b'1'; 4096].to_vec()).into(),
         ];
 
         logstore.append_batch(entries).await.unwrap();
@@ -756,15 +724,15 @@ mod tests {
 
         let entries = vec![
             // Entry[0] from region 0.
-            Entry::create(0, 0, [b'0'; 4096].to_vec()),
+            EntryImpl::create(0, 0, [b'0'; 4096].to_vec()).into(),
             // Entry[0] from region 1.
-            Entry::create(0, 1, [b'1'; 4096].to_vec()),
+            EntryImpl::create(0, 1, [b'1'; 4096].to_vec()).into(),
             // Entry[1] from region 1.
-            Entry::create(1, 0, [b'1'; 4096].to_vec()),
+            EntryImpl::create(1, 0, [b'1'; 4096].to_vec()).into(),
             // Entry[1] from region 0.
-            Entry::create(1, 1, [b'0'; 4096].to_vec()),
+            EntryImpl::create(1, 1, [b'0'; 4096].to_vec()).into(),
             // Entry[2] from region 2.
-            Entry::create(2, 2, [b'2'; 4096].to_vec()),
+            EntryImpl::create(2, 2, [b'2'; 4096].to_vec()).into(),
         ];
 
         // Ensure the last entry id returned for each region is the expected one.

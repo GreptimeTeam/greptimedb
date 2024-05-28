@@ -20,7 +20,7 @@ use common_wal::options::{KafkaWalOptions, WalOptions};
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
 use snafu::ResultExt;
-use store_api::logstore::entry::{Entry, RawEntry};
+use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::{KafkaProvider, Provider, RaftEngineProvider};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -30,7 +30,7 @@ use crate::error::{self, Result};
 use crate::wal::EntryId;
 
 /// A stream that yields [RawEntry].
-pub type RawEntryStream<'a> = BoxStream<'a, Result<RawEntry>>;
+pub type RawEntryStream<'a> = BoxStream<'a, Result<Entry>>;
 
 /// [RawEntryReader] provides the ability to read [RawEntry] from the underlying [LogStore].
 pub(crate) trait RawEntryReader: Send + Sync {
@@ -68,7 +68,7 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
                     .context(error::ReadWalSnafu { region_id })?;
 
                 for entry in entries {
-                    yield entry.into_raw_entry()
+                    yield entry
                 }
             }
         });
@@ -94,7 +94,7 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
                     .context(error::ReadKafkaWalSnafu { topic: &ns.topic })?;
 
                 for entry in entries {
-                    yield entry.into_raw_entry()
+                    yield entry
                 }
             }
         });
@@ -140,7 +140,7 @@ where
         let stream = try_stream!({
             while let Some(entry) = stream.next().await {
                 let entry = entry?;
-                if entry.region_id == region_id {
+                if entry.region_id() == region_id {
                     yield entry
                 }
             }
@@ -156,7 +156,7 @@ mod tests {
 
     use common_wal::options::WalOptions;
     use futures::stream;
-    use store_api::logstore::entry::{Entry, RawEntry};
+    use store_api::logstore::entry::{Entry, NaiveEntry};
     use store_api::logstore::entry_stream::SendableEntryStream;
     use store_api::logstore::{AppendBatchResponse, AppendResponse, EntryId, LogStore};
     use store_api::storage::RegionId;
@@ -166,25 +166,20 @@ mod tests {
 
     #[derive(Debug)]
     struct MockLogStore {
-        entries: Vec<RawEntry>,
+        entries: Vec<Entry>,
     }
 
     #[async_trait::async_trait]
     impl LogStore for MockLogStore {
-        type Entry = RawEntry;
         type Error = error::Error;
 
         async fn stop(&self) -> Result<(), Self::Error> {
             unreachable!()
         }
 
-        async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error> {
-            unreachable!()
-        }
-
         async fn append_batch(
             &self,
-            entries: Vec<Self::Entry>,
+            entries: Vec<Entry>,
         ) -> Result<AppendBatchResponse, Self::Error> {
             unreachable!()
         }
@@ -193,7 +188,7 @@ mod tests {
             &self,
             ns: &Provider,
             id: EntryId,
-        ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>, Self::Error> {
+        ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error> {
             Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
         }
 
@@ -219,28 +214,27 @@ mod tests {
             entry_id: EntryId,
             region_id: RegionId,
             ns: &Provider,
-        ) -> Result<Self::Entry, Self::Error> {
+        ) -> Result<Entry, Self::Error> {
             unreachable!()
         }
     }
 
     #[tokio::test]
     async fn test_raw_entry_reader() {
-        let expected_entries = vec![RawEntry {
+        let provider = Provider::raft_engine_provider(RegionId::new(1024, 1).as_u64());
+        let expected_entries = vec![Entry::Naive(NaiveEntry {
+            provider: provider.clone(),
             region_id: RegionId::new(1024, 1),
             entry_id: 1,
-            data: vec![],
-        }];
+            data: vec![1],
+        })];
         let store = MockLogStore {
             entries: expected_entries.clone(),
         };
 
         let reader = LogStoreRawEntryReader::new(Arc::new(store));
         let entries = reader
-            .read(
-                &Provider::raft_engine_provider(RegionId::new(1024, 1).as_u64()),
-                0,
-            )
+            .read(&provider, 0)
             .unwrap()
             .try_collect::<Vec<_>>()
             .await
@@ -250,22 +244,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_raw_entry_reader_filter() {
+        let provider = Provider::raft_engine_provider(RegionId::new(1024, 1).as_u64());
         let all_entries = vec![
-            RawEntry {
+            Entry::Naive(NaiveEntry {
+                provider: provider.clone(),
                 region_id: RegionId::new(1024, 1),
                 entry_id: 1,
                 data: vec![1],
-            },
-            RawEntry {
+            }),
+            Entry::Naive(NaiveEntry {
+                provider: provider.clone(),
                 region_id: RegionId::new(1024, 2),
                 entry_id: 2,
                 data: vec![2],
-            },
-            RawEntry {
+            }),
+            Entry::Naive(NaiveEntry {
+                provider: provider.clone(),
                 region_id: RegionId::new(1024, 3),
                 entry_id: 3,
                 data: vec![3],
-            },
+            }),
         ];
         let store = MockLogStore {
             entries: all_entries.clone(),
@@ -277,10 +275,7 @@ mod tests {
             expected_region_id,
         );
         let entries = reader
-            .read(
-                &Provider::raft_engine_provider(RegionId::new(1024, 1).as_u64()),
-                0,
-            )
+            .read(&provider, 0)
             .unwrap()
             .try_collect::<Vec<_>>()
             .await
@@ -288,7 +283,7 @@ mod tests {
         assert_eq!(
             all_entries
                 .into_iter()
-                .filter(|entry| entry.region_id == expected_region_id)
+                .filter(|entry| entry.region_id() == expected_region_id)
                 .collect::<Vec<_>>(),
             entries
         );

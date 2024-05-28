@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
+use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -33,7 +36,7 @@ pub(crate) const VERSION: u32 = 0;
 
 /// The estimated size in bytes of a serialized RecordMeta.
 /// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_size - ESTIMATED_META_SIZE.
-const ESTIMATED_META_SIZE: usize = 256;
+pub(crate) const ESTIMATED_META_SIZE: usize = 256;
 
 /// The type of a record.
 ///
@@ -126,28 +129,23 @@ impl From<Vec<Record>> for EntryImpl {
 
 /// Produces a record to a kafka topic.
 pub(crate) struct RecordProducer {
-    /// The namespace of the entries.
-    ns: NamespaceImpl,
+    /// The provide of the entries.
+    provider: Arc<KafkaProvider>,
     /// Entries are buffered before being built into a record.
-    entries: Vec<EntryImpl>,
+    entries: Vec<Entry>,
 }
 
 impl RecordProducer {
     /// Creates a new producer for producing entries with the given namespace.
-    pub(crate) fn new(ns: NamespaceImpl) -> Self {
+    pub(crate) fn new(provider: Arc<KafkaProvider>) -> Self {
         Self {
-            ns,
+            provider,
             entries: Vec::new(),
         }
     }
 
-    /// Populates the entry buffer with the given entries.
-    pub(crate) fn with_entries(self, entries: Vec<EntryImpl>) -> Self {
-        Self { entries, ..self }
-    }
-
     /// Pushes an entry into the entry buffer.
-    pub(crate) fn push(&mut self, entry: EntryImpl) {
+    pub(crate) fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
     }
 
@@ -159,11 +157,11 @@ impl RecordProducer {
 
         // Gets the producer in which a record buffer is maintained.
         let producer = client_manager
-            .get_or_insert(&self.ns.topic)
+            .get_or_insert(&self.provider.topic)
             .await
             .map_err(|e| {
                 GetClientSnafu {
-                    topic: &self.ns.topic,
+                    topic: &self.provider.topic,
                     error: e.to_string(),
                 }
                 .build()
@@ -175,7 +173,7 @@ impl RecordProducer {
         let max_record_size =
             client_manager.config.max_batch_size.as_bytes() as usize - ESTIMATED_META_SIZE;
         for entry in self.entries {
-            for record in build_records(entry, max_record_size) {
+            for record in convert_to_records(entry) {
                 let kafka_record = KafkaRecord::try_from(record)?;
 
                 metrics::METRIC_KAFKA_PRODUCE_RECORD_COUNTS.inc();
@@ -188,7 +186,7 @@ impl RecordProducer {
                     .await
                     .map(Offset)
                     .with_context(|_| ProduceRecordSnafu {
-                        topic: &self.ns.topic,
+                        topic: &self.provider.topic,
                         size: kafka_record.approximate_size(),
                         limit: max_record_size,
                     })?;
@@ -200,64 +198,134 @@ impl RecordProducer {
     }
 }
 
-fn record_type(seq: usize, num_records: usize) -> RecordType {
-    if seq == 0 {
-        RecordType::First
-    } else if seq == num_records - 1 {
-        RecordType::Last
-    } else {
-        RecordType::Middle(seq)
-    }
-}
-
-fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
-    if entry.data.len() <= max_record_size {
-        let record = Record {
+fn convert_to_records(entry: Entry) -> Vec<Record> {
+    match entry {
+        Entry::Naive(entry) => vec![Record {
             meta: RecordMeta {
                 version: VERSION,
                 tp: RecordType::Full,
-                entry_id: entry.id,
-                ns: entry.ns,
+                // TODO(weny): refactor the record meta.
+                entry_id: 0,
+                ns: NamespaceImpl {
+                    region_id: entry.region_id.as_u64(),
+                    // TODO(weny): refactor the record meta.
+                    topic: String::new(),
+                },
             },
             data: entry.data,
-        };
-        return vec![record];
-    }
+        }],
+        Entry::MultiplePart(entry) => {
+            let mut entries = Vec::with_capacity(entry.parts.len());
 
-    let chunks = entry.data.chunks(max_record_size);
-    let num_chunks = chunks.len();
-    chunks
-        .enumerate()
-        .map(|(i, chunk)| Record {
-            meta: RecordMeta {
-                version: VERSION,
-                tp: record_type(i, num_chunks),
-                entry_id: entry.id,
-                ns: entry.ns.clone(),
-            },
-            data: chunk.to_vec(),
-        })
-        .collect()
+            for (idx, part) in entry.parts.into_iter().enumerate() {
+                let tp = match entry.headers[idx] {
+                    MultiplePartHeader::First => RecordType::First,
+                    MultiplePartHeader::Middle(i) => RecordType::Middle(i),
+                    MultiplePartHeader::Last => RecordType::Last,
+                };
+                entries.push(Record {
+                    meta: RecordMeta {
+                        version: VERSION,
+                        tp,
+                        // TODO(weny): refactor the record meta.
+                        entry_id: 0,
+                        ns: NamespaceImpl {
+                            region_id: entry.region_id.as_u64(),
+                            topic: String::new(),
+                        },
+                    },
+                    data: part,
+                })
+            }
+            entries
+        }
+    }
 }
 
-/// TODO(weny): Consider ignoring existing corrupted data instead of throwing an error.
+fn convert_to_naive_entry(provider: Arc<KafkaProvider>, record: Record) -> Entry {
+    let region_id = RegionId::from_u64(record.meta.ns.region_id);
+
+    Entry::Naive(NaiveEntry {
+        provider: Provider::Kafka(provider),
+        region_id,
+        // TODO(weny): should be the offset in the topic
+        entry_id: record.meta.entry_id,
+        data: record.data,
+    })
+}
+
+fn convert_to_multiple_entry(
+    provider: Arc<KafkaProvider>,
+    region_id: RegionId,
+    records: Vec<Record>,
+) -> Entry {
+    let mut headers = Vec::with_capacity(records.len());
+    let mut parts = Vec::with_capacity(records.len());
+
+    for record in records {
+        let header = match record.meta.tp {
+            RecordType::Full => unreachable!(),
+            RecordType::First => MultiplePartHeader::First,
+            RecordType::Middle(i) => MultiplePartHeader::Middle(i),
+            RecordType::Last => MultiplePartHeader::Last,
+        };
+        headers.push(header);
+        parts.push(record.data);
+    }
+
+    Entry::MultiplePart(MultiplePartEntry {
+        provider: Provider::Kafka(provider),
+        region_id,
+        // TODO(weny): should be the offset in the topic
+        entry_id: 0,
+        headers,
+        parts,
+    })
+}
+
+/// Constructs entry from `buffered_records`
+pub fn remaining_entries(
+    provider: &Arc<KafkaProvider>,
+    buffered_records: &mut HashMap<RegionId, Vec<Record>>,
+) -> Vec<Entry> {
+    let mut entries = Vec::with_capacity(buffered_records.len());
+    for (region_id, records) in buffered_records.drain() {
+        entries.push(convert_to_multiple_entry(
+            provider.clone(),
+            region_id,
+            records,
+        ));
+    }
+    entries
+}
+
 pub fn maybe_emit_entry(
+    provider: &Arc<KafkaProvider>,
     record: Record,
-    entry_records: &mut HashMap<RegionId, Vec<Record>>,
-) -> Result<Option<EntryImpl>> {
+    buffered_records: &mut HashMap<RegionId, Vec<Record>>,
+) -> Result<Option<Entry>> {
     let mut entry = None;
     match record.meta.tp {
-        RecordType::Full => {
-            entry = Some(EntryImpl::from(vec![record]));
-        }
+        RecordType::Full => entry = Some(convert_to_naive_entry(provider.clone(), record)),
         RecordType::First => {
-            // Last win policy, overwrite any potential incomplete parts.
-            entry_records.insert(record.meta.ns.region_id.into(), vec![record]);
+            let region_id = record.meta.ns.region_id.into();
+            if let Some(records) = buffered_records.insert(region_id, vec![record]) {
+                // Incomplete entry
+                entry = Some(convert_to_multiple_entry(
+                    provider.clone(),
+                    region_id,
+                    records,
+                ))
+            }
         }
         RecordType::Middle(seq) => {
-            if let Some(previous) = entry_records.get_mut(&(record.meta.ns.region_id.into())) {
+            let region_id = record.meta.ns.region_id.into();
+            let records = buffered_records.entry(region_id).or_default();
+
+            // Only invalidate complete entries.
+            if !records.is_empty() {
                 // Safety: the records are guaranteed not empty if the key exists.
-                let last_record = previous.last().unwrap();
+                let last_record = records.last().unwrap();
                 let legal = match last_record.meta.tp {
                     // Legal if this record follows a First record.
                     RecordType::First => seq == 1,
@@ -269,18 +337,33 @@ pub fn maybe_emit_entry(
                 ensure!(
                     legal,
                     IllegalSequenceSnafu {
-                        error: "Illegal prefix for a Middle record"
+                        error: format!(
+                            "Illegal sequence of a middle record, last record: {:?}, incoming record: {:?}",
+                            last_record.meta.tp,
+                            record.meta.tp
+                        )
                     }
                 );
-
-                previous.push(record);
             }
+
+            records.push(record);
         }
         RecordType::Last => {
-            // There must have a sequence prefix before a Last record is read.
-            if let Some(mut records) = entry_records.remove(&(record.meta.ns.region_id.into())) {
+            let region_id = record.meta.ns.region_id.into();
+            if let Some(mut records) = buffered_records.remove(&region_id) {
                 records.push(record);
-                entry = Some(EntryImpl::from(records));
+                entry = Some(convert_to_multiple_entry(
+                    provider.clone(),
+                    region_id,
+                    records,
+                ))
+            } else {
+                // Incomplete entry
+                entry = Some(convert_to_multiple_entry(
+                    provider.clone(),
+                    region_id,
+                    vec![record],
+                ))
             }
         }
     }
@@ -289,15 +372,11 @@ pub fn maybe_emit_entry(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
-    use common_base::readable_size::ReadableSize;
-    use common_wal::config::kafka::DatanodeKafkaConfig;
-    use common_wal::test_util::run_test_with_kafka_wal;
-    use uuid::Uuid;
-
     use super::*;
-    use crate::kafka::client_manager::ClientManager;
+    use crate::error;
 
     fn new_test_record(tp: RecordType, entry_id: EntryId, region_id: u64, data: Vec<u8>) -> Record {
         Record {
@@ -314,219 +393,120 @@ mod tests {
         }
     }
 
-    fn new_test_entry_impl<D: AsRef<[u8]>>(
-        data: D,
-        entry_id: EntryId,
-        ns: NamespaceImpl,
-    ) -> EntryImpl {
-        EntryImpl {
-            data: data.as_ref().to_vec(),
-            id: entry_id,
-            ns,
-        }
-    }
-
-    /// Tests that the `build_records` works as expected.
     #[test]
-    fn test_build_records() {
-        let max_record_size = 128;
-
-        // On a small entry.
-        let ns = NamespaceImpl {
-            region_id: 1,
-            topic: "greptimedb_wal_topic".to_string(),
-        };
-        let entry = new_test_entry_impl([b'1'; 100], 0, ns.clone());
-        let records = build_records(entry.clone(), max_record_size);
-        assert!(records.len() == 1);
-        assert_eq!(entry.data, records[0].data);
-
-        // On a large entry.
-        let entry = new_test_entry_impl([b'1'; 150], 0, ns.clone());
-        let records = build_records(entry.clone(), max_record_size);
-        assert!(records.len() == 2);
-        assert_eq!(&records[0].data, &[b'1'; 128]);
-        assert_eq!(&records[1].data, &[b'1'; 22]);
-
-        // On a way-too large entry.
-        let entry = new_test_entry_impl([b'1'; 5000], 0, ns.clone());
-        let records = build_records(entry.clone(), max_record_size);
-        let matched = entry
-            .data
-            .chunks(max_record_size)
-            .enumerate()
-            .all(|(i, chunk)| records[i].data == chunk);
-        assert!(matched);
-    }
-
-    /// Tests that Record and KafkaRecord are able to be converted back and forth.
-    #[test]
-    fn test_record_conversion() {
-        let record = Record {
-            meta: RecordMeta {
-                version: VERSION,
-                tp: RecordType::Full,
-                entry_id: 1,
-                ns: NamespaceImpl {
-                    region_id: 1,
-                    topic: "greptimedb_wal_topic".to_string(),
-                },
-            },
-            data: b"12345".to_vec(),
-        };
-        let kafka_record: KafkaRecord = record.clone().try_into().unwrap();
-        let got = Record::try_from(kafka_record).unwrap();
-        assert_eq!(record, got);
-    }
-
-    /// Tests that the reconstruction of an entry works as expected.
-    #[test]
-    fn test_reconstruct_entry() {
-        let records = vec![
-            new_test_record(RecordType::First, 0, 0, vec![1, 1, 1]),
-            new_test_record(RecordType::Middle(1), 0, 0, vec![2, 2, 2]),
-            new_test_record(RecordType::Last, 0, 0, vec![3, 3, 3]),
-        ];
-        let entry = EntryImpl::from(records.clone());
-        assert_eq!(records[0].meta.entry_id, entry.id);
-        assert_eq!(records[0].meta.ns, entry.ns);
+    fn test_maybe_emit_entry_emit_naive_entry() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        let mut buffer = HashMap::new();
+        let record = new_test_record(RecordType::Full, 1, region_id.as_u64(), vec![1; 100]);
+        let entry = maybe_emit_entry(&provider, record, &mut buffer)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            entry.data,
-            records
-                .into_iter()
-                .flat_map(|record| record.data)
-                .collect::<Vec<_>>()
+            entry,
+            Entry::Naive(NaiveEntry {
+                provider: Provider::Kafka(provider),
+                region_id,
+                entry_id: 1,
+                data: vec![1; 100]
+            })
         );
     }
 
-    #[tokio::test]
-    async fn test_produce_large_entry() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let topic = format!("greptimedb_wal_topic_{}", Uuid::new_v4());
-                let ns = NamespaceImpl {
-                    region_id: 1,
-                    topic,
-                };
-                let entry = new_test_entry_impl([b'1'; 2000000], 0, ns.clone());
-                let producer = RecordProducer::new(ns.clone()).with_entries(vec![entry]);
-                let config = DatanodeKafkaConfig {
-                    broker_endpoints,
-                    max_batch_size: ReadableSize::mb(1),
-                    ..Default::default()
-                };
-                let manager = Arc::new(ClientManager::try_new(&config).await.unwrap());
-                producer.produce(&manager).await.unwrap();
-            })
-        })
-        .await
-    }
-
     #[test]
-    fn test_maybe_emit_entry_ignore_incomplete_part() {
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::Last, 0, 0, vec![]);
-        // Incomplete part will be ignored
-        assert!(maybe_emit_entry(incoming_record, &mut records)
+    fn test_maybe_emit_entry_emit_incomplete_entry() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        // `First` overwrite `First`
+        let mut buffer = HashMap::new();
+        let record = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
+        assert!(maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
             .is_none());
-        assert!(records.is_empty());
-
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::Middle(1), 0, 0, vec![]);
-        // Incomplete part will be ignored
-        assert!(maybe_emit_entry(incoming_record, &mut records)
-            .unwrap()
-            .is_none());
-        assert!(records.is_empty());
-    }
-
-    #[test]
-    fn test_maybe_emit_entry_incorrect_order() {
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::Last, 0, 0, vec![]);
-        // Incomplete part will be ignored
-        assert!(maybe_emit_entry(incoming_record, &mut records)
-            .unwrap()
-            .is_none());
-        assert!(records.is_empty());
-
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::Middle(1), 0, 0, vec![]);
-        // Incomplete part will be ignored
-        assert!(maybe_emit_entry(incoming_record, &mut records)
-            .unwrap()
-            .is_none());
-        assert!(records.is_empty());
-    }
-
-    #[test]
-    fn test_maybe_emit_entry() {
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::Full, 1, 1, vec![1, 1, 1]);
-        let ns = incoming_record.meta.ns.clone();
-        let entry = maybe_emit_entry(incoming_record, &mut records)
+        let record = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![2; 100]);
+        let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
             .unwrap();
 
         assert_eq!(
-            entry,
-            EntryImpl {
-                data: vec![1, 1, 1],
-                id: 1,
-                ns,
-            }
+            incomplete_entry,
+            Entry::MultiplePart(MultiplePartEntry {
+                provider: Provider::Kafka(provider.clone()),
+                region_id,
+                // TODO(weny): always be 0.
+                entry_id: 0,
+                headers: vec![MultiplePartHeader::First],
+                parts: vec![vec![1; 100]],
+            })
         );
 
-        let mut records = HashMap::new();
-        let first_entry = new_test_record(RecordType::First, 1, 1, vec![1, 1, 1]);
-        let mid_entry = new_test_record(RecordType::Middle(1), 1, 1, vec![2, 2, 2]);
-        let last_entry = new_test_record(RecordType::Last, 1, 1, vec![3, 3, 3]);
-        let ns = first_entry.meta.ns.clone();
-        assert!(maybe_emit_entry(first_entry, &mut records)
+        // `Last` overwrite `None`
+        let mut buffer = HashMap::new();
+        let record = new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![1; 100]);
+        let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
-            .is_none());
-        assert!(maybe_emit_entry(mid_entry, &mut records).unwrap().is_none());
-        let entry = maybe_emit_entry(last_entry, &mut records).unwrap().unwrap();
+            .unwrap();
 
         assert_eq!(
-            entry,
-            EntryImpl {
-                data: vec![1, 1, 1, 2, 2, 2, 3, 3, 3],
-                id: 1,
-                ns,
-            }
+            incomplete_entry,
+            Entry::MultiplePart(MultiplePartEntry {
+                provider: Provider::Kafka(provider.clone()),
+                region_id,
+                // TODO(weny): always be 0.
+                entry_id: 0,
+                headers: vec![MultiplePartHeader::Last],
+                parts: vec![vec![1; 100]],
+            })
+        );
+
+        // `First` overwrite `Middle(0)`
+        let mut buffer = HashMap::new();
+        let record = new_test_record(RecordType::Middle(0), 1, region_id.as_u64(), vec![1; 100]);
+        assert!(maybe_emit_entry(&provider, record, &mut buffer)
+            .unwrap()
+            .is_none());
+        let record = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![2; 100]);
+        let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            incomplete_entry,
+            Entry::MultiplePart(MultiplePartEntry {
+                provider: Provider::Kafka(provider),
+                region_id,
+                // TODO(weny): always be 0.
+                entry_id: 0,
+                headers: vec![MultiplePartHeader::Middle(0)],
+                parts: vec![vec![1; 100]],
+            })
         );
     }
 
     #[test]
-    fn test_maybe_emit_entry_overwrite_incomplete_part() {
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::First, 0, 0, vec![]);
-        // Incomplete part will be ignored
-        assert!(maybe_emit_entry(incoming_record, &mut records)
+    fn test_maybe_emit_entry_illegal_seq() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        let mut buffer = HashMap::new();
+        let record = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
+        assert!(maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
             .is_none());
-        assert_eq!(records.len(), 1);
+        let record = new_test_record(RecordType::Middle(2), 1, region_id.as_u64(), vec![2; 100]);
+        let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
+        assert_matches!(err, error::Error::IllegalSequence { .. });
 
-        let mut records = HashMap::new();
-        let first_entry = new_test_record(RecordType::First, 1, 1, vec![1, 1, 1]);
-        let mid_entry = new_test_record(RecordType::Middle(1), 1, 1, vec![2, 2, 2]);
-        let last_entry = new_test_record(RecordType::Last, 1, 1, vec![3, 3, 3]);
-        let ns = first_entry.meta.ns.clone();
-        assert!(maybe_emit_entry(first_entry, &mut records)
+        let mut buffer = HashMap::new();
+        let record = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
+        assert!(maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
             .is_none());
-        assert!(maybe_emit_entry(mid_entry, &mut records).unwrap().is_none());
-        let entry = maybe_emit_entry(last_entry, &mut records).unwrap().unwrap();
-
-        assert_eq!(
-            entry,
-            EntryImpl {
-                data: vec![1, 1, 1, 2, 2, 2, 3, 3, 3],
-                id: 1,
-                ns,
-            }
-        );
+        let record = new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]);
+        assert!(maybe_emit_entry(&provider, record, &mut buffer)
+            .unwrap()
+            .is_none());
+        let record = new_test_record(RecordType::Middle(3), 1, region_id.as_u64(), vec![2; 100]);
+        let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
+        assert_matches!(err, error::Error::IllegalSequence { .. });
     }
 }

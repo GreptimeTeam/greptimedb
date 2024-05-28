@@ -15,20 +15,28 @@
 use api::v1::WalEntry;
 use futures::StreamExt;
 use prost::Message;
-use snafu::ResultExt;
-use store_api::logstore::entry::RawEntry;
+use snafu::{ensure, ResultExt};
+use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
 
-use crate::error::{DecodeWalSnafu, Result};
+use crate::error::{CorruptedLogEntrySnafu, DecodeWalSnafu, Result};
 use crate::wal::raw_entry_reader::RawEntryReader;
 use crate::wal::{EntryId, WalEntryStream};
 
-pub(crate) fn decode_raw_entry(raw_entry: RawEntry) -> Result<(EntryId, WalEntry)> {
-    let entry_id = raw_entry.entry_id;
-    let wal_entry = WalEntry::decode(raw_entry.data.as_slice()).context(DecodeWalSnafu {
-        region_id: raw_entry.region_id,
-    })?;
+pub(crate) fn decode_raw_entry(
+    raw_entry: Entry,
+    ignore_incomplete_entry: bool,
+) -> Result<(EntryId, WalEntry)> {
+    let entry_id = raw_entry.entry_id();
+    let region_id = raw_entry.region_id();
+    ensure!(
+        raw_entry.is_complete() || ignore_incomplete_entry,
+        CorruptedLogEntrySnafu { region_id }
+    );
+    // TODO(weny): implement the [Buf] for return value, avoid extra memory allocation.
+    let bytes = raw_entry.into_bytes();
+    let wal_entry = WalEntry::decode(bytes.as_slice()).context(DecodeWalSnafu { region_id })?;
 
     Ok((entry_id, wal_entry))
 }
@@ -53,7 +61,17 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
     fn read(self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
         let LogStoreEntryReader { reader } = self;
         let mut stream = reader.read(ns, start_id)?;
-        let stream = stream.map(|entry| decode_raw_entry(entry?));
+
+        let stream = async_stream::stream! {
+            if let Some(entry) = stream.next().await {
+                let entry = entry?;
+                yield decode_raw_entry(entry, true)
+            }
+            while let Some(entry) = stream.next().await {
+                let entry = entry?;
+                yield decode_raw_entry(entry, false)
+            }
+        };
 
         Ok(Box::pin(stream))
     }

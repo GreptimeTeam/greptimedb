@@ -644,6 +644,13 @@ pub enum Error {
         unexpected_entry_id: u64,
     },
 
+    #[snafu(display("Read the corrupted log entry, region_id: {}", region_id))]
+    CorruptedLogEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
@@ -847,7 +854,9 @@ impl ErrorExt for Error {
 
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
-            EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
+            EncodeMemtable { .. } | ReadDataPart { .. } | CorruptedLogEntry { .. } => {
+                StatusCode::Internal
+            }
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,

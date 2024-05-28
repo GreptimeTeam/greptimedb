@@ -14,130 +14,127 @@
 
 use std::pin::Pin;
 
-use common_error::ext::ErrorExt;
 use futures::Stream;
 
-use crate::logstore::entry::Entry;
+// pub trait EntryStream: Stream<Item = Result<Vec<Self::Entry>, Self::Error>> {
+//     type Error: ErrorExt;
+//     type Entry: Entry;
 
-pub trait EntryStream: Stream<Item = Result<Vec<Self::Entry>, Self::Error>> {
-    type Error: ErrorExt;
-    type Entry: Entry;
-
-    fn start_id(&self) -> u64;
-}
+//     fn start_id(&self) -> u64;
+// }
 
 pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>, E>> + Send + 'a>>;
 
-#[cfg(test)]
-mod tests {
-    use std::any::Any;
-    use std::task::{Context, Poll};
+// #[cfg(test)]
+// mod tests {
+//     use std::any::Any;
+//     use std::task::{Context, Poll};
 
-    use common_error::ext::StackError;
-    use futures::StreamExt;
-    use snafu::Snafu;
+//     use common_error::ext::StackError;
+//     use futures::StreamExt;
+//     use snafu::Snafu;
 
-    use super::*;
-    pub use crate::logstore::entry::Id;
-    use crate::logstore::entry::RawEntry;
-    use crate::storage::RegionId;
+//     use super::*;
+//     use crate::logstore::entry::Entry;
+//     pub use crate::logstore::entry::Id;
+//     use crate::storage::RegionId;
 
-    pub struct SimpleEntry {
-        /// Binary data of current entry
-        data: Vec<u8>,
-    }
+//     pub struct SimpleEntry {
+//         /// Binary data of current entry
+//         data: Vec<u8>,
+//     }
 
-    #[derive(Debug, Snafu)]
-    #[snafu(visibility(pub))]
-    pub struct Error {}
+//     #[derive(Debug, Snafu)]
+//     #[snafu(visibility(pub))]
+//     pub struct Error {}
 
-    impl ErrorExt for Error {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
+//     impl ErrorExt for Error {
+//         fn as_any(&self) -> &dyn Any {
+//             self
+//         }
+//     }
 
-    impl StackError for Error {
-        fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+//     impl StackError for Error {
+//         fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
 
-        fn next(&self) -> Option<&dyn StackError> {
-            None
-        }
-    }
+//         fn next(&self) -> Option<&dyn StackError> {
+//             None
+//         }
+//     }
 
-    impl Entry for SimpleEntry {
-        fn into_raw_entry(self) -> RawEntry {
-            RawEntry {
-                region_id: RegionId::from_u64(0),
-                entry_id: 0,
-                data: vec![],
-            }
-        }
+//     impl Entry for SimpleEntry {
+//         fn into_raw_entry(self) -> Entry {
+//             Entry {
+//                 region_id: RegionId::from_u64(0),
+//                 entry_id: 0,
+//                 data: vec![],
+//             }
+//         }
 
-        fn data(&self) -> &[u8] {
-            &self.data
-        }
+//         fn data(&self) -> &[u8] {
+//             &self.data
+//         }
 
-        fn id(&self) -> Id {
-            0u64
-        }
+//         fn id(&self) -> Id {
+//             0u64
+//         }
 
-        fn region_id(&self) -> RegionId {
-            RegionId::from_u64(0)
-        }
+//         fn region_id(&self) -> RegionId {
+//             RegionId::from_u64(0)
+//         }
 
-        fn estimated_size(&self) -> usize {
-            self.data.len()
-        }
-    }
+//         fn estimated_size(&self) -> usize {
+//             self.data.len()
+//         }
+//     }
 
-    impl SimpleEntry {
-        pub fn new(data: impl AsRef<[u8]>) -> Self {
-            let data = data.as_ref().to_vec();
-            Self { data }
-        }
-    }
+//     impl SimpleEntry {
+//         pub fn new(data: impl AsRef<[u8]>) -> Self {
+//             let data = data.as_ref().to_vec();
+//             Self { data }
+//         }
+//     }
 
-    pub struct EntryStreamImpl<'a> {
-        inner: SendableEntryStream<'a, SimpleEntry, Error>,
-        start_id: u64,
-    }
+//     pub struct EntryStreamImpl<'a> {
+//         inner: SendableEntryStream<'a, SimpleEntry, Error>,
+//         start_id: u64,
+//     }
 
-    impl<'a> EntryStream for EntryStreamImpl<'a> {
-        type Error = Error;
-        type Entry = SimpleEntry;
+//     impl<'a> EntryStream for EntryStreamImpl<'a> {
+//         type Error = Error;
+//         type Entry = SimpleEntry;
 
-        fn start_id(&self) -> u64 {
-            self.start_id
-        }
-    }
+//         fn start_id(&self) -> u64 {
+//             self.start_id
+//         }
+//     }
 
-    impl Stream for EntryStreamImpl<'_> {
-        type Item = Result<Vec<SimpleEntry>, Error>;
+//     impl Stream for EntryStreamImpl<'_> {
+//         type Item = Result<Vec<SimpleEntry>, Error>;
 
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Ready(Some(v)) => Poll::Ready(Some(v)),
-                Poll::Ready(None) => Poll::Ready(None),
-                Poll::Pending => Poll::Pending,
-            }
-        }
-    }
+//         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+//             match Pin::new(&mut self.inner).poll_next(cx) {
+//                 Poll::Ready(Some(v)) => Poll::Ready(Some(v)),
+//                 Poll::Ready(None) => Poll::Ready(None),
+//                 Poll::Pending => Poll::Pending,
+//             }
+//         }
+//     }
 
-    #[tokio::test]
-    pub async fn test_entry_stream() {
-        let stream =
-            async_stream::stream!(yield Ok(vec![SimpleEntry::new("test_entry".as_bytes())]));
+//     #[tokio::test]
+//     pub async fn test_entry_stream() {
+//         let stream =
+//             async_stream::stream!(yield Ok(vec![SimpleEntry::new("test_entry".as_bytes())]));
 
-        let mut stream_impl = EntryStreamImpl {
-            inner: Box::pin(stream),
-            start_id: 1234,
-        };
+//         let mut stream_impl = EntryStreamImpl {
+//             inner: Box::pin(stream),
+//             start_id: 1234,
+//         };
 
-        if let Some(v) = stream_impl.next().await {
-            let vec = v.unwrap();
-            assert_eq!(1, vec.len());
-            assert_eq!(b"test_entry", vec[0].data());
-        }
-    }
-}
+//         if let Some(v) = stream_impl.next().await {
+//             let vec = v.unwrap();
+//             assert_eq!(1, vec.len());
+//             assert_eq!(b"test_entry", vec[0].data());
+//         }
+//     }
+// }

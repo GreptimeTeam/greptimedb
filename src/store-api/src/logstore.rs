@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 
 use common_error::ext::ErrorExt;
+use entry::Entry;
 
-use crate::logstore::entry::Entry;
 pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::provider::Provider;
@@ -32,20 +32,23 @@ pub mod provider;
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync + 'static;
-    type Entry: Entry;
 
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
-    /// Appends an entry to the log store and returns a response containing the id of the append entry.
-    async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
+    /// Appends a batch of entries and returns a response containing a map where the key is a region id
+    /// while the value is the id of the last successfully written entry of the region.
+    async fn append(&self, entry: Entry) -> Result<AppendResponse, Self::Error> {
+        let response = self.append_batch(vec![entry]).await?;
+        if let Some((_, last_entry_id)) = response.last_entry_ids.into_iter().next() {
+            return Ok(AppendResponse { last_entry_id });
+        }
+        todo!()
+    }
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
-    async fn append_batch(
-        &self,
-        entries: Vec<Self::Entry>,
-    ) -> Result<AppendBatchResponse, Self::Error>;
+    async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse, Self::Error>;
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
@@ -53,7 +56,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         ns: &Provider,
         id: EntryId,
-    ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>, Self::Error>;
+    ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>;
 
     /// Creates a new `Namespace` from the given ref.
     async fn create_namespace(&self, ns: &Provider) -> Result<(), Self::Error>;
@@ -76,7 +79,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         entry_id: EntryId,
         region_id: RegionId,
         ns: &Provider,
-    ) -> Result<Self::Entry, Self::Error>;
+    ) -> Result<Entry, Self::Error>;
 }
 
 /// The response of an `append` operation.

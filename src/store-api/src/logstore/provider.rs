@@ -88,7 +88,7 @@ impl Provider {
     }
 
     /// Returns the reference of [`KafkaProvider`] if it's the type of [`LogStoreProvider::Kafka`].
-    pub fn as_kafka_provider(&self) -> Option<&KafkaProvider> {
+    pub fn as_kafka_provider(&self) -> Option<&Arc<KafkaProvider>> {
         if let Provider::Kafka(ns) = self {
             return Some(ns);
         }

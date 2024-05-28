@@ -12,58 +12,139 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem::size_of;
+
+use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
 
 /// An entry's id.
 /// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
 
-/// The raw Wal entry.
+/// The raw entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawEntry {
+pub enum Entry {
+    Naive(NaiveEntry),
+    MultiplePart(MultiplePartEntry),
+}
+
+impl Entry {
+    /// Into [NaiveEntry] if it's type of [Entry::Naive].
+    pub fn into_naive_entry(self) -> Option<NaiveEntry> {
+        match self {
+            Entry::Naive(entry) => Some(entry),
+            Entry::MultiplePart(_) => None,
+        }
+    }
+
+    /// Into [MultiplePartEntry] if it's type of [Entry::MultiplePart].
+    pub fn into_multiple_part_entry(self) -> Option<MultiplePartEntry> {
+        match self {
+            Entry::Naive(_) => None,
+            Entry::MultiplePart(entry) => Some(entry),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NaiveEntry {
+    pub provider: Provider,
     pub region_id: RegionId,
     pub entry_id: Id,
     pub data: Vec<u8>,
 }
 
-impl Entry for RawEntry {
-    fn into_raw_entry(self) -> RawEntry {
-        self
-    }
-
-    fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    fn id(&self) -> Id {
-        self.entry_id
-    }
-
-    fn region_id(&self) -> RegionId {
-        self.region_id
-    }
-
+impl NaiveEntry {
     fn estimated_size(&self) -> usize {
-        std::mem::size_of_val(self)
+        size_of::<Self>() + self.data.capacity() * size_of::<u8>()
     }
 }
 
-/// Entry is the minimal data storage unit through which users interact with the log store.
-/// The log store implementation may have larger or smaller data storage unit than an entry.
-pub trait Entry: Send + Sync {
-    /// Consumes [Entry] and converts to [RawEntry].
-    fn into_raw_entry(self) -> RawEntry;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultiplePartHeader {
+    First,
+    Middle(usize),
+    Last,
+}
 
-    /// Returns the contained data of the entry.
-    fn data(&self) -> &[u8];
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiplePartEntry {
+    pub provider: Provider,
+    pub region_id: RegionId,
+    pub entry_id: Id,
+    pub headers: Vec<MultiplePartHeader>,
+    pub parts: Vec<Vec<u8>>,
+}
 
-    /// Returns the id of the entry.
-    /// Usually the namespace id is identical with the region id.
-    fn id(&self) -> Id;
+impl MultiplePartEntry {
+    fn is_complete(&self) -> bool {
+        self.headers.contains(&MultiplePartHeader::First)
+            && self.headers.contains(&MultiplePartHeader::Last)
+    }
+
+    fn estimated_size(&self) -> usize {
+        size_of::<Self>()
+            + self
+                .parts
+                .iter()
+                .map(|data| data.capacity() * size_of::<u8>())
+                .sum::<usize>()
+            + self.headers.capacity() * size_of::<MultiplePartHeader>()
+    }
+}
+
+impl Entry {
+    /// Returns the [Provider]
+    pub fn provider(&self) -> &Provider {
+        match self {
+            Entry::Naive(entry) => &entry.provider,
+            Entry::MultiplePart(entry) => &entry.provider,
+        }
+    }
 
     /// Returns the [RegionId]
-    fn region_id(&self) -> RegionId;
+    pub fn region_id(&self) -> RegionId {
+        match self {
+            Entry::Naive(entry) => entry.region_id,
+            Entry::MultiplePart(entry) => entry.region_id,
+        }
+    }
 
-    /// Computes the estimated encoded size.
-    fn estimated_size(&self) -> usize;
+    /// Returns the [Id]
+    pub fn entry_id(&self) -> Id {
+        match self {
+            Entry::Naive(entry) => entry.entry_id,
+            Entry::MultiplePart(entry) => entry.entry_id,
+        }
+    }
+
+    /// Returns the [Id]
+    pub fn set_entry_id(&mut self, id: Id) {
+        match self {
+            Entry::Naive(entry) => entry.entry_id = id,
+            Entry::MultiplePart(entry) => entry.entry_id = id,
+        }
+    }
+
+    /// Returns true if it's a complete entry.
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Entry::Naive(_) => true,
+            Entry::MultiplePart(entry) => entry.is_complete(),
+        }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Entry::Naive(entry) => entry.data,
+            Entry::MultiplePart(entry) => entry.parts.concat(),
+        }
+    }
+
+    pub fn estimated_size(&self) -> usize {
+        match self {
+            Entry::Naive(entry) => entry.estimated_size(),
+            Entry::MultiplePart(entry) => entry.estimated_size(),
+        }
+    }
 }

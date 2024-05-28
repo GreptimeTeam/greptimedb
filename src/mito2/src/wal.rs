@@ -30,6 +30,7 @@ use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
 use prost::Message;
 use snafu::ResultExt;
+use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
@@ -122,7 +123,7 @@ pub struct WalWriter<S: LogStore> {
     /// Log store of the WAL.
     store: Arc<S>,
     /// Entries to write.
-    entries: Vec<S::Entry>,
+    entries: Vec<Entry>,
     /// Buffer to encode WAL entry.
     entry_encode_buf: Vec<u8>,
     /// Namespaces of regions being written into.
