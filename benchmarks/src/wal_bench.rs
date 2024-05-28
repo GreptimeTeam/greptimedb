@@ -28,7 +28,7 @@ use rand::distributions::{Alphanumeric, DistString, Uniform};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use store_api::logstore::namespace::Namespace;
+use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
@@ -211,7 +211,7 @@ impl From<Args> for Config {
 pub struct Region {
     id: RegionId,
     schema: Vec<ColumnSchema>,
-    namespace: Namespace,
+    namespace: Provider,
     next_sequence: AtomicU64,
     next_entry_id: AtomicU64,
     next_timestamp: AtomicI64,
@@ -229,8 +229,8 @@ impl Region {
         rng_seed: u64,
     ) -> Self {
         let namespace = match wal_options {
-            WalOptions::RaftEngine => Namespace::raft_engine_namespace(*id),
-            WalOptions::Kafka(opts) => Namespace::kafka_namespace(opts.topic),
+            WalOptions::RaftEngine => Provider::raft_engine_provider(*id),
+            WalOptions::Kafka(opts) => Provider::kafka_provider(opts.topic),
         };
         Self {
             id,

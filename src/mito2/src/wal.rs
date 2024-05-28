@@ -30,7 +30,7 @@ use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
 use prost::Message;
 use snafu::ResultExt;
-use store_api::logstore::namespace::Namespace;
+use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
@@ -87,14 +87,14 @@ impl<S: LogStore> Wal<S> {
         &'a self,
         region_id: RegionId,
         start_id: EntryId,
-        namespace: &'a Namespace,
+        namespace: &'a Provider,
     ) -> Result<WalEntryStream<'a>> {
         match namespace {
-            Namespace::RaftEngine(_) => {
+            Provider::RaftEngine(_) => {
                 LogStoreEntryReader::new(LogStoreRawEntryReader::new(self.store.clone()))
                     .read(namespace, start_id)
             }
-            Namespace::Kafka(_) => LogStoreEntryReader::new(RegionRawEntryReader::new(
+            Provider::Kafka(_) => LogStoreEntryReader::new(RegionRawEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
                 region_id,
             ))
@@ -107,7 +107,7 @@ impl<S: LogStore> Wal<S> {
         &self,
         region_id: RegionId,
         last_id: EntryId,
-        namespace: &Namespace,
+        namespace: &Provider,
     ) -> Result<()> {
         self.store
             .obsolete(namespace, last_id)
@@ -126,7 +126,7 @@ pub struct WalWriter<S: LogStore> {
     /// Buffer to encode WAL entry.
     entry_encode_buf: Vec<u8>,
     /// Namespaces of regions being written into.
-    namespaces: HashMap<RegionId, Namespace>,
+    namespaces: HashMap<RegionId, Provider>,
 }
 
 impl<S: LogStore> WalWriter<S> {
@@ -136,7 +136,7 @@ impl<S: LogStore> WalWriter<S> {
         region_id: RegionId,
         entry_id: EntryId,
         wal_entry: &WalEntry,
-        namespace: &Namespace,
+        namespace: &Provider,
     ) -> Result<()> {
         // Gets or inserts with a newly built namespace.
         let namespace = self
@@ -268,7 +268,7 @@ mod tests {
                 region_id,
                 1,
                 &entry,
-                &Namespace::raft_engine_namespace(*region_id),
+                &Provider::raft_engine_provider(*region_id),
             )
             .unwrap();
         // Region 2 entry 1.
@@ -278,7 +278,7 @@ mod tests {
                 region_id,
                 1,
                 &entry,
-                &Namespace::raft_engine_namespace(*region_id),
+                &Provider::raft_engine_provider(*region_id),
             )
             .unwrap();
         // Region 1 entry 2.
@@ -288,7 +288,7 @@ mod tests {
                 region_id,
                 2,
                 &entry,
-                &Namespace::raft_engine_namespace(*region_id),
+                &Provider::raft_engine_provider(*region_id),
             )
             .unwrap();
 
@@ -340,8 +340,8 @@ mod tests {
 
         let entries = sample_entries();
         let (id1, id2) = (RegionId::new(1, 1), RegionId::new(1, 2));
-        let ns1 = Namespace::raft_engine_namespace(*id1);
-        let ns2 = Namespace::raft_engine_namespace(*id2);
+        let ns1 = Provider::raft_engine_provider(*id1);
+        let ns2 = Provider::raft_engine_provider(*id2);
         let mut writer = wal.writer();
         writer.add_entry(id1, 1, &entries[0], &ns1).unwrap();
         // Insert one entry into region2. Scan should not return this entry.
@@ -376,7 +376,7 @@ mod tests {
         let entries = sample_entries();
         let mut writer = wal.writer();
         let region_id = RegionId::new(1, 1);
-        let ns = Namespace::raft_engine_namespace(*region_id);
+        let ns = Provider::raft_engine_provider(*region_id);
         writer.add_entry(region_id, 1, &entries[0], &ns).unwrap();
         writer.add_entry(region_id, 2, &entries[1], &ns).unwrap();
         writer.add_entry(region_id, 3, &entries[2], &ns).unwrap();

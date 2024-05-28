@@ -23,13 +23,11 @@ use rskafka::client::partition::OffsetAt;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
-use store_api::logstore::namespace::{KafkaNamespace, Namespace};
+use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 use store_api::storage::RegionId;
 
-use crate::error::{
-    ConsumeRecordSnafu, Error, GetOffsetSnafu, Result, UnexpectedNamespaceTypeSnafu,
-};
+use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
@@ -65,12 +63,12 @@ impl LogStore for KafkaLogStore {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        ns: &Namespace,
+        ns: &Provider,
     ) -> Result<Self::Entry> {
         let ns = ns
-            .as_kafka_namespace()
-            .with_context(|| UnexpectedNamespaceTypeSnafu {
-                expected: KafkaNamespace::type_name(),
+            .as_kafka_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: KafkaProvider::type_name(),
                 actual: ns.type_name(),
             })?;
 
@@ -143,13 +141,13 @@ impl LogStore for KafkaLogStore {
     /// starting from `entry_id`. The generated entries will be filtered by the namespace.
     async fn read(
         &self,
-        ns: &Namespace,
+        ns: &Provider,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>> {
         let ns = ns
-            .as_kafka_namespace()
-            .with_context(|| UnexpectedNamespaceTypeSnafu {
-                expected: KafkaNamespace::type_name(),
+            .as_kafka_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: KafkaProvider::type_name(),
                 actual: ns.type_name(),
             })?;
 
@@ -248,24 +246,24 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, _ns: &Namespace) -> Result<()> {
+    async fn create_namespace(&self, _ns: &Provider) -> Result<()> {
         Ok(())
     }
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, _ns: &Namespace) -> Result<()> {
+    async fn delete_namespace(&self, _ns: &Provider) -> Result<()> {
         Ok(())
     }
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<Namespace>> {
+    async fn list_namespaces(&self) -> Result<Vec<Provider>> {
         Ok(vec![])
     }
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _ns: &Namespace, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(&self, _ns: &Provider, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }
 
@@ -300,7 +298,7 @@ mod tests {
 
     // Stores test context for a region.
     struct RegionContext {
-        ns: Namespace,
+        ns: Provider,
         entry_builder: EntryBuilder,
         expected: Vec<EntryImpl>,
         flushed_entry_id: EntryId,
@@ -416,7 +414,7 @@ mod tests {
                 (
                     i as u64,
                     RegionContext {
-                        ns: Namespace::kafka_namespace(topic.to_string()),
+                        ns: Provider::kafka_provider(topic.to_string()),
                         entry_builder,
                         expected: Vec::new(),
                         flushed_entry_id: 0,

@@ -25,8 +25,8 @@ use store_api::storage::RegionId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Invalid namespace type, expected: {}, actual: {}", expected, actual))]
-    UnexpectedNamespaceType {
+    #[snafu(display("Invalid provider type, expected: {}, actual: {}", expected, actual))]
+    InvalidProvider {
         #[snafu(implicit)]
         location: Location,
         expected: String,

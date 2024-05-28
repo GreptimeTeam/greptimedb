@@ -26,14 +26,14 @@ use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMo
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
 use store_api::logstore::entry_stream::SendableEntryStream;
-use store_api::logstore::namespace::{Namespace, RaftEngineNamespace};
+use store_api::logstore::provider::{Provider, RaftEngineProvider};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{
     AddEntryLogBatchSnafu, DiscontinuousLogIndexSnafu, Error, FetchEntrySnafu,
-    IllegalNamespaceSnafu, IllegalStateSnafu, OverrideCompactedEntrySnafu, RaftEngineSnafu, Result,
-    StartGcTaskSnafu, StopGcTaskSnafu, UnexpectedNamespaceTypeSnafu,
+    IllegalNamespaceSnafu, IllegalStateSnafu, InvalidProviderSnafu, OverrideCompactedEntrySnafu,
+    RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
 };
 use crate::metrics;
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
@@ -117,7 +117,7 @@ impl RaftEngineLogStore {
             .context(StartGcTaskSnafu)
     }
 
-    fn span(&self, ns: &RaftEngineNamespace) -> (Option<u64>, Option<u64>) {
+    fn span(&self, ns: &RaftEngineProvider) -> (Option<u64>, Option<u64>) {
         (
             self.engine.first_index(ns.id),
             self.engine.last_index(ns.id),
@@ -286,13 +286,13 @@ impl LogStore for RaftEngineLogStore {
     /// determined by the current "last index" of the namespace.
     async fn read(
         &self,
-        ns: &Namespace,
+        ns: &Provider,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<'static, Self::Entry, Self::Error>> {
         let ns = ns
-            .as_raft_engine_namespace()
-            .with_context(|| UnexpectedNamespaceTypeSnafu {
-                expected: RaftEngineNamespace::type_name(),
+            .as_raft_engine_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: RaftEngineProvider::type_name(),
                 actual: ns.type_name(),
             })?;
         let namespace_id = ns.id;
@@ -356,11 +356,11 @@ impl LogStore for RaftEngineLogStore {
         Ok(Box::pin(s))
     }
 
-    async fn create_namespace(&self, ns: &Namespace) -> Result<()> {
+    async fn create_namespace(&self, ns: &Provider) -> Result<()> {
         let ns = ns
-            .as_raft_engine_namespace()
-            .with_context(|| UnexpectedNamespaceTypeSnafu {
-                expected: RaftEngineNamespace::type_name(),
+            .as_raft_engine_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: RaftEngineProvider::type_name(),
                 actual: ns.type_name(),
             })?;
         let namespace_id = ns.id;
@@ -390,11 +390,11 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    async fn delete_namespace(&self, ns: &Namespace) -> Result<()> {
+    async fn delete_namespace(&self, ns: &Provider) -> Result<()> {
         let ns = ns
-            .as_raft_engine_namespace()
-            .with_context(|| UnexpectedNamespaceTypeSnafu {
-                expected: RaftEngineNamespace::type_name(),
+            .as_raft_engine_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: RaftEngineProvider::type_name(),
                 actual: ns.type_name(),
             })?;
         let namespace_id = ns.id;
@@ -415,9 +415,9 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    async fn list_namespaces(&self) -> Result<Vec<Namespace>> {
+    async fn list_namespaces(&self) -> Result<Vec<Provider>> {
         ensure!(self.started(), IllegalStateSnafu);
-        let mut namespaces: Vec<Namespace> = vec![];
+        let mut namespaces: Vec<Provider> = vec![];
         self.engine
             .scan_messages::<NamespaceImpl, _>(
                 SYSTEM_NAMESPACE,
@@ -425,7 +425,7 @@ impl LogStore for RaftEngineLogStore {
                 None,
                 false,
                 |_, v| {
-                    namespaces.push(Namespace::RaftEngine(RaftEngineNamespace { id: v.id }));
+                    namespaces.push(Provider::RaftEngine(RaftEngineProvider { id: v.id }));
                     true
                 },
             )
@@ -438,7 +438,7 @@ impl LogStore for RaftEngineLogStore {
         data: &mut Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
-        _ns: &Namespace,
+        _ns: &Provider,
     ) -> Result<Self::Entry> {
         Ok(EntryImpl {
             id: entry_id,
@@ -448,11 +448,11 @@ impl LogStore for RaftEngineLogStore {
         })
     }
 
-    async fn obsolete(&self, ns: &Namespace, entry_id: EntryId) -> Result<()> {
+    async fn obsolete(&self, ns: &Provider, entry_id: EntryId) -> Result<()> {
         let ns = ns
-            .as_raft_engine_namespace()
-            .with_context(|| UnexpectedNamespaceTypeSnafu {
-                expected: RaftEngineNamespace::type_name(),
+            .as_raft_engine_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: RaftEngineProvider::type_name(),
                 actual: ns.type_name(),
             })?;
         let namespace_id = ns.id;
@@ -522,15 +522,15 @@ mod tests {
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
 
         logstore
-            .create_namespace(&Namespace::raft_engine_namespace(42))
+            .create_namespace(&Provider::raft_engine_provider(42))
             .await
             .unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
         assert_eq!(1, namespaces.len());
-        assert_eq!(Namespace::raft_engine_namespace(42), namespaces[0]);
+        assert_eq!(Provider::raft_engine_provider(42), namespaces[0]);
 
         logstore
-            .delete_namespace(&Namespace::raft_engine_namespace(42))
+            .delete_namespace(&Provider::raft_engine_provider(42))
             .await
             .unwrap();
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
@@ -561,7 +561,7 @@ mod tests {
         }
         let mut entries = HashSet::with_capacity(1024);
         let mut s = logstore
-            .read(&Namespace::raft_engine_namespace(1), 0)
+            .read(&Provider::raft_engine_provider(1), 0)
             .await
             .unwrap();
         while let Some(r) = s.next().await {
@@ -594,7 +594,7 @@ mod tests {
                 .await
                 .is_ok());
             let entries = logstore
-                .read(&Namespace::raft_engine_namespace(1), 1)
+                .read(&Provider::raft_engine_provider(1), 1)
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -612,7 +612,7 @@ mod tests {
 
         let entries = collect_entries(
             logstore
-                .read(&Namespace::raft_engine_namespace(1), 1)
+                .read(&Provider::raft_engine_provider(1), 1)
                 .await
                 .unwrap(),
         )
@@ -659,7 +659,7 @@ mod tests {
         let logstore = new_test_log_store(&dir).await;
 
         let namespace_id = 42;
-        let namespace = Namespace::raft_engine_namespace(namespace_id);
+        let namespace = Provider::raft_engine_provider(namespace_id);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace_id, [b'x'; 4096].to_vec());
             let _ = logstore.append(entry).await.unwrap();
@@ -684,7 +684,7 @@ mod tests {
         let logstore = new_test_log_store(&dir).await;
 
         let namespace_id = 42;
-        let namespace = Namespace::raft_engine_namespace(namespace_id);
+        let namespace = Provider::raft_engine_provider(namespace_id);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace_id, [b'x'; 4096].to_vec());
             let _ = logstore.append(entry).await.unwrap();
@@ -714,7 +714,7 @@ mod tests {
 
         logstore.append_batch(entries).await.unwrap();
         for ns_id in 0..8 {
-            let namespace = &RaftEngineNamespace::new(ns_id);
+            let namespace = &RaftEngineProvider::new(ns_id);
             let (first, last) = logstore.span(namespace);
             assert_eq!(0, first.unwrap());
             assert_eq!(15, last.unwrap());
@@ -739,11 +739,11 @@ mod tests {
 
         assert_eq!(
             (Some(0), Some(2)),
-            logstore.span(&RaftEngineNamespace::new(0))
+            logstore.span(&RaftEngineProvider::new(0))
         );
         assert_eq!(
             (Some(0), Some(1)),
-            logstore.span(&RaftEngineNamespace::new(1))
+            logstore.span(&RaftEngineProvider::new(1))
         );
     }
 

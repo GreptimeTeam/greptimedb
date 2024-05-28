@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry};
 use snafu::ResultExt;
-use store_api::logstore::namespace::Namespace;
+use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
@@ -86,7 +86,7 @@ pub(crate) struct RegionWriteCtx {
     /// out of the context to construct the wal entry when we write to the wal.
     wal_entry: WalEntry,
     /// Wal options of the region being written to.
-    log_store_namespace: Namespace,
+    log_store_namespace: Provider,
     /// Notifiers to send write results to waiters.
     ///
     /// The i-th notify is for i-th mutation.
@@ -106,7 +106,7 @@ impl RegionWriteCtx {
     pub(crate) fn new(
         region_id: RegionId,
         version_control: &VersionControlRef,
-        log_store_namespace: Namespace,
+        log_store_namespace: Provider,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
