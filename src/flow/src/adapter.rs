@@ -35,12 +35,12 @@ use itertools::Itertools;
 use query::{QueryEngine, QueryEngineFactory};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
 use tokio::sync::{oneshot, watch, Mutex, RwLock};
 
-use crate::adapter::error::{ExternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
+use crate::adapter::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
@@ -283,10 +283,16 @@ impl FlownodeManager {
                     .map(|i| meta.schema.column_schemas[i].name.clone())
                     .collect_vec();
                 let schema = meta.schema.column_schemas;
-                let is_auto_create = schema
-                    .last()
-                    .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
-                    .unwrap_or(false);
+                // check if the last column is the auto created timestamp column, hence the table is auto created from
+                // flow's plan type
+                let is_auto_create = {
+                    let correct_name = schema
+                        .last()
+                        .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+                        .unwrap_or(false);
+                    let correct_time_index = meta.schema.timestamp_index == Some(schema.len() - 1);
+                    correct_name && correct_time_index
+                };
                 (primary_keys, schema, is_auto_create)
             } else {
                 // TODO(discord9): condiser remove buggy auto create by schema
@@ -351,7 +357,7 @@ impl FlownodeManager {
 
                 (primary_keys, with_ts, true)
             };
-
+            let schema_len = schema.len();
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
 
             debug!(
@@ -373,13 +379,23 @@ impl FlownodeManager {
                                 ))]);
                                 // ts col, if auto create
                                 if is_auto_create {
+                                    ensure!(
+                                        row.len() == schema_len - 1,
+                                        InternalSnafu {
+                                            reason: format!(
+                                                "Row len mismatch, expect {} got {}",
+                                                schema_len - 1,
+                                                row.len()
+                                            )
+                                        }
+                                    );
                                     row.extend([Value::from(
                                         common_time::Timestamp::new_millisecond(0),
                                     )]);
                                 }
-                                row.into()
+                                Ok(row.into())
                             })
-                            .collect::<Vec<_>>();
+                            .collect::<Result<Vec<_>, Error>>()?;
                         let table_name = table_name.last().unwrap().clone();
                         let req = RowInsertRequest {
                             table_name,
