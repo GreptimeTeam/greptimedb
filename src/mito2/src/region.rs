@@ -98,8 +98,8 @@ pub(crate) struct MitoRegion {
     pub(crate) manifest_ctx: ManifestContextRef,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
-    /// The namespace of log store.
-    pub(crate) log_store_namespace: Provider,
+    /// The provider of log store.
+    pub(crate) provider: Provider,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
     /// Provider to get current time.

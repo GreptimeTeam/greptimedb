@@ -82,7 +82,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .obsolete(
                 region_id,
                 truncate_result.truncated_entry_id,
-                &region.log_store_namespace,
+                &region.provider,
             )
             .await
         {

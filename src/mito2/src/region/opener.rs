@@ -163,7 +163,7 @@ impl RegionOpener {
             }
         }
         let options = self.options.take().unwrap();
-        let log_store_namespace = self.log_store_namespace(&options.wal_options);
+        let provider = self.provider(&options.wal_options);
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -213,7 +213,7 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
             )),
-            log_store_namespace,
+            provider,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             time_provider,
             memtable_builder,
@@ -251,7 +251,7 @@ impl RegionOpener {
         Ok(region)
     }
 
-    fn log_store_namespace(&self, wal_options: &WalOptions) -> Provider {
+    fn provider(&self, wal_options: &WalOptions) -> Provider {
         match wal_options {
             WalOptions::RaftEngine => Provider::raft_engine_provider(*self.region_id),
             WalOptions::Kafka(options) => Provider::kafka_provider(options.topic.to_string()),
@@ -276,7 +276,7 @@ impl RegionOpener {
         let metadata = manifest.metadata.clone();
 
         let region_id = self.region_id;
-        let log_store_namespace = self.log_store_namespace(&region_options.wal_options);
+        let provider = self.provider(&region_options.wal_options);
         let object_store = self.object_store(&region_options.storage)?.clone();
 
         debug!("Open region {} with options: {:?}", region_id, self.options);
@@ -321,7 +321,7 @@ impl RegionOpener {
             );
             replay_memtable(
                 wal,
-                &log_store_namespace,
+                &provider,
                 region_id,
                 flushed_entry_id,
                 &version_control,
@@ -346,7 +346,7 @@ impl RegionOpener {
                 RegionState::ReadOnly,
             )),
             file_purger,
-            log_store_namespace,
+            provider,
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             time_provider,
             memtable_builder,
@@ -438,7 +438,7 @@ pub(crate) fn check_recovered_region(
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
 pub(crate) async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
-    log_store_namespace: &Provider,
+    provider: &Provider,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
@@ -450,7 +450,7 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     let mut last_entry_id = flushed_entry_id;
     let replay_from_entry_id = flushed_entry_id + 1;
 
-    let mut wal_stream = wal.scan(region_id, replay_from_entry_id, log_store_namespace)?;
+    let mut wal_stream = wal.scan(region_id, replay_from_entry_id, provider)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         if entry_id <= flushed_entry_id {
@@ -467,7 +467,7 @@ pub(crate) async fn replay_memtable<S: LogStore>(
         last_entry_id = last_entry_id.max(entry_id);
 
         let mut region_write_ctx =
-            RegionWriteCtx::new(region_id, version_control, log_store_namespace.clone());
+            RegionWriteCtx::new(region_id, version_control, provider.clone());
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows
@@ -482,8 +482,7 @@ pub(crate) async fn replay_memtable<S: LogStore>(
         region_write_ctx.write_memtable();
     }
 
-    wal.obsolete(region_id, flushed_entry_id, log_store_namespace)
-        .await?;
+    wal.obsolete(region_id, flushed_entry_id, provider).await?;
 
     info!(
         "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",

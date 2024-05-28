@@ -86,7 +86,7 @@ pub(crate) struct RegionWriteCtx {
     /// out of the context to construct the wal entry when we write to the wal.
     wal_entry: WalEntry,
     /// Wal options of the region being written to.
-    log_store_namespace: Provider,
+    provider: Provider,
     /// Notifiers to send write results to waiters.
     ///
     /// The i-th notify is for i-th mutation.
@@ -106,7 +106,7 @@ impl RegionWriteCtx {
     pub(crate) fn new(
         region_id: RegionId,
         version_control: &VersionControlRef,
-        log_store_namespace: Provider,
+        provider: Provider,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -122,7 +122,7 @@ impl RegionWriteCtx {
             next_sequence: committed_sequence + 1,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
-            log_store_namespace,
+            provider,
             notifiers: Vec::new(),
             failed: false,
             put_num: 0,
@@ -163,7 +163,7 @@ impl RegionWriteCtx {
             self.region_id,
             self.next_entry_id,
             &self.wal_entry,
-            &self.log_store_namespace,
+            &self.provider,
         )?;
         self.next_entry_id += 1;
         Ok(())

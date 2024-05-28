@@ -211,7 +211,7 @@ impl From<Args> for Config {
 pub struct Region {
     id: RegionId,
     schema: Vec<ColumnSchema>,
-    namespace: Provider,
+    provider: Provider,
     next_sequence: AtomicU64,
     next_entry_id: AtomicU64,
     next_timestamp: AtomicI64,
@@ -235,7 +235,7 @@ impl Region {
         Self {
             id,
             schema,
-            namespace,
+            provider: namespace,
             next_sequence: AtomicU64::new(1),
             next_entry_id: AtomicU64::new(1),
             next_timestamp: AtomicI64::new(1655276557000),
@@ -263,14 +263,14 @@ impl Region {
                 self.id,
                 self.next_entry_id.fetch_add(1, Ordering::Relaxed),
                 &entry,
-                &self.namespace,
+                &self.provider,
             )
             .unwrap();
     }
 
     /// Replays the region.
     pub async fn replay<S: LogStore>(&self, wal: &Arc<Wal<S>>) {
-        let mut wal_stream = wal.scan(self.id, 0, &self.namespace).unwrap();
+        let mut wal_stream = wal.scan(self.id, 0, &self.provider).unwrap();
         while let Some(res) = wal_stream.next().await {
             let (_, entry) = res.unwrap();
             metrics::METRIC_WAL_READ_BYTES_TOTAL.inc_by(Self::entry_estimated_size(&entry) as u64);

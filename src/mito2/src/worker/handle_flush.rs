@@ -212,11 +212,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         if let Err(e) = self
             .wal
-            .obsolete(
-                region_id,
-                request.flushed_entry_id,
-                &region.log_store_namespace,
-            )
+            .obsolete(region_id, request.flushed_entry_id, &region.provider)
             .await
         {
             error!(e; "Failed to write wal, region: {}", region_id);
