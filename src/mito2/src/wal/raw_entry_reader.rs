@@ -29,12 +29,12 @@ use tokio_stream::StreamExt;
 use crate::error::{self, Result};
 use crate::wal::EntryId;
 
-/// A stream that yields [RawEntry].
-pub type RawEntryStream<'a> = BoxStream<'a, Result<Entry>>;
+/// A stream that yields [Entry].
+pub type EntryStream<'a> = BoxStream<'a, Result<Entry>>;
 
-/// [RawEntryReader] provides the ability to read [RawEntry] from the underlying [LogStore].
+/// [RawEntryReader] provides the ability to read [Entry] from the underlying [LogStore].
 pub(crate) trait RawEntryReader: Send + Sync {
-    fn read(&self, ns: &Provider, start_id: EntryId) -> Result<RawEntryStream<'static>>;
+    fn read(&self, ns: &Provider, start_id: EntryId) -> Result<EntryStream<'static>>;
 }
 
 /// Implement the [RawEntryReader] for the [LogStore].
@@ -51,7 +51,7 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
         &self,
         ns: RaftEngineProvider,
         start_id: EntryId,
-    ) -> Result<RawEntryStream<'static>> {
+    ) -> Result<EntryStream<'static>> {
         let region_id = RegionId::from_u64(ns.id);
         let store = self.store.clone();
 
@@ -80,7 +80,7 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
         &self,
         ns: Arc<KafkaProvider>,
         start_id: EntryId,
-    ) -> Result<RawEntryStream<'static>> {
+    ) -> Result<EntryStream<'static>> {
         let store = self.store.clone();
         let stream = try_stream!({
             let mut stream = store
@@ -104,7 +104,7 @@ impl<S: LogStore> LogStoreRawEntryReader<S> {
 }
 
 impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
-    fn read(&self, ctx: &Provider, start_id: EntryId) -> Result<RawEntryStream<'static>> {
+    fn read(&self, ctx: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
         let stream = match ctx {
             Provider::RaftEngine(ns) => self.read_region(*ns, start_id)?,
             Provider::Kafka(ns) => self.read_topic(ns.clone(), start_id)?,
@@ -133,7 +133,7 @@ impl<R> RawEntryReader for RegionRawEntryReader<R>
 where
     R: RawEntryReader,
 {
-    fn read(&self, ctx: &Provider, start_id: EntryId) -> Result<RawEntryStream<'static>> {
+    fn read(&self, ctx: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
         let mut stream = self.reader.read(ctx, start_id)?;
         let region_id = self.region_id;
 
