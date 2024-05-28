@@ -261,8 +261,9 @@ impl LogStore for KafkaLogStore {
                 // Ignores no-op records.
                 if kafka_record.value.is_none() {
                     if check_termination(offset, end_offset) {
-                        let entries = remaining_entries(&provider, &mut entry_records);
-                        yield Ok(entries);
+                        if let Some(entries) = remaining_entries(&provider, &mut entry_records) {
+                            yield Ok(entries);
+                        }
                         break;
                     }
                     continue;
@@ -279,8 +280,9 @@ impl LogStore for KafkaLogStore {
                 }
 
                 if check_termination(offset, end_offset) {
-                    let entries = remaining_entries(&provider, &mut entry_records);
-                    yield Ok(entries);
+                    if let Some(entries) = remaining_entries(&provider, &mut entry_records) {
+                        yield Ok(entries);
+                    }
                     break;
                 }
             }

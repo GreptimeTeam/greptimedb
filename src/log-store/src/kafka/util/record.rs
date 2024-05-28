@@ -287,16 +287,20 @@ fn convert_to_multiple_entry(
 pub fn remaining_entries(
     provider: &Arc<KafkaProvider>,
     buffered_records: &mut HashMap<RegionId, Vec<Record>>,
-) -> Vec<Entry> {
-    let mut entries = Vec::with_capacity(buffered_records.len());
-    for (region_id, records) in buffered_records.drain() {
-        entries.push(convert_to_multiple_entry(
-            provider.clone(),
-            region_id,
-            records,
-        ));
+) -> Option<Vec<Entry>> {
+    if buffered_records.is_empty() {
+        None
+    } else {
+        let mut entries = Vec::with_capacity(buffered_records.len());
+        for (region_id, records) in buffered_records.drain() {
+            entries.push(convert_to_multiple_entry(
+                provider.clone(),
+                region_id,
+                records,
+            ));
+        }
+        Some(entries)
     }
-    entries
 }
 
 pub fn maybe_emit_entry(
