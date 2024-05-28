@@ -16,8 +16,6 @@ pub(crate) mod client_manager;
 pub mod log_store;
 pub(crate) mod util;
 
-use std::fmt::Display;
-
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::Id as EntryId;
 
@@ -26,12 +24,6 @@ use store_api::logstore::entry::Id as EntryId;
 pub struct NamespaceImpl {
     pub region_id: u64,
     pub topic: String,
-}
-
-impl Display for NamespaceImpl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[topic: {}, region: {}]", self.topic, self.region_id)
-    }
 }
 
 /// Kafka Entry implementation.
@@ -43,16 +35,4 @@ pub struct EntryImpl {
     pub id: EntryId,
     /// The namespace used to identify and isolate log entries from different regions.
     pub ns: NamespaceImpl,
-}
-
-impl Display for EntryImpl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Entry [ns: {}, id: {}, data_len: {}]",
-            self.ns,
-            self.id,
-            self.data.len()
-        )
-    }
 }

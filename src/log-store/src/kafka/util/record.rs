@@ -28,7 +28,7 @@ use crate::error::{
 };
 use crate::kafka::client_manager::ClientManagerRef;
 use crate::kafka::util::offset::Offset;
-use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
+use crate::kafka::{EntryId, NamespaceImpl};
 use crate::metrics;
 
 /// The current version of Record.
@@ -111,19 +111,6 @@ impl TryFrom<KafkaRecord> for Record {
         let meta = serde_json::from_slice(&key).context(DecodeJsonSnafu)?;
         let data = kafka_record.value.context(MissingValueSnafu)?;
         Ok(Self { meta, data })
-    }
-}
-
-impl From<Vec<Record>> for EntryImpl {
-    fn from(records: Vec<Record>) -> Self {
-        let entry_id = records[0].meta.entry_id;
-        let ns = records[0].meta.ns.clone();
-        let data = records.into_iter().flat_map(|record| record.data).collect();
-        EntryImpl {
-            data,
-            id: entry_id,
-            ns,
-        }
     }
 }
 
