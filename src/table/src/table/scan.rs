@@ -24,8 +24,8 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
-    RecordBatchStream as DfRecordBatchStream,
+    DisplayAs, DisplayFormatType, EmptyRecordBatchStream, ExecutionMode, ExecutionPlan,
+    PlanProperties, RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
@@ -103,6 +103,12 @@ impl ExecutionPlan for RegionScanExec {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let span =
             tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
+
+        if partition >= self.scanner.properties().partitioning().num_partitions() {
+            // We might read partition 0 even if partition count is 0.
+            let stream = Box::pin(EmptyRecordBatchStream::new(self.arrow_schema.clone()));
+            return Ok(stream);
+        }
 
         let stream = self
             .scanner
