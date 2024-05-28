@@ -80,6 +80,7 @@ tracing-appender = "0.2"
 tikv-jemallocator = "0.5"
 
 [dev-dependencies]
+client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 serde.workspace = true
 temp-env = "0.3"

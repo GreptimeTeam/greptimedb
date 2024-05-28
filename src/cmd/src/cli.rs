@@ -22,8 +22,8 @@ mod helper;
 
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
 #[allow(unused)]
-// mod repl;
-// TODO(weny): Removes it
+mod repl;
+// TODO(tisonkun): migrate deprecated methods
 #[allow(deprecated)]
 mod upgrade;
 
@@ -31,8 +31,8 @@ use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
 use clap::Parser;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
+pub use repl::Repl;
 use tracing_appender::non_blocking::WorkerGuard;
-// pub use repl::Repl;
 use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;
