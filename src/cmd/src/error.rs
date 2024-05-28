@@ -163,6 +163,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to request database, sql: {sql}"))]
+    RequestDatabase {
+        sql: String,
+        location: Location,
+        source: client::Error,
+    },
+
     #[snafu(display("Failed to collect RecordBatches"))]
     CollectRecordBatches {
         #[snafu(implicit)]
@@ -354,6 +361,7 @@ impl ErrorExt for Error {
             Error::ReplCreation { .. } | Error::Readline { .. } | Error::HttpQuerySql { .. } => {
                 StatusCode::Internal
             }
+            Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source, .. }
             | Error::PrettyPrintRecordBatches { source, .. } => source.status_code(),
             Error::StartMetaClient { source, .. } => source.status_code(),

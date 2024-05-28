@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(assert_matches)]
+
 mod client;
 pub mod client_manager;
 pub mod error;
 pub mod load_balance;
 mod metrics;
 pub mod region;
+#[cfg(feature = "testing")]
+mod database;
 
 pub use api;
 use api::v1::greptime_response::Response;
@@ -29,6 +33,8 @@ pub use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use snafu::OptionExt;
 
 pub use self::client::Client;
+#[cfg(feature = "testing")]
+pub use self::database::Database;
 pub use self::error::{Error, Result};
 use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};
 

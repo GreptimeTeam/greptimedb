@@ -15,7 +15,6 @@
 #![feature(assert_matches)]
 
 pub mod cluster;
-pub mod database;
 mod grpc;
 mod influxdb;
 mod instance;
