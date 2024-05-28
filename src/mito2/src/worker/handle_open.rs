@@ -68,17 +68,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionOpenRequest,
         sender: OptionOutputTx,
     ) {
+        if self.regions.is_region_exists(region_id) {
+            sender.send(Ok(0));
+            return;
+        }
         let Some(sender) = self
             .opening_regions
             .wait_for_opening_region(region_id, sender)
         else {
             return;
         };
-
-        if self.regions.is_region_exists(region_id) {
-            sender.send(Ok(0));
-            return;
-        }
         if let Err(err) = self.check_and_cleanup_region(region_id, &request).await {
             sender.send(Err(err));
             return;
@@ -106,7 +105,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let regions = self.regions.clone();
-        let wal: crate::wal::Wal<S> = self.wal.clone();
+        let wal = self.wal.clone();
         let config = self.config.clone();
         let opening_regions = self.opening_regions.clone();
         opening_regions.insert_sender(region_id, sender);

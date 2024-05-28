@@ -779,34 +779,32 @@ mod tests {
         let mut mock_region_server = mock_region_server();
         let (engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
         let engine_name = engine.name();
-
         mock_region_server.register_engine(engine.clone());
-
         let region_id = RegionId::new(1, 1);
         let builder = CreateRequestBuilder::new();
         let create_req = builder.build();
-
         // Tries to create/open a registering region.
         mock_region_server.inner.region_map.insert(
             region_id,
             RegionEngineWithStatus::Registering(engine.clone()),
         );
-
         let response = mock_region_server
             .handle_request(region_id, RegionRequest::Create(create_req))
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
-
         let status = mock_region_server
             .inner
             .region_map
             .get(&region_id)
             .unwrap()
             .clone();
+        assert!(matches!(status, RegionEngineWithStatus::Ready(_)));
 
-        assert!(matches!(status, RegionEngineWithStatus::Registering(_)));
-
+        mock_region_server.inner.region_map.insert(
+            region_id,
+            RegionEngineWithStatus::Registering(engine.clone()),
+        );
         let response = mock_region_server
             .handle_request(
                 region_id,
@@ -820,14 +818,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
-
         let status = mock_region_server
             .inner
             .region_map
             .get(&region_id)
             .unwrap()
             .clone();
-        assert!(matches!(status, RegionEngineWithStatus::Registering(_)));
+        assert!(matches!(status, RegionEngineWithStatus::Ready(_)));
     }
 
     #[tokio::test]
