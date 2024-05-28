@@ -15,6 +15,7 @@
 use snafu::ResultExt;
 use sqlparser::ast::Statement as SpStatement;
 
+use crate::ast::{Ident, ObjectName};
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::statements::set_variables::SetVariables;
@@ -32,6 +33,15 @@ impl<'a> ParserContext<'a> {
                 hivevar,
                 ..
             } if !hivevar => Ok(Statement::SetVariables(SetVariables { variable, value })),
+
+            SpStatement::SetTimeZone { value, .. } => Ok(Statement::SetVariables(SetVariables {
+                variable: ObjectName(vec![Ident {
+                    value: "TIMEZONE".to_string(),
+                    quote_style: None,
+                }]),
+                value: vec![value],
+            })),
+
             unexp => error::UnsupportedSnafu {
                 sql: self.sql.to_string(),
                 keyword: unexp.to_string(),
@@ -62,6 +72,19 @@ mod tests {
         );
     }
 
+    fn assert_pg_parse_result(sql: &str) {
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::SetVariables(SetVariables {
+                variable: ObjectName(vec![Ident::new("TIMEZONE")]),
+                value: vec![Expr::Value(Value::SingleQuotedString("UTC".to_string()))],
+            })
+        );
+    }
+
     #[test]
     pub fn test_set_timezone() {
         // mysql style
@@ -75,15 +98,8 @@ mod tests {
 
         // postgresql style
         let sql = "SET TIMEZONE TO 'UTC'";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        let mut stmts = result.unwrap();
-        assert_eq!(
-            stmts.pop().unwrap(),
-            Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new("TIMEZONE")]),
-                value: vec![Expr::Value(Value::SingleQuotedString("UTC".to_string()))],
-            })
-        );
+        assert_pg_parse_result(sql);
+        let sql = "SET TIMEZONE 'UTC'";
+        assert_pg_parse_result(sql);
     }
 }
