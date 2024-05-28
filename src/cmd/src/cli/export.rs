@@ -17,20 +17,21 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose;
 use base64::Engine;
+use base64::engine::general_purpose;
 use clap::{Parser, ValueEnum};
-use client::DEFAULT_SCHEMA_NAME;
-use common_telemetry::{debug, error, info, warn};
 use serde_json::Value;
-use servers::http::greptime_result_v1::GreptimedbV1Response;
-use servers::http::GreptimeQueryOutput;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tracing_appender::non_blocking::WorkerGuard;
+
+use client::DEFAULT_SCHEMA_NAME;
+use common_telemetry::{debug, error, info, warn};
+use servers::http::greptime_result_v1::GreptimedbV1Response;
+use servers::http::GreptimeQueryOutput;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
@@ -432,5 +433,83 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
         Ok((catalog.to_string(), None))
     } else {
         Ok((catalog.to_string(), Some(schema.to_string())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use client::{Client, Database};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, DEFAULT_SCHEMA_NAME};
+    use common_telemetry::logging::LoggingOptions;
+
+    use crate::{App, cli, standalone};
+    use crate::error::Result as CmdResult;
+    use crate::options::GlobalOptions;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let standalone = standalone::Command::parse_from([
+            "standalone",
+            "start",
+            "--data-home",
+            &*output_dir.path().to_string_lossy(),
+        ]);
+
+        let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
+        let mut instance = standalone.build(standalone_opts).await?;
+        instance.start().await?;
+
+        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        database
+            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
+            .await
+            .unwrap();
+        database
+            .sql(
+                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
+                        ts TIMESTAMP,
+                        TIME INDEX (ts)
+                    ) engine=mito;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let cli = cli::Command::parse_from([
+            "cli",
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--output-dir",
+            &*output_dir.path().to_string_lossy(),
+            "--target",
+            "create-table",
+        ]);
+        let mut cli_app = cli.build(LoggingOptions::default()).await?;
+        cli_app.start().await?;
+
+        instance.stop().await?;
+
+        let output_file = output_dir
+            .path()
+            .join("greptime-cli.export.create_table.sql");
+        let res = std::fs::read_to_string(output_file).unwrap();
+        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+
+ENGINE=mito
+;
+"#;
+        assert_eq!(res.trim(), expect.trim());
+
+        Ok(())
     }
 }
