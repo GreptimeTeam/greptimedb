@@ -28,8 +28,7 @@ use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{
-    ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result,
-    UnexpectedNamespaceTypeSnafu,
+    ConsumeRecordSnafu, Error, GetOffsetSnafu, Result, UnexpectedNamespaceTypeSnafu,
 };
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
@@ -224,7 +223,7 @@ impl LogStore for KafkaLogStore {
 
                 // Ignores no-op records.
                 if kafka_record.value.is_none() {
-                    if check_termination(offset, end_offset, &entry_records)? {
+                    if check_termination(offset, end_offset) {
                         break;
                     }
                     continue;
@@ -240,7 +239,7 @@ impl LogStore for KafkaLogStore {
                     yield Ok(vec![entry]);
                 }
 
-                if check_termination(offset, end_offset, &entry_records)? {
+                if check_termination(offset, end_offset) {
                     break;
                 }
             }
@@ -276,24 +275,14 @@ impl LogStore for KafkaLogStore {
     }
 }
 
-fn check_termination(
-    offset: i64,
-    end_offset: i64,
-    entry_records: &HashMap<RegionId, Vec<Record>>,
-) -> Result<bool> {
+fn check_termination(offset: i64, end_offset: i64) -> bool {
     // Terminates the stream if the entry with the end offset was read.
     if offset >= end_offset {
         debug!("Stream consumer terminates at offset {}", offset);
         // There must have no records when the stream terminates.
-        if !entry_records.is_empty() {
-            return IllegalSequenceSnafu {
-                error: "Found records leftover",
-            }
-            .fail();
-        }
-        Ok(true)
+        true
     } else {
-        Ok(false)
+        false
     }
 }
 

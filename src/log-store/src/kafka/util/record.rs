@@ -251,15 +251,7 @@ pub fn maybe_emit_entry(
             entry = Some(EntryImpl::from(vec![record]));
         }
         RecordType::First => {
-            ensure!(
-                !entry_records.contains_key(&(record.meta.ns.region_id.into())),
-                IllegalSequenceSnafu {
-                    error: format!(
-                        "First record must be the first, region_id: {}",
-                        record.meta.ns.region_id
-                    )
-                }
-            );
+            // Last win policy, overwrite any potential incomplete parts.
             entry_records.insert(record.meta.ns.region_id.into(), vec![record]);
         }
         RecordType::Middle(seq) => {
@@ -431,21 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn test_maybe_emit_entry_unexpected_first_part() {
-        let mut records = HashMap::new();
-        let incoming_record = new_test_record(RecordType::First, 0, 0, vec![]);
-        assert!(maybe_emit_entry(incoming_record, &mut records)
-            .unwrap()
-            .is_none());
-
-        let incoming_record = new_test_record(RecordType::First, 0, 0, vec![]);
-        assert!(maybe_emit_entry(incoming_record, &mut records)
-            .unwrap_err()
-            .to_string()
-            .contains("First record must be the first"));
-    }
-
-    #[test]
     fn test_maybe_emit_entry_ignore_incomplete_part() {
         let mut records = HashMap::new();
         let incoming_record = new_test_record(RecordType::Last, 0, 0, vec![]);
@@ -500,6 +477,37 @@ mod tests {
                 ns,
             }
         );
+
+        let mut records = HashMap::new();
+        let first_entry = new_test_record(RecordType::First, 1, 1, vec![1, 1, 1]);
+        let mid_entry = new_test_record(RecordType::Middle(1), 1, 1, vec![2, 2, 2]);
+        let last_entry = new_test_record(RecordType::Last, 1, 1, vec![3, 3, 3]);
+        let ns = first_entry.meta.ns.clone();
+        assert!(maybe_emit_entry(first_entry, &mut records)
+            .unwrap()
+            .is_none());
+        assert!(maybe_emit_entry(mid_entry, &mut records).unwrap().is_none());
+        let entry = maybe_emit_entry(last_entry, &mut records).unwrap().unwrap();
+
+        assert_eq!(
+            entry,
+            EntryImpl {
+                data: vec![1, 1, 1, 2, 2, 2, 3, 3, 3],
+                id: 1,
+                ns,
+            }
+        );
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_overwrite_incomplete_part() {
+        let mut records = HashMap::new();
+        let incoming_record = new_test_record(RecordType::First, 0, 0, vec![]);
+        // Incomplete part will be ignored
+        assert!(maybe_emit_entry(incoming_record, &mut records)
+            .unwrap()
+            .is_none());
+        assert_eq!(records.len(), 1);
 
         let mut records = HashMap::new();
         let first_entry = new_test_record(RecordType::First, 1, 1, vec![1, 1, 1]);
