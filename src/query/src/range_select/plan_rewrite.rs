@@ -510,7 +510,7 @@ impl RangePlanRewriter {
 fn have_range_in_exprs(exprs: &[Expr]) -> bool {
     exprs.iter().any(|expr| {
         let mut find_range = false;
-        let _ = expr.apply(&mut |expr| {
+        let _ = expr.apply(|expr| {
             Ok(match expr {
                 Expr::ScalarFunction(func) if func.name() == "range_fn" => {
                     find_range = true;
@@ -525,7 +525,7 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
 
 fn interval_only_in_expr(expr: &Expr) -> bool {
     let mut all_interval = true;
-    let _ = expr.apply(&mut |expr| {
+    let _ = expr.apply(|expr| {
         if !matches!(
             expr,
             Expr::Literal(ScalarValue::IntervalDayTime(_))
@@ -649,7 +649,7 @@ mod test {
     #[tokio::test]
     async fn range_multi_args() {
         let query =
-            r#"SELECT (covar(field_0 + field_1, field_1)/4) RANGE '5m' FROM test ALIGN '1h';"#;
+            r#"SELECT (covar_pop(field_0 + field_1, field_1)/4) RANGE '5m' FROM test ALIGN '1h';"#;
         let expected = String::from(
             "Projection: COVAR(test.field_0 + test.field_1,test.field_1) RANGE 5m / Int64(4) [COVAR(test.field_0 + test.field_1,test.field_1) RANGE 5m / Int64(4):Float64;N]\
             \n  RangeSelect: range_exprs=[COVAR(test.field_0 + test.field_1,test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1, test.tag_2, test.tag_3, test.tag_4], time_index=timestamp [COVAR(test.field_0 + test.field_1,test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8]\

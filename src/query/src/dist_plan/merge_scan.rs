@@ -86,8 +86,12 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
         write!(f, "MergeScan [is_placeholder={}]", self.is_placeholder)
     }
 
-    fn from_template(&self, _exprs: &[datafusion_expr::Expr], _inputs: &[LogicalPlan]) -> Self {
-        self.clone()
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::prelude::Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(self.clone())
     }
 }
 

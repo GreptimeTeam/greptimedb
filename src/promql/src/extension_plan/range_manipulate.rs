@@ -231,10 +231,18 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "RangeManipulate should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -243,7 +251,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
             field_columns: self.field_columns.clone(),
             input: inputs[0].clone(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 

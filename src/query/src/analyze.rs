@@ -210,7 +210,7 @@ fn create_output_batch(
     builder.append_metric(0, 0, stage_0_metrics);
 
     // Find merge scan and append its sub_stage_metrics
-    input.apply(&mut |plan| {
+    input.apply(|plan| {
         if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
             let sub_stage_metrics = merge_scan.sub_stage_metrics();
             for (node, metric) in sub_stage_metrics.into_iter().enumerate() {

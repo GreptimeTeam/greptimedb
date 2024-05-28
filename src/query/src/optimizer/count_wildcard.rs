@@ -57,7 +57,7 @@ impl CountWildcardToTimeIndexRule {
         };
         plan.map_expressions(|expr| {
             let original_name = name_preserver.save(&expr)?;
-            let transformed_expr = expr.transform_up_mut(&mut |expr| match expr {
+            let transformed_expr = expr.transform_up(|expr| match expr {
                 Expr::WindowFunction(mut window_function)
                     if Self::is_count_star_window_aggregate(&window_function) =>
                 {

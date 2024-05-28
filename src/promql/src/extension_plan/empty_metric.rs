@@ -156,19 +156,23 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
         )
     }
 
-    fn from_template(&self, expr: &[Expr], _inputs: &[LogicalPlan]) -> Self {
-        Self {
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        Ok(Self {
             start: self.start,
             end: self.end,
             interval: self.interval,
-            expr: if !expr.is_empty() {
-                Some(expr[0].clone())
+            expr: if !exprs.is_empty() {
+                Some(exprs[0].clone())
             } else {
                 None
             },
             time_index_schema: self.time_index_schema.clone(),
             result_schema: self.result_schema.clone(),
-        }
+        })
     }
 }
 

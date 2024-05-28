@@ -584,9 +584,22 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
         )
     }
 
-    fn from_template(&self, exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
-        assert!(exprs.len() == self.range_expr.len() + self.by.len() + 1);
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Plan(
+                "RangeSelect: inputs is empty".to_string(),
+            ));
+        }
+        if exprs.len() != self.range_expr.len() + self.by.len() + 1 {
+            return Err(DataFusionError::Plan(
+                "RangeSelect: exprs length not match".to_string(),
+            ));
+        }
+
         let range_expr = exprs
             .iter()
             .zip(self.range_expr.iter())
@@ -601,7 +614,7 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
             .collect();
         let time_expr = exprs[self.range_expr.len()].clone();
         let by = exprs[self.range_expr.len() + 1..].to_vec();
-        Self {
+        Ok(Self {
             align: self.align,
             align_to: self.align_to,
             range_expr,
@@ -613,7 +626,7 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
             by_schema: self.by_schema.clone(),
             schema_project: self.schema_project.clone(),
             schema_before_project: self.schema_before_project.clone(),
-        }
+        })
     }
 }
 
@@ -795,10 +808,8 @@ impl RangeSelect {
                                 &input_schema,
                                 name,
                                 false,
+                                false,
                             ),
-                            f => Err(DataFusionError::NotImplemented(format!(
-                                "Range function from {f:?}"
-                            ))),
                         }
                     }
                     _ => Err(DataFusionError::Plan(format!(

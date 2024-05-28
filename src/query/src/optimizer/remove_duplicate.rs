@@ -50,7 +50,7 @@ impl PhysicalOptimizerRule for RemoveDuplicate {
 impl RemoveDuplicate {
     fn do_optimize(plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
         let result = plan
-            .transform_down_mut(&mut |plan| {
+            .transform_down(|plan| {
                 if plan.as_any().is::<CoalesceBatchesExec>()
                     || plan.as_any().is::<RepartitionExec>()
                 {

@@ -95,8 +95,12 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        Self {
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        Ok(Self {
             le_column: self.le_column.clone(),
             ts_column: self.ts_column.clone(),
             input: inputs[0].clone(),
@@ -105,7 +109,7 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
             // This method cannot return error. Otherwise we should re-calculate
             // the output schema
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 

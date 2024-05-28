@@ -215,9 +215,17 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
         write!(f, "ScalarCalculate: tags={:?}", self.tag_columns)
     }
 
-    fn from_template(&self, _expr: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
-        ScalarCalculate {
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if !exprs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "ScalarCalculate should not have any expressions".to_string(),
+            ));
+        }
+        Ok(ScalarCalculate {
             start: self.start,
             end: self.end,
             interval: self.interval,
@@ -226,7 +234,7 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
             field_column: self.field_column.clone(),
             input: inputs[0].clone(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 

@@ -141,7 +141,7 @@ impl DfLogicalPlanner {
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
         );
-        PromPlanner::stmt_to_plan(table_provider, stmt)
+        PromPlanner::stmt_to_plan(table_provider, stmt, &self.session_state)
             .await
             .map(LogicalPlan::DfPlan)
             .map_err(BoxedError::new)

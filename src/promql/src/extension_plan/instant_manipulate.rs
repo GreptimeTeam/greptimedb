@@ -83,10 +83,18 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "InstantManipulate should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -94,7 +102,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             time_index_column: self.time_index_column.clone(),
             field_column: self.field_column.clone(),
             input: inputs[0].clone(),
-        }
+        })
     }
 }
 

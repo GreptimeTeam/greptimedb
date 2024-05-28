@@ -81,15 +81,23 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "SeriesNormalize should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: inputs[0].clone(),
-        }
+        })
     }
 }
 

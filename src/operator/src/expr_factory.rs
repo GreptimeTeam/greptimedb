@@ -322,11 +322,8 @@ fn find_primary_keys(
     let constraints_pk = constraints
         .iter()
         .filter_map(|constraint| match constraint {
-            TableConstraint::Unique {
-                name: _,
-                columns,
-                is_primary: true,
-                ..
+            TableConstraint::PrimaryKey {
+                name: _, columns, ..
             } => Some(columns.iter().map(|ident| ident.value.clone())),
             _ => None,
         })
@@ -353,7 +350,6 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
             TableConstraint::Unique {
                 name: Some(name),
                 columns,
-                is_primary: false,
                 ..
             } => {
                 if name.value == TIME_INDEX {
