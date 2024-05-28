@@ -26,7 +26,6 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
-use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
@@ -66,6 +65,10 @@ mod table_source;
 use error::Error;
 
 pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
+
+pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
+
+pub const UPDATE_AT_TS_COL: &str = "update_at";
 
 // TODO: refactor common types for flow to a separate module
 /// FlowId is a unique identifier for a flow task
@@ -282,7 +285,7 @@ impl FlownodeManager {
                 let schema = meta.schema.column_schemas;
                 let is_auto_create = schema
                     .last()
-                    .map(|s| s.name == GREPTIME_TIMESTAMP)
+                    .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
                     .unwrap_or(false);
                 (primary_keys, schema, is_auto_create)
             } else {
@@ -314,13 +317,13 @@ impl FlownodeManager {
                     })
                     .unwrap_or_default();
                 let update_at = ColumnSchema::new(
-                    "update_at",
+                    UPDATE_AT_TS_COL,
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 );
                 // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
                 let ts_col = ColumnSchema::new(
-                    GREPTIME_TIMESTAMP,
+                    AUTO_CREATED_PLACEHOLDER_TS_COL,
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 )
@@ -357,16 +360,7 @@ impl FlownodeManager {
                 table_name.join("."),
                 reqs
             );
-            let now = SystemTime::now();
-            let now = now
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|s| s.as_millis() as repr::Timestamp)
-                .unwrap_or_else(|_| {
-                    -(SystemTime::UNIX_EPOCH
-                        .duration_since(now)
-                        .unwrap()
-                        .as_millis() as repr::Timestamp)
-                });
+            let now = self.tick_manager.tick();
             for req in reqs {
                 match req {
                     DiffRequest::Insert(insert) => {
@@ -666,7 +660,9 @@ impl FlownodeManager {
 /// TSO coord mess
 #[derive(Clone, Debug)]
 pub struct FlowTickManager {
+    /// The starting instant of the flow, used with `start_timestamp` to calculate the current timestamp
     start: Instant,
+    /// The timestamp when the flow started
     start_timestamp: repr::Timestamp,
 }
 

@@ -406,10 +406,15 @@ fn reduce_accum_subgraph(
             err_collector.run(|| {
                 if let Some(expired) = expire_man.get_expire_duration(now, &key)? {
                     is_expired = true;
-                    DataAlreadyExpiredSnafu {
-                        expired_by: expired,
-                    }
-                    .fail()
+                    // expired data is ignored in computation, and a simple warning is logged
+                    common_telemetry::warn!(
+                        "Data already expired: {}",
+                        DataAlreadyExpiredSnafu {
+                            expired_by: expired,
+                        }
+                        .build()
+                    );
+                    Ok(())
                 } else {
                     Ok(())
                 }
