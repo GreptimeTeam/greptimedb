@@ -35,6 +35,7 @@ use crate::error::{
     ChecksumMismatchSnafu, CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu,
     OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
+use crate::metrics::MANIFEST_OP_ELAPSED;
 
 lazy_static! {
     static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json").unwrap();
@@ -239,8 +240,15 @@ impl ManifestObjectStore {
     /// Fetch all manifests in concurrent.
     pub async fn fetch_manifests(
         &self,
-        manifests: &[(u64, Entry)],
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["fetch_manifests"])
+            .start_timer();
+
+        let manifests = self.scan(start_version, end_version).await?;
+
         // TODO(weny): Make it configurable.
         let semaphore = Semaphore::new(FETCH_MANIFEST_PARALLELISM);
 
@@ -276,6 +284,10 @@ impl ManifestObjectStore {
         end: ManifestVersion,
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["delete_manifests"])
+            .start_timer();
+
         // Stores (entry, is_checkpoint, version) in a Vec.
         let entries: Vec<_> = self
             .get_paths(|entry| {
@@ -379,6 +391,10 @@ impl ManifestObjectStore {
 
     /// Save the checkpoint manifest file.
     pub async fn save_checkpoint(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["save_checkpoint"])
+            .start_timer();
+
         let path = self.checkpoint_file_path(version);
         let data = self
             .compress_type
@@ -486,6 +502,10 @@ impl ManifestObjectStore {
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["last_checkpoint"])
+            .start_timer();
+
         let last_checkpoint_path = self.last_checkpoint_path();
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
             Ok(data) => data,
@@ -682,8 +702,7 @@ mod tests {
                 .unwrap();
         }
 
-        let manifests = log_store.scan(1, 4).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(1, 4).await.unwrap();
         let mut it = manifests.into_iter();
         for v in 1..4 {
             let (version, bytes) = it.next().unwrap();
@@ -692,8 +711,7 @@ mod tests {
         }
         assert!(it.next().is_none());
 
-        let manifests = log_store.scan(0, 11).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
         for v in 0..5 {
             let (version, bytes) = it.next().unwrap();
@@ -721,8 +739,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let _ = log_store.load_last_checkpoint().await.unwrap().unwrap();
-        let manifests = log_store.scan(0, 11).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
 
         let (version, bytes) = it.next().unwrap();
@@ -738,8 +755,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
-        let manifests = log_store.scan(0, 11).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
 
         assert!(it.next().is_none());
@@ -784,8 +800,7 @@ mod tests {
             .unwrap();
 
         // test data reading
-        let manifests = log_store.scan(0, 10).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 10).await.unwrap();
         let mut it = manifests.into_iter();
 
         for v in 0..10 {
@@ -807,8 +822,7 @@ mod tests {
         // Delete util 10, contain uncompressed/compressed data
         // log 0, 1, 2, 7, 8, 9 will be delete
         assert_eq!(11, log_store.delete_until(10, false).await.unwrap());
-        let manifests = log_store.scan(0, 10).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 10).await.unwrap();
         let mut it = manifests.into_iter();
         assert!(it.next().is_none());
     }

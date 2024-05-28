@@ -215,8 +215,7 @@ impl RegionManifestManager {
         };
 
         // apply actions from storage
-        let manifests = store.scan(version, MAX_VERSION).await?;
-        let manifests = store.fetch_manifests(&manifests).await?;
+        let manifests = store.fetch_manifests(version, MAX_VERSION).await?;
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
@@ -386,59 +385,17 @@ impl RegionManifestManager {
             .with_label_values(&["checkpoint"])
             .start_timer();
 
-        let last_checkpoint = Self::last_checkpoint(&mut self.store).await?;
-        let current_version = self.last_version;
-
-        let (start_version, mut manifest_builder) = if let Some(checkpoint) = last_checkpoint {
-            (
-                checkpoint.last_version + 1,
-                RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint),
-            )
+        let start_version = if self.last_checkpoint_version == 0 {
+            // Checkpoint version can't be zero by implementation.
+            // So last checkpoint version is zero means no last checkpoint.
+            MIN_VERSION
         } else {
-            (MIN_VERSION, RegionManifestBuilder::default())
+            self.last_checkpoint_version + 1
         };
-        let end_version = current_version;
-
-        if start_version >= end_version {
-            return Ok(None);
-        }
-
-        let manifests = self.store.scan(start_version, end_version).await?;
-        let mut last_version = start_version;
-        let mut compacted_actions = 0;
-
-        let manifests = self.store.fetch_manifests(&manifests).await?;
-
-        for (version, raw_action_list) in manifests {
-            let action_list = RegionMetaActionList::decode(&raw_action_list)?;
-            for action in action_list.actions {
-                match action {
-                    RegionMetaAction::Change(action) => {
-                        manifest_builder.apply_change(version, action);
-                    }
-                    RegionMetaAction::Edit(action) => {
-                        manifest_builder.apply_edit(version, action);
-                    }
-                    RegionMetaAction::Remove(_) => {
-                        debug!(
-                            "Unhandled action for region {}, action: {:?}",
-                            self.manifest.metadata.region_id, action
-                        );
-                    }
-                    RegionMetaAction::Truncate(action) => {
-                        manifest_builder.apply_truncate(version, action);
-                    }
-                }
-            }
-            last_version = version;
-            compacted_actions += 1;
-        }
-
-        if compacted_actions == 0 {
-            return Ok(None);
-        }
-
-        let region_manifest = manifest_builder.try_build()?;
+        let end_version = self.last_version;
+        let last_version = self.last_version;
+        let compacted_actions = (end_version - start_version + 1) as usize;
+        let region_manifest = self.manifest.as_ref().clone();
         let checkpoint = RegionCheckpoint {
             last_version,
             compacted_actions,
@@ -670,6 +627,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1312);
+        assert_eq!(manifest_size, 1173);
     }
 }
