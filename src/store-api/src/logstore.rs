@@ -38,16 +38,6 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
-    async fn append(&self, entry: Entry) -> Result<AppendResponse, Self::Error> {
-        let response = self.append_batch(vec![entry]).await?;
-        if let Some((_, last_entry_id)) = response.last_entry_ids.into_iter().next() {
-            return Ok(AppendResponse { last_entry_id });
-        }
-        todo!()
-    }
-
-    /// Appends a batch of entries and returns a response containing a map where the key is a region id
-    /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse, Self::Error>;
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with ids
