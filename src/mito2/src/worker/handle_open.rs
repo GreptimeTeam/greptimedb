@@ -20,24 +20,24 @@ use common_telemetry::info;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::{AffectedRows, RegionOpenRequest};
+use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{ObjectStoreNotFoundSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{
+    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
+};
 use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
+use crate::request::OptionOutputTx;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_open_request(
-        &mut self,
+    async fn check_and_cleanup_region(
+        &self,
         region_id: RegionId,
-        request: RegionOpenRequest,
-    ) -> Result<AffectedRows> {
-        if self.regions.is_region_exists(region_id) {
-            return Ok(0);
-        }
+        request: &RegionOpenRequest,
+    ) -> Result<()> {
         let object_store = if let Some(storage_name) = request.options.get("storage") {
             self.object_store_manager
                 .find(storage_name)
@@ -59,10 +59,33 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionNotFoundSnafu { region_id }.fail();
         }
 
+        Ok(())
+    }
+
+    pub(crate) async fn handle_open_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionOpenRequest,
+        sender: OptionOutputTx,
+    ) {
+        if self.regions.is_region_exists(region_id) {
+            sender.send(Ok(0));
+            return;
+        }
+        let Some(sender) = self
+            .opening_regions
+            .wait_for_opening_region(region_id, sender)
+        else {
+            return;
+        };
+        if let Err(err) = self.check_and_cleanup_region(region_id, &request).await {
+            sender.send(Err(err));
+            return;
+        }
         info!("Try to open region {}", region_id);
 
         // Open region from specific region dir.
-        let region = RegionOpener::new(
+        let opener = match RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder_provider.clone(),
@@ -71,18 +94,43 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.intermediate_manager.clone(),
         )
         .skip_wal_replay(request.skip_wal_replay)
-        .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
-        .open(&self.config, &self.wal)
-        .await?;
+        .parse_options(request.options)
+        {
+            Ok(opener) => opener,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
+        };
 
-        info!("Region {} is opened", region_id);
+        let regions = self.regions.clone();
+        let wal = self.wal.clone();
+        let config = self.config.clone();
+        let opening_regions = self.opening_regions.clone();
+        opening_regions.insert_sender(region_id, sender);
+        common_runtime::spawn_bg(async move {
+            match opener.open(&config, &wal).await {
+                Ok(region) => {
+                    info!("Region {} is opened", region_id);
+                    REGION_COUNT.inc();
 
-        REGION_COUNT.inc();
+                    // Insert the Region into the RegionMap.
+                    regions.insert_region(Arc::new(region));
 
-        // Insert the MitoRegion into the RegionMap.
-        self.regions.insert_region(Arc::new(region));
-
-        Ok(0)
+                    let senders = opening_regions.remove_sender(region_id);
+                    for sender in senders {
+                        sender.send(Ok(0));
+                    }
+                }
+                Err(err) => {
+                    let senders = opening_regions.remove_sender(region_id);
+                    let err = Arc::new(err);
+                    for sender in senders {
+                        sender.send(Err(err.clone()).context(OpenRegionSnafu));
+                    }
+                }
+            }
+        });
     }
 }

@@ -722,6 +722,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to open region"))]
+    OpenRegion {
+        #[snafu(implicit)]
+        location: Location,
+        source: Arc<Error>,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -783,6 +790,7 @@ impl ErrorExt for Error {
             | Recv { .. }
             | EncodeWal { .. }
             | DecodeWal { .. } => StatusCode::Internal,
+            OpenRegion { source, .. } => source.status_code(),
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),

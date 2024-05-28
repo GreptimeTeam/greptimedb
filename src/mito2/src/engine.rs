@@ -104,6 +104,11 @@ impl MitoEngine {
         self.inner.workers.is_region_exists(region_id)
     }
 
+    /// Returns true if the specific region exists.
+    pub fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_opening(region_id)
+    }
+
     /// Returns the region disk/memory usage information.
     pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
         let region = self
