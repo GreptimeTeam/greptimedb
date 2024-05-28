@@ -16,14 +16,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::kvbackend::{
-    CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager,
+use cache::{
+    build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
+    TABLE_ROUTE_CACHE_NAME,
 };
-use client::{Client, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::kvbackend::{
+    CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend,
+};
+use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_config::Mode;
 use common_error::ext::ErrorExt;
-use common_meta::cache_invalidator::MultiCacheInvalidator;
+use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::debug;
@@ -38,12 +42,13 @@ use query::QueryEngine;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use session::context::QueryContext;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::cli::cmd::ReplCommand;
 use crate::cli::helper::RustylineHelper;
 use crate::cli::AttachCommand;
+use crate::error;
 use crate::error::{
     CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
     ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
@@ -257,19 +262,42 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
 
     let cached_meta_backend =
         Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
-    let multi_cache_invalidator = Arc::new(MultiCacheInvalidator::with_invalidators(vec![
-        cached_meta_backend.clone(),
-    ]));
-    let catalog_list = KvBackendCatalogManager::new(
+    let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
+        CacheRegistryBuilder::default()
+            .add_cache(cached_meta_backend.clone())
+            .build(),
+    );
+    let fundamental_cache_registry =
+        build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+    let layered_cache_registry = Arc::new(
+        with_default_composite_cache_registry(
+            layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+        )
+        .context(error::BuildCacheRegistrySnafu)?
+        .build(),
+    );
+
+    let table_cache = layered_cache_registry
+        .get()
+        .context(error::CacheRequiredSnafu {
+            name: TABLE_CACHE_NAME,
+        })?;
+    let table_route_cache = layered_cache_registry
+        .get()
+        .context(error::CacheRequiredSnafu {
+            name: TABLE_ROUTE_CACHE_NAME,
+        })?;
+    let catalog_manager = KvBackendCatalogManager::new(
         Mode::Distributed,
         Some(meta_client.clone()),
         cached_meta_backend.clone(),
-        multi_cache_invalidator,
+        table_cache,
+        table_route_cache,
     )
     .await;
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
-        catalog_list,
+        catalog_manager,
         None,
         None,
         None,

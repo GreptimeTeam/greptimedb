@@ -904,7 +904,6 @@ dependencies = [
  "rskafka",
  "serde",
  "store-api",
- "tests-integration",
  "tokio",
  "toml 0.8.12",
  "uuid",
@@ -9631,7 +9630,6 @@ dependencies = [
  "strum 0.25.0",
  "table",
  "tempfile",
- "tests-integration",
  "tikv-jemalloc-ctl",
  "tokio",
  "tokio-postgres",
@@ -9996,7 +9994,6 @@ dependencies = [
  "serde_json",
  "sqlness",
  "tempfile",
- "tests-integration",
  "tinytemplate",
  "tokio",
 ]
