@@ -332,11 +332,23 @@ fn check_termination(offset: i64, end_offset: i64) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use store_api::logstore::entry::{MultiplePartEntry, MultiplePartHeader, NaiveEntry};
+    use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
+
+    use common_base::readable_size::ReadableSize;
+    use common_telemetry::info;
+    use common_telemetry::tracing::warn;
+    use common_wal::config::kafka::DatanodeKafkaConfig;
+    use futures::TryStreamExt;
+    use rand::prelude::SliceRandom;
+    use rand::Rng;
+    use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
     use store_api::logstore::provider::Provider;
+    use store_api::logstore::LogStore;
     use store_api::storage::RegionId;
 
     use super::build_entry;
+    use crate::kafka::log_store::KafkaLogStore;
 
     #[test]
     fn test_build_naive_entry() {
@@ -398,224 +410,157 @@ mod tests {
             }
         )
     }
+
+    fn generate_entries(
+        logstore: &KafkaLogStore,
+        provider: &Provider,
+        num_entries: usize,
+        region_id: RegionId,
+        data_len: usize,
+    ) -> Vec<Entry> {
+        (0..num_entries)
+            .map(|_| {
+                let mut data: Vec<u8> = (0..data_len).map(|_| rand::random::<u8>()).collect();
+                // Always set `entry_id` to 0, the real entry_id will be set during the read.
+                logstore.entry(&mut data, 0, region_id, provider).unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_append_batch_basic() {
+        common_telemetry::init_default_ut_logging();
+        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+            warn!("The endpoints is empty, skipping the test 'test_append_batch_basic'");
+            return;
+        };
+        let broker_endpoints = broker_endpoints
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>();
+        let config = DatanodeKafkaConfig {
+            broker_endpoints,
+            max_batch_size: ReadableSize::kb(32),
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        let provider = Provider::kafka_provider(topic_name);
+        let region_entries = (0..5)
+            .map(|i| {
+                let region_id = RegionId::new(1, i);
+                (
+                    region_id,
+                    generate_entries(&logstore, &provider, 20, region_id, 1024),
+                )
+            })
+            .collect::<HashMap<RegionId, Vec<_>>>();
+
+        let mut all_entries = region_entries
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        all_entries.shuffle(&mut rand::thread_rng());
+
+        let response = logstore.append_batch(all_entries.clone()).await.unwrap();
+        // 5 region
+        assert_eq!(response.last_entry_ids.len(), 5);
+        let got_entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        for (region_id, _) in region_entries {
+            let expected_entries = all_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut actual_entries = got_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            actual_entries
+                .iter_mut()
+                .for_each(|entry| entry.set_entry_id(0));
+            assert_eq!(expected_entries, actual_entries);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_append_batch_basic_large() {
+        common_telemetry::init_default_ut_logging();
+        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+            warn!("The endpoints is empty, skipping the test 'test_append_batch_basic_large'");
+            return;
+        };
+        let data_size_kb = rand::thread_rng().gen_range(9..31usize);
+        info!("Entry size: {}Ki", data_size_kb);
+        let broker_endpoints = broker_endpoints
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>();
+        let config = DatanodeKafkaConfig {
+            broker_endpoints,
+            max_batch_size: ReadableSize::kb(8),
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        let provider = Provider::kafka_provider(topic_name);
+        let region_entries = (0..5)
+            .map(|i| {
+                let region_id = RegionId::new(1, i);
+                (
+                    region_id,
+                    generate_entries(&logstore, &provider, 20, region_id, data_size_kb * 1024),
+                )
+            })
+            .collect::<HashMap<RegionId, Vec<_>>>();
+
+        let mut all_entries = region_entries
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_matches!(all_entries[0], Entry::MultiplePart(_));
+        all_entries.shuffle(&mut rand::thread_rng());
+
+        let response = logstore.append_batch(all_entries.clone()).await.unwrap();
+        // 5 region
+        assert_eq!(response.last_entry_ids.len(), 5);
+        let got_entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        for (region_id, _) in region_entries {
+            let expected_entries = all_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut actual_entries = got_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            actual_entries
+                .iter_mut()
+                .for_each(|entry| entry.set_entry_id(0));
+            assert_eq!(expected_entries, actual_entries);
+        }
+    }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use common_base::readable_size::ReadableSize;
-//     use common_telemetry::info;
-//     use futures::TryStreamExt;
-//     use rand::seq::IteratorRandom;
-
-//     use super::*;
-//     use crate::test_util::kafka::{
-//         create_topics, entries_with_random_data, new_namespace, EntryBuilder,
-//     };
-
-//     // Stores test context for a region.
-//     struct RegionContext {
-//         ns: Provider,
-//         entry_builder: EntryBuilder,
-//         expected: Vec<EntryImpl>,
-//         flushed_entry_id: EntryId,
-//     }
-
-//     /// Prepares for a test in that a log store is constructed and a collection of topics is created.
-//     async fn prepare(
-//         test_name: &str,
-//         num_topics: usize,
-//         broker_endpoints: Vec<String>,
-//     ) -> (KafkaLogStore, Vec<String>) {
-//         let topics = create_topics(
-//             num_topics,
-//             |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
-//             &broker_endpoints,
-//         )
-//         .await;
-
-//         let config = DatanodeKafkaConfig {
-//             broker_endpoints,
-//             max_batch_size: ReadableSize::kb(32),
-//             ..Default::default()
-//         };
-//         let logstore = KafkaLogStore::try_new(&config).await.unwrap();
-
-//         let region_id = RegionId::new(0, 0);
-//         // Appends a no-op record to each topic.
-//         for topic in topics.iter() {
-//             let last_entry_id = logstore
-//                 .append_batch(vec![Entry::Naive(NaiveEntry {
-//                     provider: Provider::kafka_provider(topic.to_string()),
-//                     region_id,
-//                     entry_id: 0,
-//                     data: vec![],
-//                 })])
-//                 .await
-//                 .unwrap()
-//                 .last_entry_ids
-//                 .remove(&region_id)
-//                 .unwrap();
-//             assert_eq!(last_entry_id, 0);
-//         }
-
-//         (logstore, topics)
-//     }
-
-//     /// Creates a vector containing indexes of all regions if the `all` is true.
-//     /// Otherwise, creates a subset of the indexes. The cardinality of the subset
-//     /// is nearly a quarter of that of the universe set.
-//     fn all_or_subset(all: bool, num_regions: usize) -> Vec<u64> {
-//         assert!(num_regions > 0);
-//         let amount = if all {
-//             num_regions
-//         } else {
-//             (num_regions / 4).max(1)
-//         };
-//         (0..num_regions as u64).choose_multiple(&mut rand::thread_rng(), amount)
-//     }
-
-//     /// Builds entries for regions specified by `which`. Builds large entries if `large` is true.
-//     /// Returns the aggregated entries.
-//     fn build_entries(
-//         region_contexts: &mut HashMap<u64, RegionContext>,
-//         which: &[u64],
-//         large: bool,
-//     ) -> Vec<EntryImpl> {
-//         let mut aggregated = Vec::with_capacity(which.len());
-//         for region_id in which {
-//             let ctx = region_contexts.get_mut(region_id).unwrap();
-//             // Builds entries for the region.
-//             ctx.expected = if !large {
-//                 entries_with_random_data(3, &ctx.entry_builder)
-//             } else {
-//                 // Builds a large entry of size 256KB which is way greater than the configured `max_batch_size` which is 32KB.
-//                 let large_entry = ctx.entry_builder.with_data([b'1'; 256 * 1024]);
-//                 vec![large_entry]
-//             };
-//             // Aggregates entries of all regions.
-//             aggregated.push(ctx.expected.clone());
-//         }
-//         aggregated.into_iter().flatten().collect()
-//     }
-
-//     /// TODO(weny): Consider refactoring the code.
-//     /// Starts a test with:
-//     /// * `test_name` - The name of the test.
-//     /// * `num_topics` - Number of topics to be created in the preparation phase.
-//     /// * `num_regions` - Number of regions involved in the test.
-//     /// * `num_appends` - Number of append operations to be performed.
-//     /// * `all` - All regions will be involved in an append operation if `all` is true. Otherwise,
-//     /// an append operation will only randomly choose a subset of regions.
-//     /// * `large` - Builds large entries for each region is `large` is true.
-//     async fn test_with(
-//         test_name: &str,
-//         num_topics: usize,
-//         num_regions: usize,
-//         num_appends: usize,
-//         all: bool,
-//         large: bool,
-//     ) {
-//         common_telemetry::init_default_ut_logging();
-//         let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
-//             warn!("The endpoints is empty, skipping the test {test_name}");
-//             return;
-//         };
-//         let broker_endpoints = broker_endpoints
-//             .split(',')
-//             .map(|s| s.trim().to_string())
-//             .collect::<Vec<_>>();
-
-//         let (logstore, topics) = prepare(test_name, num_topics, broker_endpoints).await;
-//         let mut region_contexts = (0..num_regions)
-//             .map(|i| {
-//                 let topic = &topics[i % topics.len()];
-//                 let ns = new_namespace(topic, i as u64);
-//                 let entry_builder = EntryBuilder::new(ns.clone());
-//                 (
-//                     i as u64,
-//                     RegionContext {
-//                         ns: Provider::kafka_provider(topic.to_string()),
-//                         entry_builder,
-//                         expected: Vec::new(),
-//                         flushed_entry_id: 0,
-//                     },
-//                 )
-//             })
-//             .collect();
-
-//         for _ in 0..num_appends {
-//             // Appends entries for a subset of regions.
-//             let which = all_or_subset(all, num_regions);
-//             let entries = build_entries(&mut region_contexts, &which, large);
-//             let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
-
-//             // Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
-//             for region_id in which {
-//                 let ctx = region_contexts.get_mut(&region_id).unwrap();
-//                 info!(
-//                     "read region:{}, from: {}",
-//                     region_id,
-//                     ctx.flushed_entry_id + 1
-//                 );
-//                 let stream = logstore
-//                     .read(&ctx.ns, ctx.flushed_entry_id + 1)
-//                     .await
-//                     .unwrap();
-//                 let mut got = stream
-//                     .try_collect::<Vec<_>>()
-//                     .await
-//                     .unwrap()
-//                     .into_iter()
-//                     .flatten()
-//                     .filter(|entry| entry.region_id() == region_id)
-//                     .collect::<Vec<_>>();
-//                 //FIXME(weny): https://github.com/GreptimeTeam/greptimedb/issues/3152
-//                 ctx.expected.iter_mut().for_each(|entry| entry.id = 0);
-//                 got.iter_mut().for_each(|entry| entry.id = 0);
-//                 assert_eq!(ctx.expected, got);
-//             }
-
-//             // Simulates a flush for regions.
-//             for (region_id, last_entry_id) in last_entry_ids {
-//                 let ctx = region_contexts.get_mut(&region_id).unwrap();
-//                 ctx.flushed_entry_id = last_entry_id;
-//                 info!("region: {region_id}, flushed_entry_id: {last_entry_id}");
-//             }
-//         }
-//     }
-
-//     /// Appends entries for one region and checks all entries can be read successfully.
-//     #[tokio::test]
-//     async fn test_one_region() {
-//         test_with("test_one_region", 1, 1, 1, true, false).await;
-//     }
-
-//     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-//     /// A topic is assigned only a single region.
-//     #[tokio::test]
-//     async fn test_multi_regions_disjoint() {
-//         test_with("test_multi_regions_disjoint", 5, 5, 1, true, false).await;
-//     }
-
-//     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-//     /// A topic is assigned multiple regions.
-//     #[tokio::test]
-//     async fn test_multi_regions_overlapped() {
-//         test_with("test_multi_regions_overlapped", 5, 20, 1, true, false).await;
-//     }
-
-//     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-//     /// A topic may be assigned multiple regions. The append operation repeats for a several iterations.
-//     /// Each append operation will only append entries for a subset of randomly chosen regions.
-//     #[tokio::test]
-//     async fn test_multi_appends() {
-//         test_with("test_multi_appends", 5, 20, 3, false, false).await;
-//     }
-
-//     /// Appends large entries for multiple regions and checks entries for each region can be read successfully.
-//     /// A topic may be assigned multiple regions.
-//     #[tokio::test]
-//     async fn test_append_large_entries() {
-//         test_with("test_append_large_entries", 5, 20, 3, true, true).await;
-//     }
-// }
