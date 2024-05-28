@@ -101,7 +101,7 @@ impl TypedExpr {
             .unzip();
 
         match arg_len {
-            1 if UnaryFunc::from_str_and_type(fn_name, None).is_ok() => {
+            1 if UnaryFunc::is_valid_func_name(fn_name) => {
                 let func = UnaryFunc::from_str_and_type(fn_name, None)?;
                 let arg = arg_exprs[0].clone();
                 let ret_type = ColumnType::new_nullable(func.signature().output.clone());
@@ -123,13 +123,7 @@ impl TypedExpr {
 
                 Ok(TypedExpr::new(arg.call_unary(func), ret_type))
             }
-            2 if BinaryFunc::from_str_expr_and_type(
-                fn_name,
-                &arg_exprs,
-                arg_types.get(0..2).expect("arg have 2 elements"),
-            )
-            .is_ok() =>
-            {
+            2 if BinaryFunc::is_valid_func_name(fn_name) => {
                 let (func, signature) =
                     BinaryFunc::from_str_expr_and_type(fn_name, &arg_exprs, &arg_types[0..2])?;
 
@@ -171,7 +165,8 @@ impl TypedExpr {
                 Ok(TypedExpr::new(ret_expr, ret_type))
             }
             _var => {
-                if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
+                if VariadicFunc::is_valid_func_name(fn_name) {
+                    let func = VariadicFunc::from_str_and_types(fn_name, &arg_types)?;
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     let mut expr = ScalarExpr::CallVariadic {
                         func,
@@ -179,9 +174,8 @@ impl TypedExpr {
                     };
                     expr.optimize();
                     Ok(TypedExpr::new(expr, ret_type))
-                } else if let Ok(func) =
-                    UnmaterializableFunc::from_str_args(fn_name, arg_typed_exprs)
-                {
+                } else if UnmaterializableFunc::is_valid_func_name(fn_name) {
+                    let func = UnmaterializableFunc::from_str_args(fn_name, arg_typed_exprs)?;
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     Ok(TypedExpr::new(
                         ScalarExpr::CallUnmaterializable(func),
@@ -520,6 +514,9 @@ mod test {
 
     #[test]
     fn test_func_sig() {
+        fn lit(v: Value) -> substrait_proto::proto::FunctionArgument {
+            todo!()
+        }
         fn col(i: usize) -> substrait_proto::proto::FunctionArgument {
             use substrait_proto::proto::expression;
             let expr = Expression {
@@ -602,5 +599,23 @@ mod test {
             }
         );
         // TODO: test tumble function&other var functions
+
+        let f = substrait_proto::proto::expression::ScalarFunction {
+            function_reference: 0,
+            arguments: vec![col(0), col(1)],
+            options: vec![],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationType::new(vec![
+            ColumnType::new(CDT::time_nanosecond_datatype(), false),
+            ColumnType::new(CDT::string_datatype(), false),
+        ]);
+        let extensions = FunctionExtensions {
+            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
+        };
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+
+        dbg!(&res);
     }
 }

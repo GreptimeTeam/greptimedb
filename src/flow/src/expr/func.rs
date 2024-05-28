@@ -76,6 +76,13 @@ impl UnmaterializableFunc {
         }
     }
 
+    pub fn is_valid_func_name(name: &str) -> bool {
+        match name.to_lowercase().as_str() {
+            "now" | "current_schema" | "tumble" => true,
+            _ => false,
+        }
+    }
+
     /// Create a UnmaterializableFunc from a string of the function name
     pub fn from_str_args(name: &str, args: Vec<TypedExpr>) -> Result<Self, Error> {
         match name.to_lowercase().as_str() {
@@ -180,6 +187,13 @@ impl UnaryFunc {
                 output: ConcreteDataType::timestamp_millisecond_datatype(),
                 generic_fn: GenericFn::TumbleWindow,
             },
+        }
+    }
+
+    pub fn is_valid_func_name(name: &str) -> bool {
+        match name.to_lowercase().as_str() {
+            "not" | "is_null" | "is_true" | "is_false" | "step_timestamp" | "cast" => true,
+            _ => false,
         }
     }
 
@@ -579,6 +593,27 @@ impl BinaryFunc {
         Ok(ret)
     }
 
+    pub fn is_valid_func_name(name: &str) -> bool {
+        matches!(
+            name.to_lowercase().as_str(),
+            "eq" | "equal"
+                | "not_eq"
+                | "not_equal"
+                | "lt"
+                | "lte"
+                | "gt"
+                | "gte"
+                | "add"
+                | "sub"
+                | "subtract"
+                | "mul"
+                | "multiply"
+                | "div"
+                | "divide"
+                | "mod"
+        )
+    }
+
     /// choose the appropriate specialization based on the input types
     /// return a specialization of the binary function and it's actual input and output type(so no null type present)
     ///
@@ -768,6 +803,10 @@ impl VariadicFunc {
                 Self::Or => GenericFn::Or,
             },
         }
+    }
+
+    pub fn is_valid_func_name(name: &str) -> bool {
+        matches!(name.to_lowercase().as_str(), "and" | "or")
     }
 
     /// Create a VariadicFunc from a string of the function name and given argument types(optional)
