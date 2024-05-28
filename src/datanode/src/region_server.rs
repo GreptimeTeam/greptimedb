@@ -409,9 +409,7 @@ impl RegionServerInner {
         let engine = match region_change {
             RegionChange::Register(attribute) => match current_region_status {
                 Some(status) => match status.clone() {
-                    RegionEngineWithStatus::Registering(_) => {
-                        return Ok(CurrentEngine::EarlyReturn(0))
-                    }
+                    RegionEngineWithStatus::Registering(engine) => engine,
                     RegionEngineWithStatus::Deregistering(_) => {
                         return error::RegionBusySnafu { region_id }.fail()
                     }
@@ -1020,7 +1018,7 @@ mod tests {
                 region_change: RegionChange::Register(RegionAttribute::Mito),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
-                    assert_matches!(current_engine, CurrentEngine::EarlyReturn(_));
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
                 }),
             },
             CurrentEngineTest {
