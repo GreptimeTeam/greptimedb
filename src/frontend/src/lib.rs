@@ -22,3 +22,4 @@ pub(crate) mod metrics;
 mod script;
 pub mod server;
 pub mod service_config;
+mod pipeline;

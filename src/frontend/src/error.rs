@@ -297,6 +297,14 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display("Failed to insert pipeline to pipeline table, name: {}", name))]
+    InsertPipeline {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Unsupported format: {:?}", format))]
     UnsupportedFormat {
         #[snafu(implicit)]
@@ -383,6 +391,7 @@ impl ErrorExt for Error {
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. }
+            | Error::InsertPipeline { .. }
             | Error::InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,

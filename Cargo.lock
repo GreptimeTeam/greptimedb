@@ -3937,6 +3937,7 @@ dependencies = [
  "opentelemetry-proto 0.5.0",
  "operator",
  "partition",
+ "pipeline",
  "prometheus",
  "prost 0.12.4",
  "query",
