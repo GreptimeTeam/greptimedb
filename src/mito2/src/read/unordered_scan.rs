@@ -193,7 +193,7 @@ impl RegionScanner for UnorderedScan {
             let cache = stream_ctx.input.cache_manager.as_deref();
             // Scans memtables first.
             for mut source in memtable_sources {
-                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, None, &mut metrics).await? {
+                while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, None, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
                     yield batch;
@@ -205,7 +205,7 @@ impl RegionScanner for UnorderedScan {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
                 let compat_batch = file_range.compat_batch();
                 let mut source = Source::RowGroupReader(reader);
-                while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, compat_batch, &mut metrics).await? {
+                while let Some(batch) = Self::fetch_from_source(&mut source, mapper, cache, compat_batch, &mut metrics).await? {
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
                     yield batch;
