@@ -15,6 +15,8 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
+use crate::storage::RegionId;
+
 // The Provider of kafka log store
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KafkaProvider {
@@ -60,6 +62,17 @@ impl RaftEngineProvider {
 pub enum Provider {
     RaftEngine(RaftEngineProvider),
     Kafka(Arc<KafkaProvider>),
+}
+
+impl Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self {
+            Provider::RaftEngine(provider) => {
+                write!(f, "region: {}", RegionId::from_u64(provider.id))
+            }
+            Provider::Kafka(provider) => write!(f, "topic: {}", provider.topic),
+        }
+    }
 }
 
 impl Provider {

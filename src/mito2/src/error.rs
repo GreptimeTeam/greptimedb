@@ -27,6 +27,7 @@ use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
+use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
@@ -250,17 +251,9 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
+    #[snafu(display("Failed to read WAL, provider: {}", provider))]
     ReadWal {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to read WAL, topic: {}", topic))]
-    ReadKafkaWal {
-        topic: String,
+        provider: Provider,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -772,7 +765,6 @@ impl ErrorExt for Error {
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }
-            | ReadKafkaWal { .. }
             | DeleteWal { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }

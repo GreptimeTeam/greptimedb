@@ -235,8 +235,7 @@ impl LogStore for KafkaLogStore {
             provider, start_offset, end_offset
         );
 
-        // Key: entry id, Value: the records associated with the entry.
-        let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
+        let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
         let provider = provider.clone();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {

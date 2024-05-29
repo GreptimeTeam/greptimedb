@@ -42,73 +42,38 @@ pub struct LogStoreRawEntryReader<S> {
     store: Arc<S>,
 }
 
-impl<S: LogStore> LogStoreRawEntryReader<S> {
+impl<S> LogStoreRawEntryReader<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self { store }
-    }
-
-    fn read_region(
-        &self,
-        ns: RaftEngineProvider,
-        start_id: EntryId,
-    ) -> Result<EntryStream<'static>> {
-        let region_id = RegionId::from_u64(ns.id);
-        let store = self.store.clone();
-
-        let stream = try_stream!({
-            let mut stream = store
-                .read(&Provider::RaftEngine(ns), start_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ReadWalSnafu { region_id })?;
-
-            while let Some(entries) = stream.next().await {
-                let entries = entries
-                    .map_err(BoxedError::new)
-                    .context(error::ReadWalSnafu { region_id })?;
-
-                for entry in entries {
-                    yield entry
-                }
-            }
-        });
-
-        Ok(Box::pin(stream))
-    }
-
-    fn read_topic(
-        &self,
-        ns: Arc<KafkaProvider>,
-        start_id: EntryId,
-    ) -> Result<EntryStream<'static>> {
-        let store = self.store.clone();
-        let stream = try_stream!({
-            let mut stream = store
-                .read(&Provider::Kafka(ns.clone()), start_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ReadKafkaWalSnafu { topic: &ns.topic })?;
-            while let Some(entries) = stream.next().await {
-                let entries = entries
-                    .map_err(BoxedError::new)
-                    .context(error::ReadKafkaWalSnafu { topic: &ns.topic })?;
-
-                for entry in entries {
-                    yield entry
-                }
-            }
-        });
-
-        Ok(Box::pin(stream))
     }
 }
 
 impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
-    fn read(&self, ctx: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
-        let stream = match ctx {
-            Provider::RaftEngine(ns) => self.read_region(*ns, start_id)?,
-            Provider::Kafka(ns) => self.read_topic(ns.clone(), start_id)?,
-        };
+    fn read(&self, provider: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
+        let store = self.store.clone();
+        let provider = provider.clone();
+        let stream = try_stream!({
+            let mut stream = store
+                .read(&provider, start_id)
+                .await
+                .map_err(BoxedError::new)
+                .with_context(|_| error::ReadWalSnafu {
+                    provider: provider.clone(),
+                })?;
+
+            while let Some(entries) = stream.next().await {
+                let entries =
+                    entries
+                        .map_err(BoxedError::new)
+                        .with_context(|_| error::ReadWalSnafu {
+                            provider: provider.clone(),
+                        })?;
+
+                for entry in entries {
+                    yield entry
+                }
+            }
+        });
 
         Ok(Box::pin(stream))
     }
