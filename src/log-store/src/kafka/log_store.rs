@@ -93,7 +93,7 @@ fn build_entry(
 impl LogStore for KafkaLogStore {
     type Error = Error;
 
-    /// Creates an entry of the associated Entry type.
+    /// Creates an [Entry].
     fn entry(
         &self,
         data: &mut Vec<u8>,
@@ -171,8 +171,8 @@ impl LogStore for KafkaLogStore {
         Ok(AppendBatchResponse { last_entry_ids })
     }
 
-    /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
-    /// starting from `entry_id`. The generated entries will be filtered by the namespace.
+    /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids.
+    /// Returns entries belonging to `provider`, starting from `entry_id`.
     async fn read(
         &self,
         provider: &Provider,

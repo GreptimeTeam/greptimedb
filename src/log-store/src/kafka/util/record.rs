@@ -313,7 +313,7 @@ pub fn maybe_emit_entry(
             let region_id = record.meta.ns.region_id.into();
             let records = buffered_records.entry(region_id).or_default();
 
-            // Only invalidate complete entries.
+            // Only validate complete entries.
             if !records.is_empty() {
                 // Safety: the records are guaranteed not empty if the key exists.
                 let last_record = records.last().unwrap();
