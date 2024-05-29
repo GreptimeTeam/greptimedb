@@ -572,8 +572,8 @@ pub async fn show_status(_query_ctx: QueryContextRef) -> Result<Output> {
     let records = RecordBatches::try_from_columns(
         schema,
         vec![
-            Arc::new(StringVector::from(Vec::<&str>::with_capacity(0))) as _,
-            Arc::new(StringVector::from(Vec::<&str>::with_capacity(0))) as _,
+            Arc::new(StringVector::from(Vec::<&str>::new())) as _,
+            Arc::new(StringVector::from(Vec::<&str>::new())) as _,
         ],
     )
     .context(error::CreateRecordBatchSnafu)?;
