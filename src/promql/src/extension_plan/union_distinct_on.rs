@@ -190,8 +190,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
         self.properties.as_ref()
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.left.clone(), self.right.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.left, &self.right]
     }
 
     fn with_new_children(

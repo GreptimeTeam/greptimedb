@@ -104,15 +104,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
-datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "9c065065dfb4b87bf3f32c0c83feed55a44812df" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
 derive_builder = "0.12"
 dotenv = "0.15"
 # TODO(LFC): Wait for https://github.com/etcdv3/etcd-client/pull/76

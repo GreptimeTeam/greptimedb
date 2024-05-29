@@ -181,8 +181,8 @@ impl ExecutionPlan for SeriesNormalizeExec {
         self.input.properties()
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn with_new_children(

@@ -288,8 +288,8 @@ impl ExecutionPlan for RangeManipulateExec {
         vec![true; self.children().len()]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {

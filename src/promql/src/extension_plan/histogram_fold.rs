@@ -283,8 +283,8 @@ impl ExecutionPlan for HistogramFoldExec {
         vec![true; self.children().len()]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     // cannot change schema with this method

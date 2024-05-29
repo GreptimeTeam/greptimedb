@@ -108,7 +108,7 @@ struct OrderHintVisitor {
     order_expr: Option<Vec<Sort>>,
 }
 
-impl TreeNodeVisitor for OrderHintVisitor {
+impl TreeNodeVisitor<'_> for OrderHintVisitor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {

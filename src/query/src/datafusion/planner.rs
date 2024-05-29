@@ -126,11 +126,14 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        self.engine_state.aggregate_function(name).map(|func| {
-            Arc::new(
-                create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
-            )
-        })
+        self.engine_state.aggregate_function(name).map_or_else(
+            || self.session_state.aggregate_functions().get(name).cloned(),
+            |func| {
+                Some(Arc::new(
+                    create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
+                ))
+            },
+        )
     }
 
     fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {

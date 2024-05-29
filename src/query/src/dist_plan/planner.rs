@@ -170,7 +170,7 @@ struct TableNameExtractor {
     pub table_name: Option<TableName>,
 }
 
-impl TreeNodeVisitor for TableNameExtractor {
+impl TreeNodeVisitor<'_> for TableNameExtractor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {

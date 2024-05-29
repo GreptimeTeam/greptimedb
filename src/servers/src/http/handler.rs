@@ -168,7 +168,7 @@ pub async fn from_output(
                         let mut result_map = HashMap::new();
 
                         let mut tmp = vec![&mut merge_map, &mut result_map];
-                        collect_plan_metrics(physical_plan, &mut tmp);
+                        collect_plan_metrics(&physical_plan, &mut tmp);
                         let re = result_map
                             .into_iter()
                             .map(|(k, v)| (k, Value::from(v)))

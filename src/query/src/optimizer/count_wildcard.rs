@@ -135,7 +135,7 @@ struct TimeIndexFinder {
     table_alias: Option<TableReference>,
 }
 
-impl TreeNodeVisitor for TimeIndexFinder {
+impl TreeNodeVisitor<'_> for TimeIndexFinder {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {

@@ -687,84 +687,84 @@ impl RangeSelect {
                 };
 
                 let expr = match &range_expr {
-                    Expr::AggregateFunction(
-                        aggr @ datafusion_expr::expr::AggregateFunction {
-                            func_def:
-                                AggregateFunctionDefinition::BuiltIn(AggregateFunction::FirstValue),
-                            ..
-                        },
-                    )
-                    | Expr::AggregateFunction(
-                        aggr @ datafusion_expr::expr::AggregateFunction {
-                            func_def:
-                                AggregateFunctionDefinition::BuiltIn(AggregateFunction::LastValue),
-                            ..
-                        },
-                    ) => {
-                        let is_last_value_func = matches!(
-                            aggr.func_def,
-                            AggregateFunctionDefinition::BuiltIn(AggregateFunction::LastValue)
-                        );
+                    // Expr::AggregateFunction(
+                    //     aggr @ datafusion_expr::expr::AggregateFunction {
+                    //         func_def:
+                    //             AggregateFunctionDefinition::BuiltIn(AggregateFunction::FirstValue),
+                    //         ..
+                    //     },
+                    // )
+                    // | Expr::AggregateFunction(
+                    //     aggr @ datafusion_expr::expr::AggregateFunction {
+                    //         func_def:
+                    //             AggregateFunctionDefinition::BuiltIn(AggregateFunction::LastValue),
+                    //         ..
+                    //     },
+                    // ) => {
+                    //     let is_last_value_func = matches!(
+                    //         aggr.func_def,
+                    //         AggregateFunctionDefinition::BuiltIn(AggregateFunction::LastValue)
+                    //     );
 
-                        // Because we only need to find the first_value/last_value,
-                        // the complexity of sorting the entire batch is O(nlogn).
-                        // We can sort the batch with limit 1.
-                        // In this case, the algorithm degenerates into finding the Top1 problem with complexity O(n).
-                        // We need reverse the sort order of last_value to correctly apply limit 1 when sorting.
-                        let order_by = if let Some(exprs) = &aggr.order_by {
-                            exprs
-                                .iter()
-                                .map(|x| {
-                                    create_physical_sort_expr(
-                                        x,
-                                        input_dfschema.as_ref(),
-                                        session_state.execution_props(),
-                                    )
-                                    .map(|expr| {
-                                        // reverse the last_value sort
-                                        if is_last_value_func {
-                                            PhysicalSortExpr {
-                                                expr: expr.expr,
-                                                options: SortOptions {
-                                                    descending: !expr.options.descending,
-                                                    nulls_first: !expr.options.nulls_first,
-                                                },
-                                            }
-                                        } else {
-                                            expr
-                                        }
-                                    })
-                                })
-                                .collect::<DfResult<Vec<_>>>()?
-                        } else {
-                            // if user not assign order by, time index is needed as default ordering
-                            let time_index = create_physical_expr(
-                                &self.time_expr,
-                                input_dfschema.as_ref(),
-                                session_state.execution_props(),
-                            )?;
-                            vec![PhysicalSortExpr {
-                                expr: time_index,
-                                options: SortOptions {
-                                    descending: is_last_value_func,
-                                    nulls_first: false,
-                                },
-                            }]
-                        };
-                        let arg = self.create_physical_expr_list(
-                            false,
-                            &aggr.args,
-                            input_dfschema,
-                            session_state,
-                        )?;
-                        // first_value/last_value has only one param.
-                        // The param have been checked by datafusion in logical plan stage.
-                        // We can safely assume that there is only one element here.
-                        Ok(RangeFirstListValue::new_aggregate_expr(
-                            arg[0].clone(),
-                            order_by,
-                        ))
-                    }
+                    //     // Because we only need to find the first_value/last_value,
+                    //     // the complexity of sorting the entire batch is O(nlogn).
+                    //     // We can sort the batch with limit 1.
+                    //     // In this case, the algorithm degenerates into finding the Top1 problem with complexity O(n).
+                    //     // We need reverse the sort order of last_value to correctly apply limit 1 when sorting.
+                    //     let order_by = if let Some(exprs) = &aggr.order_by {
+                    //         exprs
+                    //             .iter()
+                    //             .map(|x| {
+                    //                 create_physical_sort_expr(
+                    //                     x,
+                    //                     input_dfschema.as_ref(),
+                    //                     session_state.execution_props(),
+                    //                 )
+                    //                 .map(|expr| {
+                    //                     // reverse the last_value sort
+                    //                     if is_last_value_func {
+                    //                         PhysicalSortExpr {
+                    //                             expr: expr.expr,
+                    //                             options: SortOptions {
+                    //                                 descending: !expr.options.descending,
+                    //                                 nulls_first: !expr.options.nulls_first,
+                    //                             },
+                    //                         }
+                    //                     } else {
+                    //                         expr
+                    //                     }
+                    //                 })
+                    //             })
+                    //             .collect::<DfResult<Vec<_>>>()?
+                    //     } else {
+                    //         // if user not assign order by, time index is needed as default ordering
+                    //         let time_index = create_physical_expr(
+                    //             &self.time_expr,
+                    //             input_dfschema.as_ref(),
+                    //             session_state.execution_props(),
+                    //         )?;
+                    //         vec![PhysicalSortExpr {
+                    //             expr: time_index,
+                    //             options: SortOptions {
+                    //                 descending: is_last_value_func,
+                    //                 nulls_first: false,
+                    //             },
+                    //         }]
+                    //     };
+                    //     let arg = self.create_physical_expr_list(
+                    //         false,
+                    //         &aggr.args,
+                    //         input_dfschema,
+                    //         session_state,
+                    //     )?;
+                    //     // first_value/last_value has only one param.
+                    //     // The param have been checked by datafusion in logical plan stage.
+                    //     // We can safely assume that there is only one element here.
+                    //     Ok(RangeFirstListValue::new_aggregate_expr(
+                    //         arg[0].clone(),
+                    //         order_by,
+                    //     ))
+                    // }
                     Expr::AggregateFunction(aggr) => {
                         let order_by = if let Some(exprs) = &aggr.order_by {
                             exprs
@@ -941,8 +941,8 @@ impl ExecutionPlan for RangeSelectExec {
         &self.cache
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn with_new_children(

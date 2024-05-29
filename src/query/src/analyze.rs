@@ -97,8 +97,8 @@ impl ExecutionPlan for DistAnalyzeExec {
         &self.properties
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     /// AnalyzeExec is handled specially so this value is ignored
