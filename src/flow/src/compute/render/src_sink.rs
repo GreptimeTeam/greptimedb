@@ -76,6 +76,9 @@ impl<'referred, 'df> Context<'referred, 'df> {
                                 to_arrange.push(((r, Row::empty()), t, d));
                             }
                         }
+                        Err(TryRecvError::Empty) => {
+                            break;
+                        }
                         Err(TryRecvError::Lagged(lag_offset)) => {
                             common_telemetry::error!("Flow missing {} rows behind", lag_offset);
                             break;
