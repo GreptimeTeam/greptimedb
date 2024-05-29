@@ -452,6 +452,19 @@ impl MessageExt for MessageType {
 }
 
 #[cfg(test)]
+impl RaftEngineLogStore {
+    /// Appends a batch of entries and returns a response containing a map where the key is a region id
+    /// while the value is the id of the last successfully written entry of the region.
+    async fn append(&self, entry: Entry) -> Result<store_api::logstore::AppendResponse> {
+        let response = self.append_batch(vec![entry]).await?;
+        if let Some((_, last_entry_id)) = response.last_entry_ids.into_iter().next() {
+            return Ok(store_api::logstore::AppendResponse { last_entry_id });
+        }
+        unreachable!()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
@@ -460,24 +473,12 @@ mod tests {
     use common_telemetry::debug;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use futures_util::StreamExt;
-    use store_api::logstore::{AppendResponse, LogStore, SendableEntryStream};
+    use store_api::logstore::{LogStore, SendableEntryStream};
 
     use super::*;
     use crate::error::Error;
     use crate::raft_engine::log_store::RaftEngineLogStore;
     use crate::raft_engine::protos::logstore::EntryImpl;
-
-    impl RaftEngineLogStore {
-        /// Appends a batch of entries and returns a response containing a map where the key is a region id
-        /// while the value is the id of the last successfully written entry of the region.
-        async fn append(&self, entry: Entry) -> Result<AppendResponse> {
-            let response = self.append_batch(vec![entry]).await?;
-            if let Some((_, last_entry_id)) = response.last_entry_ids.into_iter().next() {
-                return Ok(AppendResponse { last_entry_id });
-            }
-            unreachable!()
-        }
-    }
 
     #[tokio::test]
     async fn test_open_logstore() {
