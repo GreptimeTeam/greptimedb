@@ -510,9 +510,12 @@ impl FlownodeManager {
         debug!("Starting to run");
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            self.run_available().await.unwrap();
+            debug!("call run_available in run every second");
+            self.run_available(true).await.unwrap();
+            debug!("call send_writeback_requests in run every second");
             // TODO(discord9): error handling
             self.send_writeback_requests().await.unwrap();
+            debug!("call log_all_errors in run every second");
             self.log_all_errors().await;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -521,17 +524,33 @@ impl FlownodeManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
     ///
-    /// However this is not blocking and can sometimes return while actual computation is still running in worker thread
+    /// set `blocking` to true to wait until lock is acquired
+    /// and false to return immediately if lock is not acquired
     /// TODO(discord9): add flag for subgraph that have input since last run
-    pub async fn run_available(&self) -> Result<(), Error> {
+    pub async fn run_available(&self, blocking: bool) -> Result<(), Error> {
         loop {
             let now = self.tick_manager.tick();
             for worker in self.worker_handles.iter() {
                 // TODO(discord9): consider how to handle error in individual worker
-                worker.lock().await.run_available(now).await.unwrap();
+                if blocking {
+                    worker.lock().await.run_available(now).await?;
+                } else if let Ok(worker) = worker.try_lock() {
+                    worker.run_available(now).await?;
+                } else {
+                    return Ok(());
+                }
             }
             // first check how many inputs were sent
-            match self.node_context.lock().await.flush_all_sender() {
+            let (flush_res, buf_len) = if blocking {
+                let mut ctx = self.node_context.lock().await;
+                (ctx.flush_all_sender(), ctx.get_send_buf_size())
+            } else {
+                match self.node_context.try_lock() {
+                    Ok(mut ctx) => (ctx.flush_all_sender(), ctx.get_send_buf_size()),
+                    Err(_) => return Ok(()),
+                }
+            };
+            match flush_res {
                 Ok(_) => (),
                 Err(err) => {
                     common_telemetry::error!("Flush send buf errors: {:?}", err);
@@ -539,7 +558,6 @@ impl FlownodeManager {
                 }
             };
             // if no thing in send buf then break
-            let buf_len = self.node_context.lock().await.get_send_buf_size();
             if buf_len == 0 {
                 break;
             } else {
@@ -564,7 +582,7 @@ impl FlownodeManager {
         let table_id = region_id.table_id();
         self.node_context.lock().await.send(table_id, rows)?;
         // TODO(discord9): put it in a background task?
-        self.run_available().await?;
+        // self.run_available(false).await?;
         Ok(())
     }
 }

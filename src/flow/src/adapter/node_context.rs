@@ -107,7 +107,7 @@ impl SourceSender {
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
-            debug!("Send buf len = {}", self.send_buf.len());
+            debug!("Remaining Send buf.len() = {}", self.send_buf.len());
         }
 
         Ok(row_cnt)
