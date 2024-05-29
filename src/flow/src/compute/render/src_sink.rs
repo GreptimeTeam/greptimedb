@@ -20,12 +20,14 @@ use common_telemetry::{debug, info};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
+use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
-use crate::expr::GlobalId;
+use crate::expr::error::InternalSnafu;
+use crate::expr::{EvalError, GlobalId};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
@@ -65,11 +67,30 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();
                 // TODO(discord9): handling tokio broadcast error
-                while let Ok((r, t, d)) = src_recv.try_recv() {
-                    if t <= now {
-                        to_send.push((r, t, d));
-                    } else {
-                        to_arrange.push(((r, Row::empty()), t, d));
+                loop {
+                    match src_recv.try_recv() {
+                        Ok((r, t, d)) => {
+                            if t <= now {
+                                to_send.push((r, t, d));
+                            } else {
+                                to_arrange.push(((r, Row::empty()), t, d));
+                            }
+                        }
+                        Err(TryRecvError::Lagged(lag_offset)) => {
+                            common_telemetry::error!("Flow missing {} rows behind", lag_offset);
+                            break;
+                        }
+                        Err(err) => {
+                            err_collector.run(|| -> Result<(), EvalError> {
+                                InternalSnafu {
+                                    reason: format!(
+                                        "Error receiving from broadcast channel: {}",
+                                        err
+                                    ),
+                                }
+                                .fail()
+                            });
+                        }
                     }
                 }
                 let all = prev_avail.chain(to_send).collect_vec();

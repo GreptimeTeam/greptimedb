@@ -71,7 +71,8 @@ pub struct SourceSender {
 impl Default for SourceSender {
     fn default() -> Self {
         Self {
-            sender: broadcast::Sender::new(BROADCAST_CAP),
+            // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
+            sender: broadcast::Sender::new(BROADCAST_CAP * 2),
             send_buf: Default::default(),
         }
     }
