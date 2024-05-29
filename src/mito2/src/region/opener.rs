@@ -482,6 +482,8 @@ pub(crate) async fn replay_memtable<S: LogStore>(
         region_write_ctx.write_memtable();
     }
 
+    // TODO(weny): We need to update `flushed_entry_id` in the region manifest
+    // to avoid reading potentially incomplete entries in the future.
     wal.obsolete(region_id, flushed_entry_id, provider).await?;
 
     info!(
