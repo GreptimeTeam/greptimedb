@@ -436,7 +436,9 @@ impl Database for GreptimeDB {
 
         let mut client = self.client.lock().await;
 
-        if query.trim().to_lowercase().starts_with("use ") {
+        let query_str = query.trim().to_lowercase();
+
+        if query_str.starts_with("use ") {
             // use [db]
             let database = query
                 .split_ascii_whitespace()
@@ -447,7 +449,10 @@ impl Database for GreptimeDB {
             Box::new(ResultDisplayer {
                 result: Ok(Output::new_with_affected_rows(0)),
             }) as _
-        } else if query.trim().to_lowercase().starts_with("set time_zone") {
+        } else if query_str.starts_with("set time_zone")
+            || query_str.starts_with("set session time_zone")
+            || query_str.starts_with("set local time_zone")
+        {
             // set time_zone='xxx'
             let timezone = query
                 .split('=')
