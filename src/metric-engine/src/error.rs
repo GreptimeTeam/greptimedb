@@ -121,6 +121,27 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mito flush operation fails"))]
+    MitoFlushOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito catchup operation fails"))]
+    MitoCatchupOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito compact operation fails"))]
+    MitoCompactOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch stream"))]
     CollectRecordBatchStream {
         source: common_recordbatch::error::Error,
@@ -267,7 +288,10 @@ impl ErrorExt for Error {
             | OpenMitoRegion { source, .. }
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
-            | MitoWriteOperation { source, .. } => source.status_code(),
+            | MitoWriteOperation { source, .. }
+            | MitoCatchupOperation { source, .. }
+            | MitoFlushOperation { source, .. }
+            | MitoCompactOperation { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 

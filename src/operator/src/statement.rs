@@ -263,6 +263,7 @@ impl StatementExecutor {
                 self.show_columns(show_columns, query_ctx).await
             }
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
+            Statement::ShowStatus(_) => self.show_status(query_ctx).await,
         }
     }
 

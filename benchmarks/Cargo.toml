@@ -12,15 +12,15 @@ api.workspace = true
 arrow.workspace = true
 chrono.workspace = true
 clap.workspace = true
-# client.workspace = true
+# client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-telemetry.workspace = true
 common-wal.workspace = true
 dotenv.workspace = true
-futures.workspace = true
 futures-util.workspace = true
-humantime.workspace = true
+futures.workspace = true
 humantime-serde.workspace = true
+humantime.workspace = true
 indicatif = "0.17.1"
 itertools.workspace = true
 lazy_static.workspace = true
@@ -33,8 +33,6 @@ rand.workspace = true
 rskafka.workspace = true
 serde.workspace = true
 store-api.workspace = true
-# TODO depend `Database` client
-tests-integration.workspace = true
 tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true

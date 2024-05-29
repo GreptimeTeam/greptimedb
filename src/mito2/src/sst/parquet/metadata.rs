@@ -85,7 +85,8 @@ impl<'a> MetadataLoader<'a> {
             .read_with(path)
             .range(buffer_start..file_size)
             .await
-            .context(error::OpenDalSnafu)?;
+            .context(error::OpenDalSnafu)?
+            .to_vec();
         let buffer_len = buffer.len();
 
         let mut footer = [0; 8];
@@ -129,7 +130,8 @@ impl<'a> MetadataLoader<'a> {
                 .read_with(path)
                 .range(metadata_start..(file_size - FOOTER_SIZE as u64))
                 .await
-                .context(error::OpenDalSnafu)?;
+                .context(error::OpenDalSnafu)?
+                .to_vec();
 
             let metadata = decode_metadata(&data).map_err(|e| {
                 error::InvalidParquetSnafu {

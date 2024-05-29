@@ -18,6 +18,7 @@ pub(crate) mod opener;
 pub mod options;
 pub(crate) mod version;
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -35,7 +36,7 @@ use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
-use crate::request::OnFailure;
+use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::time_provider::TimeProviderRef;
 
@@ -470,6 +471,60 @@ impl RegionMap {
 }
 
 pub(crate) type RegionMapRef = Arc<RegionMap>;
+
+/// Opening regions
+#[derive(Debug, Default)]
+pub(crate) struct OpeningRegions {
+    regions: RwLock<HashMap<RegionId, Vec<OptionOutputTx>>>,
+}
+
+impl OpeningRegions {
+    /// Registers `sender` for an opening region; Otherwise, it returns `None`.
+    pub(crate) fn wait_for_opening_region(
+        &self,
+        region_id: RegionId,
+        sender: OptionOutputTx,
+    ) -> Option<OptionOutputTx> {
+        let mut regions = self.regions.write().unwrap();
+        match regions.entry(region_id) {
+            Entry::Occupied(mut senders) => {
+                senders.get_mut().push(sender);
+                None
+            }
+            Entry::Vacant(_) => Some(sender),
+        }
+    }
+
+    /// Returns true if the region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        let regions = self.regions.read().unwrap();
+        regions.contains_key(&region_id)
+    }
+
+    /// Inserts a new region into the map.
+    pub(crate) fn insert_sender(&self, region: RegionId, sender: OptionOutputTx) {
+        let mut regions = self.regions.write().unwrap();
+        regions.insert(region, vec![sender]);
+    }
+
+    /// Remove region by id.
+    pub(crate) fn remove_sender(&self, region_id: RegionId) -> Vec<OptionOutputTx> {
+        let mut regions = self.regions.write().unwrap();
+        regions.remove(&region_id).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sender_len(&self, region_id: RegionId) -> usize {
+        let regions = self.regions.read().unwrap();
+        if let Some(senders) = regions.get(&region_id) {
+            senders.len()
+        } else {
+            0
+        }
+    }
+}
+
+pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
 
 #[cfg(test)]
 mod tests {

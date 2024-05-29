@@ -14,9 +14,11 @@
 
 //! Scans a region according to the scan request.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
@@ -32,15 +34,16 @@ use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::CompatReader;
+use crate::read::compat::{CompatBatch, CompatReader};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{compat, Batch, Source};
 use crate::region::version::VersionRef;
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::parquet::file_range::FileRange;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -51,20 +54,24 @@ pub(crate) enum Scanner {
 }
 
 impl Scanner {
-    /// Returns a [SendableRecordBatchStream] to retrieve scan results.
-    pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream> {
+    /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
+    pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
+            Scanner::Seq(seq_scan) => seq_scan.build_stream().await.map_err(BoxedError::new),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
 
     /// Returns a [RegionScanner] to scan the region.
-    pub(crate) async fn region_scanner(&self) -> Result<RegionScannerRef> {
-        let stream = self.scan().await?;
-        let scanner = SinglePartitionScanner::new(stream);
-
-        Ok(Arc::new(scanner))
+    pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
+        match self {
+            Scanner::Seq(seq_scan) => {
+                let stream = seq_scan.build_stream().await?;
+                let scanner = Arc::new(SinglePartitionScanner::new(stream));
+                Ok(scanner)
+            }
+            Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
+        }
     }
 }
 
@@ -222,9 +229,7 @@ impl ScanRegion {
     /// Unordered scan.
     pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input(true)?;
-        let scan = UnorderedScan::new(input);
-
-        Ok(scan)
+        Ok(UnorderedScan::new(input))
     }
 
     #[cfg(test)]
@@ -386,7 +391,7 @@ pub(crate) struct ScanInput {
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
-    predicate: Option<Predicate>,
+    pub(crate) predicate: Option<Predicate>,
     /// Memtables to scan.
     pub(crate) memtables: Vec<MemtableRef>,
     /// Handles to SST files to scan.
@@ -498,7 +503,6 @@ impl ScanInput {
     }
 
     /// Sets whether to remove deletion markers during scan.
-    #[allow(unused)]
     #[must_use]
     pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
         self.filter_deleted = filter_deleted;
@@ -572,6 +576,61 @@ impl ScanInput {
         Ok(sources)
     }
 
+    /// Prunes file ranges to scan and adds them tothe `collector`.
+    pub(crate) async fn prune_file_ranges(
+        &self,
+        collector: &mut impl FileRangeCollector,
+    ) -> Result<()> {
+        for file in &self.files {
+            let res = self
+                .access_layer
+                .read_sst(file.clone())
+                .predicate(self.predicate.clone())
+                .time_range(self.time_range)
+                .projection(Some(self.mapper.column_ids().to_vec()))
+                .cache(self.cache_manager.clone())
+                .index_applier(self.index_applier.clone())
+                .expected_metadata(Some(self.mapper.metadata().clone()))
+                .build_reader_input()
+                .await;
+            let (mut file_range_ctx, row_groups) = match res {
+                Ok(x) => x,
+                Err(e) => {
+                    if e.is_object_not_found() && self.ignore_file_not_found {
+                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            if !compat::has_same_columns(
+                self.mapper.metadata(),
+                file_range_ctx.read_format().metadata(),
+            ) {
+                // They have different schema. We need to adapt the batch first so the
+                // mapper can convert it.
+                let compat = CompatBatch::new(
+                    &self.mapper,
+                    file_range_ctx.read_format().metadata().clone(),
+                )?;
+                file_range_ctx.set_compat_batch(Some(compat));
+            }
+            // Build ranges from row groups.
+            let file_range_ctx = Arc::new(file_range_ctx);
+            let file_ranges = row_groups
+                .into_iter()
+                .map(|(row_group_idx, row_selection)| {
+                    FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection)
+                });
+            collector.append_file_ranges(file.meta_ref(), file_ranges);
+        }
+
+        READ_SST_COUNT.observe(self.files.len() as f64);
+
+        Ok(())
+    }
+
     /// Scans the input source in another task and sends batches to the sender.
     pub(crate) fn spawn_scan_task(
         &self,
@@ -619,4 +678,36 @@ impl ScanInput {
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
         self.files.iter().map(|file| file.file_id()).collect()
     }
+}
+
+/// A partition of a scanner to read.
+/// It contains memtables and file ranges to scan.
+#[derive(Default)]
+pub(crate) struct ScanPart {
+    /// Memtables to scan.
+    /// We scan the whole memtable now. We might scan a range of the memtable in the future.
+    pub(crate) memtables: Vec<MemtableRef>,
+    /// File ranges to scan.
+    pub(crate) file_ranges: Vec<FileRange>,
+}
+
+impl fmt::Debug for ScanPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ScanPart({} memtables, {} file ranges)",
+            self.memtables.len(),
+            self.file_ranges.len()
+        )
+    }
+}
+
+/// A trait to collect file ranges to scan.
+pub(crate) trait FileRangeCollector {
+    /// Appends file ranges from the **same file** to the collector.
+    fn append_file_ranges(
+        &mut self,
+        file_meta: &FileMeta,
+        file_ranges: impl Iterator<Item = FileRange>,
+    );
 }

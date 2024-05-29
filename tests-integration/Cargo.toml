@@ -73,7 +73,7 @@ time = "0.3"
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
-tower = "0.4"
+tower.workspace = true
 uuid.workspace = true
 zstd.workspace = true
 

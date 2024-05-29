@@ -117,6 +117,13 @@ impl StatementExecutor {
             .await
             .context(error::ExecuteStatementSnafu)
     }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_status(&self, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_status(query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
 }
 
 pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {

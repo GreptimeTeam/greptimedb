@@ -53,7 +53,7 @@ use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
-use crate::sst::parquet::file_range::{FileRange, FileRangeContext, FileRangeContextRef};
+use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
@@ -155,29 +155,17 @@ impl ParquetReaderBuilder {
     /// This needs to perform IO operation.
     pub async fn build(&self) -> Result<ParquetReader> {
         let (context, row_groups) = self.build_reader_input().await?;
-        ParquetReader::new(context, row_groups).await
-    }
-
-    /// Builds [FileRange]s to read and pushes them to `file_ranges`.
-    #[allow(dead_code)]
-    pub async fn build_file_ranges(&self, file_ranges: &mut Vec<FileRange>) -> Result<()> {
-        let (context, row_groups) = self.build_reader_input().await?;
-        file_ranges.reserve_exact(row_groups.len());
-        for (row_group_idx, row_selection) in row_groups {
-            let file_range = FileRange::new(context.clone(), row_group_idx, row_selection);
-            file_ranges.push(file_range);
-        }
-        Ok(())
+        ParquetReader::new(Arc::new(context), row_groups).await
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
-    async fn build_reader_input(&self) -> Result<(FileRangeContextRef, RowGroupMap)> {
+    pub(crate) async fn build_reader_input(&self) -> Result<(FileRangeContext, RowGroupMap)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
-        let file_size = self.file_handle.meta().file_size;
+        let file_size = self.file_handle.meta_ref().file_size;
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
         // Decodes region metadata.
@@ -211,7 +199,7 @@ impl ParquetReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
 
-        let mut metrics = Metrics::default();
+        let mut metrics = ReaderMetrics::default();
 
         let row_groups = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics)
@@ -258,7 +246,7 @@ impl ParquetReaderBuilder {
         );
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
-        Ok((Arc::new(context), row_groups))
+        Ok((context, row_groups))
     }
 
     /// Decodes region metadata from key value.
@@ -324,7 +312,7 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut Metrics,
+        metrics: &mut ReaderMetrics,
     ) -> BTreeMap<usize, Option<RowSelection>> {
         let num_row_groups = parquet_meta.num_row_groups();
         if num_row_groups == 0 {
@@ -346,13 +334,13 @@ impl ParquetReaderBuilder {
     async fn prune_row_groups_by_inverted_index(
         &self,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut Metrics,
+        metrics: &mut ReaderMetrics,
     ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
         let Some(index_applier) = &self.index_applier else {
             return None;
         };
 
-        if !self.file_handle.meta().inverted_index_available() {
+        if !self.file_handle.meta_ref().inverted_index_available() {
             return None;
         }
 
@@ -428,7 +416,7 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        metrics: &mut Metrics,
+        metrics: &mut ReaderMetrics,
     ) -> Option<BTreeMap<usize, Option<RowSelection>>> {
         let Some(predicate) = &self.predicate else {
             return None;
@@ -513,7 +501,7 @@ fn time_range_to_predicate(
 
 /// Parquet reader metrics.
 #[derive(Debug, Default)]
-struct Metrics {
+pub(crate) struct ReaderMetrics {
     /// Number of row groups before filtering.
     num_row_groups_before_filtering: usize,
     /// Number of row groups filtered by inverted index.
@@ -536,6 +524,24 @@ struct Metrics {
     num_batches: usize,
     /// Number of rows read.
     num_rows: usize,
+}
+
+impl ReaderMetrics {
+    /// Adds `other` metrics to this metrics.
+    pub(crate) fn merge_from(&mut self, other: &ReaderMetrics) {
+        self.num_row_groups_before_filtering += other.num_row_groups_before_filtering;
+        self.num_row_groups_inverted_index_filtered += other.num_row_groups_inverted_index_filtered;
+        self.num_row_groups_min_max_filtered += other.num_row_groups_min_max_filtered;
+        self.num_rows_precise_filtered += other.num_rows_precise_filtered;
+        self.num_rows_in_row_group_before_filtering += other.num_rows_in_row_group_before_filtering;
+        self.num_rows_in_row_group_inverted_index_filtered +=
+            other.num_rows_in_row_group_inverted_index_filtered;
+        self.build_cost += other.build_cost;
+        self.scan_cost += other.scan_cost;
+        self.num_record_batches += other.num_record_batches;
+        self.num_batches += other.num_batches;
+        self.num_rows += other.num_rows;
+    }
 }
 
 /// Builder to build a [ParquetRecordBatchReader] for a row group.
@@ -606,12 +612,12 @@ enum ReaderState {
     /// The reader is reading a row group.
     Readable(RowGroupReader),
     /// The reader is exhausted.
-    Exhausted(Metrics),
+    Exhausted(ReaderMetrics),
 }
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&self) -> &Metrics {
+    fn metrics(&self) -> &ReaderMetrics {
         match self {
             ReaderState::Readable(reader) => &reader.metrics,
             ReaderState::Exhausted(m) => m,
@@ -807,7 +813,7 @@ impl ParquetReader {
                 .await?;
             ReaderState::Readable(RowGroupReader::new(context.clone(), parquet_reader))
         } else {
-            ReaderState::Exhausted(Metrics::default())
+            ReaderState::Exhausted(ReaderMetrics::default())
         };
 
         Ok(ParquetReader {
@@ -829,7 +835,7 @@ impl ParquetReader {
 }
 
 /// Reader to read a row group of a parquet file.
-pub(crate) struct RowGroupReader {
+pub struct RowGroupReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet reader.
@@ -837,7 +843,7 @@ pub(crate) struct RowGroupReader {
     /// Buffered batches to return.
     batches: VecDeque<Batch>,
     /// Local scan metrics.
-    metrics: Metrics,
+    metrics: ReaderMetrics,
 }
 
 impl RowGroupReader {
@@ -847,8 +853,13 @@ impl RowGroupReader {
             context,
             reader,
             batches: VecDeque::new(),
-            metrics: Metrics::default(),
+            metrics: ReaderMetrics::default(),
         }
+    }
+
+    /// Gets the metrics.
+    pub(crate) fn metrics(&self) -> &ReaderMetrics {
+        &self.metrics
     }
 
     /// Resets the parquet reader.
@@ -857,7 +868,7 @@ impl RowGroupReader {
     }
 
     /// Tries to fetch next [Batch] from the reader.
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
             return Ok(Some(batch));

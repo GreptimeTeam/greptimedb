@@ -554,6 +554,7 @@ pub fn check_permission(
         Statement::ShowIndex(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
+        Statement::ShowStatus(_stmt) => {}
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
         }

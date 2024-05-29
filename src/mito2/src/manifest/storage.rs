@@ -489,7 +489,7 @@ impl ManifestObjectStore {
             }
         };
 
-        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
+        let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data.to_vec())?;
 
         debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
@@ -501,7 +501,11 @@ impl ManifestObjectStore {
 
     #[cfg(test)]
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        self.object_store.read(path).await.context(OpenDalSnafu)
+        self.object_store
+            .read(path)
+            .await
+            .context(OpenDalSnafu)
+            .map(|v| v.to_vec())
     }
 
     #[cfg(test)]

@@ -100,7 +100,7 @@ tokio-rustls = "0.25"
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tonic-reflection = "0.11"
-tower = { version = "0.4", features = ["full"] }
+tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 zstd.workspace = true
@@ -111,7 +111,7 @@ tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
 catalog = { workspace = true, features = ["testing"] }
-client.workspace = true
+client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.4"
@@ -125,8 +125,6 @@ serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
-# TODO depend `Database` client
-tests-integration.workspace = true
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"

@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use common_telemetry::debug;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{ListExt, Read, ReadExt, Reader, WriteExt};
-use opendal::raw::{Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
-use opendal::{Error as OpendalError, ErrorKind, Result};
+use opendal::raw::oio::{Read, ReadDyn, Reader};
+use opendal::raw::{Access, BytesRange, OpRead, OpStat, RpRead};
+use opendal::{Buffer, Error as OpendalError, ErrorKind, Operator, Result};
 
 use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
@@ -52,26 +52,22 @@ fn can_cache(path: &str) -> bool {
 }
 
 /// Generate an unique cache key for the read path and range.
-fn read_cache_key(path: &str, args: &OpRead) -> String {
-    format!(
-        "{:x}.cache-{}",
-        md5::compute(path),
-        args.range().to_header()
-    )
+fn read_cache_key(path: &str, range: BytesRange) -> String {
+    format!("{:x}.cache-{}", md5::compute(path), range.to_header())
 }
 
 /// Local read cache for files in object storage
 #[derive(Clone, Debug)]
-pub(crate) struct ReadCache<C: Clone> {
+pub(crate) struct ReadCache {
     /// Local file cache backend
-    file_cache: Arc<C>,
+    file_cache: Operator,
     /// Local memory cache to track local cache files
     mem_cache: Cache<String, ReadResult>,
 }
 
-impl<C: Accessor + Clone> ReadCache<C> {
+impl ReadCache {
     /// Create a [`ReadCache`] with capacity in bytes.
-    pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
+    pub(crate) fn new(file_cache: Operator, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
         let eviction_listener =
             move |read_key: Arc<String>, read_result: ReadResult, cause| -> ListenerFuture {
@@ -83,7 +79,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     if let ReadResult::Success(size) = read_result {
                         OBJECT_STORE_LRU_CACHE_BYTES.sub(size as i64);
 
-                        let result = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
+                        let result = file_cache_cloned.delete(&read_key).await;
                         debug!(
                             "Deleted local cache file `{}`, result: {:?}, cause: {:?}.",
                             read_key, result, cause
@@ -133,17 +129,17 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// Recover existing cache items from `file_cache` to `mem_cache`.
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
-        let (_, mut pager) = self.file_cache.list("/", OpList::default()).await?;
+        let mut pager = self.file_cache.lister("/").await?;
 
-        while let Some(entry) = pager.next().await? {
+        while let Some(entry) = pager.next().await.transpose()? {
             let read_key = entry.path();
 
             // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
             // because it's private field.
             let size = {
-                let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
+                let stat = self.file_cache.stat(read_key).await?;
 
-                stat.into_metadata().content_length()
+                stat.content_length()
             };
 
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
@@ -159,8 +155,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// Returns true when the read cache contains the specific file.
     pub(crate) async fn contains_file(&self, path: &str) -> bool {
         self.mem_cache.run_pending_tasks().await;
-        self.mem_cache.contains_key(path)
-            && self.file_cache.stat(path, OpStat::default()).await.is_ok()
+        self.mem_cache.contains_key(path) && self.file_cache.stat(path).await.is_ok()
     }
 
     /// Read from a specific path using the OpRead operation.
@@ -173,86 +168,54 @@ impl<C: Accessor + Clone> ReadCache<C> {
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Box<dyn Read>)>
+    ) -> Result<(RpRead, Arc<dyn ReadDyn>)>
     where
-        I: Accessor,
+        I: Access,
     {
         if !can_cache(path) {
             return inner.read(path, args).await.map(to_output_reader);
         }
 
-        let read_key = read_cache_key(path, &args);
-
-        let read_result = self
-            .mem_cache
-            .try_get_with(
-                read_key.clone(),
-                self.read_remote(inner, &read_key, path, args.clone()),
-            )
-            .await
-            .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
-
-        match read_result {
-            ReadResult::Success(_) => {
-                // There is a concurrent issue here, the local cache may be purged
-                // while reading, we have to fallback to remote read
-                match self.file_cache.read(&read_key, OpRead::default()).await {
-                    Ok(ret) => {
-                        OBJECT_STORE_LRU_CACHE_HIT
-                            .with_label_values(&["success"])
-                            .inc();
-                        Ok(to_output_reader(ret))
-                    }
-                    Err(_) => {
-                        OBJECT_STORE_LRU_CACHE_MISS.inc();
-                        inner.read(path, args).await.map(to_output_reader)
-                    }
-                }
-            }
-            ReadResult::NotFound => {
-                OBJECT_STORE_LRU_CACHE_HIT
-                    .with_label_values(&["not_found"])
-                    .inc();
-
-                Err(OpendalError::new(
-                    ErrorKind::NotFound,
-                    &format!("File not found: {path}"),
-                ))
-            }
-        }
+        // FIXME: remove this block after opendal v0.47 released.
+        let meta = inner.stat(path, OpStat::new()).await?;
+        let (rp, reader) = inner.read(path, args).await?;
+        let reader: ReadCacheReader<I> = ReadCacheReader {
+            path: Arc::new(path.to_string()),
+            inner_reader: reader,
+            size: meta.into_metadata().content_length(),
+            file_cache: self.file_cache.clone(),
+            mem_cache: self.mem_cache.clone(),
+        };
+        Ok((rp, Arc::new(reader)))
     }
+}
 
-    async fn try_write_cache<I>(&self, mut reader: I::Reader, read_key: &str) -> Result<usize>
-    where
-        I: Accessor,
-    {
-        let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
-        let mut total = 0;
-        while let Some(bytes) = reader.next().await {
-            let bytes = &bytes?;
-            total += bytes.len();
-            writer.write(bytes).await?;
-        }
-        // Call `close` to ensure data is written.
-        writer.close().await?;
-        Ok(total)
-    }
+pub struct ReadCacheReader<I: Access> {
+    /// Path of the file
+    path: Arc<String>,
+    /// Remote file reader.
+    inner_reader: I::Reader,
+    /// FIXME: remove this field after opendal v0.47 released.
+    ///
+    /// OpenDAL's read_at takes `offset, limit` which means the underlying storage
+    /// services could return less data than limit. We store size here as a workaround.
+    ///
+    /// This API has been refactor into `offset, size` instead. After opendal v0.47 released,
+    /// we don't need this anymore.
+    size: u64,
+    /// Local file cache backend
+    file_cache: Operator,
+    /// Local memory cache to track local cache files
+    mem_cache: Cache<String, ReadResult>,
+}
 
-    /// Read the file from remote storage. If success, write the content into local cache.
-    async fn read_remote<I>(
-        &self,
-        inner: &I,
-        read_key: &str,
-        path: &str,
-        args: OpRead,
-    ) -> Result<ReadResult>
-    where
-        I: Accessor,
-    {
+impl<I: Access> ReadCacheReader<I> {
+    /// TODO: we can return the Buffer directly to avoid another read from cache.
+    async fn read_remote(&self, offset: u64, limit: usize) -> Result<ReadResult> {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
-        let (_, reader) = inner.read(path, args).await?;
-        let result = self.try_write_cache::<I>(reader, read_key).await;
+        let buf = self.inner_reader.read_at(offset, limit).await?;
+        let result = self.try_write_cache(buf, offset).await;
 
         match result {
             Ok(read_bytes) => {
@@ -279,10 +242,59 @@ impl<C: Accessor + Clone> ReadCache<C> {
             }
         }
     }
+
+    async fn try_write_cache(&self, buf: Buffer, offset: u64) -> Result<usize> {
+        let size = buf.len();
+        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(size as _)));
+        self.file_cache.write(&read_key, buf).await?;
+        Ok(size)
+    }
+}
+
+impl<I: Access> Read for ReadCacheReader<I> {
+    async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
+        let size = self.size.min(offset + limit as u64) - offset;
+        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(size as _)));
+
+        let read_result = self
+            .mem_cache
+            .try_get_with(read_key.clone(), self.read_remote(offset, limit))
+            .await
+            .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
+
+        match read_result {
+            ReadResult::Success(_) => {
+                // There is a concurrent issue here, the local cache may be purged
+                // while reading, we have to fallback to remote read
+                match self.file_cache.read(&read_key).await {
+                    Ok(ret) => {
+                        OBJECT_STORE_LRU_CACHE_HIT
+                            .with_label_values(&["success"])
+                            .inc();
+                        Ok(ret)
+                    }
+                    Err(_) => {
+                        OBJECT_STORE_LRU_CACHE_MISS.inc();
+                        self.inner_reader.read_at(offset, limit).await
+                    }
+                }
+            }
+            ReadResult::NotFound => {
+                OBJECT_STORE_LRU_CACHE_HIT
+                    .with_label_values(&["not_found"])
+                    .inc();
+
+                Err(OpendalError::new(
+                    ErrorKind::NotFound,
+                    &format!("File not found: {}", self.path),
+                ))
+            }
+        }
+    }
 }
 
 fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
-    (input.0, Box::new(input.1))
+    (input.0, Arc::new(input.1))
 }
 
 #[cfg(test)]
