@@ -324,9 +324,10 @@ impl TypedExpr {
 mod test {
     use std::collections::HashMap;
 
+    use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
-    use substrait::substrait_proto::proto::FunctionArgument;
+    use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::expr::{GlobalId, MapFilterProject};
@@ -514,8 +515,20 @@ mod test {
 
     #[test]
     fn test_func_sig() {
-        fn lit(v: Value) -> substrait_proto::proto::FunctionArgument {
-            todo!()
+        fn lit(v: impl ToString) -> substrait_proto::proto::FunctionArgument {
+            use substrait_proto::proto::expression;
+            let expr = Expression {
+                rex_type: Some(expression::RexType::Literal(expression::Literal {
+                    nullable: false,
+                    type_variation_reference: 0,
+                    literal_type: Some(expression::literal::LiteralType::String(v.to_string())),
+                })),
+            };
+            substrait_proto::proto::FunctionArgument {
+                arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
+                    expr,
+                )),
+            }
         }
         fn col(i: usize) -> substrait_proto::proto::FunctionArgument {
             use substrait_proto::proto::expression;
@@ -598,17 +611,16 @@ mod test {
                 },
             }
         );
-        // TODO: test tumble function&other var functions
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), col(1)],
+            arguments: vec![col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
             options: vec![],
             output_type: None,
             ..Default::default()
         };
         let input_schema = RelationType::new(vec![
-            ColumnType::new(CDT::time_nanosecond_datatype(), false),
+            ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
             ColumnType::new(CDT::string_datatype(), false),
         ]);
         let extensions = FunctionExtensions {
@@ -616,6 +628,46 @@ mod test {
         };
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
-        dbg!(&res);
+        assert_eq!(
+            res,
+            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
+                ts: Box::new(
+                    ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::timestamp_nanosecond_datatype(), false))
+                ),
+                window_size: Interval::from_month_day_nano(0, 0, 1_000_000_000),
+                start_time: Some(DateTime::new(1625097600000))
+            })
+            .with_type(ColumnType::new(CDT::timestamp_millisecond_datatype(), true)),
+        );
+
+        let f = substrait_proto::proto::expression::ScalarFunction {
+            function_reference: 0,
+            arguments: vec![col(0), lit("1 second")],
+            options: vec![],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationType::new(vec![
+            ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
+            ColumnType::new(CDT::string_datatype(), false),
+        ]);
+        let extensions = FunctionExtensions {
+            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
+        };
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+
+        assert_eq!(
+            res,
+            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
+                ts: Box::new(
+                    ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::timestamp_nanosecond_datatype(), false))
+                ),
+                window_size: Interval::from_month_day_nano(0, 0, 1_000_000_000),
+                start_time: None
+            })
+            .with_type(ColumnType::new(CDT::timestamp_millisecond_datatype(), true)),
+        )
     }
 }
