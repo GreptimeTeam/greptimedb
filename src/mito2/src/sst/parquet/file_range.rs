@@ -25,6 +25,7 @@ use parquet::arrow::arrow_reader::RowSelection;
 use snafu::ResultExt;
 
 use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
+use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
 use crate::sst::parquet::format::ReadFormat;
@@ -32,6 +33,7 @@ use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleF
 
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
+#[derive(Clone)]
 pub struct FileRange {
     /// Shared context.
     context: FileRangeContextRef,
@@ -56,7 +58,6 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
-    #[allow(dead_code)]
     pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
         let parquet_reader = self
             .context
@@ -65,6 +66,11 @@ impl FileRange {
             .await?;
 
         Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
+    }
+
+    /// Returns the helper to compat batches.
+    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+        self.context.compat_batch()
     }
 }
 
@@ -78,6 +84,8 @@ pub(crate) struct FileRangeContext {
     read_format: ReadFormat,
     /// Decoder for primary keys
     codec: McmpRowCodec,
+    /// Optional helper to compat batches.
+    compat_batch: Option<CompatBatch>,
 }
 
 pub(crate) type FileRangeContextRef = Arc<FileRangeContext>;
@@ -95,6 +103,7 @@ impl FileRangeContext {
             filters,
             read_format,
             codec,
+            compat_batch: None,
         }
     }
 
@@ -116,6 +125,16 @@ impl FileRangeContext {
     /// Returns the reader builder.
     pub(crate) fn reader_builder(&self) -> &RowGroupReaderBuilder {
         &self.reader_builder
+    }
+
+    /// Returns the helper to compat batches.
+    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
+        self.compat_batch.as_ref()
+    }
+
+    /// Sets the `CompatBatch` to the context.
+    pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
+        self.compat_batch = compat;
     }
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.

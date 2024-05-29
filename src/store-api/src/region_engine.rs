@@ -170,6 +170,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
     fn schema(&self) -> SchemaRef;
 
     /// Scans the partition and returns a stream of record batches.
+    /// # Panics
+    /// Panics if the `partition` is out of bound.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
 }
 

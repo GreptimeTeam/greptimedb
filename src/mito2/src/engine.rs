@@ -126,12 +126,11 @@ impl MitoEngine {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scanner(region_id, request)
             .map_err(BoxedError::new)?
             .scan()
             .await
-            .map_err(BoxedError::new)
     }
 
     /// Returns a scanner to scan for `request`.

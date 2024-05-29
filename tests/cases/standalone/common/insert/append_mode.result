@@ -10,6 +10,11 @@ with('append_mode'='true');
 
 Affected Rows: 0
 
+SELECT host, ts from append_mode_on ORDER BY host, ts;
+
+++
+++
+
 INSERT INTO append_mode_on VALUES ('host1',0, 0), ('host2', 1, 1,);
 
 Affected Rows: 2
