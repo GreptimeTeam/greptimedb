@@ -208,7 +208,7 @@ impl Inserter {
                 let node_manager = self.node_manager.clone();
                 let flow_tasks = flow_requests.into_iter().map(|(peer, inserts)| {
                     let node_manager = node_manager.clone();
-                    common_runtime::spawn_write(async move {
+                    common_runtime::spawn_bg(async move {
                         node_manager
                             .flownode(&peer)
                             .await
