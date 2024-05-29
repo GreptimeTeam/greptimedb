@@ -507,7 +507,12 @@ impl RangeSelect {
                         .index_of_column_by_name(column.relation.as_ref(), &column.name)
                         .ok_or(())
                 } else {
-                    Err(())
+                    let (qualifier, field) = project_expr
+                        .to_field(input.schema().as_ref())
+                        .map_err(|_| ())?;
+                    schema_before_project
+                        .index_of_column_by_name(qualifier.as_ref(), field.name())
+                        .ok_or(())
                 }
             })
             .collect::<std::result::Result<Vec<usize>, ()>>()
