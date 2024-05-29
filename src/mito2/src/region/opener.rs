@@ -253,7 +253,7 @@ impl RegionOpener {
 
     fn provider(&self, wal_options: &WalOptions) -> Provider {
         match wal_options {
-            WalOptions::RaftEngine => Provider::raft_engine_provider(*self.region_id),
+            WalOptions::RaftEngine => Provider::raft_engine_provider(self.region_id.as_u64()),
             WalOptions::Kafka(options) => Provider::kafka_provider(options.topic.to_string()),
         }
     }

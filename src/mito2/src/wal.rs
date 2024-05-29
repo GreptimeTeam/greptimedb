@@ -269,7 +269,7 @@ mod tests {
                 region_id,
                 1,
                 &entry,
-                &Provider::raft_engine_provider(*region_id),
+                &Provider::raft_engine_provider(region_id.as_u64()),
             )
             .unwrap();
         // Region 2 entry 1.
@@ -279,7 +279,7 @@ mod tests {
                 region_id,
                 1,
                 &entry,
-                &Provider::raft_engine_provider(*region_id),
+                &Provider::raft_engine_provider(region_id.as_u64()),
             )
             .unwrap();
         // Region 1 entry 2.
@@ -289,7 +289,7 @@ mod tests {
                 region_id,
                 2,
                 &entry,
-                &Provider::raft_engine_provider(*region_id),
+                &Provider::raft_engine_provider(region_id.as_u64()),
             )
             .unwrap();
 
@@ -341,8 +341,8 @@ mod tests {
 
         let entries = sample_entries();
         let (id1, id2) = (RegionId::new(1, 1), RegionId::new(1, 2));
-        let ns1 = Provider::raft_engine_provider(*id1);
-        let ns2 = Provider::raft_engine_provider(*id2);
+        let ns1 = Provider::raft_engine_provider(id1.as_u64());
+        let ns2 = Provider::raft_engine_provider(id2.as_u64());
         let mut writer = wal.writer();
         writer.add_entry(id1, 1, &entries[0], &ns1).unwrap();
         // Insert one entry into region2. Scan should not return this entry.
@@ -377,7 +377,7 @@ mod tests {
         let entries = sample_entries();
         let mut writer = wal.writer();
         let region_id = RegionId::new(1, 1);
-        let ns = Provider::raft_engine_provider(*region_id);
+        let ns = Provider::raft_engine_provider(region_id.as_u64());
         writer.add_entry(region_id, 1, &entries[0], &ns).unwrap();
         writer.add_entry(region_id, 2, &entries[1], &ns).unwrap();
         writer.add_entry(region_id, 3, &entries[2], &ns).unwrap();

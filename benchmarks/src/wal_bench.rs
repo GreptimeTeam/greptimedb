@@ -229,7 +229,7 @@ impl Region {
         rng_seed: u64,
     ) -> Self {
         let provider = match wal_options {
-            WalOptions::RaftEngine => Provider::raft_engine_provider(*id),
+            WalOptions::RaftEngine => Provider::raft_engine_provider(id.as_u64()),
             WalOptions::Kafka(opts) => Provider::kafka_provider(opts.topic),
         };
         Self {

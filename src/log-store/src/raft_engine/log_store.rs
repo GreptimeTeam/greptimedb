@@ -151,7 +151,7 @@ impl RaftEngineLogStore {
                 }
                 hash_map::Entry::Vacant(v) => {
                     // this entry is the first in batch of given region.
-                    if let Some(first_index) = self.engine.first_index(*region_id) {
+                    if let Some(first_index) = self.engine.first_index(region_id.as_u64()) {
                         // ensure the first in batch does not override compacted entry.
                         ensure!(
                             entry_id > first_index,
@@ -163,7 +163,7 @@ impl RaftEngineLogStore {
                         );
                     }
                     // ensure the first in batch does not form a hole in raft-engine.
-                    if let Some(last_index) = self.engine.last_index(*region_id) {
+                    if let Some(last_index) = self.engine.last_index(region_id.as_u64()) {
                         ensure!(
                             entry_id == last_index + 1,
                             DiscontinuousLogIndexSnafu {
@@ -178,7 +178,7 @@ impl RaftEngineLogStore {
             }
             batch
                 .add_entries::<MessageType>(
-                    *region_id,
+                    region_id.as_u64(),
                     &[EntryImpl {
                         id: entry_id,
                         namespace_id: region_id.as_u64(),
