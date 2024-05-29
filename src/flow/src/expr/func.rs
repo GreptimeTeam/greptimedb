@@ -77,10 +77,10 @@ impl UnmaterializableFunc {
     }
 
     pub fn is_valid_func_name(name: &str) -> bool {
-        match name.to_lowercase().as_str() {
-            "now" | "current_schema" | "tumble" => true,
-            _ => false,
-        }
+        matches!(
+            name.to_lowercase().as_str(),
+            "now" | "current_schema" | "tumble"
+        )
     }
 
     /// Create a UnmaterializableFunc from a string of the function name
@@ -191,10 +191,10 @@ impl UnaryFunc {
     }
 
     pub fn is_valid_func_name(name: &str) -> bool {
-        match name.to_lowercase().as_str() {
-            "not" | "is_null" | "is_true" | "is_false" | "step_timestamp" | "cast" => true,
-            _ => false,
-        }
+        matches!(
+            name.to_lowercase().as_str(),
+            "not" | "is_null" | "is_true" | "is_false" | "step_timestamp" | "cast"
+        )
     }
 
     /// Create a UnaryFunc from a string of the function name and given argument type(optional)
