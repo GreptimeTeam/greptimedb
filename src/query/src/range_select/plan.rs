@@ -496,8 +496,9 @@ impl RangeSelect {
             DFSchema::new_with_metadata(by_fields, input.schema().metadata().clone())
                 .context(DataFusionSnafu)?,
         );
-        // If the results of project plan can be obtained directly from range plan without any additional calculations, no project plan is required.
-        // We can simply project the final output of the range plan to produce the final result.
+        // If the results of project plan can be obtained directly from range plan without any additional
+        // calculations, no project plan is required. We can simply project the final output of the range
+        // plan to produce the final result.
         let schema_project = projection_expr
             .iter()
             .map(|project_expr| {
