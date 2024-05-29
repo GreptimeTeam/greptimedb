@@ -92,6 +92,42 @@ fn validate_log_ingester_payload(payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
+async fn log_ingester_inner(
+    state: LogHandlerRef,
+    query_params: LogIngesterQueryParams,
+    query_ctx: QueryContextRef,
+    mut payload: Value,
+) -> Result<HttpResponse, String> {
+    let processors_ = payload["pipeline_model"].take();
+    let processors = processors_.as_str().unwrap();
+    let data = payload["data"].take();
+    let yaml_content = Content::Yaml(processors.into());
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content)?;
+
+    let pipeline_data = PipelineValue::try_from(data)?;
+
+    let transformed_data: Rows = pipeline.exec(pipeline_data)?;
+
+    let insert_request = RowInsertRequest {
+        rows: Some(transformed_data),
+        table_name: query_params.table_name.clone(),
+    };
+    let insert_requests = RowInsertRequests {
+        inserts: vec![insert_request],
+    };
+    state
+        .insert_log(insert_requests, query_ctx)
+        .await
+        .map(|_| {
+            HttpResponse::GreptimedbV1(GreptimedbV1Response {
+                output: vec![],
+                execution_time_ms: 0,
+                resp_metrics: HashMap::new(),
+            })
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// handler to log ingester
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
@@ -100,11 +136,6 @@ pub async fn log_ingester(
     Extension(_query_ctx): Extension<QueryContextRef>,
     Json(mut _payload): Json<Value>,
 ) -> HttpResponse {
-    // TODO (qtang): implement log ingester
-    // transform payload to RowInsertRequest
-    // maybe we need a new trait for log ingester like `LogIngester` instead of `ServerGrpcQueryHandlerRef`
-    // let request = pileline::transform(payload);
-    // state.do_query(payload, query_ctx).await.to_string();
     match validate_log_ingester_payload(&_payload) {
         Ok(_) => (),
         Err(e) => {
@@ -114,52 +145,8 @@ pub async fn log_ingester(
             ))
         }
     };
-    let processors_ = _payload["pipeline_model"].take();
-    let processors = processors_.as_str().unwrap();
-    let data = _payload["data"].take();
-    let yaml_content = Content::Yaml(processors.into());
-    let pipeline_: Result<Pipeline<GreptimeTransformer>, String> = parse(&yaml_content);
-    match pipeline_ {
-        Ok(pipeline) => {
-            let pipeline_data = PipelineValue::try_from(data);
-            match pipeline_data {
-                Ok(pipeline_data) => {
-                    let transformed_data: Result<Rows, String> = pipeline.exec(pipeline_data);
-                    match transformed_data {
-                        Ok(rows) => {
-                            let insert_request = RowInsertRequest {
-                                rows: Some(rows),
-                                table_name: _query_params.table_name.clone(),
-                            };
-                            let insert_requests = RowInsertRequests {
-                                inserts: vec![insert_request],
-                            };
-                            let insert_result =
-                                _state.insert_log(insert_requests, _query_ctx).await;
-                            match insert_result {
-                                Ok(_) => HttpResponse::GreptimedbV1(GreptimedbV1Response {
-                                    output: vec![],
-                                    execution_time_ms: 0,
-                                    resp_metrics: HashMap::new(),
-                                }),
-                                Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
-                                    StatusCode::InvalidArguments,
-                                    e.to_string(),
-                                )),
-                            }
-                        }
-                        Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
-                            StatusCode::InvalidArguments,
-                            e,
-                        )),
-                    }
-                }
-                Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
-                    StatusCode::InvalidArguments,
-                    e,
-                )),
-            }
-        }
+    match log_ingester_inner(_state, _query_params, _query_ctx, _payload).await {
+        Ok(resp) => resp,
         Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
             StatusCode::InvalidArguments,
             e,

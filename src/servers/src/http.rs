@@ -712,6 +712,11 @@ impl HttpServer {
     fn route_log<S>(log_handler: LogHandlerRef) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(handler::log_ingester))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
             .with_state(log_handler)
     }
 

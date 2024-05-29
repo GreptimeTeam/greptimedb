@@ -121,7 +121,6 @@ pub trait OpenTelemetryProtocolHandler {
 }
 
 #[async_trait]
-
 pub trait LogHandler {
     async fn insert_log(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 }
