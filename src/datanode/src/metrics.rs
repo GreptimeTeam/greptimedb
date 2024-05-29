@@ -35,6 +35,12 @@ lazy_static! {
         "last received heartbeat lease elapsed",
     )
     .unwrap();
+    /// The elapsed time since the last sent heartbeat.
+    pub static ref LAST_SENT_HEARTBEAT_ELAPSED: IntGauge = register_int_gauge!(
+        "greptime_last_sent_heartbeat_lease_elapsed",
+        "last sent heartbeat lease elapsed",
+    )
+    .unwrap();
     pub static ref LEASE_EXPIRED_REGION: IntGaugeVec = register_int_gauge_vec!(
         "greptime_lease_expired_region",
         "lease expired region",

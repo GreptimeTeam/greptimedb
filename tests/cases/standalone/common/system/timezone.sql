@@ -48,7 +48,7 @@ select to_unixtime('2024-01-02 00:00:00');
 select to_unixtime('2024-01-02 00:00:00+08:00');
 
 --- UTC-8 ---
-SET TIME_ZONE = '-8:00';
+SET SESSION TIME_ZONE = '-8:00';
 
 SHOW VARIABLES time_zone;
 
@@ -71,7 +71,7 @@ select to_unixtime('2024-01-02 00:00:00+08:00');
 drop table test;
 
 -- revert timezone to UTC
-SET TIME_ZONE = 'UTC';
+SET LOCAL TIME_ZONE = 'UTC';
 
 SHOW VARIABLES time_zone;
 

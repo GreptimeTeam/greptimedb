@@ -24,8 +24,10 @@ use store_api::region_request::{
     RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::oneshot;
 
 use crate::config::MitoConfig;
+use crate::error;
 use crate::test_util::{
     build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
 };
@@ -318,4 +320,88 @@ async fn test_open_region_skip_wal_replay() {
 | 4     | 4.0     | 1970-01-01T00:00:04 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_open_region_wait_for_opening_region_ok() {
+    let mut env = TestEnv::with_prefix("wait-for-opening-region-ok");
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let worker = engine.inner.workers.worker(region_id);
+    let (tx, rx) = oneshot::channel();
+    let opening_regions = worker.opening_regions().clone();
+    opening_regions.insert_sender(region_id, tx.into());
+    assert!(engine.is_region_opening(region_id));
+
+    let handle_open = tokio::spawn(async move {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    region_dir: "empty".to_string(),
+                    options: HashMap::default(),
+                    skip_wal_replay: false,
+                }),
+            )
+            .await
+    });
+
+    // Wait for conditions
+    while opening_regions.sender_len(region_id) != 2 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let senders = opening_regions.remove_sender(region_id);
+    for sender in senders {
+        sender.send(Ok(0));
+    }
+
+    assert_eq!(handle_open.await.unwrap().unwrap().affected_rows, 0);
+    assert_eq!(rx.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_open_region_wait_for_opening_region_err() {
+    let mut env = TestEnv::with_prefix("wait-for-opening-region-err");
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let worker = engine.inner.workers.worker(region_id);
+    let (tx, rx) = oneshot::channel();
+    let opening_regions = worker.opening_regions().clone();
+    opening_regions.insert_sender(region_id, tx.into());
+    assert!(engine.is_region_opening(region_id));
+
+    let handle_open = tokio::spawn(async move {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    region_dir: "empty".to_string(),
+                    options: HashMap::default(),
+                    skip_wal_replay: false,
+                }),
+            )
+            .await
+    });
+
+    // Wait for conditions
+    while opening_regions.sender_len(region_id) != 2 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let senders = opening_regions.remove_sender(region_id);
+    for sender in senders {
+        sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+    }
+
+    assert_eq!(
+        handle_open.await.unwrap().unwrap_err().status_code(),
+        StatusCode::RegionNotFound
+    );
+    assert_eq!(
+        rx.await.unwrap().unwrap_err().status_code(),
+        StatusCode::RegionNotFound
+    );
 }
