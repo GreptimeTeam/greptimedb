@@ -235,6 +235,7 @@ impl LogStore for KafkaLogStore {
             provider, start_offset, end_offset
         );
 
+        // A buffer is used to collect records to construct a complete entry.
         let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
         let provider = provider.clone();
         let stream = async_stream::stream!({

@@ -290,7 +290,18 @@ pub fn remaining_entries(
     }
 }
 
-pub fn maybe_emit_entry(
+/// For type of [Entry::Naive] Entry:
+/// - Emits a [RecordType::Full] type record immediately.
+///
+/// For type of [Entry::MultiplePart] Entry:
+/// - Emits a complete or incomplete [Entry] while the next same [RegionId] record arrives.
+///
+/// **Incomplete Entry:**
+/// If the records arrive in the following order, it emits **the incomplete [Entry]** when the next record arrives.
+/// - **[RecordType::First], [RecordType::Middle]**, [RecordType::First]
+/// - **[RecordType::Middle]**, [RecordType::First]
+/// - **[RecordType::Last]**
+pub(crate) fn maybe_emit_entry(
     provider: &Arc<KafkaProvider>,
     record: Record,
     buffered_records: &mut HashMap<RegionId, Vec<Record>>,
