@@ -107,7 +107,7 @@ impl RegionEngine for FileRegionEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
         None
     }
 

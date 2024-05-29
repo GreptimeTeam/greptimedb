@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
@@ -121,12 +122,17 @@ pub struct RegionManifestManager {
 
 impl RegionManifestManager {
     /// Constructs a region's manifest and persist it.
-    pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
+    pub async fn new(
+        metadata: RegionMetadataRef,
+        options: RegionManifestOptions,
+        total_manifest_size: Arc<AtomicU64>,
+    ) -> Result<Self> {
         // construct storage
         let mut store = ManifestObjectStore::new(
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
+            total_manifest_size,
         );
 
         info!(
@@ -168,7 +174,10 @@ impl RegionManifestManager {
     /// Opens an existing manifest.
     ///
     /// Returns `Ok(None)` if no such manifest.
-    pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
+    pub async fn open(
+        options: RegionManifestOptions,
+        total_manifest_size: Arc<AtomicU64>,
+    ) -> Result<Option<Self>> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["open"])
             .start_timer();
@@ -178,6 +187,7 @@ impl RegionManifestManager {
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
+            total_manifest_size,
         );
 
         // recover from storage

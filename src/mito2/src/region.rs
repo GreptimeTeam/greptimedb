@@ -20,7 +20,7 @@ pub(crate) mod version;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info, warn};
@@ -106,6 +106,8 @@ pub(crate) struct MitoRegion {
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
+    /// Region stats
+    stats: Stats,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -233,7 +235,7 @@ impl MitoRegion {
     }
 
     /// Returns the region usage in bytes.
-    pub(crate) async fn region_usage(&self) -> RegionUsage {
+    pub(crate) fn region_usage(&self) -> RegionUsage {
         let region_id = self.region_id;
 
         let version = self.version();
@@ -243,13 +245,7 @@ impl MitoRegion {
         let sst_usage = version.ssts.sst_usage();
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
-
-        let manifest_usage = self
-            .manifest_ctx
-            .manifest_manager
-            .read()
-            .await
-            .manifest_usage();
+        let manifest_usage = self.stats.total_manifest_size();
 
         RegionUsage {
             region_id,
@@ -525,6 +521,18 @@ impl OpeningRegions {
 }
 
 pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
+
+/// Single region stats.
+#[derive(Default, Debug, Clone)]
+pub(crate) struct Stats {
+    total_manifest_size: Arc<AtomicU64>,
+}
+
+impl Stats {
+    fn total_manifest_size(&self) -> u64 {
+        self.total_manifest_size.load(Ordering::Relaxed)
+    }
+}
 
 #[cfg(test)]
 mod tests {

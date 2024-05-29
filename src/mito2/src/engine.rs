@@ -110,14 +110,14 @@ impl MitoEngine {
     }
 
     /// Returns the region disk/memory usage information.
-    pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
+    pub fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
         let region = self
             .inner
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        Ok(region.region_usage().await)
+        Ok(region.region_usage())
     }
 
     /// Handle substrait query and return a stream of record batches
@@ -368,10 +368,9 @@ impl RegionEngine for MitoEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         let size = self
             .get_region_usage(region_id)
-            .await
             .map(|usage| usage.disk_usage())
             .ok()?;
         size.try_into().ok()

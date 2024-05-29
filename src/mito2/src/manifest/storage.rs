@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::iter::Iterator;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
@@ -133,15 +135,22 @@ pub struct ManifestObjectStore {
     path: String,
     /// Stores the size of each manifest file.
     manifest_size_map: HashMap<FileKey, u64>,
+    total_manifest_size: Arc<AtomicU64>,
 }
 
 impl ManifestObjectStore {
-    pub fn new(path: &str, object_store: ObjectStore, compress_type: CompressionType) -> Self {
+    pub fn new(
+        path: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+        total_manifest_size: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             object_store,
             compress_type,
             path: util::normalize_dir(path),
             manifest_size_map: HashMap::new(),
+            total_manifest_size,
         }
     }
 
@@ -338,10 +347,9 @@ impl ManifestObjectStore {
         // delete manifest sizes
         for (_, is_checkpoint, version) in &del_entries {
             if *is_checkpoint {
-                self.manifest_size_map
-                    .remove(&FileKey::Checkpoint(*version));
+                self.unset_file_size(&FileKey::Checkpoint(*version));
             } else {
-                self.manifest_size_map.remove(&FileKey::Delta(*version));
+                self.unset_file_size(&FileKey::Delta(*version));
             }
         }
 
@@ -564,12 +572,28 @@ impl ManifestObjectStore {
     /// Set the size of the delta file by delta version.
     pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
         self.manifest_size_map.insert(FileKey::Delta(version), size);
+        self.inc_total_manifest_size(size);
     }
 
     /// Set the size of the checkpoint file by checkpoint version.
     pub(crate) fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
         self.manifest_size_map
             .insert(FileKey::Checkpoint(version), size);
+        self.inc_total_manifest_size(size);
+    }
+
+    fn unset_file_size(&mut self, key: &FileKey) {
+        if let Some(val) = self.manifest_size_map.remove(key) {
+            self.dec_total_manifest_size(val);
+        }
+    }
+
+    fn inc_total_manifest_size(&self, val: u64) {
+        self.total_manifest_size.fetch_add(val, Ordering::Relaxed);
+    }
+
+    fn dec_total_manifest_size(&self, val: u64) {
+        self.total_manifest_size.fetch_sub(val, Ordering::Relaxed);
     }
 }
 
@@ -610,7 +634,12 @@ mod tests {
         let mut builder = Fs::default();
         let _ = builder.root(&tmp_dir.path().to_string_lossy());
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        ManifestObjectStore::new("/", object_store, CompressionType::Uncompressed)
+        ManifestObjectStore::new(
+            "/",
+            object_store,
+            CompressionType::Uncompressed,
+            Default::default(),
+        )
     }
 
     fn new_checkpoint_metadata_with_version(version: ManifestVersion) -> CheckpointMetadata {
