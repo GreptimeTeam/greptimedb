@@ -38,6 +38,9 @@ pub(crate) const VERSION: u32 = 0;
 /// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_size - ESTIMATED_META_SIZE.
 pub(crate) const ESTIMATED_META_SIZE: usize = 256;
 
+/// The minimum batch size
+pub(crate) const MIN_BATCH_SIZE: usize = 4 * 1024;
+
 /// The type of a record.
 ///
 /// - If the entry is able to fit into a Kafka record, it's converted into a Full record.

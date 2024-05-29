@@ -28,11 +28,12 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
-use super::util::record::ESTIMATED_META_SIZE;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
-use crate::kafka::util::record::{maybe_emit_entry, remaining_entries, Record, RecordProducer};
+use crate::kafka::util::record::{
+    maybe_emit_entry, remaining_entries, Record, RecordProducer, ESTIMATED_META_SIZE,
+};
 use crate::metrics;
 
 /// A log store backed by Kafka.
