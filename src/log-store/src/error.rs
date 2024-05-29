@@ -176,16 +176,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to produce records to Kafka, topic: {}, size: {}, limit: {}",
-        topic,
-        size,
-        limit,
-    ))]
+    #[snafu(display("Failed to produce records to Kafka, topic: {}, size: {}", topic, size))]
     ProduceRecord {
         topic: String,
         size: usize,
-        limit: usize,
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]

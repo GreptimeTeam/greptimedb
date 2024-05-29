@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::WalEntry;
+use common_telemetry::info;
 use futures::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -57,16 +58,23 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
         let mut stream = reader.read(ns, start_id)?;
 
         let stream = async_stream::stream! {
-            if let Some(entry) = stream.next().await {
-                let entry = entry?;
-                if entry.is_complete() {
-                    yield decode_raw_entry(entry)
-                }
-                // Ignores tail corrupted data.
+            let mut buffered_entry = None;
+            while let Some(next_entry) = stream.next().await {
+                match buffered_entry.take() {
+                    Some(entry) => {
+                        yield decode_raw_entry(entry);
+                        buffered_entry = Some(next_entry?);
+                    },
+                    None => {
+                        buffered_entry = Some(next_entry?);
+                    }
+                };
             }
-            while let Some(entry) = stream.next().await {
-                let entry = entry?;
-                yield decode_raw_entry(entry)
+            if let Some(entry) = buffered_entry {
+                // Ignores tail corrupted data.
+                if entry.is_complete() {
+                    yield decode_raw_entry(entry);
+                }
             }
         };
 
@@ -104,6 +112,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {
+        common_telemetry::init_default_ut_logging();
         let provider = Provider::kafka_provider("my_topic".to_string());
         let wal_entry = WalEntry {
             mutations: vec![Mutation {
@@ -122,16 +131,17 @@ mod tests {
                 Entry::MultiplePart(MultiplePartEntry {
                     provider: provider.clone(),
                     region_id: RegionId::new(1, 1),
-                    entry_id: 1,
-                    headers: vec![MultiplePartHeader::Last],
-                    parts: vec![vec![1; 100]],
-                }),
-                Entry::MultiplePart(MultiplePartEntry {
-                    provider: provider.clone(),
-                    region_id: RegionId::new(1, 1),
                     entry_id: 2,
                     headers: vec![MultiplePartHeader::First, MultiplePartHeader::Last],
                     parts,
+                }),
+                // The tail corrupted data.
+                Entry::MultiplePart(MultiplePartEntry {
+                    provider: provider.clone(),
+                    region_id: RegionId::new(1, 1),
+                    entry_id: 1,
+                    headers: vec![MultiplePartHeader::Last],
+                    parts: vec![vec![1; 100]],
                 }),
             ],
         };

@@ -157,8 +157,6 @@ impl RecordProducer {
 
         // Stores the offset of the last successfully produced record.
         let mut last_offset = None;
-        let max_record_size =
-            client_manager.config.max_batch_size.as_bytes() as usize - ESTIMATED_META_SIZE;
         for entry in self.entries {
             for record in convert_to_records(entry) {
                 let kafka_record = KafkaRecord::try_from(record)?;
@@ -175,7 +173,6 @@ impl RecordProducer {
                     .with_context(|_| ProduceRecordSnafu {
                         topic: &self.provider.topic,
                         size: kafka_record.approximate_size(),
-                        limit: max_record_size,
                     })?;
                 last_offset = Some(offset);
             }
