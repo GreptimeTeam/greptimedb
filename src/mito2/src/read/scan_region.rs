@@ -208,11 +208,11 @@ impl ScanRegion {
     }
 
     /// Returns a [Scanner] to scan the region.
-    pub(crate) async fn scanner(self) -> Result<Scanner> {
+    pub(crate) fn scanner(self) -> Result<Scanner> {
         if self.version.options.append_mode {
             // If table uses append mode, we use unordered scan in query.
             // We still use seq scan in compaction.
-            self.unordered_scan().await.map(Scanner::Unordered)
+            self.unordered_scan().map(Scanner::Unordered)
         } else {
             self.seq_scan().map(Scanner::Seq)
         }
@@ -227,9 +227,9 @@ impl ScanRegion {
     }
 
     /// Unordered scan.
-    pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
+    pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input(true)?;
-        UnorderedScan::new(input).await
+        Ok(UnorderedScan::new(input))
     }
 
     #[cfg(test)]

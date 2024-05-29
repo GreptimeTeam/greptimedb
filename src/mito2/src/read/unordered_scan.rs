@@ -15,6 +15,7 @@
 //! Unordered scanner.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::{stream, try_stream};
@@ -27,6 +28,7 @@ use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use snafu::ResultExt;
 use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
+use tokio::sync::Mutex;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
@@ -44,56 +46,42 @@ use crate::sst::parquet::reader::ReaderMetrics;
 ///
 /// Only an append only table should use this scanner.
 pub struct UnorderedScan {
-    /// Input memtables and files.
-    input: ScanInput,
     /// Properties of the scanner.
     properties: ScannerProperties,
-    /// Parts to scan.
-    parts: Vec<ScanPart>,
-
-    // Metrics:
-    /// The start time of the query.
-    query_start: Instant,
-    /// Time elapsed before creating the scanner.
-    prepare_scan_cost: Duration,
-    /// Duration to build parts to scan.
-    build_parts_cost: Duration,
+    /// Context of streams.
+    stream_ctx: Arc<StreamContext>,
 }
 
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
-    pub(crate) async fn new(input: ScanInput) -> Result<Self> {
-        let build_start = Instant::now();
-        let query_start = input.query_start.unwrap_or(build_start);
+    pub(crate) fn new(input: ScanInput) -> Self {
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
         let prepare_scan_cost = query_start.elapsed();
-        // Prunes file ranges.
-        let mut distributor = UnorderedDistributor::default();
-        input.prune_file_ranges(&mut distributor).await?;
-        // Builds parts to scan.
-        let parts = distributor.build_parts(&input.memtables, input.parallelism.parallelism);
-        let build_parts_cost = build_start.elapsed();
+        let properties =
+            ScannerProperties::new(ScannerPartitioning::Unknown(input.parallelism.parallelism));
 
         // Observes metrics.
         READ_STAGE_ELAPSED
             .with_label_values(&["prepare_scan"])
             .observe(prepare_scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parts"])
-            .observe(build_parts_cost.as_secs_f64());
 
-        Ok(Self {
+        let stream_ctx = Arc::new(StreamContext {
             input,
-            properties: ScannerProperties::new(ScannerPartitioning::Unknown(parts.len())),
-            parts,
+            parts: Mutex::new(ScanPartList::default()),
             query_start,
             prepare_scan_cost,
-            build_parts_cost,
-        })
+        });
+
+        Self {
+            properties,
+            stream_ctx,
+        }
     }
 
     /// Scans the region and returns a stream.
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        let streams = (0..self.parts.len())
+        let part_num = self.properties.partitioning().num_partitions();
+        let streams = (0..part_num)
             .map(|i| self.scan_partition(i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let stream = stream! {
@@ -167,31 +155,42 @@ impl RegionScanner for UnorderedScan {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.input.mapper.output_schema()
+        self.stream_ctx.input.mapper.output_schema()
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part = &self.parts[partition];
         let mut metrics = Metrics {
-            prepare_scan_cost: self.prepare_scan_cost,
-            build_source_cost: self.build_parts_cost,
+            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
             ..Default::default()
         };
-        let mapper = self.input.mapper.clone();
-        let cache_manager = self.input.cache_manager.clone();
-        let memtable_sources = part
-            .memtables
-            .iter()
-            .map(|mem| {
-                let iter = mem.iter(Some(mapper.column_ids()), self.input.predicate.clone())?;
-                Ok(Source::Iter(iter))
-            })
-            .collect::<Result<Vec<_>>>()
-            .map_err(BoxedError::new)?;
-        let file_ranges = part.file_ranges.clone();
-        let query_start = self.query_start;
+        let stream_ctx = self.stream_ctx.clone();
         let stream = try_stream! {
-            let cache = cache_manager.as_deref();
+            let mut parts = stream_ctx.parts.lock().await;
+            parts
+                .maybe_init_parts(&stream_ctx.input, &mut metrics)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let Some(part) = parts.get_part(partition) else {
+                return;
+            };
+
+            let mapper = &stream_ctx.input.mapper;
+            let memtable_sources = part
+                .memtables
+                .iter()
+                .map(|mem| {
+                    let iter = mem.iter(
+                        Some(mapper.column_ids()),
+                        stream_ctx.input.predicate.clone(),
+                    )?;
+                    Ok(Source::Iter(iter))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let query_start = stream_ctx.query_start;
+            let cache = stream_ctx.input.cache_manager.as_deref();
             // Scans memtables first.
             for mut source in memtable_sources {
                 while let Some(batch) = Self::fetch_from_source(&mut source, &mapper, cache, None, &mut metrics).await? {
@@ -202,7 +201,7 @@ impl RegionScanner for UnorderedScan {
             }
             // Then scans file ranges.
             let mut reader_metrics = ReaderMetrics::default();
-            for file_range in file_ranges {
+            for file_range in &part.file_ranges {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
                 let compat_batch = file_range.compat_batch();
                 let mut source = Source::RowGroupReader(reader);
@@ -224,7 +223,7 @@ impl RegionScanner for UnorderedScan {
             );
         };
         let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
+            self.stream_ctx.input.mapper.output_schema(),
             Box::pin(stream),
         ));
 
@@ -234,16 +233,15 @@ impl RegionScanner for UnorderedScan {
 
 impl DisplayAs for UnorderedScan {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "UnorderedScan: [{:?}]", self.parts)
+        write!(f, "UnorderedScan: [{:?}]", self.stream_ctx.parts)
     }
 }
 
 impl fmt::Debug for UnorderedScan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnorderedScan")
-            .field("parts", &self.parts)
-            .field("prepare_scan_cost", &self.prepare_scan_cost)
-            .field("build_parts_cost", &self.build_parts_cost)
+            .field("parts", &self.stream_ctx.parts)
+            .field("prepare_scan_cost", &self.stream_ctx.prepare_scan_cost)
             .finish()
     }
 }
@@ -252,8 +250,56 @@ impl fmt::Debug for UnorderedScan {
 impl UnorderedScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
-        &self.input
+        &self.stream_ctx.input
     }
+}
+
+/// List of [ScanPart]s.
+#[derive(Debug, Default)]
+struct ScanPartList(Option<Vec<ScanPart>>);
+
+impl ScanPartList {
+    /// Initializes parts if they are not built yet.
+    async fn maybe_init_parts(&mut self, input: &ScanInput, metrics: &mut Metrics) -> Result<()> {
+        if self.0.is_none() {
+            let now = Instant::now();
+            let mut distributor = UnorderedDistributor::default();
+            input.prune_file_ranges(&mut distributor).await?;
+            self.0 = Some(distributor.build_parts(&input.memtables, input.parallelism.parallelism));
+
+            metrics.build_parts_cost = now.elapsed();
+            READ_STAGE_ELAPSED
+                .with_label_values(&["build_parts"])
+                .observe(metrics.build_parts_cost.as_secs_f64());
+        }
+        Ok(())
+    }
+
+    /// Gets the part by index, returns None if the index is out of bound.
+    /// # Panics
+    /// Panics if parts are not initialized.
+    fn get_part(&mut self, index: usize) -> Option<&ScanPart> {
+        let parts = self.0.as_ref().unwrap();
+        parts.get(index)
+    }
+}
+
+/// Context shared by different streams.
+/// It contains the input and distributes input to multiple parts
+/// to scan.
+struct StreamContext {
+    /// Input memtables and files.
+    input: ScanInput,
+    /// Parts to scan.
+    /// The scanner builds parts to scan from the input lazily.
+    /// The mutex is used to ensure the parts are only built once.
+    parts: Mutex<ScanPartList>,
+
+    // Metrics:
+    /// The start time of the query.
+    query_start: Instant,
+    /// Time elapsed before creating the scanner.
+    prepare_scan_cost: Duration,
 }
 
 /// Metrics for [UnorderedScan].
@@ -263,8 +309,8 @@ impl UnorderedScan {
 struct Metrics {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
-    /// Duration to build sources.
-    build_source_cost: Duration,
+    /// Duration to build parts.
+    build_parts_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
     /// Duration to convert batches.
@@ -297,6 +343,7 @@ impl FileRangeCollector for UnorderedDistributor {
 
 impl UnorderedDistributor {
     /// Distributes file ranges and memtables across partitions according to the `parallelism`.
+    /// The output number of parts may be `<= parallelism`.
     fn build_parts(self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
         if parallelism <= 1 {
             // Returns a single part.

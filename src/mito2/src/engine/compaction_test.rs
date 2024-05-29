@@ -139,10 +139,7 @@ async fn test_compaction_region() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(
         1,
         scanner.num_files(),
@@ -193,10 +190,7 @@ async fn test_compaction_region_with_overlapping() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(
         2,
         scanner.num_files(),
@@ -247,10 +241,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(
         4,
         scanner.num_files(),
@@ -320,10 +311,7 @@ async fn test_readonly_during_compaction() {
         .unwrap();
     notify.notified().await;
 
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(
         2,
         scanner.num_files(),

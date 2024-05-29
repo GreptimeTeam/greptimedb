@@ -177,7 +177,7 @@ async fn test_engine_truncate_after_flush() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request.clone()).await.unwrap();
+    let scanner = engine.scanner(region_id, request.clone()).unwrap();
     assert_eq!(1, scanner.num_files());
 
     // Truncate the region.
@@ -194,7 +194,7 @@ async fn test_engine_truncate_after_flush() {
     put_rows(&engine, region_id, rows).await;
 
     // Scan the region.
-    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(0, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -340,7 +340,7 @@ async fn test_engine_truncate_during_flush() {
     let truncated_sequence = version_data.version.flushed_sequence;
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request.clone()).await.unwrap();
+    let scanner = engine.scanner(region_id, request.clone()).unwrap();
     assert_eq!(0, scanner.num_files());
     assert_eq!(Some(entry_id), truncated_entry_id);
     assert_eq!(sequence, truncated_sequence);
