@@ -21,7 +21,9 @@ use crate::storage::RegionId;
 /// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
 
-/// The raw entry.
+/// The [Entry::Naive] is used in RaftEngineLogStore and KafkaLogStore.
+///
+/// The [Entry::MultiplePart] contains multiple parts of data that split from a large entry, is used in KafkaLogStore,
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Naive(NaiveEntry),
