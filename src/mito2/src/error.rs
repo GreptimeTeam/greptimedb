@@ -27,6 +27,7 @@ use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
+use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
@@ -226,6 +227,14 @@ pub enum Error {
         source: datatypes::Error,
     },
 
+    #[snafu(display("Failed to build entry, region_id: {}", region_id))]
+    BuildEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
     EncodeWal {
         region_id: RegionId,
@@ -242,17 +251,9 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
+    #[snafu(display("Failed to read WAL, provider: {}", provider))]
     ReadWal {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to read WAL, topic: {}", topic))]
-    ReadKafkaWal {
-        topic: String,
+        provider: Provider,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -636,6 +637,13 @@ pub enum Error {
         unexpected_entry_id: u64,
     },
 
+    #[snafu(display("Read the corrupted log entry, region_id: {}", region_id))]
+    CorruptedEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
@@ -757,7 +765,6 @@ impl ErrorExt for Error {
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }
-            | ReadKafkaWal { .. }
             | DeleteWal { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }
@@ -789,8 +796,10 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. } => StatusCode::Internal,
+            | DecodeWal { .. }
+            | BuildEntry { .. } => StatusCode::Internal,
             OpenRegion { source, .. } => source.status_code(),
+
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
@@ -837,7 +846,9 @@ impl ErrorExt for Error {
 
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
-            EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
+            EncodeMemtable { .. } | ReadDataPart { .. } | CorruptedEntry { .. } => {
+                StatusCode::Internal
+            }
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
