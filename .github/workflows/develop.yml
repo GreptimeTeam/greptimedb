@@ -217,7 +217,7 @@ jobs:
         run: |
           cd tests-fuzz &
           cargo install cargo-gc-bin &
-          cargo gc --release &
+          cargo gc &
           cd ..
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
