@@ -129,6 +129,15 @@ impl TableContext {
                 self.name = new_table_name;
                 Ok(self)
             }
+            AlterTableOperation::ModifyDataType { column } => {
+                for iter in self.columns.iter_mut() {
+                    if iter.name != column.name {
+                        continue;
+                    }
+                    iter.column_type = column.column_type.clone();
+                }
+                Ok(self)
+            }
         }
     }
 

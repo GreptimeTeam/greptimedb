@@ -27,7 +27,8 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generat
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
-    droppable_columns, generate_columns, generate_random_value, ColumnTypeGenerator, Ident,
+    droppable_columns, generate_columns, generate_random_value, modifiable_columns, Column,
+    ColumnTypeGenerator, Ident,
 };
 
 fn add_column_options_generator<R: Rng>(
@@ -157,6 +158,39 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprRenameGenerator<R> {
     }
 }
 
+/// Generates the [AlterTableOperation::ModifyDataType] of [AlterTableExpr].
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct AlterExprModifyDataTypeGenerator<R: Rng> {
+    table_ctx: TableContextRef,
+    #[builder(default = "Box::new(ColumnTypeGenerator)")]
+    column_type_generator: ConcreteDataTypeGenerator<R>,
+}
+
+impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprModifyDataTypeGenerator<R> {
+    type Error = Error;
+
+    fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
+        let modifiable = modifiable_columns(&self.table_ctx.columns);
+        let changed = modifiable[rng.gen_range(0..modifiable.len())].clone();
+        let mut to_type = self.column_type_generator.gen(rng);
+        while !changed.column_type.can_arrow_type_cast_to(&to_type) {
+            to_type = self.column_type_generator.gen(rng);
+        }
+
+        Ok(AlterTableExpr {
+            table_name: self.table_ctx.name.clone(),
+            alter_options: AlterTableOperation::ModifyDataType {
+                column: Column {
+                    name: changed.name,
+                    column_type: to_type,
+                    options: vec![],
+                },
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -200,13 +234,23 @@ mod tests {
         assert_eq!(expected, serialized);
 
         let expr = AlterExprDropColumnGeneratorBuilder::default()
-            .table_ctx(table_ctx)
+            .table_ctx(table_ctx.clone())
             .build()
             .unwrap()
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
         let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"DropColumn":{"name":{"value":"cUmquE","quote_style":null}}}}"#;
+        assert_eq!(expected, serialized);
+
+        let expr = AlterExprModifyDataTypeGeneratorBuilder::default()
+            .table_ctx(table_ctx)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"ModifyDataType":{"column":{"name":{"value":"toTAm","quote_style":null},"column_type":{"Int64":{}},"options":[]}}}}"#;
         assert_eq!(expected, serialized);
     }
 }
