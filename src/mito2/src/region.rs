@@ -106,7 +106,7 @@ pub(crate) struct MitoRegion {
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
-    /// Region stats
+    /// manifest stats
     stats: ManifestStats,
 }
 
