@@ -76,6 +76,10 @@ pub fn create_aggregate_function(
 pub trait SubstraitPlanDecoder {
     /// Decode the [`LogicalPlan`] from bytes with the [`CatalogProviderList`].
     /// When `optimize` is true, it will do the optimization for decoded plan.
+    ///
+    /// TODO(dennis): It's not a good design for an API to do many things.
+    /// The `optimize` was introduced because of `query` and `catalog` cyclic dependency issue
+    /// I am happy to refactor it if we have a better solution.
     async fn decode(
         &self,
         message: bytes::Bytes,
