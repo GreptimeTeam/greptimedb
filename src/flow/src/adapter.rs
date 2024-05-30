@@ -543,10 +543,10 @@ impl FlownodeManager {
             // first check how many inputs were sent
             let (flush_res, buf_len) = if blocking {
                 let mut ctx = self.node_context.lock().await;
-                (ctx.flush_all_sender(), ctx.get_send_buf_size())
+                (ctx.flush_all_sender().await, ctx.get_send_buf_size().await)
             } else {
                 match self.node_context.try_lock() {
-                    Ok(mut ctx) => (ctx.flush_all_sender(), ctx.get_send_buf_size()),
+                    Ok(mut ctx) => (ctx.flush_all_sender().await, ctx.get_send_buf_size().await),
                     Err(_) => return Ok(()),
                 }
             };
@@ -580,7 +580,7 @@ impl FlownodeManager {
             rows.len()
         );
         let table_id = region_id.table_id();
-        self.node_context.lock().await.send(table_id, rows)?;
+        self.node_context.lock().await.send(table_id, rows).await?;
         // TODO(discord9): put it in a background task?
         // self.run_available(false).await?;
         Ok(())
