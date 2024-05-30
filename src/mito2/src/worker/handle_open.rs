@@ -29,6 +29,7 @@ use crate::error::{
 use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
+use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
@@ -66,6 +67,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionOpenRequest,
+        wal_entry_receiver: Option<WalEntryReceiver>,
         sender: OptionOutputTx,
     ) {
         if self.regions.is_region_exists(region_id) {
@@ -85,7 +87,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Try to open region {}", region_id);
 
         // Open region from specific region dir.
-        let opener = match RegionOpener::new(
+        let mut opener = match RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder_provider.clone(),
@@ -102,6 +104,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender.send(Err(err));
                 return;
             }
+        };
+        if let Some(wal_entry_receiver) = wal_entry_receiver {
+            opener = opener.wal_entry_reader(Box::new(wal_entry_receiver));
         };
 
         let regions = self.regions.clone();

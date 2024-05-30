@@ -20,7 +20,7 @@ use api::v1::WalEntry;
 use async_stream::stream;
 use common_telemetry::{debug, error};
 use futures::future::join_all;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
@@ -101,9 +101,9 @@ impl WalEntryDistributor {
 pub(crate) struct WalEntryReceiver {
     region_id: RegionId,
     /// Receives the [Entry] from the [WalEntryDistributor].
-    entry_receiver: Receiver<Entry>,
+    entry_receiver: Option<Receiver<Entry>>,
     /// Sends the `start_id` to the [WalEntryDistributor].
-    arg_sender: oneshot::Sender<EntryId>,
+    arg_sender: Option<oneshot::Sender<EntryId>>,
 }
 
 impl WalEntryReceiver {
@@ -114,19 +114,22 @@ impl WalEntryReceiver {
     ) -> Self {
         Self {
             region_id,
-            entry_receiver,
-            arg_sender,
+            entry_receiver: Some(entry_receiver),
+            arg_sender: Some(arg_sender),
         }
     }
 }
 
 impl WalEntryReader for WalEntryReceiver {
-    fn read(self, provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
-        let WalEntryReceiver {
-            region_id: expected_region_id,
-            mut entry_receiver,
-            arg_sender,
-        } = self;
+    fn read(&mut self, provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
+        let mut arg_sender = self
+            .arg_sender
+            .take()
+            .context(error::InvalidWalReadRequestSnafu {
+                reason: format!("Call WalEntryReceiver multiple time, start_id: {start_id}"),
+            })?;
+        // Safety: check via arg_sender
+        let mut entry_receiver = self.entry_receiver.take().unwrap();
 
         if arg_sender.send(start_id).is_err() {
             return error::InvalidWalReadRequestSnafu {
@@ -331,7 +334,7 @@ mod tests {
         drop(last);
 
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 0).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
@@ -432,7 +435,7 @@ mod tests {
         );
         assert_eq!(receivers.len(), 3);
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 0).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
@@ -515,7 +518,7 @@ mod tests {
         );
         assert_eq!(receivers.len(), 2);
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 0).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
@@ -607,7 +610,7 @@ mod tests {
         );
         assert_eq!(receivers.len(), 2);
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 4).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
