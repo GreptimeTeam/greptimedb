@@ -102,7 +102,7 @@ async fn test_on_prepare_view_exists_err() {
         .table_metadata_manager
         .create_view_metadata(
             task.view_info.clone(),
-            &task.create_view.logical_plan,
+            task.create_view.logical_plan.clone(),
             test_table_names(),
         )
         .await
@@ -126,7 +126,7 @@ async fn test_on_prepare_with_create_if_view_exists() {
         .table_metadata_manager
         .create_view_metadata(
             task.view_info.clone(),
-            &task.create_view.logical_plan,
+            task.create_view.logical_plan.clone(),
             test_table_names(),
         )
         .await

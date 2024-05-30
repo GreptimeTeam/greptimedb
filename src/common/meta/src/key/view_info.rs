@@ -90,9 +90,9 @@ pub struct ViewInfoValue {
 }
 
 impl ViewInfoValue {
-    pub fn new(view_info: &RawViewLogicalPlan, table_names: HashSet<TableName>) -> Self {
+    pub fn new(view_info: RawViewLogicalPlan, table_names: HashSet<TableName>) -> Self {
         Self {
-            view_info: view_info.clone(),
+            view_info,
             table_names,
             version: 0,
         }

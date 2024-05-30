@@ -116,7 +116,7 @@ mod tests {
         table_metadata_manager
             .create_view_metadata(
                 task.view_info.clone(),
-                &task.create_view.logical_plan,
+                task.create_view.logical_plan.clone(),
                 table_names,
             )
             .await

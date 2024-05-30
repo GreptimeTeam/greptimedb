@@ -208,7 +208,7 @@ impl CreateViewProcedure {
             manager
                 .create_view_metadata(
                     raw_view_info,
-                    self.data.task.raw_logical_plan(),
+                    self.data.task.raw_logical_plan().clone(),
                     self.data.task.table_names(),
                 )
                 .await?;

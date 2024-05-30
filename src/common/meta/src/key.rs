@@ -490,7 +490,7 @@ impl TableMetadataManager {
     pub async fn create_view_metadata(
         &self,
         view_info: RawTableInfo,
-        raw_logical_plan: &Vec<u8>,
+        raw_logical_plan: Vec<u8>,
         table_names: HashSet<TableName>,
     ) -> Result<()> {
         let view_id = view_info.ident.table_id;
@@ -2009,7 +2009,7 @@ mod tests {
 
         // Create metadata
         table_metadata_manager
-            .create_view_metadata(view_info.clone(), &logical_plan, table_names.clone())
+            .create_view_metadata(view_info.clone(), logical_plan.clone(), table_names.clone())
             .await
             .unwrap();
 
@@ -2051,8 +2051,10 @@ mod tests {
             set
         };
 
-        let current_view_info_value =
-            DeserializedValueWithBytes::from_inner(ViewInfoValue::new(&logical_plan, table_names));
+        let current_view_info_value = DeserializedValueWithBytes::from_inner(ViewInfoValue::new(
+            logical_plan.clone(),
+            table_names,
+        ));
         // should be ok.
         table_metadata_manager
             .update_view_info(
