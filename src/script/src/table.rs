@@ -292,7 +292,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
 }
 
 /// Build the inserted column schemas
-fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
+fn  build_insert_column_schemas() -> Vec<PbColumnSchema> {
     vec![
         // The schema that script belongs to.
         PbColumnSchema {

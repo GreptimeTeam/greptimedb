@@ -38,6 +38,7 @@ use crate::error::{self, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::{Instance, StatementExecutorRef};
+use crate::pipeline::PipelineOperator;
 use crate::script::ScriptExecutor;
 
 /// The frontend [`Instance`] builder.
@@ -172,11 +173,17 @@ impl FrontendBuilder {
             table_route_cache,
         ));
 
+        let pipeline_operator = Arc::new(PipelineOperator::new(
+            self.catalog_manager.clone(),
+            query_engine.clone(),
+        ));
+
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         Ok(Instance {
             catalog_manager: self.catalog_manager,
             script_executor,
+            pipeline_operator,
             statement_executor,
             query_engine,
             plugins,

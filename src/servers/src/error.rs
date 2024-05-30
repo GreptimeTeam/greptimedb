@@ -148,6 +148,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to insert pipeline with name: {}", name))]
+    InsertPipeline {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to execute script by name: {}", name))]
     ExecuteScript {
         name: String,
@@ -607,6 +615,7 @@ impl ErrorExt for Error {
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
             InsertScript { source, .. }
+            | InsertPipeline { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }

@@ -27,9 +27,7 @@ use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use pipeline::transform::GreptimeTransformer;
 use pipeline::value::Value as PipelineValue;
-use pipeline::{parse, Content, Pipeline};
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -98,14 +96,16 @@ async fn log_ingester_inner(
     query_ctx: QueryContextRef,
     mut payload: Value,
 ) -> Result<HttpResponse, String> {
-    let processors_ = payload["pipeline_model"].take();
-    let processors = processors_.as_str().unwrap();
+    let pipeline_id = payload["pipeline_id"].take();
+    let pipeline_id = pipeline_id.as_str().unwrap();
     let data = payload["data"].take();
-    let yaml_content = Content::Yaml(processors.into());
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content)?;
 
     let pipeline_data = PipelineValue::try_from(data)?;
 
+    let pipeline = state
+        .get_pipeline(query_ctx.clone(), pipeline_id)
+        .await
+        .map_err(|e| e.to_string())?;
     let transformed_data: Rows = pipeline.exec(pipeline_data)?;
 
     let insert_request = RowInsertRequest {

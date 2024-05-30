@@ -3937,7 +3937,7 @@ dependencies = [
  "opentelemetry-proto 0.5.0",
  "operator",
  "partition",
- "pipeline",
+ "pipeline 0.8.0",
  "prometheus",
  "prost 0.12.4",
  "query",
@@ -7183,6 +7183,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "pipeline"
+version = "0.8.0"
+dependencies = [
+ "api",
+ "arc-swap",
+ "arrow",
+ "async-trait",
+ "catalog",
+ "common-catalog",
+ "common-error",
+ "common-function",
+ "common-macro",
+ "common-meta",
+ "common-query",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "common-test-util",
+ "common-time",
+ "console",
+ "criterion",
+ "crossbeam-utils",
+ "datafusion 37.0.0",
+ "datafusion-common 37.0.0",
+ "datafusion-expr 37.0.0",
+ "datafusion-functions 37.0.0",
+ "datafusion-physical-expr 37.0.0",
+ "datatypes",
+ "futures",
+ "lazy_static",
+ "log-store",
+ "once_cell",
+ "operator",
+ "paste",
+ "pipeline 0.1.0",
+ "prometheus",
+ "query",
+ "rayon",
+ "ron",
+ "serde",
+ "servers",
+ "session",
+ "snafu 0.8.2",
+ "sql",
+ "table",
+ "tokio",
+ "tokio-test",
+]
+
+[[package]]
 name = "pkcs1"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9576,7 +9626,7 @@ dependencies = [
  "permutation",
  "pgwire",
  "pin-project",
- "pipeline",
+ "pipeline 0.1.0",
  "postgres-types",
  "pprof",
  "prometheus",

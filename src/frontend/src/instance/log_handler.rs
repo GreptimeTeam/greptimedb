@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use pipeline::{GreptimeTransformer, Pipeline};
 use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
@@ -39,6 +40,32 @@ impl LogHandler for Instance {
             .context(AuthSnafu)?;
 
         self.handle_log_inserts(log, ctx).await
+    }
+
+    async fn get_pipeline(
+        &self,
+        query_ctx: QueryContextRef,
+        name: &str,
+    ) -> servers::error::Result<Pipeline<GreptimeTransformer>> {
+        self.pipeline_operator
+            .get_pipeline(query_ctx, name)
+            .await
+            .map_err(BoxedError::new)
+            .context(servers::error::InsertPipelineSnafu { name })
+    }
+    async fn insert_pipeline(
+        &self,
+        query_ctx: QueryContextRef,
+        name: &str,
+        content_type: &str,
+        pipeline: &str,
+    ) -> servers::error::Result<()> {
+        self.pipeline_operator
+            .insert_pipeline(query_ctx, name, content_type, pipeline)
+            .await
+            .map_err(BoxedError::new)
+            .context(servers::error::InsertPipelineSnafu { name })?;
+        Ok(())
     }
 }
 

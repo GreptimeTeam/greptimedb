@@ -89,6 +89,7 @@ use crate::error::{
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
+use crate::pipeline::PipelineOperator;
 use crate::script::ScriptExecutor;
 
 #[async_trait]
@@ -116,6 +117,7 @@ pub type StatementExecutorRef = Arc<StatementExecutor>;
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
     script_executor: Arc<ScriptExecutor>,
+    pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
@@ -265,6 +267,7 @@ impl FrontendInstance for Instance {
         }
 
         self.script_executor.start(self)?;
+        self.pipeline_operator.start(self);
 
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {
