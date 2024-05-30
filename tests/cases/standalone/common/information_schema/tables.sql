@@ -10,7 +10,7 @@ use abcde;
 
 create table t (ts timestamp time index);
 
-select * from information_schema.tables where table_schema != 'information_schema';
+select table_catalog, table_schema, table_name from information_schema.tables where table_schema != 'information_schema';
 
 use public;
 
