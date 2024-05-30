@@ -41,7 +41,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{ManifestContext, MitoRegion, RegionState};
+use crate::region::{ManifestContext, ManifestStats, MitoRegion, RegionState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
@@ -63,6 +63,7 @@ pub(crate) struct RegionOpener {
     skip_wal_replay: bool,
     intermediate_manager: IntermediateManager,
     time_provider: Option<TimeProviderRef>,
+    stats: ManifestStats,
 }
 
 impl RegionOpener {
@@ -87,6 +88,7 @@ impl RegionOpener {
             skip_wal_replay: false,
             intermediate_manager,
             time_provider: None,
+            stats: Default::default(),
         }
     }
 
@@ -169,8 +171,12 @@ impl RegionOpener {
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options = self.manifest_options(config, &options)?;
         let metadata = Arc::new(self.metadata.unwrap());
-        let manifest_manager =
-            RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
+        let manifest_manager = RegionManifestManager::new(
+            metadata.clone(),
+            region_manifest_options,
+            self.stats.total_manifest_size.clone(),
+        )
+        .await?;
 
         let memtable_builder = self
             .memtable_builder_provider
@@ -217,6 +223,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             time_provider,
             memtable_builder,
+            stats: self.stats,
         })
     }
 
@@ -267,7 +274,11 @@ impl RegionOpener {
         let region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = self.manifest_options(config, &region_options)?;
-        let Some(manifest_manager) = RegionManifestManager::open(region_manifest_options).await?
+        let Some(manifest_manager) = RegionManifestManager::open(
+            region_manifest_options,
+            self.stats.total_manifest_size.clone(),
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -350,6 +361,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(time_provider.current_time_millis()),
             time_provider,
             memtable_builder,
+            stats: self.stats.clone(),
         };
         Ok(Some(region))
     }

@@ -189,7 +189,7 @@ impl RegionServer {
 
     pub async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         match self.inner.region_map.get(&region_id) {
-            Some(e) => e.region_disk_usage(region_id).await,
+            Some(e) => e.region_disk_usage(region_id),
             None => None,
         }
     }
