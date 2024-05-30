@@ -218,11 +218,21 @@ impl Inserter {
                     })
                 });
 
-                if let Err(err) = future::try_join_all(flow_tasks)
+                match future::try_join_all(flow_tasks)
                     .await
                     .context(JoinTaskSnafu)
                 {
-                    warn!(err; "Failed to insert data into flownode");
+                    Ok(ret) => {
+                        let affected_rows = ret
+                            .into_iter()
+                            .map(|resp| resp.map(|r| r.affected_rows))
+                            .sum::<Result<u64>>()
+                            .unwrap_or(0);
+                        crate::metrics::DIST_MIRROR_ROW_COUNT.inc_by(affected_rows);
+                    }
+                    Err(err) => {
+                        warn!(err; "Failed to insert data into flownode");
+                    }
                 }
             }
             Err(err) => warn!(err; "Failed to mirror request to flownode"),
