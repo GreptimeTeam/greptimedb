@@ -107,7 +107,7 @@ pub(crate) struct MitoRegion {
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// Region stats
-    stats: Stats,
+    stats: ManifestStats,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -522,13 +522,13 @@ impl OpeningRegions {
 
 pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
 
-/// Single region stats.
+/// Manifest stats.
 #[derive(Default, Debug, Clone)]
-pub(crate) struct Stats {
+pub(crate) struct ManifestStats {
     total_manifest_size: Arc<AtomicU64>,
 }
 
-impl Stats {
+impl ManifestStats {
     fn total_manifest_size(&self) -> u64 {
         self.total_manifest_size.load(Ordering::Relaxed)
     }

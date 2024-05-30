@@ -41,7 +41,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{ManifestContext, MitoRegion, RegionState, Stats};
+use crate::region::{ManifestContext, ManifestStats, MitoRegion, RegionState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
@@ -63,7 +63,7 @@ pub(crate) struct RegionOpener {
     skip_wal_replay: bool,
     intermediate_manager: IntermediateManager,
     time_provider: Option<TimeProviderRef>,
-    stats: Stats,
+    stats: ManifestStats,
 }
 
 impl RegionOpener {
