@@ -15,7 +15,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 
-use common_meta::table_name::TableName;
 use common_query::prelude::ScalarValue;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
@@ -27,6 +26,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table_name::TableName;
 
 use crate::error::{ConvertDatafusionSchemaSnafu, DataFusionSnafu, Result};
 

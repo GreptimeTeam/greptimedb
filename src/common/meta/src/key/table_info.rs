@@ -19,6 +19,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use super::TABLE_INFO_KEY_PATTERN;
@@ -28,7 +29,6 @@ use crate::key::{DeserializedValueWithBytes, MetaKey, TableMetaValue, TABLE_INFO
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;
-use crate::table_name::TableName;
 
 /// The key stores the metadata of the table.
 ///

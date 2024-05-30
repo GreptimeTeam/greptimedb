@@ -20,6 +20,7 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::{TableId, TableType};
+use table::table_name::TableName;
 
 use super::executor::DropDatabaseExecutor;
 use super::metadata::DropDatabaseRemoveMetadata;
@@ -30,7 +31,6 @@ use crate::ddl::DdlContext;
 use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
-use crate::table_name::TableName;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseCursor {

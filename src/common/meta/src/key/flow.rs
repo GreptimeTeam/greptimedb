@@ -262,12 +262,12 @@ mod tests {
 
     use futures::TryStreamExt;
     use table::metadata::TableId;
+    use table::table_name::TableName;
 
     use super::*;
     use crate::key::flow::table_flow::TableFlowKey;
     use crate::key::FlowPartitionId;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::table_name::TableName;
     use crate::FlownodeId;
 
     #[derive(Debug)]

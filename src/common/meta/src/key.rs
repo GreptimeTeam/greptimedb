@@ -119,6 +119,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, TableId};
+use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
@@ -138,7 +139,6 @@ use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
 use crate::rpc::store::BatchDeleteRequest;
-use crate::table_name::TableName;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
@@ -1212,6 +1212,7 @@ mod tests {
     use futures::TryStreamExt;
     use store_api::storage::RegionId;
     use table::metadata::{RawTableInfo, TableInfo};
+    use table::table_name::TableName;
 
     use super::datanode_table::DatanodeTableKey;
     use super::test_utils;
@@ -1226,7 +1227,6 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
-    use crate::table_name::TableName;
 
     #[test]
     fn test_deserialized_value_with_bytes() {

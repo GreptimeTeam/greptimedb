@@ -32,7 +32,6 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
 };
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
-use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{debug, info, tracing};
 use common_time::Timezone;
@@ -62,6 +61,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions, COMMENT_KEY};
+use table::table_name::TableName;
 use table::TableRef;
 
 use super::StatementExecutor;

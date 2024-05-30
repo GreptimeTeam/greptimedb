@@ -18,13 +18,13 @@ use common_telemetry::{info, warn};
 use itertools::Itertools;
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::physical_table_metadata;
 use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::instruction::CacheIdent;
-use crate::table_name::TableName;
 
 impl CreateLogicalTablesProcedure {
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {

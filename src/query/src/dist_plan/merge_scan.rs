@@ -21,7 +21,6 @@ use async_stream::stream;
 use common_base::bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
-use common_meta::table_name::TableName;
 use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
 use common_recordbatch::error::ExternalSnafu;
@@ -48,6 +47,7 @@ use meter_macros::read_meter;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use table::table_name::TableName;
 use tokio::time::Instant;
 
 use crate::error::ConvertSchemaSnafu;

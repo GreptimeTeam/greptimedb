@@ -39,11 +39,11 @@ use serde_with::{serde_as, DefaultOnNull};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{self, Result};
 use crate::key::FlowId;
-use crate::table_name::TableName;
 
 /// DDL tasks
 #[derive(Debug, Clone)]
