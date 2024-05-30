@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
 use crate::key::FlowId;
-use crate::table_name::TableName;
 use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]

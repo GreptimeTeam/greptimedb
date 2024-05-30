@@ -12,12 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod table_info;
-mod table_name;
-mod table_route;
-mod view_info;
-
-pub use table_info::{new_table_info_cache, TableInfoCache, TableInfoCacheRef};
-pub use table_name::{new_table_name_cache, TableNameCache, TableNameCacheRef};
-pub use table_route::{new_table_route_cache, TableRoute, TableRouteCache, TableRouteCacheRef};
-pub use view_info::{new_view_info_cache, ViewInfoCache, ViewInfoCacheRef};
+pub(crate) mod error;
+pub mod planner;

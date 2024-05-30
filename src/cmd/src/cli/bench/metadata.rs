@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::table_name::TableName;
+use table::table_name::TableName;
 
 use crate::cli::bench::{
     bench_self_recorded, create_region_routes, create_region_wal_options, create_table_info,

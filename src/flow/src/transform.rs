@@ -23,6 +23,7 @@ use literal::{from_substrait_literal, from_substrait_type};
 use prost::Message;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
+use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -121,7 +122,7 @@ pub async fn sql_to_flow_plan(
         .context(ExternalSnafu)?;
     let LogicalPlan::DfPlan(plan) = plan;
     let sub_plan = DFLogicalSubstraitConvertor {}
-        .to_sub_plan(&plan)
+        .to_sub_plan(&plan, DefaultSerializer)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
@@ -294,7 +295,9 @@ mod test {
         let LogicalPlan::DfPlan(plan) = plan;
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
-        let bytes = DFLogicalSubstraitConvertor {}.encode(&plan).unwrap();
+        let bytes = DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
 
         proto::Plan::decode(bytes).unwrap()
     }

@@ -20,6 +20,7 @@ use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use super::{MetaKey, TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidTableMetadataSnafu, Result};
@@ -29,7 +30,6 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::{BatchGetRequest, RangeRequest};
 use crate::rpc::KeyValue;
-use crate::table_name::TableName;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TableNameKey<'a> {

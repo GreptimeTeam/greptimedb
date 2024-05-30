@@ -1227,6 +1227,7 @@ dependencies = [
  "common-meta",
  "moka",
  "snafu 0.8.2",
+ "substrait 0.8.1",
 ]
 
 [[package]]
@@ -1260,6 +1261,8 @@ dependencies = [
  "arrow-schema",
  "async-stream",
  "async-trait",
+ "bytes",
+ "cache",
  "catalog",
  "chrono",
  "common-catalog",
@@ -2026,6 +2029,7 @@ version = "0.8.1"
 dependencies = [
  "api",
  "async-trait",
+ "bytes",
  "common-base",
  "common-error",
  "common-macro",
@@ -3197,7 +3201,6 @@ dependencies = [
  "session",
  "snafu 0.8.2",
  "store-api",
- "substrait 0.8.1",
  "table",
  "tokio",
  "toml 0.8.12",
@@ -4185,7 +4188,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=902f75fdd170c572e90b1f640161d90995f20218#902f75fdd170c572e90b1f640161d90995f20218"
+source = "git+https://github.com/killme2008/greptime-proto.git?rev=a15a54a714fe117d7e9f7635e149c4eecac773fa#a15a54a714fe117d7e9f7635e149c4eecac773fa"
 dependencies = [
  "prost 0.12.4",
  "serde",
@@ -7586,23 +7589,17 @@ name = "promql"
 version = "0.8.1"
 dependencies = [
  "ahash 0.8.11",
- "async-recursion",
  "async-trait",
  "bytemuck",
- "catalog",
- "common-catalog",
  "common-error",
  "common-macro",
- "common-query",
  "common-recordbatch",
  "common-telemetry",
  "datafusion 37.0.0",
  "datafusion-expr 37.0.0",
- "datafusion-functions 37.0.0",
  "datatypes",
  "futures",
  "greptime-proto",
- "itertools 0.10.5",
  "lazy_static",
  "prometheus",
  "promql-parser",
@@ -7610,7 +7607,6 @@ dependencies = [
  "query",
  "session",
  "snafu 0.8.2",
- "table",
  "tokio",
 ]
 
@@ -7918,6 +7914,7 @@ dependencies = [
  "async-recursion",
  "async-stream",
  "async-trait",
+ "bytes",
  "catalog",
  "chrono",
  "common-base",
@@ -7930,11 +7927,13 @@ dependencies = [
  "common-plugins",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-time",
  "datafusion 37.0.0",
  "datafusion-common 37.0.0",
  "datafusion-expr 37.0.0",
+ "datafusion-functions 37.0.0",
  "datafusion-optimizer 37.0.0",
  "datafusion-physical-expr 37.0.0",
  "datafusion-sql 37.0.0",
@@ -7944,6 +7943,7 @@ dependencies = [
  "futures-util",
  "greptime-proto",
  "humantime",
+ "itertools 0.10.5",
  "lazy_static",
  "meter-core",
  "meter-macros",
@@ -7955,6 +7955,7 @@ dependencies = [
  "prometheus",
  "promql",
  "promql-parser",
+ "prost 0.12.4",
  "rand",
  "regex",
  "session",
@@ -10370,9 +10371,7 @@ version = "0.8.1"
 dependencies = [
  "async-trait",
  "bytes",
- "catalog",
  "common-error",
- "common-function",
  "common-macro",
  "common-telemetry",
  "datafusion 37.0.0",
@@ -10382,7 +10381,6 @@ dependencies = [
  "datatypes",
  "promql",
  "prost 0.12.4",
- "session",
  "snafu 0.8.2",
  "substrait 0.17.1",
  "tokio",
@@ -10559,6 +10557,7 @@ dependencies = [
 name = "table"
 version = "0.8.1"
 dependencies = [
+ "api",
  "async-trait",
  "chrono",
  "common-base",

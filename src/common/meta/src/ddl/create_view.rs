@@ -22,9 +22,11 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
+use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_retry_error;
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{self, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::rpc::ddl::CreateViewTask;
@@ -157,6 +159,25 @@ impl CreateViewProcedure {
         Ok(Status::executing(true))
     }
 
+    async fn invalidate_view_cache(&self) -> Result<()> {
+        let cache_invalidator = &self.context.cache_invalidator;
+        let ctx = Context {
+            subject: Some("Invalidate view cache by creating view".to_string()),
+        };
+
+        cache_invalidator
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::TableName(self.data.table_ref().into()),
+                    CacheIdent::TableId(self.view_id()),
+                ],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// Creates view metadata
     ///
     /// Abort(not-retry):
@@ -175,15 +196,21 @@ impl CreateViewProcedure {
                     view_name: self.data.table_ref().to_string(),
                 })?;
             let new_logical_plan = self.data.task.raw_logical_plan().clone();
+            let table_names = self.data.task.table_names();
+
             manager
-                .update_view_info(view_id, &current_view_info, new_logical_plan)
+                .update_view_info(view_id, &current_view_info, new_logical_plan, table_names)
                 .await?;
 
             info!("Updated view metadata for view {view_id}");
         } else {
             let raw_view_info = self.view_info().clone();
             manager
-                .create_view_metadata(raw_view_info, self.data.task.raw_logical_plan())
+                .create_view_metadata(
+                    raw_view_info,
+                    self.data.task.raw_logical_plan().clone(),
+                    self.data.task.table_names(),
+                )
                 .await?;
 
             info!(
@@ -191,6 +218,7 @@ impl CreateViewProcedure {
                 ctx.procedure_id
             );
         }
+        self.invalidate_view_cache().await?;
 
         Ok(Status::done_with_output(view_id))
     }

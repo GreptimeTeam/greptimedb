@@ -40,7 +40,6 @@ pub mod region_keeper;
 pub mod rpc;
 pub mod sequence;
 pub mod state_store;
-pub mod table_name;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod util;
