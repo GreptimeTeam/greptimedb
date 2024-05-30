@@ -74,7 +74,7 @@ pub fn create_aggregate_function(
 /// The datafusion `[LogicalPlan]` decoder.
 #[async_trait::async_trait]
 pub trait SubstraitPlanDecoder {
-    /// Decode the `[LogicalPlan]` from bytes with the `[CatalogProviderList]`.
+    /// Decode the [`LogicalPlan`] from bytes with the [`CatalogProviderList`].
     /// When `optimize` is true, it will do the optimization for decoded plan.
     async fn decode(
         &self,
