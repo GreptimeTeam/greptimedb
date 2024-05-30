@@ -23,6 +23,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use smallvec::SmallVec;
 use store_api::region_engine::RegionScannerRef;
 use store_api::storage::ScanRequest;
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -611,6 +612,10 @@ impl ScanInput {
     }
 }
 
+/// Groups of file ranges. Each group in the list contains multiple file
+/// ranges to scan. File ranges in the same group may come from different files.
+pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
+
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
 #[derive(Default)]
@@ -619,7 +624,7 @@ pub(crate) struct ScanPart {
     /// We scan the whole memtable now. We might scan a range of the memtable in the future.
     pub(crate) memtables: Vec<MemtableRef>,
     /// File ranges to scan.
-    pub(crate) file_ranges: Vec<FileRange>,
+    pub(crate) file_ranges: FileRangesGroup,
     /// Optional time range of the part (inclusive).
     pub(crate) time_range: Option<(Timestamp, Timestamp)>,
 }
@@ -630,7 +635,10 @@ impl fmt::Debug for ScanPart {
             f,
             "ScanPart({} memtables, {} file ranges, time range {:?})",
             self.memtables.len(),
-            self.file_ranges.len(),
+            self.file_ranges
+                .iter()
+                .map(|ranges| ranges.len())
+                .sum::<usize>(),
             self.time_range,
         )
     }

@@ -26,6 +26,7 @@ use common_telemetry::debug;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
+use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
 use tokio::sync::Mutex;
@@ -187,7 +188,7 @@ impl RegionScanner for UnorderedScan {
             }
             // Then scans file ranges.
             let mut reader_metrics = ReaderMetrics::default();
-            for file_range in &part.file_ranges {
+            for file_range in &part.file_ranges[0] {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
                 let compat_batch = file_range.compat_batch();
                 let mut source = Source::RowGroupReader(reader);
@@ -334,12 +335,14 @@ impl FileRangeCollector for UnorderedDistributor {
 impl UnorderedDistributor {
     /// Distributes file ranges and memtables across partitions according to the `parallelism`.
     /// The output number of parts may be `<= parallelism`.
+    ///
+    /// [ScanPart] created by this distributor only contains one group of file ranges.
     fn build_parts(self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
         if parallelism <= 1 {
             // Returns a single part.
             let part = ScanPart {
                 memtables: memtables.to_vec(),
-                file_ranges: self.file_ranges,
+                file_ranges: smallvec![self.file_ranges],
                 time_range: None,
             };
             return vec![part];
@@ -359,7 +362,7 @@ impl UnorderedDistributor {
             .chunks(mems_per_part)
             .map(|mems| ScanPart {
                 memtables: mems.to_vec(),
-                file_ranges: Vec::new(),
+                file_ranges: smallvec![Vec::new()], // Ensures there is always one group.
                 time_range: None,
             })
             .collect::<Vec<_>>();
@@ -367,11 +370,11 @@ impl UnorderedDistributor {
             if i == scan_parts.len() {
                 scan_parts.push(ScanPart {
                     memtables: Vec::new(),
-                    file_ranges: ranges.to_vec(),
+                    file_ranges: smallvec![ranges.to_vec()],
                     time_range: None,
                 });
             } else {
-                scan_parts[i].file_ranges = ranges.to_vec();
+                scan_parts[i].file_ranges = smallvec![ranges.to_vec()];
             }
         }
 
