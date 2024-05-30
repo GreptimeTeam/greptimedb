@@ -48,7 +48,7 @@ impl<'a> TableNameKey<'a> {
     }
 
     pub fn prefix_to_table(catalog: &str, schema: &str) -> String {
-        format!("{}/{}/{}", TABLE_NAME_KEY_PREFIX, catalog, schema)
+        format!("{}/{}/{}/", TABLE_NAME_KEY_PREFIX, catalog, schema)
     }
 }
 
@@ -56,7 +56,7 @@ impl Display for TableNameKey<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}/{}",
+            "{}{}",
             Self::prefix_to_table(self.catalog, self.schema),
             self.table
         )
@@ -268,7 +268,11 @@ impl TableNameManager {
 #[cfg(test)]
 mod tests {
 
+    use futures::StreamExt;
+
     use super::*;
+    use crate::kv_backend::KvBackend;
+    use crate::rpc::store::PutRequest;
 
     #[test]
     fn test_strip_table_name() {
@@ -323,5 +327,40 @@ mod tests {
 
         assert_eq!(value.try_as_raw_value().unwrap(), literal);
         assert_eq!(TableNameValue::try_from_raw_value(literal).unwrap(), value);
+    }
+
+    #[tokio::test]
+    async fn test_prefix_scan_tables() {
+        let memory_kv = Arc::new(MemoryKvBackend::<crate::error::Error>::new());
+        memory_kv
+            .put(PutRequest {
+                key: TableNameKey {
+                    catalog: "greptime",
+                    schema: "👉",
+                    table: "t",
+                }
+                .to_bytes(),
+                value: vec![],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        memory_kv
+            .put(PutRequest {
+                key: TableNameKey {
+                    catalog: "greptime",
+                    schema: "👉👈",
+                    table: "t",
+                }
+                .to_bytes(),
+                value: vec![],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+
+        let manager = TableNameManager::new(memory_kv);
+        let items = manager.tables("greptime", "👉").collect::<Vec<_>>().await;
+        assert_eq!(items.len(), 1);
     }
 }
