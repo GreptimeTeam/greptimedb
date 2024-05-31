@@ -139,17 +139,6 @@ impl MetadataRegion {
         Ok(())
     }
 
-    /// Check if the given logical region exists.
-    pub async fn is_logical_region_exists(
-        &self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-    ) -> Result<bool> {
-        let region_id = utils::to_metadata_region_id(physical_region_id);
-        let region_key = Self::concat_region_key(logical_region_id);
-        self.exists(region_id, &region_key).await
-    }
-
     /// Check if the given column exists. Return the semantic type if exists.
     pub async fn column_semantic_type(
         &self,
@@ -669,10 +658,6 @@ mod test {
             .add_logical_region(physical_region_id, logical_region_id)
             .await
             .unwrap();
-        assert!(metadata_region
-            .is_logical_region_exists(physical_region_id, logical_region_id)
-            .await
-            .unwrap());
 
         // add it again
         assert!(metadata_region

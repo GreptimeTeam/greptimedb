@@ -171,9 +171,10 @@ impl MetricEngineInner {
 
         // check if the logical region already exist
         if self
-            .metadata_region
-            .is_logical_region_exists(metadata_region_id, logical_region_id)
-            .await?
+            .state
+            .read()
+            .unwrap()
+            .is_logical_region_exists(logical_region_id)
         {
             info!("Create a existing logical region {logical_region_id}. Skipped");
             return Ok(data_region_id);

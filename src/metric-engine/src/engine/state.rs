@@ -149,7 +149,7 @@ impl MetricEngineState {
         Ok(exist)
     }
 
-    pub fn is_logical_region_exist(&self, logical_region_id: RegionId) -> bool {
+    pub fn is_logical_region_exists(&self, logical_region_id: RegionId) -> bool {
         self.logical_regions().contains_key(&logical_region_id)
     }
 }

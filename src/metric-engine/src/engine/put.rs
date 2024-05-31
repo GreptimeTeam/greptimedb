@@ -104,7 +104,7 @@ impl MetricEngineInner {
         // check if the region exists
         let data_region_id = to_data_region_id(physical_region_id);
         let state = self.state.read().unwrap();
-        if !state.is_logical_region_exist(logical_region_id) {
+        if !state.is_logical_region_exists(logical_region_id) {
             error!("Trying to write to an nonexistent region {logical_region_id}");
             return LogicalRegionNotFoundSnafu {
                 region_id: logical_region_id,
