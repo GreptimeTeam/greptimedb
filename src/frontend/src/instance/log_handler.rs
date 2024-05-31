@@ -51,8 +51,9 @@ impl LogHandler for Instance {
             .get_pipeline(query_ctx, name)
             .await
             .map_err(BoxedError::new)
-            .context(servers::error::InsertPipelineSnafu { name })
+            .context(servers::error::GetPipelineSnafu { name })
     }
+
     async fn insert_pipeline(
         &self,
         query_ctx: QueryContextRef,
@@ -66,6 +67,14 @@ impl LogHandler for Instance {
             .map_err(BoxedError::new)
             .context(servers::error::InsertPipelineSnafu { name })?;
         Ok(())
+    }
+
+    async fn delete_pipeline(
+        &self,
+        _query_ctx: QueryContextRef,
+        _name: &str,
+    ) -> servers::error::Result<()> {
+        todo!("delete_pipeline")
     }
 }
 

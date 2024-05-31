@@ -44,6 +44,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to parse pipeline"))]
+    ParsePipeline {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Pipeline not found, name: {}", name))]
     PipelineNotFound {
         #[snafu(implicit)]
@@ -92,6 +99,7 @@ impl ErrorExt for Error {
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. } => StatusCode::InvalidArguments,
+            ParsePipeline { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
         }

@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
@@ -31,7 +32,7 @@ use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
-    InsertPipelineSnafu, PipelineNotFoundSnafu, Result,
+    InsertPipelineSnafu, ParsePipelineSnafu, PipelineNotFoundSnafu, Result,
 };
 
 pub type PipelineTableRef<E> = Arc<PipelineTable<E>>;
@@ -41,6 +42,7 @@ pub struct PipelineTable<E: ErrorExt + Send + Sync + 'static> {
     grpc_handler: GrpcQueryHandlerRef<E>,
     table: TableRef,
     query_engine: QueryEngineRef,
+    pipelines: RwLock<HashMap<String, Pipeline<GreptimeTransformer>>>,
 }
 
 impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
@@ -53,6 +55,7 @@ impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
             grpc_handler,
             table,
             query_engine,
+            pipelines: RwLock::new(HashMap::default()),
         }
     }
 
@@ -179,14 +182,30 @@ impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
             .into()
     }
 
-    pub fn compile_pipeline(name: &str, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
+    pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
         let yaml_content = Content::Yaml(pipeline.into());
         parse::<GreptimeTransformer>(&yaml_content)
             .map_err(|e| BoxedError::new(PlainError::new(e, StatusCode::InvalidArguments)))
-            .context(InsertPipelineSnafu { name })
+            .context(ParsePipelineSnafu)
     }
 
-    pub async fn insert_pipeline_to_pipeline_table(
+    fn generate_pipeline_cache_key(schema: &str, name: &str) -> String {
+        format!("{}.{}", schema, name)
+    }
+
+    fn get_compiled_pipeline_from_cache(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Option<Pipeline<GreptimeTransformer>> {
+        self.pipelines
+            .read()
+            .unwrap()
+            .get(&Self::generate_pipeline_cache_key(schema, name))
+            .cloned()
+    }
+
+    async fn insert_pipeline_to_pipeline_table(
         &self,
         schema: &str,
         name: &str,
@@ -235,7 +254,46 @@ impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
 
         Ok(())
     }
-    pub async fn find_pipeline_by_name(&self, schema: &str, name: &str) -> Result<String> {
+
+    pub async fn get_pipeline(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<Pipeline<GreptimeTransformer>> {
+        if let Some(pipeline) = self.get_compiled_pipeline_from_cache(schema, name) {
+            return Ok(pipeline);
+        }
+
+        let pipeline = self.find_pipeline_by_name(schema, name).await?;
+        let compiled_pipeline = Self::compile_pipeline(&pipeline)?;
+        self.pipelines.write().unwrap().insert(
+            Self::generate_pipeline_cache_key(schema, name),
+            compiled_pipeline.clone(),
+        );
+        Ok(compiled_pipeline)
+    }
+
+    pub async fn insert_and_compile(
+        &self,
+        schema: &str,
+        name: &str,
+        content_type: &str,
+        pipeline: &str,
+    ) -> Result<()> {
+        let compiled_pipeline = Self::compile_pipeline(pipeline)?;
+
+        self.insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
+            .await?;
+
+        self.pipelines.write().unwrap().insert(
+            Self::generate_pipeline_cache_key(schema, name),
+            compiled_pipeline,
+        );
+
+        Ok(())
+    }
+
+    async fn find_pipeline_by_name(&self, schema: &str, name: &str) -> Result<String> {
         let table_info = self.table.table_info();
 
         let table_name = TableReference::full(

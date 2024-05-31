@@ -305,6 +305,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to parse pipeline"))]
+    ParsePipeline {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to get pipeline to pipeline table, name: {}", name))]
     GetPipeline {
         name: String,
@@ -400,6 +407,7 @@ impl ErrorExt for Error {
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. }
             | Error::InsertPipeline { .. }
+            | Error::ParsePipeline { .. }
             | Error::GetPipeline { .. }
             | Error::InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
 

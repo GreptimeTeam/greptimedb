@@ -188,13 +188,13 @@ impl PipelineOperator {
         content_type: &str,
         pipeline: &str,
     ) -> Result<()> {
-        let _compiled_pipeline = PipelineTable::<Error>::compile_pipeline(name, pipeline)
+        let _compiled_pipeline = PipelineTable::<Error>::compile_pipeline(pipeline)
             .map_err(BoxedError::new)
             .context(InsertPipelineSnafu { name })?;
         self.get_pipeline_table_from_cache(catalog)
             // FIXME (qtang): we should add error handling here
             .unwrap()
-            .insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
+            .insert_and_compile(schema, name, content_type, pipeline)
             .await
             .map_err(|e| {
                 if e.status_code().should_log_error() {
@@ -228,19 +228,16 @@ impl PipelineOperator {
         query_ctx: QueryContextRef,
         name: &str,
     ) -> Result<Pipeline<GreptimeTransformer>> {
-        let _s = self
-            .create_pipeline_table_if_not_exists(query_ctx.current_catalog())
-            .await;
-        let table = self
-            .get_pipeline_table_from_cache(query_ctx.current_catalog())
-            .unwrap()
-            .find_pipeline_by_name(query_ctx.current_schema(), name)
+        self.create_pipeline_table_if_not_exists(query_ctx.current_catalog())
+            .await?;
+        self.get_pipeline_table_from_cache(query_ctx.current_catalog())
+            .context(TableNotFoundSnafu {
+                table_name: PIPELINE_TABLE_NAME,
+            })?
+            .get_pipeline(query_ctx.current_schema(), name)
             .await
             .map_err(BoxedError::new)
-            .context(GetPipelineSnafu { name })?;
-        PipelineTable::<Error>::compile_pipeline(name, &table)
-            .map_err(BoxedError::new)
-            .context(InsertPipelineSnafu { name })
+            .context(GetPipelineSnafu { name })
     }
 
     pub async fn insert_pipeline(

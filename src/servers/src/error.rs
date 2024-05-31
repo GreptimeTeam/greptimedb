@@ -156,6 +156,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to parse pipeline with name: {}", name))]
+    GetPipeline {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to execute script by name: {}", name))]
     ExecuteScript {
         name: String,
@@ -616,6 +624,7 @@ impl ErrorExt for Error {
 
             InsertScript { source, .. }
             | InsertPipeline { source, .. }
+            | GetPipeline { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }

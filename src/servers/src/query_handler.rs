@@ -137,4 +137,5 @@ pub trait LogHandler {
         content_type: &str,
         pipeline: &str,
     ) -> Result<()>;
+    async fn delete_pipeline(&self, query_ctx: QueryContextRef, name: &str) -> Result<()>;
 }
