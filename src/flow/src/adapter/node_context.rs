@@ -150,7 +150,7 @@ impl FlownodeContext {
     pub async fn flush_all_sender(&self) -> Result<usize, Error> {
         let mut sum = 0;
         for sender in self.source_sender.values() {
-            sender.try_send_all().await.map(|x| sum += x)?;
+            sender.try_send_all().await.inspect(|x| sum += x)?;
         }
         Ok(sum)
     }
