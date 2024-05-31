@@ -20,14 +20,29 @@ rpc_addr = "127.0.0.1:3001"
 ## +toml2docs:none-default
 rpc_hostname = "127.0.0.1"
 
-## The number of gRPC server worker threads.
-rpc_runtime_size = 8
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+addr = "127.0.0.1:4001"
+## The number of server worker threads.
+runtime_size = 8
 
-## The maximum receive message size for gRPC server.
-rpc_max_recv_message_size = "512MB"
+## gRPC server TLS options, see `mysql.tls` section.
+[grpc.tls]
+## TLS mode.
+mode = "disable"
 
-## The maximum send message size for gRPC server.
-rpc_max_send_message_size = "512MB"
+## Certificate file path.
+## +toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## +toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
 
 ## Enable telemetry to collect anonymous usage data.
 enable_telemetry = true

@@ -45,7 +45,7 @@ use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -350,6 +350,7 @@ pub(crate) fn create_datanode_opts(
             providers,
             store: default_store,
         },
+        grpc: GrpcOptions::default().with_addr(PEER_PLACEHOLDER_ADDR),
         mode,
         wal: wal_config,
         ..Default::default()

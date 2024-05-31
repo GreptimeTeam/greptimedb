@@ -75,6 +75,13 @@ impl Default for GrpcOptions {
     }
 }
 
+impl GrpcOptions {
+    pub fn with_addr(mut self, addr: &str) -> Self {
+        self.addr = addr.to_string();
+        self
+    }
+}
+
 pub struct GrpcServer {
     // states
     shutdown_tx: Mutex<Option<Sender<()>>>,

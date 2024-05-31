@@ -176,7 +176,7 @@ impl StartCommand {
         };
 
         if let Some(addr) = &self.rpc_addr {
-            opts.rpc_addr.clone_from(addr);
+            opts.grpc.addr.clone_from(addr);
         }
 
         if self.rpc_hostname.is_some() {
@@ -306,9 +306,11 @@ mod tests {
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            rpc_addr = "127.0.0.1:3001"
             rpc_hostname = "127.0.0.1"
-            rpc_runtime_size = 8
+            
+            [grpc]
+            addr = "127.0.0.1:3001"
+            runtime_size = 8
 
             [heartbeat]
             interval = "300ms"
@@ -355,7 +357,7 @@ mod tests {
 
         let options = cmd.load_options(&GlobalOptions::default()).unwrap();
 
-        assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.addr);
         assert_eq!(Some(42), options.node_id);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {

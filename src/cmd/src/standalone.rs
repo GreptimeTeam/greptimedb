@@ -198,7 +198,7 @@ impl StandaloneOptions {
             wal: cloned_opts.wal.into(),
             storage: cloned_opts.storage,
             region_engine: cloned_opts.region_engine,
-            rpc_addr: cloned_opts.grpc.addr,
+            grpc: cloned_opts.grpc,
             ..Default::default()
         }
     }
@@ -341,7 +341,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
+            let datanode_grpc_addr = DatanodeOptions::default().grpc.addr;
             if addr.eq(&datanode_grpc_addr) {
                 return IllegalConfigSnafu {
                     msg: format!(

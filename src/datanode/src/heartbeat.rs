@@ -84,7 +84,7 @@ impl HeartbeatTask {
             node_id: opts.node_id.unwrap_or(0),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
-            server_addr: opts.rpc_addr.clone(),
+            server_addr: opts.grpc.addr.clone(),
             server_hostname: opts.rpc_hostname.clone(),
             running: Arc::new(AtomicBool::new(false)),
             meta_client: Arc::new(meta_client),

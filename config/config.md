@@ -296,10 +296,15 @@
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `rpc_addr` | String | `127.0.0.1:3001` | The gRPC address of the datanode. |
 | `rpc_hostname` | String | `None` | The hostname of the datanode. |
-| `rpc_runtime_size` | Integer | `8` | The number of gRPC server worker threads. |
-| `rpc_max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
-| `rpc_max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
-| `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
+| `grpc` | -- | -- | The gRPC server options. |
+| `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
+| `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
+| `grpc.tls.mode` | String | `disable` | TLS mode. |
+| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
+| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `grpc.tls.enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
