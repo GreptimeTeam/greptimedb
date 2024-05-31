@@ -33,6 +33,7 @@ use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
+use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
@@ -44,7 +45,7 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
-use store_api::logstore::LogStore;
+use rstest_reuse::template;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
@@ -76,6 +77,34 @@ impl FilePurger for NoopFilePurger {
 pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
     Arc::new(NoopFilePurger {})
 }
+
+pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {
+    Some(LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory))
+}
+
+pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
+    let _ = dotenv::dotenv();
+    let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+        warn!("env GT_KAFKA_ENDPOINTS not found");
+        return None;
+    };
+
+    let broker_endpoints = broker_endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+
+    Some(LogStoreFactory::Kafka(KafkaLogStoreFactory {
+        broker_endpoints,
+    }))
+}
+
+#[template]
+#[rstest]
+#[case::with_raft_engine(raft_engine_log_store_factory())]
+#[case::with_kafka(kafka_log_store_factory())]
+#[tokio::test]
+pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
 
 pub(crate) struct RaftEngineLogStoreFactory;
 
@@ -150,6 +179,12 @@ impl TestEnv {
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
         }
+    }
+
+    /// Overwrites the original `log_store_factory`.
+    pub(crate) fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
+        self.log_store_factory = log_store_factory;
+        self
     }
 
     pub(crate) fn get_log_store(&self) -> Option<LogStoreImpl> {

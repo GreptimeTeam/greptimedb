@@ -5833,6 +5833,7 @@ dependencies = [
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
  "datatypes",
+ "dotenv",
  "futures",
  "humantime-serde",
  "index",
@@ -5850,6 +5851,8 @@ dependencies = [
  "puffin",
  "rand",
  "regex",
+ "rstest 0.20.0",
+ "rstest_reuse 0.7.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -8257,6 +8260,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "relative-path"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
 name = "rend"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8528,7 +8537,19 @@ checksum = "de1bb486a691878cd320c2f0d319ba91eeaa2e894066d8b5f8f117c000e9d962"
 dependencies = [
  "futures",
  "futures-timer",
- "rstest_macros",
+ "rstest_macros 0.17.0",
+ "rustc_version",
+]
+
+[[package]]
+name = "rstest"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27059f51958c5f8496a6f79511e7c0ac396dd815dc8894e9b6e2efb5779cf6f0"
+dependencies = [
+ "futures",
+ "futures-timer",
+ "rstest_macros 0.20.0",
  "rustc_version",
 ]
 
@@ -8547,6 +8568,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rstest_macros"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6132d64df104c0b3ea7a6ad7766a43f587bd773a4a9cf4cd59296d426afaf3a"
+dependencies = [
+ "cfg-if",
+ "glob",
+ "proc-macro-crate 3.1.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "relative-path",
+ "rustc_version",
+ "syn 2.0.61",
+ "unicode-ident",
+]
+
+[[package]]
 name = "rstest_reuse"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8556,6 +8595,17 @@ dependencies = [
  "rand",
  "rustc_version",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rstest_reuse"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3a8fb4672e840a587a66fc577a5491375df51ddb88f2a2c2a792598c326fe14"
+dependencies = [
+ "quote",
+ "rand",
+ "syn 2.0.61",
 ]
 
 [[package]]
@@ -10764,8 +10814,8 @@ dependencies = [
  "prost 0.12.6",
  "query",
  "rand",
- "rstest",
- "rstest_reuse",
+ "rstest 0.17.0",
+ "rstest_reuse 0.5.0",
  "script",
  "serde_json",
  "servers",
