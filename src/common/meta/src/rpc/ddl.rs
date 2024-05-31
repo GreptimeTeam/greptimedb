@@ -325,6 +325,10 @@ impl CreateViewTask {
         &self.create_view.logical_plan
     }
 
+    pub fn view_definition(&self) -> &str {
+        &self.create_view.definition
+    }
+
     pub fn table_names(&self) -> HashSet<TableName> {
         self.create_view
             .table_names

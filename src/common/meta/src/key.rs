@@ -492,6 +492,7 @@ impl TableMetadataManager {
         view_info: RawTableInfo,
         raw_logical_plan: Vec<u8>,
         table_names: HashSet<TableName>,
+        definition: String,
     ) -> Result<()> {
         let view_id = view_info.ident.table_id;
 
@@ -513,7 +514,7 @@ impl TableMetadataManager {
             .build_create_txn(view_id, &table_info_value)?;
 
         // Creates view info
-        let view_info_value = ViewInfoValue::new(raw_logical_plan, table_names);
+        let view_info_value = ViewInfoValue::new(raw_logical_plan, table_names, definition);
         let (create_view_info_txn, on_create_view_info_failure) = self
             .view_info_manager()
             .build_create_txn(view_id, &view_info_value)?;
@@ -932,8 +933,10 @@ impl TableMetadataManager {
         current_view_info_value: &DeserializedValueWithBytes<ViewInfoValue>,
         new_view_info: Vec<u8>,
         table_names: HashSet<TableName>,
+        definition: String,
     ) -> Result<()> {
-        let new_view_info_value = current_view_info_value.update(new_view_info, table_names);
+        let new_view_info_value =
+            current_view_info_value.update(new_view_info, table_names, definition);
 
         // Updates view info.
         let (update_view_info_txn, on_update_view_info_failure) = self
@@ -2008,10 +2011,16 @@ mod tests {
         let logical_plan: Vec<u8> = vec![1, 2, 3];
 
         let table_names = new_test_table_names();
+        let definition = "CREATE VIEW test AS SELECT * FROM numbers";
 
         // Create metadata
         table_metadata_manager
-            .create_view_metadata(view_info.clone(), logical_plan.clone(), table_names.clone())
+            .create_view_metadata(
+                view_info.clone(),
+                logical_plan.clone(),
+                table_names.clone(),
+                definition.to_string(),
+            )
             .await
             .unwrap();
 
@@ -2026,6 +2035,7 @@ mod tests {
                 .into_inner();
             assert_eq!(current_view_info.view_info, logical_plan);
             assert_eq!(current_view_info.table_names, table_names);
+            assert_eq!(current_view_info.definition, definition);
             // assert table info
             let current_table_info = table_metadata_manager
                 .table_info_manager()
@@ -2052,10 +2062,12 @@ mod tests {
             });
             set
         };
+        let new_definition = "CREATE VIEW test AS SELECT * FROM b_table join c_table";
 
         let current_view_info_value = DeserializedValueWithBytes::from_inner(ViewInfoValue::new(
             logical_plan.clone(),
             table_names,
+            definition.to_string(),
         ));
         // should be ok.
         table_metadata_manager
@@ -2064,6 +2076,7 @@ mod tests {
                 &current_view_info_value,
                 new_logical_plan.clone(),
                 new_table_names.clone(),
+                new_definition.to_string(),
             )
             .await
             .unwrap();
@@ -2074,6 +2087,7 @@ mod tests {
                 &current_view_info_value,
                 new_logical_plan.clone(),
                 new_table_names.clone(),
+                new_definition.to_string(),
             )
             .await
             .unwrap();
@@ -2088,11 +2102,16 @@ mod tests {
             .into_inner();
         assert_eq!(updated_view_info.view_info, new_logical_plan);
         assert_eq!(updated_view_info.table_names, new_table_names);
+        assert_eq!(updated_view_info.definition, new_definition);
 
         let wrong_view_info = logical_plan.clone();
-        let wrong_view_info_value = DeserializedValueWithBytes::from_inner(
-            current_view_info_value.update(wrong_view_info, new_table_names.clone()),
-        );
+        let wrong_definition = "wrong_definition";
+        let wrong_view_info_value =
+            DeserializedValueWithBytes::from_inner(current_view_info_value.update(
+                wrong_view_info,
+                new_table_names.clone(),
+                wrong_definition.to_string(),
+            ));
         // if the current_view_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
@@ -2101,6 +2120,7 @@ mod tests {
                 &wrong_view_info_value,
                 new_logical_plan.clone(),
                 new_table_names.clone(),
+                wrong_definition.to_string(),
             )
             .await
             .is_err());
@@ -2115,5 +2135,6 @@ mod tests {
             .into_inner();
         assert_eq!(current_view_info.view_info, new_logical_plan);
         assert_eq!(current_view_info.table_names, new_table_names);
+        assert_eq!(current_view_info.definition, new_definition);
     }
 }

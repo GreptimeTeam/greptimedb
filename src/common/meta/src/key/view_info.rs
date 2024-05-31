@@ -86,14 +86,21 @@ pub struct ViewInfoValue {
     pub view_info: RawViewLogicalPlan,
     /// The resolved fully table names in logical plan
     pub table_names: HashSet<TableName>,
+    /// The SQL to create the view
+    pub definition: String,
     version: u64,
 }
 
 impl ViewInfoValue {
-    pub fn new(view_info: RawViewLogicalPlan, table_names: HashSet<TableName>) -> Self {
+    pub fn new(
+        view_info: RawViewLogicalPlan,
+        table_names: HashSet<TableName>,
+        definition: String,
+    ) -> Self {
         Self {
             view_info,
             table_names,
+            definition,
             version: 0,
         }
     }
@@ -102,10 +109,12 @@ impl ViewInfoValue {
         &self,
         new_view_info: RawViewLogicalPlan,
         table_names: HashSet<TableName>,
+        definition: String,
     ) -> Self {
         Self {
             view_info: new_view_info,
             table_names,
+            definition,
             version: self.version + 1,
         }
     }
@@ -286,6 +295,7 @@ mod tests {
             view_info: vec![1, 2, 3],
             version: 1,
             table_names,
+            definition: "CREATE VIEW test AS SELECT * FROM numbers".to_string(),
         };
         let serialized = value.try_as_raw_value().unwrap();
         let deserialized = ViewInfoValue::try_from_raw_value(&serialized).unwrap();

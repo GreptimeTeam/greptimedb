@@ -400,6 +400,7 @@ impl StatementExecutor {
                 return InvalidViewStmtSnafu {}.fail();
             }
         };
+        let definition = create_view.to_string();
 
         // Extract the table names from the origin plan
         // and rewrite them as fully qualified names.
@@ -423,6 +424,7 @@ impl StatementExecutor {
             create_view,
             encoded_plan.to_vec(),
             table_names,
+            definition,
             ctx.clone(),
         )?;
 
