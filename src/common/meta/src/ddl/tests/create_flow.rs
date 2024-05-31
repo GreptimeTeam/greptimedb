@@ -19,6 +19,7 @@ use std::sync::Arc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure_test::execute_procedure_until_done;
 use session::context::QueryContext;
+use table::table_name::TableName;
 
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task;
@@ -27,7 +28,6 @@ use crate::ddl::DdlContext;
 use crate::key::table_route::TableRouteValue;
 use crate::key::FlowId;
 use crate::rpc::ddl::CreateFlowTask;
-use crate::table_name::TableName;
 use crate::test_util::{new_ddl_context, MockFlownodeManager};
 use crate::{error, ClusterId};
 
@@ -44,7 +44,7 @@ pub(crate) fn test_create_flow_task(
         sink_table_name,
         or_replace: false,
         create_if_not_exists,
-        expire_when: "".to_string(),
+        expire_after: Some(300),
         comment: "".to_string(),
         sql: "raw_sql".to_string(),
         flow_options: Default::default(),

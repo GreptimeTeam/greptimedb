@@ -62,7 +62,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -104,20 +104,48 @@ impl MitoEngine {
         self.inner.workers.is_region_exists(region_id)
     }
 
+    /// Returns true if the specific region exists.
+    pub fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_opening(region_id)
+    }
+
     /// Returns the region disk/memory usage information.
-    pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
+    pub fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
         let region = self
             .inner
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        Ok(region.region_usage().await)
+        Ok(region.region_usage())
+    }
+
+    /// Handle substrait query and return a stream of record batches
+    #[tracing::instrument(skip_all)]
+    pub async fn scan_to_stream(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.scanner(region_id, request)
+            .map_err(BoxedError::new)?
+            .scan()
+            .await
     }
 
     /// Returns a scanner to scan for `request`.
     fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
         self.scan_region(region_id, request)?.scanner()
+    }
+
+    /// Returns a region scanner to scan the region for `request`.
+    async fn region_scanner(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RegionScannerRef> {
+        let scanner = self.scanner(region_id, request)?;
+        scanner.region_scanner().await
     }
 
     /// Scans a region.
@@ -312,16 +340,13 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
-    /// Handle substrait query and return a stream of record batches
     #[tracing::instrument(skip_all)]
     async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        self.scanner(region_id, request)
-            .map_err(BoxedError::new)?
-            .scan()
+    ) -> Result<RegionScannerRef, BoxedError> {
+        self.region_scanner(region_id, request)
             .await
             .map_err(BoxedError::new)
     }
@@ -343,10 +368,9 @@ impl RegionEngine for MitoEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         let size = self
             .get_region_usage(region_id)
-            .await
             .map(|usage| usage.disk_usage())
             .ok()?;
         size.try_into().ok()

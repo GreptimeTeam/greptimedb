@@ -15,10 +15,9 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info, tracing};
-use datafusion::logical_expr;
+use datafusion::logical_expr::{self, Expr};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -62,7 +61,7 @@ impl MetricEngineInner {
             .start_timer();
 
         self.mito
-            .handle_query(region_id, request)
+            .scan_to_stream(region_id, request)
             .await
             .context(MitoReadOperationSnafu)
     }
@@ -82,7 +81,7 @@ impl MetricEngineInner {
             .transform_request(physical_region_id, logical_region_id, request)
             .await?;
         self.mito
-            .handle_query(data_region_id, request)
+            .scan_to_stream(data_region_id, request)
             .await
             .context(MitoReadOperationSnafu)
     }
@@ -158,7 +157,6 @@ impl MetricEngineInner {
     fn table_id_filter(&self, logical_region_id: RegionId) -> Expr {
         logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
             .eq(logical_expr::lit(logical_region_id.table_id()))
-            .into()
     }
 
     /// Transform the projection from logical region to physical region.
@@ -309,7 +307,6 @@ mod test {
             scan_req.filters[0],
             logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                 .eq(logical_expr::lit(logical_region_id.table_id()))
-                .into()
         );
 
         // check default projection

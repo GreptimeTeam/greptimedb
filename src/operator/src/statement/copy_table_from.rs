@@ -20,7 +20,7 @@ use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
-use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader};
+use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader, ReaderAdapter};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
@@ -46,6 +46,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
@@ -146,10 +147,16 @@ impl StatementExecutor {
                 path,
             }),
             Format::Parquet(_) => {
+                let meta = object_store
+                    .stat(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?;
                 let mut reader = object_store
                     .reader(&path)
                     .await
-                    .context(error::ReadObjectSnafu { path: &path })?;
+                    .context(error::ReadObjectSnafu { path: &path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .compat();
                 let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default())
                     .await
                     .context(error::ReadParquetMetadataSnafu)?;
@@ -161,12 +168,17 @@ impl StatementExecutor {
                 })
             }
             Format::Orc(_) => {
+                let meta = object_store
+                    .stat(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?;
+
                 let reader = object_store
                     .reader(&path)
                     .await
                     .context(error::ReadObjectSnafu { path: &path })?;
 
-                let schema = infer_orc_schema(reader)
+                let schema = infer_orc_schema(ReaderAdapter::new(reader, meta.content_length()))
                     .await
                     .context(error::ReadOrcSnafu)?;
 
@@ -279,11 +291,17 @@ impl StatementExecutor {
                 )))
             }
             FileMetadata::Parquet { metadata, path, .. } => {
-                let reader = object_store
-                    .reader_with(path)
-                    .buffer(DEFAULT_READ_BUFFER)
+                let meta = object_store
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
+                let reader = object_store
+                    .reader_with(path)
+                    .chunk(DEFAULT_READ_BUFFER)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .compat();
                 let builder =
                     ParquetRecordBatchStreamBuilder::new_with_metadata(reader, metadata.clone());
                 let stream = builder
@@ -302,14 +320,20 @@ impl StatementExecutor {
                 )))
             }
             FileMetadata::Orc { path, .. } => {
-                let reader = object_store
-                    .reader_with(path)
-                    .buffer(DEFAULT_READ_BUFFER)
+                let meta = object_store
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
-                let stream = new_orc_stream_reader(reader)
+
+                let reader = object_store
+                    .reader_with(path)
+                    .chunk(DEFAULT_READ_BUFFER)
                     .await
-                    .context(error::ReadOrcSnafu)?;
+                    .context(error::ReadObjectSnafu { path })?;
+                let stream =
+                    new_orc_stream_reader(ReaderAdapter::new(reader, meta.content_length()))
+                        .await
+                        .context(error::ReadOrcSnafu)?;
 
                 let projected_schema = Arc::new(
                     compat_schema

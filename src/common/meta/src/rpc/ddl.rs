@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::result;
 
 use api::v1::meta::ddl_task_request::Task;
@@ -28,8 +28,8 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, QueryContext as PbQueryContext,
-    TruncateTableExpr,
+    DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
+    QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -39,11 +39,11 @@ use serde_with::{serde_as, DefaultOnNull};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{self, Result};
 use crate::key::FlowId;
-use crate::table_name::TableName;
 
 /// DDL tasks
 #[derive(Debug, Clone)]
@@ -274,10 +274,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 #[derive(Debug, Default)]
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
-    // For create physical table
-    // TODO(jeremy): remove it?
-    pub table_id: Option<TableId>,
-    // For create multi logical tables
+    // `table_id`s for `CREATE TABLE` or `CREATE LOGICAL TABLES` task.
     pub table_ids: Vec<TableId>,
 }
 
@@ -285,11 +282,9 @@ impl TryFrom<PbDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
 
     fn try_from(resp: PbDdlTaskResponse) -> Result<Self> {
-        let table_id = resp.table_id.map(|t| t.id);
         let table_ids = resp.table_ids.into_iter().map(|t| t.id).collect();
         Ok(Self {
             key: resp.pid.map(|pid| pid.key).unwrap_or_default(),
-            table_id,
             table_ids,
         })
     }
@@ -299,9 +294,6 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
     fn from(val: SubmitDdlTaskResponse) -> Self {
         Self {
             pid: Some(ProcedureId { key: val.key }),
-            table_id: val
-                .table_id
-                .map(|table_id| api::v1::TableId { id: table_id }),
             table_ids: val
                 .table_ids
                 .into_iter()
@@ -331,6 +323,14 @@ impl CreateViewTask {
 
     pub fn raw_logical_plan(&self) -> &Vec<u8> {
         &self.create_view.logical_plan
+    }
+
+    pub fn table_names(&self) -> HashSet<TableName> {
+        self.create_view
+            .table_names
+            .iter()
+            .map(|t| t.clone().into())
+            .collect()
     }
 }
 
@@ -898,7 +898,8 @@ pub struct CreateFlowTask {
     pub sink_table_name: TableName,
     pub or_replace: bool,
     pub create_if_not_exists: bool,
-    pub expire_when: String,
+    /// Duration in seconds. Data older than this duration will not be used.
+    pub expire_after: Option<i64>,
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -915,7 +916,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             sink_table_name,
             or_replace,
             create_if_not_exists,
-            expire_when,
+            expire_after,
             comment,
             sql,
             flow_options,
@@ -934,7 +935,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
                 .into(),
             or_replace,
             create_if_not_exists,
-            expire_when,
+            expire_after: expire_after.map(|e| e.value),
             comment,
             sql,
             flow_options,
@@ -951,7 +952,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             sink_table_name,
             or_replace,
             create_if_not_exists,
-            expire_when,
+            expire_after,
             comment,
             sql,
             flow_options,
@@ -965,7 +966,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
                 sink_table_name: Some(sink_table_name.into()),
                 or_replace,
                 create_if_not_exists,
-                expire_when,
+                expire_after: expire_after.map(|value| ExpireAfter { value }),
                 comment,
                 sql,
                 flow_options,

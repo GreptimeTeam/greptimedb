@@ -128,7 +128,7 @@ async fn test_region_replay() {
     assert_eq!(0, result.affected_rows);
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(42, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 
@@ -166,7 +166,7 @@ async fn test_write_query_region() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -227,7 +227,7 @@ async fn test_different_order() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+-------+---------+---------+---------------------+
@@ -289,7 +289,7 @@ async fn test_different_order_and_type() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+-------+---------+---------+---------------------+
@@ -341,7 +341,7 @@ async fn test_put_delete() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -383,7 +383,7 @@ async fn test_delete_not_null_fields() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -398,7 +398,7 @@ async fn test_delete_not_null_fields() {
     // Reopen and scan again.
     reopen_region(&engine, region_id, region_dir, false, HashMap::new()).await;
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
@@ -447,7 +447,7 @@ async fn test_put_overwrite() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -524,7 +524,7 @@ async fn test_region_usage() {
         .unwrap();
     // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert_eq!(region_stat.manifest_usage, 686);
 
     // put some rows
@@ -535,7 +535,7 @@ async fn test_region_usage() {
 
     put_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert!(region_stat.wal_usage > 0);
 
     // delete some rows
@@ -545,13 +545,13 @@ async fn test_region_usage() {
     };
     delete_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert!(region_stat.wal_usage > 0);
 
     // flush region
     flush_region(&engine, region_id, None).await;
 
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert_eq!(region_stat.sst_usage, 3010);
 
     // region total usage
@@ -565,7 +565,7 @@ async fn test_engine_with_write_cache() {
 
     let mut env = TestEnv::new();
     let path = env.data_home().to_str().unwrap().to_string();
-    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512));
+    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512), None);
     let engine = env.create_engine(mito_config).await;
 
     let region_id = RegionId::new(1, 1);
@@ -688,7 +688,7 @@ async fn test_cache_null_primary_key() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+-------+---------+---------------------+

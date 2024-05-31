@@ -13,9 +13,9 @@
 // limitations under the License.
 
 mod context;
+mod default_serializer;
 pub mod options;
 mod state;
-
 use std::any::Any;
 use std::sync::Arc;
 
@@ -29,6 +29,7 @@ use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
+pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use session::context::QueryContextRef;
 use table::TableRef;
 

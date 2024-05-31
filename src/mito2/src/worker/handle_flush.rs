@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use api::v1::region::compact_request;
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
@@ -190,6 +191,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: FlushFinished,
     ) {
+        // Notifies other workers. Even the remaining steps of this method fail we still
+        // wake up other workers as we have released some memory by flush.
+        self.notify_group();
+
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             warn!(
                 "Unable to finish the flush task for a read only region {}",
@@ -207,7 +212,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         if let Err(e) = self
             .wal
-            .obsolete(region_id, request.flushed_entry_id, &region.wal_options)
+            .obsolete(region_id, request.flushed_entry_id, &region.provider)
             .await
         {
             error!(e; "Failed to write wal, region: {}", region_id);
@@ -229,13 +234,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Handle stalled requests.
-        let stalled = std::mem::take(&mut self.stalled_requests);
-        // We already stalled these requests, don't stall them again.
-        self.handle_write_requests(stalled.requests, false).await;
+        self.handle_stalled_requests().await;
 
         // Schedules compaction.
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
+            compact_request::Options::Regular(Default::default()),
             &region.version_control,
             &region.access_layer,
             &region.file_purger,

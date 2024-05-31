@@ -15,9 +15,11 @@
 //! A write-through cache for remote object stores.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
+use futures::AsyncWriteExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
@@ -55,9 +57,10 @@ impl WriteCache {
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        ttl: Option<Duration>,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
-        let file_cache = FileCache::new(local_store, cache_capacity);
+        let file_cache = FileCache::new(local_store, cache_capacity, ttl);
         file_cache.recover().await?;
 
         Ok(Self {
@@ -72,6 +75,7 @@ impl WriteCache {
         cache_dir: &str,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
+        ttl: Option<Duration>,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
         info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
@@ -81,6 +85,7 @@ impl WriteCache {
             local_store,
             object_store_manager,
             cache_capacity,
+            ttl,
             intermediate_manager,
         )
         .await
@@ -171,19 +176,27 @@ impl WriteCache {
             }])
             .start_timer();
 
+        let cached_value = self
+            .file_cache
+            .local_store()
+            .stat(&cache_path)
+            .await
+            .context(error::OpenDalSnafu)?;
         let reader = self
             .file_cache
             .local_store()
             .reader(&cache_path)
             .await
-            .context(error::OpenDalSnafu)?;
+            .context(error::OpenDalSnafu)?
+            .into_futures_async_read(0..cached_value.content_length());
 
         let mut writer = remote_store
             .writer_with(upload_path)
-            .buffer(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
-            .context(error::OpenDalSnafu)?;
+            .context(error::OpenDalSnafu)?
+            .into_futures_async_write();
 
         let bytes_written =
             futures::io::copy(reader, &mut writer)
@@ -195,7 +208,11 @@ impl WriteCache {
                 })?;
 
         // Must close to upload all data.
-        writer.close().await.context(error::OpenDalSnafu)?;
+        writer.close().await.context(error::UploadSnafu {
+            region_id,
+            file_id,
+            file_type,
+        })?;
 
         UPLOAD_BYTES_TOTAL.inc_by(bytes_written);
 
@@ -311,7 +328,7 @@ mod tests {
             .read(&write_cache.file_cache.cache_file_path(key))
             .await
             .unwrap();
-        assert_eq!(remote_data, cache_data);
+        assert_eq!(remote_data.to_vec(), cache_data.to_vec());
 
         // Check write cache contains the index key
         let index_key = IndexKey::new(region_id, file_id, FileType::Puffin);
@@ -322,7 +339,7 @@ mod tests {
             .read(&write_cache.file_cache.cache_file_path(index_key))
             .await
             .unwrap();
-        assert_eq!(remote_index_data, cache_index_data);
+        assert_eq!(remote_index_data.to_vec(), cache_index_data.to_vec());
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub type BinaryArray = arrow::array::LargeBinaryArray;
-pub type MutableBinaryArray = arrow::array::LargeBinaryBuilder;
+pub type BinaryArray = arrow::array::BinaryArray;
+pub type MutableBinaryArray = arrow::array::BinaryBuilder;
 pub type StringArray = arrow::array::StringArray;
 pub type MutableStringArray = arrow::array::StringBuilder;

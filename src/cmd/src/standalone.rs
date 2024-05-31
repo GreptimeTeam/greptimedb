@@ -16,10 +16,7 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
-use cache::{
-    build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
-    TABLE_ROUTE_CACHE_NAME,
-};
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -41,6 +38,7 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
+use common_version::{short_version, version};
 use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -60,16 +58,19 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu,
-    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
+    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::{GlobalOptions, Options};
-use crate::App;
+use crate::options::GlobalOptions;
+use crate::{log_versions, App};
+
+pub const APP_NAME: &str = "greptime-standalone";
 
 #[derive(Parser)]
 pub struct Command {
@@ -78,11 +79,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -93,13 +94,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -207,12 +208,15 @@ pub struct Instance {
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
+
+    // Keep the logging guard to prevent the worker from being dropped.
+    _guard: Vec<WorkerGuard>,
 }
 
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-standalone"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -287,21 +291,19 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Standalone(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                StandaloneOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
+        self.merge_with_cli_options(
+            global_options,
+            StandaloneOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
+    pub fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
         mut opts: StandaloneOptions,
@@ -373,7 +375,11 @@ impl StartCommand {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
+        let guard =
+            common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+        log_versions(version!(), short_version!());
+
         info!("Standalone start command: {:#?}", self);
         info!("Building standalone instance with {opts:#?}");
 
@@ -412,20 +418,12 @@ impl StartCommand {
             .build(),
         );
 
-        let table_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: TABLE_CACHE_NAME,
-        })?;
-        let table_route_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: TABLE_ROUTE_CACHE_NAME,
-        })?;
         let catalog_manager = KvBackendCatalogManager::new(
             dn_opts.mode,
             None,
             kv_backend.clone(),
-            table_cache,
-            table_route_cache,
-        )
-        .await;
+            layered_cache_registry.clone(),
+        );
 
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
@@ -516,6 +514,7 @@ impl StartCommand {
             frontend,
             procedure_manager,
             wal_options_allocator,
+            _guard: guard,
         })
     }
 
@@ -665,10 +664,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(options) = cmd.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
@@ -721,7 +717,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(opts) = cmd
+        let opts = cmd
             .load_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
@@ -729,10 +725,7 @@ mod tests {
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap()
-        else {
-            unreachable!()
-        };
+            .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
@@ -794,11 +787,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Standalone(opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let opts = command.load_options(&GlobalOptions::default()).unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

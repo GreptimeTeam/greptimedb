@@ -16,14 +16,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::HeaderValue;
 use common_base::Plugins;
 use common_telemetry::metric::{convert_metric_to_write_request, MetricFilter};
 use common_telemetry::{error, info};
 use common_time::Timestamp;
-use hyper::HeaderMap;
 use prost::Message;
-use reqwest::header::HeaderName;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextBuilder;
 use snafu::{ensure, ResultExt};
@@ -115,7 +113,7 @@ impl ExportMetricsTask {
                 }
             );
         }
-        let mut headers = reqwest::header::HeaderMap::new();
+        let mut headers = HeaderMap::new();
         if let Some(remote_write) = &config.remote_write {
             ensure!(
                 !remote_write.url.is_empty(),

@@ -20,6 +20,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
@@ -27,7 +28,6 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetaKey, TableMetaValue};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::table_name::TableName;
 use crate::FlownodeId;
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";
@@ -123,7 +123,8 @@ pub struct FlowInfoValue {
     /// The raw sql.
     pub(crate) raw_sql: String,
     /// The expr of expire.
-    pub(crate) expire_when: String,
+    /// Duration in seconds as `i64`.
+    pub(crate) expire_after: Option<i64>,
     /// The comment.
     pub(crate) comment: String,
     /// The options.
@@ -153,8 +154,8 @@ impl FlowInfoValue {
         &self.raw_sql
     }
 
-    pub fn expire_when(&self) -> &String {
-        &self.expire_when
+    pub fn expire_after(&self) -> Option<i64> {
+        self.expire_after
     }
 
     pub fn comment(&self) -> &String {

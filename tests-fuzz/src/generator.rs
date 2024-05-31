@@ -20,6 +20,7 @@ pub mod select_expr;
 use std::fmt;
 
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use rand::Rng;
 
@@ -39,6 +40,8 @@ pub type ConcreteDataTypeGenerator<R> = Box<dyn Random<ConcreteDataType, R>>;
 
 pub type ValueGenerator<R> =
     Box<dyn Fn(&mut R, &ConcreteDataType, Option<&dyn Random<Ident, R>>) -> Value>;
+
+pub type TsValueGenerator<R> = Box<dyn Fn(&mut R, TimestampType) -> Value>;
 
 pub trait Generator<T, R: Rng> {
     type Error: Sync + Send + fmt::Debug;

@@ -145,13 +145,13 @@ mod tests {
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use moka::future::CacheBuilder;
+    use table::table_name::TableName;
 
     use crate::cache::flow::table_flownode::new_table_flownode_set_cache;
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
     use crate::key::flow::flow_info::FlowInfoValue;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::table_name::TableName;
 
     #[tokio::test]
     async fn test_cache_empty_set() {
@@ -180,7 +180,7 @@ mod tests {
                     catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                     flow_name: "my_flow".to_string(),
                     raw_sql: "sql".to_string(),
-                    expire_when: "expire".to_string(),
+                    expire_after: Some(300),
                     comment: "comment".to_string(),
                     options: Default::default(),
                 },

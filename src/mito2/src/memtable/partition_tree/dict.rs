@@ -281,10 +281,6 @@ impl Drop for KeyDict {
 
 /// Buffer to store unsorted primary keys.
 struct KeyBuffer {
-    // We use arrow's binary builder as out default binary builder
-    // is LargeBinaryBuilder
-    // TODO(yingwen): Change the type binary vector to Binary instead of LargeBinary.
-    /// Builder for binary key array.
     key_builder: BinaryBuilder,
     next_pk_index: usize,
 }

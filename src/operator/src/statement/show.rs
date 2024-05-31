@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use common_meta::key::flow::flow_info::FlowInfoValue;
-use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
@@ -26,6 +25,7 @@ use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
 use sqlparser::ast::ObjectName;
+use table::table_name::TableName;
 use table::TableRef;
 
 use crate::error::{self, ExecuteStatementSnafu, Result};
@@ -125,6 +125,13 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn show_charset(&self, kind: ShowKind, query_ctx: QueryContextRef) -> Result<Output> {
         query::sql::show_charsets(kind, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_status(&self, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_status(query_ctx)
             .await
             .context(error::ExecuteStatementSnafu)
     }

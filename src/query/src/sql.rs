@@ -573,6 +573,22 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
     Ok(Output::new_with_record_batches(records))
 }
 
+pub async fn show_status(_query_ctx: QueryContextRef) -> Result<Output> {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("Variable_name", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Value", ConcreteDataType::string_datatype(), true),
+    ]));
+    let records = RecordBatches::try_from_columns(
+        schema,
+        vec![
+            Arc::new(StringVector::from(Vec::<&str>::new())) as _,
+            Arc::new(StringVector::from(Vec::<&str>::new())) as _,
+        ],
+    )
+    .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(records))
+}
+
 pub fn show_create_table(
     table: TableRef,
     partitions: Option<Partitions>,
@@ -606,9 +622,9 @@ pub fn show_create_flow(obj_name: &ObjectName, flow_val: FlowInfoValue) -> Resul
         &obj_name
     ));
     sql.push_str(&format!("OUTPUT AS {} ", flow_val.sink_table_name()));
-    if !flow_val.expire_when().is_empty() {
-        sql.push_str(&format!("EXPIRE WHEN {} ", flow_val.expire_when()));
-    }
+//    if !flow_val.expire_after().is_some() {
+//        sql.push_str(&format!("EXPIRE WHEN {} ", flow_val.expire_after()));
+//    }
     if !flow_val.comment().is_empty() {
         sql.push_str(&format!("COMMENT '{}' ", flow_val.comment()));
     }

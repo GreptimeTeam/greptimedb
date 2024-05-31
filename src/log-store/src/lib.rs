@@ -14,12 +14,10 @@
 
 #![feature(let_chains)]
 #![feature(io_error_more)]
+#![feature(assert_matches)]
 
 pub mod error;
 pub mod kafka;
 pub mod metrics;
-mod noop;
 pub mod raft_engine;
 pub mod test_util;
-
-pub use noop::NoopLogStore;

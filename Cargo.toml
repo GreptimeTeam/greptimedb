@@ -64,13 +64,14 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.1"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints]
 clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
+clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
 clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
@@ -109,6 +110,7 @@ datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev 
 datafusion-functions = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
+datafusion-physical-plan = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "34eda15b73a9e278af8844b30ed2f1c21c10359c" }
 derive_builder = "0.12"
@@ -118,7 +120,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a11db14b8502f55ca5348917fd18e6fcf140f55e" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ae26136accd82fbdf8be540cd502f2e94951077e" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -138,12 +140,13 @@ parquet = { version = "51.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
+promql-parser = { version = "0.4" }
 prost = "0.12"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 regex = "1.8"
 regex-automata = { version = "0.4" }
-reqwest = { version = "0.11", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
@@ -168,7 +171,8 @@ tokio = { version = "1.36", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.11", features = ["tls"] }
+tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
+tower = { version = "0.4" }
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
 
@@ -229,8 +233,6 @@ sql = { path = "src/sql" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
-# TODO some code depends on this
-tests-integration = { path = "tests-integration" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
@@ -245,6 +247,11 @@ strip = true
 lto = "thin"
 debug = false
 incremental = false
+
+[profile.ci]
+inherits = "dev"
+debug = false
+strip = true
 
 [profile.dev.package.sqlness-runner]
 debug = false

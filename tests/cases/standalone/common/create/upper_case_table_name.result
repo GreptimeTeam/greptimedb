@@ -100,9 +100,13 @@ Affected Rows: 0
 
 drop database upper_case_table_name;
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Schema `upper_case_table_name` is in use
 
 use public;
+
+Affected Rows: 0
+
+drop database upper_case_table_name;
 
 Affected Rows: 0
 

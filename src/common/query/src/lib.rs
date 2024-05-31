@@ -18,7 +18,8 @@ mod function;
 pub mod logical_plan;
 pub mod prelude;
 mod signature;
-
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 

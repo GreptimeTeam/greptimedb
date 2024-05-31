@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
+use datafusion_expr::expr::Expr;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {

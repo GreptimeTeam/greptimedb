@@ -104,7 +104,7 @@ async fn test_catchup_with_last_entry_id() {
     // Scans
     let request = ScanRequest::default();
     let stream = follower_engine
-        .handle_query(region_id, request)
+        .scan_to_stream(region_id, request)
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -264,7 +264,7 @@ async fn test_catchup_without_last_entry_id() {
 
     let request = ScanRequest::default();
     let stream = follower_engine
-        .handle_query(region_id, request)
+        .scan_to_stream(region_id, request)
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -367,7 +367,7 @@ async fn test_catchup_with_manifest_update() {
 
     let request = ScanRequest::default();
     let stream = follower_engine
-        .handle_query(region_id, request)
+        .scan_to_stream(region_id, request)
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

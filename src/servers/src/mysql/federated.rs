@@ -72,7 +72,6 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SELECT \\$\\$)",
 
         // mysqldump.
-        "(?i)^(SET SESSION(.*))",
         "(?i)^(SET SQL_QUOTE_SHOW_CREATE(.*))",
         "(?i)^(LOCK TABLES(.*))",
         "(?i)^(UNLOCK TABLES(.*))",

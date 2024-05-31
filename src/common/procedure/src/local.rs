@@ -36,7 +36,7 @@ use crate::error::{
 };
 use crate::local::runner::Runner;
 use crate::procedure::{BoxedProcedureLoader, InitProcedureState};
-use crate::store::{ProcedureMessage, ProcedureStore, StateStoreRef};
+use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId, Watcher,
@@ -534,8 +534,11 @@ impl LocalManager {
         info!("LocalManager start to recover");
         let recover_start = Instant::now();
 
-        let (messages, rollback_messages, finished_ids) =
-            self.procedure_store.load_messages().await?;
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = self.procedure_store.load_messages().await?;
         // Submits recovered messages first.
         self.submit_recovered_messages(rollback_messages, InitProcedureState::RollingBack);
         self.submit_recovered_messages(messages, InitProcedureState::Running);

@@ -38,32 +38,33 @@ use datafusion_expr::utils::conjunction;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+use promql::extension_plan::{
+    build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
+    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+};
+use promql::functions::{
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+};
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::parser::token::TokenType;
 use promql_parser::parser::{
     token, AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
     Expr as PromExpr, Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector,
-    NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, TokenType, UnaryExpr,
+    NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr,
     VectorMatchCardinality, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::{
+use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
     ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, Result,
-    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
+    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
+    Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
+    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
     UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
-};
-use crate::extension_plan::{
-    build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
-    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
-};
-use crate::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 
 /// `time()` function in PromQL.
@@ -606,15 +607,14 @@ impl PromPlanner {
         if let Some(name) = name.clone() {
             metric_name = Some(name);
             ensure!(
-                label_matchers.find_matcher(METRIC_NAME).is_none(),
+                label_matchers.find_matchers(METRIC_NAME).is_empty(),
                 MultipleMetricMatchersSnafu
             );
         } else {
-            metric_name = Some(
-                label_matchers
-                    .find_matcher(METRIC_NAME)
-                    .context(NoMetricMatcherSnafu)?,
-            );
+            let mut matches = label_matchers.find_matchers(METRIC_NAME);
+            ensure!(!matches.is_empty(), NoMetricMatcherSnafu);
+            ensure!(matches.len() == 1, MultipleMetricMatchersSnafu);
+            metric_name = matches.pop().map(|m| m.value);
         }
 
         self.ctx.table_name = metric_name;
@@ -640,8 +640,7 @@ impl PromPlanner {
                 let _ = matchers.insert(matcher.clone());
             }
         }
-        let matchers = matchers.into_iter().collect();
-        Ok(Matchers { matchers })
+        Ok(Matchers::new(matchers.into_iter().collect()))
     }
 
     async fn selector_to_series_normalize_plan(
@@ -1523,16 +1522,19 @@ impl PromPlanner {
             },
         );
         let scalar_plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(ScalarCalculate::new(
-                self.ctx.start,
-                self.ctx.end,
-                self.ctx.interval,
-                input,
-                self.ctx.time_index_column.as_ref().unwrap(),
-                &self.ctx.tag_columns,
-                &self.ctx.field_columns[0],
-                self.ctx.table_name.as_deref(),
-            )?),
+            node: Arc::new(
+                ScalarCalculate::new(
+                    self.ctx.start,
+                    self.ctx.end,
+                    self.ctx.interval,
+                    input,
+                    self.ctx.time_index_column.as_ref().unwrap(),
+                    &self.ctx.tag_columns,
+                    &self.ctx.field_columns[0],
+                    self.ctx.table_name.as_deref(),
+                )
+                .context(PromqlPlanNodeSnafu)?,
+            ),
         });
         // scalar plan have no tag columns
         self.ctx.tag_columns.clear();
@@ -2184,6 +2186,7 @@ mod test {
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::test_util::DummyDecoder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
@@ -2250,7 +2253,12 @@ mod test {
                 .is_ok());
         }
 
-        DfTableSourceProvider::new(catalog_list, false, QueryContext::arc().as_ref())
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc().as_ref(),
+            DummyDecoder::arc(),
+        )
     }
 
     // {
@@ -3073,7 +3081,12 @@ mod test {
             .is_ok());
 
         let plan = PromPlanner::stmt_to_plan(
-            DfTableSourceProvider::new(catalog_list.clone(), false, QueryContext::arc().as_ref()),
+            DfTableSourceProvider::new(
+                catalog_list.clone(),
+                false,
+                QueryContext::arc().as_ref(),
+                DummyDecoder::arc(),
+            ),
             EvalStmt {
                 expr: parser::parse("metrics{tag = \"1\"}").unwrap(),
                 start: UNIX_EPOCH,
@@ -3096,7 +3109,12 @@ mod test {
         \n            TableScan: metrics [tag:Utf8, timestamp:Timestamp(Nanosecond, None), field:Float64;N]"
         );
         let plan = PromPlanner::stmt_to_plan(
-            DfTableSourceProvider::new(catalog_list.clone(), false, QueryContext::arc().as_ref()),
+            DfTableSourceProvider::new(
+                catalog_list.clone(),
+                false,
+                QueryContext::arc().as_ref(),
+                DummyDecoder::arc(),
+            ),
             EvalStmt {
                 expr: parser::parse("avg_over_time(metrics{tag = \"1\"}[5s])").unwrap(),
                 start: UNIX_EPOCH,

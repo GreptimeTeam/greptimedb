@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::{Hash, Hasher};
-use std::mem::size_of;
-
-use store_api::logstore::entry::{Entry, Id as EntryId};
-use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
-
-use crate::error::Error;
-use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
+use crate::raft_engine::protos::logstore::EntryImpl;
 
 mod backend;
 pub mod log_store;
 
 pub use backend::RaftEngineBackend;
 pub use raft_engine::Config;
+use store_api::logstore::entry::{Entry, NaiveEntry};
+use store_api::logstore::provider::Provider;
+use store_api::storage::RegionId;
 
 pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));
@@ -42,55 +38,20 @@ impl EntryImpl {
     }
 }
 
-impl NamespaceImpl {
-    pub fn with_id(id: NamespaceId) -> Self {
-        Self {
+impl From<EntryImpl> for Entry {
+    fn from(
+        EntryImpl {
             id,
-            ..Default::default()
-        }
-    }
-}
-
-#[allow(clippy::derived_hash_with_manual_eq)]
-impl Hash for NamespaceImpl {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl Eq for NamespaceImpl {}
-
-impl Namespace for NamespaceImpl {
-    fn id(&self) -> NamespaceId {
-        self.id
-    }
-}
-
-impl Entry for EntryImpl {
-    type Error = Error;
-
-    fn data(&self) -> &[u8] {
-        self.data.as_slice()
-    }
-
-    fn id(&self) -> EntryId {
-        self.id
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.data.len() + size_of::<u64>() + size_of::<u64>()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use store_api::logstore::entry::Entry;
-
-    use crate::raft_engine::protos::logstore::EntryImpl;
-
-    #[test]
-    fn test_estimated_size() {
-        let entry = EntryImpl::create(1, 1, b"hello, world".to_vec());
-        assert_eq!(28, entry.estimated_size());
+            namespace_id,
+            data,
+            ..
+        }: EntryImpl,
+    ) -> Self {
+        Entry::Naive(NaiveEntry {
+            provider: Provider::raft_engine_provider(namespace_id),
+            region_id: RegionId::from_u64(namespace_id),
+            entry_id: id,
+            data,
+        })
     }
 }

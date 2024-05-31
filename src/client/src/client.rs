@@ -19,9 +19,10 @@ use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::region::region_client::RegionClient as PbRegionClient;
 use api::v1::HealthCheckRequest;
 use arrow_flight::flight_service_client::FlightServiceClient;
-use common_grpc::channel_manager::ChannelManager;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager, ClientTlsOption};
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::load_balance::{LoadBalance, Loadbalancer};
@@ -84,6 +85,17 @@ impl Client {
         A: AsRef<[U]>,
     {
         Self::with_manager_and_urls(ChannelManager::new(), urls)
+    }
+
+    pub fn with_tls_and_urls<U, A>(urls: A, client_tls: ClientTlsOption) -> Result<Self>
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]>,
+    {
+        let channel_config = ChannelConfig::default().client_tls_config(client_tls);
+        let channel_manager = ChannelManager::with_tls_config(channel_config)
+            .context(error::CreateTlsChannelSnafu)?;
+        Ok(Self::with_manager_and_urls(channel_manager, urls))
     }
 
     pub fn with_manager_and_urls<U, A>(channel_manager: ChannelManager, urls: A) -> Self
@@ -151,24 +163,34 @@ impl Client {
 
     pub fn make_flight_client(&self) -> Result<FlightClient> {
         let (addr, channel) = self.find_channel()?;
-        Ok(FlightClient {
-            addr,
-            client: FlightServiceClient::new(channel)
-                .max_decoding_message_size(self.max_grpc_recv_message_size())
-                .max_encoding_message_size(self.max_grpc_send_message_size()),
-        })
+
+        let client = FlightServiceClient::new(channel)
+            .max_decoding_message_size(self.max_grpc_recv_message_size())
+            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
+
+        Ok(FlightClient { addr, client })
     }
 
     pub(crate) fn raw_region_client(&self) -> Result<PbRegionClient<Channel>> {
         let (_, channel) = self.find_channel()?;
-        Ok(PbRegionClient::new(channel)
+        let client = PbRegionClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size()))
+            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
+        Ok(client)
     }
 
     pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {
         let (_, channel) = self.find_channel()?;
-        Ok(PrometheusGatewayClient::new(channel))
+        let client = PrometheusGatewayClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Zstd);
+        Ok(client)
     }
 
     pub async fn health_check(&self) -> Result<()> {

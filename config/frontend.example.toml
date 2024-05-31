@@ -30,6 +30,23 @@ addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
 
+## gRPC server TLS options, see `mysql.tls` section.
+[grpc.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## +toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## +toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
+
 ## MySQL server options.
 [mysql]
 ## Whether to enable.
@@ -70,7 +87,7 @@ addr = "127.0.0.1:4003"
 ## The number of server worker threads.
 runtime_size = 2
 
-## PostgresSQL server TLS options, see `mysql_options.tls` section.
+## PostgresSQL server TLS options, see `mysql.tls` section.
 [postgres.tls]
 ## TLS mode.
 mode = "disable"

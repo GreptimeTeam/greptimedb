@@ -23,12 +23,11 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest};
 
@@ -67,7 +66,7 @@ impl RegionEngine for MetaRegionEngine {
         &self,
         _region_id: RegionId,
         _request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
+    ) -> Result<RegionScannerRef, BoxedError> {
         unimplemented!()
     }
 
@@ -80,7 +79,7 @@ impl RegionEngine for MetaRegionEngine {
         })
     }
 
-    async fn region_disk_usage(&self, _region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, _region_id: RegionId) -> Option<i64> {
         None
     }
 

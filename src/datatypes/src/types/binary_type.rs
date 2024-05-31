@@ -47,7 +47,7 @@ impl DataType for BinaryType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::LargeBinary
+        ArrowDataType::Binary
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {

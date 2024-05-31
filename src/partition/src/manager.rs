@@ -21,8 +21,7 @@ use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
-use common_query::prelude::Expr;
-use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
+use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::prelude::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -291,7 +290,7 @@ fn create_partitions_from_region_routes(
         let partition = r
             .region
             .partition
-            .clone()
+            .as_ref()
             .context(error::FindRegionRoutesSnafu {
                 region_id: r.region.id,
                 table_id,
@@ -327,12 +326,11 @@ fn create_partitions_from_region_routes(
 }
 
 fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<HashSet<RegionNumber>> {
-    let expr = filter.df_expr();
-    match expr {
-        DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if op.is_comparison_operator() => {
+    match filter {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) if op.is_comparison_operator() => {
             let column_op_value = match (left.as_ref(), right.as_ref()) {
-                (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
-                (DfExpr::Literal(v), DfExpr::Column(c)) => Some((
+                (Expr::Column(c), Expr::Literal(v)) => Some((&c.name, *op, v)),
+                (Expr::Literal(v), Expr::Column(c)) => Some((
                     &c.name,
                     // Safety: previous branch ensures this is a comparison operator
                     op.swap().unwrap(),
@@ -352,11 +350,11 @@ fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<Hash
                     .collect::<HashSet<RegionNumber>>());
             }
         }
-        DfExpr::BinaryExpr(BinaryExpr { left, op, right })
+        Expr::BinaryExpr(BinaryExpr { left, op, right })
             if matches!(op, Operator::And | Operator::Or) =>
         {
-            let left_regions = find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
-            let right_regions = find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
+            let left_regions = find_regions0(partition_rule.clone(), &left.clone())?;
+            let right_regions = find_regions0(partition_rule.clone(), &right.clone())?;
             let regions = match op {
                 Operator::And => left_regions
                     .intersection(&right_regions)

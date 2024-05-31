@@ -45,6 +45,8 @@ impl TypedExpr {
 
 impl TypedExpr {
     /// expand multi-value expression to multiple expressions with new indices
+    ///
+    /// Currently it just mean expand `TumbleWindow` to `TumbleWindowFloor` and `TumbleWindowCeiling`
     pub fn expand_multi_value(
         input_typ: &RelationType,
         exprs: &[TypedExpr],
@@ -106,7 +108,7 @@ impl TypedExpr {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(dbg!(exprs))
+        Ok(exprs)
     }
 }
 

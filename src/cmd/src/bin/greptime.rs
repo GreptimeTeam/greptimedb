@@ -14,13 +14,11 @@
 
 #![doc = include_str!("../../../../README.md")]
 
-use std::fmt;
-
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
-use cmd::options::{GlobalOptions, Options};
-use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, start_app, App};
-use common_version::{short_version, version};
+use cmd::options::GlobalOptions;
+use cmd::{cli, datanode, frontend, metasrv, standalone, App};
+use common_version::version;
 
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = version!(), about)]
@@ -56,58 +54,6 @@ enum SubCommand {
     Cli(cli::Command),
 }
 
-impl SubCommand {
-    async fn build(self, opts: Options) -> Result<Box<dyn App>> {
-        let app: Box<dyn App> = match (self, opts) {
-            (SubCommand::Datanode(cmd), Options::Datanode(dn_opts)) => {
-                let app = cmd.build(*dn_opts).await?;
-                Box::new(app) as _
-            }
-            (SubCommand::Frontend(cmd), Options::Frontend(fe_opts)) => {
-                let app = cmd.build(*fe_opts).await?;
-                Box::new(app) as _
-            }
-            (SubCommand::Metasrv(cmd), Options::Metasrv(meta_opts)) => {
-                let app = cmd.build(*meta_opts).await?;
-                Box::new(app) as _
-            }
-            (SubCommand::Standalone(cmd), Options::Standalone(opts)) => {
-                let app = cmd.build(*opts).await?;
-                Box::new(app) as _
-            }
-            (SubCommand::Cli(cmd), Options::Cli(_)) => {
-                let app = cmd.build().await?;
-                Box::new(app) as _
-            }
-
-            _ => unreachable!(),
-        };
-        Ok(app)
-    }
-
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        match self {
-            SubCommand::Datanode(cmd) => cmd.load_options(global_options),
-            SubCommand::Frontend(cmd) => cmd.load_options(global_options),
-            SubCommand::Metasrv(cmd) => cmd.load_options(global_options),
-            SubCommand::Standalone(cmd) => cmd.load_options(global_options),
-            SubCommand::Cli(cmd) => cmd.load_options(global_options),
-        }
-    }
-}
-
-impl fmt::Display for SubCommand {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SubCommand::Datanode(..) => write!(f, "greptime-datanode"),
-            SubCommand::Frontend(..) => write!(f, "greptime-frontend"),
-            SubCommand::Metasrv(..) => write!(f, "greptime-metasrv"),
-            SubCommand::Standalone(..) => write!(f, "greptime-standalone"),
-            SubCommand::Cli(_) => write!(f, "greptime-cli"),
-        }
-    }
-}
-
 #[cfg(not(windows))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -119,24 +65,38 @@ async fn main() -> Result<()> {
 }
 
 async fn start(cli: Command) -> Result<()> {
-    let subcmd = cli.subcmd;
-
-    let app_name = subcmd.to_string();
-
-    let opts = subcmd.load_options(&cli.global_options)?;
-
-    let _guard = common_telemetry::init_global_logging(
-        &app_name,
-        opts.logging_options(),
-        &cli.global_options.tracing_options(),
-        opts.node_id(),
-    );
-
-    log_versions(version!(), short_version!());
-
-    let app = subcmd.build(opts).await?;
-
-    start_app(app).await
+    match cli.subcmd {
+        SubCommand::Datanode(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Frontend(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Metasrv(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Standalone(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Cli(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+    }
 }
 
 fn setup_human_panic() {

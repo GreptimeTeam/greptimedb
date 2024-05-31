@@ -36,6 +36,8 @@ pub enum RowValue {
 impl RowValue {
     pub fn cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
+            (RowValue::Value(Value::Null), RowValue::Value(v2)) => v2.partial_cmp(&Value::Null),
+            (RowValue::Value(v1), RowValue::Value(Value::Null)) => Value::Null.partial_cmp(v1),
             (RowValue::Value(v1), RowValue::Value(v2)) => v1.partial_cmp(v2),
             _ => panic!("Invalid comparison: {:?} and {:?}", self, other),
         }

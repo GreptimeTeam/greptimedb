@@ -16,7 +16,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
@@ -56,9 +56,13 @@ pub(crate) type FileCacheRef = Arc<FileCache>;
 
 impl FileCache {
     /// Creates a new file cache.
-    pub(crate) fn new(local_store: ObjectStore, capacity: ReadableSize) -> FileCache {
+    pub(crate) fn new(
+        local_store: ObjectStore,
+        capacity: ReadableSize,
+        ttl: Option<Duration>,
+    ) -> FileCache {
         let cache_store = local_store.clone();
-        let memory_index = Cache::builder()
+        let mut builder = Cache::builder()
             .weigher(|_key, value: &IndexValue| -> u32 {
                 // We only measure space on local store.
                 value.file_size
@@ -87,8 +91,11 @@ impl FileCache {
                     }
                 }
                 .boxed()
-            })
-            .build();
+            });
+        if let Some(ttl) = ttl {
+            builder = builder.time_to_idle(ttl);
+        }
+        let memory_index = builder.build();
         FileCache {
             local_store,
             memory_index,
@@ -103,6 +110,10 @@ impl FileCache {
             .with_label_values(&[FILE_TYPE])
             .add(value.file_size.into());
         self.memory_index.insert(key, value).await;
+    }
+
+    pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
+        self.memory_index.get(&key).await
     }
 
     /// Reads a file from the cache.
@@ -365,7 +376,6 @@ fn parse_index_key(name: &str) -> Option<IndexKey> {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
-    use futures::AsyncReadExt;
     use object_store::services::Fs;
 
     use super::*;
@@ -377,11 +387,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_file_cache_ttl() {
+        let dir = create_temp_dir("");
+        let local_store = new_fs_store(dir.path().to_str().unwrap());
+
+        let cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            Some(Duration::from_millis(5)),
+        );
+        let region_id = RegionId::new(2000, 0);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let file_path = cache.cache_file_path(key);
+
+        // Get an empty file.
+        assert!(cache.reader(key).await.is_none());
+
+        // Write a file.
+        local_store
+            .write(&file_path, b"hello".as_slice())
+            .await
+            .unwrap();
+
+        // Add to the cache.
+        cache
+            .put(
+                IndexKey::new(region_id, file_id, FileType::Parquet),
+                IndexValue { file_size: 5 },
+            )
+            .await;
+
+        let exist = cache.reader(key).await;
+        assert!(exist.is_some());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cache.memory_index.run_pending_tasks().await;
+        let non = cache.reader(key).await;
+        assert!(non.is_none());
+    }
+
+    #[tokio::test]
     async fn test_file_cache_basic() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -404,10 +454,9 @@ mod tests {
             .await;
 
         // Read file content.
-        let mut reader = cache.reader(key).await.unwrap();
-        let mut buf = String::new();
-        reader.read_to_string(&mut buf).await.unwrap();
-        assert_eq!("hello", buf);
+        let reader = cache.reader(key).await.unwrap();
+        let buf = reader.read(..).await.unwrap().to_vec();
+        assert_eq!("hello", String::from_utf8(buf).unwrap());
 
         // Get weighted size.
         cache.memory_index.run_pending_tasks().await;
@@ -430,7 +479,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -462,7 +511,7 @@ mod tests {
     async fn test_file_cache_recover() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
 
         let region_id = RegionId::new(2000, 0);
         let file_type = FileType::Parquet;
@@ -488,7 +537,7 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         // No entry before recovery.
         assert!(cache
             .reader(IndexKey::new(region_id, file_ids[0], file_type))
@@ -502,10 +551,9 @@ mod tests {
 
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = IndexKey::new(region_id, *file_id, file_type);
-            let mut reader = cache.reader(key).await.unwrap();
-            let mut buf = String::new();
-            reader.read_to_string(&mut buf).await.unwrap();
-            assert_eq!(i.to_string(), buf);
+            let reader = cache.reader(key).await.unwrap();
+            let buf = reader.read(..).await.unwrap().to_vec();
+            assert_eq!(i.to_string(), String::from_utf8(buf).unwrap());
         }
     }
 
@@ -513,7 +561,7 @@ mod tests {
     async fn test_file_cache_read_ranges() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);

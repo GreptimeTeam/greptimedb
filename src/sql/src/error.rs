@@ -19,6 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use datafusion_common::DataFusionError;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::{Location, Snafu};
 use sqlparser::ast::Ident;
@@ -123,6 +124,13 @@ pub enum Error {
     #[snafu(display("Invalid database name: {}", name))]
     InvalidDatabaseName { name: String },
 
+    #[snafu(display("Invalid interval provided: {}", reason))]
+    InvalidInterval {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unrecognized database option key: {}", key))]
     InvalidDatabaseOption {
         key: String,
@@ -216,6 +224,34 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert to logical TQL expression"))]
+    ConvertToLogicalExpression {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to simplify TQL expression"))]
+    Simplification {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Permission denied while operating catalog {} from current catalog {}",
+        target,
+        current
+    ))]
+    PermissionDenied {
+        target: String,
+        current: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -245,7 +281,11 @@ impl ErrorExt for Error {
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
             | InvalidTableOption { .. }
-            | InvalidCast { .. } => StatusCode::InvalidArguments,
+            | InvalidCast { .. }
+            | ConvertToLogicalExpression { .. }
+            | Simplification { .. }
+            | InvalidInterval { .. }
+            | PermissionDenied { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

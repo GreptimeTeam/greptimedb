@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use table::metadata::RawTableInfo;
+use table::table_name::TableName;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::instruction::CacheIdent;
-use crate::table_name::TableName;
 
 impl AlterLogicalTablesProcedure {
     pub(crate) fn build_table_cache_keys_to_invalidate(&self) -> Vec<CacheIdent> {

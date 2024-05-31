@@ -72,12 +72,12 @@ mod python {
     use arc_swap::ArcSwap;
     use catalog::RegisterSystemTableRequest;
     use common_error::ext::BoxedError;
-    use common_meta::table_name::TableName;
     use common_telemetry::{error, info};
     use script::manager::ScriptManager;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
     use snafu::{OptionExt, ResultExt};
+    use table::table_name::TableName;
 
     use super::*;
     use crate::error::{CatalogSnafu, TableNotFoundSnafu};

@@ -17,6 +17,8 @@
 use async_trait::async_trait;
 use common_telemetry::{error, info};
 
+use crate::error::Result;
+
 pub mod cli;
 pub mod datanode;
 pub mod error;
@@ -35,39 +37,39 @@ pub trait App: Send {
     fn name(&self) -> &str;
 
     /// A hook for implementor to make something happened before actual startup. Defaults to no-op.
-    async fn pre_start(&mut self) -> error::Result<()> {
+    async fn pre_start(&mut self) -> Result<()> {
         Ok(())
     }
 
-    async fn start(&mut self) -> error::Result<()>;
+    async fn start(&mut self) -> Result<()>;
 
     /// Waits the quit signal by default.
     fn wait_signal(&self) -> bool {
         true
     }
 
-    async fn stop(&self) -> error::Result<()>;
-}
+    async fn stop(&self) -> Result<()>;
 
-pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
-    info!("Starting app: {}", app.name());
+    async fn run(&mut self) -> Result<()> {
+        info!("Starting app: {}", self.name());
 
-    app.pre_start().await?;
+        self.pre_start().await?;
 
-    app.start().await?;
+        self.start().await?;
 
-    if app.wait_signal() {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            error!("Failed to listen for ctrl-c signal: {}", e);
-            // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
-            // the underlying system. So we stop the app instead of running nonetheless to let people
-            // investigate the issue.
+        if self.wait_signal() {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                error!(e; "Failed to listen for ctrl-c signal");
+                // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
+                // the underlying system. So we stop the app instead of running nonetheless to let people
+                // investigate the issue.
+            }
         }
-    }
 
-    app.stop().await?;
-    info!("Goodbye!");
-    Ok(())
+        self.stop().await?;
+        info!("Goodbye!");
+        Ok(())
+    }
 }
 
 /// Log the versions of the application, and the arguments passed to the cli.

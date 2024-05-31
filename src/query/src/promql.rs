@@ -12,13 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::Hash;
-
-/// The namespace id.
-/// Usually the namespace id is identical with the region id.
-pub type Id = u64;
-
-pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + PartialEq + Eq {
-    /// Returns the namespace id.
-    fn id(&self) -> Id;
-}
+pub(crate) mod error;
+pub mod planner;

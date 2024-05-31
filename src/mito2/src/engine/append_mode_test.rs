@@ -63,7 +63,7 @@ async fn test_append_mode_write_query() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -137,7 +137,10 @@ async fn test_append_mode_compaction() {
     flush_region(&engine, region_id, None).await;
 
     let output = engine
-        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
         .await
         .unwrap();
     assert_eq!(output.affected_rows, 0);
@@ -183,7 +186,7 @@ async fn test_append_mode_compaction() {
     // Reopens the region.
     reopen_region(&engine, region_id, region_dir, false, region_opts).await;
     let stream = engine
-        .handle_query(region_id, ScanRequest::default())
+        .scan_to_stream(region_id, ScanRequest::default())
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

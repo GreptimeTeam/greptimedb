@@ -158,6 +158,16 @@ impl Display for ShowVariables {
     }
 }
 
+/// SQL structure for "SHOW STATUS"
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowStatus {}
+
+impl Display for ShowStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW STATUS")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

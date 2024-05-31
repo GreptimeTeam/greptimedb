@@ -21,7 +21,7 @@ use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
 use auth::tests::MockUserProvider;
 use auth::UserProviderRef;
-use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use servers::error::{Result, StartGrpcSnafu, TcpBindSnafu};
 use servers::grpc::flight::FlightCraftWrapper;
@@ -31,9 +31,9 @@ use servers::server::Server;
 use snafu::ResultExt;
 use table::test_util::MemTable;
 use table::TableRef;
-use tests_integration::database::Database;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::codec::CompressionEncoding;
 
 use crate::{create_testing_grpc_query_handler, LOCALHOST_WITH_0};
 
@@ -64,6 +64,10 @@ impl MockGrpcServer {
         )
         .into();
         FlightServiceServer::new(service)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Zstd)
     }
 }
 

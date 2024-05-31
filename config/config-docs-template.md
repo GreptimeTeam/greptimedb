@@ -1,10 +1,16 @@
 # Configurations
 
+- [Standalone Mode](#standalone-mode)
+- [Distributed Mode](#distributed-mode)
+    - [Frontend](#frontend)
+    - [Metasrv](#metasrv)
+    - [Datanode](#datanode)
+
 ## Standalone Mode
 
 {{ toml2docs "./standalone.example.toml" }}
 
-## Cluster Mode
+## Distributed Mode
 
 ### Frontend
 

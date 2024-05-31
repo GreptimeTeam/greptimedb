@@ -84,7 +84,7 @@ pub async fn inner_auth<B>(
     let (username, password) = match extract_username_and_password(&req) {
         Ok((username, password)) => (username, password),
         Err(e) => {
-            warn!("extract username and password failed: {}", e);
+            warn!(e; "extract username and password failed");
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
@@ -108,7 +108,7 @@ pub async fn inner_auth<B>(
             Ok(req)
         }
         Err(e) => {
-            warn!("authenticate failed: {}", e);
+            warn!(e; "authenticate failed");
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();

@@ -34,13 +34,14 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
+use prometheus::IntGauge;
 use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
@@ -49,7 +50,8 @@ use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
-use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
+use crate::metrics::WRITE_STALL_TOTAL;
+use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
@@ -151,6 +153,7 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
+        let (flush_sender, flush_receiver) = watch::channel(());
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -166,6 +169,8 @@ impl WorkerGroup {
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
+                    flush_sender: flush_sender.clone(),
+                    flush_receiver: flush_receiver.clone(),
                 }
                 .start()
             })
@@ -207,6 +212,11 @@ impl WorkerGroup {
         self.worker(region_id).is_region_exists(region_id)
     }
 
+    /// Returns true if the specific region is opening.
+    pub(crate) fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.worker(region_id).is_region_opening(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     ///
     /// This method should not be public.
@@ -220,7 +230,7 @@ impl WorkerGroup {
     }
 
     /// Get worker for specific `region_id`.
-    fn worker(&self, region_id: RegionId) -> &RegionWorker {
+    pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
 
         &self.workers[index]
@@ -266,6 +276,7 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let (flush_sender, flush_receiver) = watch::channel(());
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -280,6 +291,8 @@ impl WorkerGroup {
                     cache_manager: cache_manager.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
+                    flush_sender: flush_sender.clone(),
+                    flush_receiver: flush_receiver.clone(),
                 }
                 .start()
             })
@@ -320,6 +333,7 @@ async fn write_cache_from_config(
         &config.experimental_write_cache_path,
         object_store_manager,
         config.experimental_write_cache_size,
+        config.experimental_write_cache_ttl,
         intermediate_manager,
     )
     .await?;
@@ -345,12 +359,17 @@ struct WorkerStarter<S> {
     cache_manager: CacheManagerRef,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
+    /// Watch channel sender to notify workers to handle stalled requests.
+    flush_sender: watch::Sender<()>,
+    /// Watch channel receiver to wait for background flush job.
+    flush_receiver: watch::Receiver<()>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
     /// Starts a region worker and its background thread.
     fn start(self) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
+        let opening_regions = Arc::new(OpeningRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
@@ -360,6 +379,7 @@ impl<S: LogStore> WorkerStarter<S> {
             config: self.config.clone(),
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
+            opening_regions: opening_regions.clone(),
             sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
@@ -385,6 +405,9 @@ impl<S: LogStore> WorkerStarter<S> {
             intermediate_manager: self.intermediate_manager,
             time_provider: self.time_provider,
             last_periodical_check_millis: now,
+            flush_sender: self.flush_sender,
+            flush_receiver: self.flush_receiver,
+            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&self.id.to_string()]),
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -393,6 +416,7 @@ impl<S: LogStore> WorkerStarter<S> {
         RegionWorker {
             id: self.id,
             regions,
+            opening_regions,
             sender,
             handle: Mutex::new(Some(handle)),
             running,
@@ -406,6 +430,8 @@ pub(crate) struct RegionWorker {
     id: WorkerId,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// The opening regions.
+    opening_regions: OpeningRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequest>,
     /// Handle to the worker thread.
@@ -465,9 +491,20 @@ impl RegionWorker {
         self.regions.is_region_exists(region_id)
     }
 
+    /// Returns true if the region is opening.
+    fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.opening_regions.is_region_exists(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.regions.get_region(region_id)
+    }
+
+    #[cfg(test)]
+    /// Returns the [OpeningRegionsRef].
+    pub(crate) fn opening_regions(&self) -> &OpeningRegionsRef {
+        &self.opening_regions
     }
 }
 
@@ -515,6 +552,8 @@ struct RegionWorkerLoop<S> {
     regions: RegionMapRef,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
+    /// Regions that are opening.
+    opening_regions: OpeningRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequest>,
     /// Request receiver.
@@ -547,6 +586,12 @@ struct RegionWorkerLoop<S> {
     time_provider: TimeProviderRef,
     /// Last time to check regions periodically.
     last_periodical_check_millis: i64,
+    /// Watch channel sender to notify workers to handle stalled requests.
+    flush_sender: watch::Sender<()>,
+    /// Watch channel receiver to wait for background flush job.
+    flush_receiver: watch::Receiver<()>,
+    /// Gauge of stalled request count.
+    stalled_count: IntGauge,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -567,15 +612,39 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             buffer.clear();
 
             let max_wait_time = self.time_provider.wait_duration(CHECK_REGION_INTERVAL);
-            match tokio::time::timeout(max_wait_time, self.receiver.recv()).await {
-                Ok(Some(request)) => buffer.push(request),
-                // The channel is disconnected.
-                Ok(None) => break,
-                Err(_) => {
+            let sleep = tokio::time::sleep(max_wait_time);
+            tokio::pin!(sleep);
+
+            tokio::select! {
+                request_opt = self.receiver.recv() => {
+                    match request_opt {
+                        Some(request) => buffer.push(request),
+                        // The channel is disconnected.
+                        None => break,
+                    }
+                }
+                recv_res = self.flush_receiver.changed() => {
+                    if recv_res.is_err() {
+                        // The channel is disconnected.
+                        break;
+                    } else {
+                        // A flush job is finished, handles stalled requests.
+                        self.handle_stalled_requests().await;
+                        continue;
+                    }
+                }
+                _ = &mut sleep => {
                     // Timeout. Checks periodical tasks.
                     self.handle_periodical_tasks();
                     continue;
                 }
+            }
+
+            if self.flush_receiver.has_changed().unwrap_or(false) {
+                // Always checks whether we could process stalled requests to avoid a request
+                // hangs too long.
+                // If the channel is closed, do nothing.
+                self.handle_stalled_requests().await;
             }
 
             // Try to recv more requests from the channel.
@@ -652,7 +721,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
-                DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
+                DdlRequest::Open(req) => {
+                    self.handle_open_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
                 DdlRequest::Alter(req) => {
                     self.handle_alter_request(ddl.region_id, req, ddl.sender)
@@ -664,8 +737,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Compact(_) => {
-                    self.handle_compaction_request(ddl.region_id, ddl.sender);
+                DdlRequest::Compact(req) => {
+                    self.handle_compaction_request(ddl.region_id, req, ddl.sender);
                     continue;
                 }
                 DdlRequest::Truncate(_) => {
@@ -734,7 +807,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S> RegionWorkerLoop<S> {
-    // Clean up the worker.
+    /// Cleans up the worker.
     async fn clean(&self) {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
@@ -743,6 +816,15 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         self.regions.clear();
+    }
+
+    /// Notifies the whole group that a flush job is finished so other
+    /// workers can handle stalled requests.
+    fn notify_group(&mut self) {
+        // Notifies all receivers.
+        let _ = self.flush_sender.send(());
+        // Marks the receiver in current worker as seen so the loop won't be waked up immediately.
+        self.flush_receiver.borrow_and_update();
     }
 }
 

@@ -16,10 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cache::{
-    build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
-    TABLE_ROUTE_CACHE_NAME,
-};
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::DatanodeClients;
@@ -31,6 +28,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
+use common_version::{short_version, version};
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
@@ -41,20 +39,29 @@ use meta_client::MetaClientOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
 };
-use crate::options::{GlobalOptions, Options};
-use crate::App;
+use crate::options::GlobalOptions;
+use crate::{log_versions, App};
 
 pub struct Instance {
     frontend: FeInstance,
+
+    // Keep the logging guard to prevent the worker from being dropped.
+    _guard: Vec<WorkerGuard>,
 }
 
+pub const APP_NAME: &str = "greptime-frontend";
+
 impl Instance {
-    pub fn new(frontend: FeInstance) -> Self {
-        Self { frontend }
+    pub fn new(frontend: FeInstance, guard: Vec<WorkerGuard>) -> Self {
+        Self {
+            frontend,
+            _guard: guard,
+        }
     }
 
     pub fn mut_inner(&mut self) -> &mut FeInstance {
@@ -69,7 +76,7 @@ impl Instance {
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-frontend"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -95,11 +102,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -110,13 +117,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -156,17 +163,15 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Frontend(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                FrontendOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+        self.merge_with_cli_options(
+            global_options,
+            FrontendOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -208,6 +213,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_addr {
             opts.grpc.addr.clone_from(addr);
+            opts.grpc.tls = tls_opts.clone();
         }
 
         if let Some(addr) = &self.mysql_addr {
@@ -239,7 +245,15 @@ impl StartCommand {
         Ok(opts)
     }
 
-    async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, mut opts: FrontendOptions) -> Result<Instance> {
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.logging,
+            &opts.tracing,
+            opts.node_id.clone(),
+        );
+        log_versions(version!(), short_version!());
+
         #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut opts)
             .await
@@ -285,25 +299,12 @@ impl StartCommand {
             .build(),
         );
 
-        let table_cache = layered_cache_registry
-            .get()
-            .context(error::CacheRequiredSnafu {
-                name: TABLE_CACHE_NAME,
-            })?;
-        let table_route_cache =
-            layered_cache_registry
-                .get()
-                .context(error::CacheRequiredSnafu {
-                    name: TABLE_ROUTE_CACHE_NAME,
-                })?;
         let catalog_manager = KvBackendCatalogManager::new(
             opts.mode,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
-            table_cache,
-            table_route_cache,
-        )
-        .await;
+            layered_cache_registry.clone(),
+        );
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
@@ -349,7 +350,7 @@ impl StartCommand {
             .build_servers(opts, servers)
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance::new(instance))
+        Ok(Instance::new(instance, guard))
     }
 }
 
@@ -379,10 +380,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let opts = command.load_options(&GlobalOptions::default()).unwrap();
 
         assert_eq!(opts.http.addr, "127.0.0.1:1234");
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
@@ -430,10 +428,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let fe_opts = command.load_options(&GlobalOptions::default()).unwrap();
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
@@ -486,7 +481,7 @@ mod tests {
             })
             .unwrap();
 
-        let logging_opt = options.logging_options();
+        let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
@@ -562,11 +557,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Frontend(fe_opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let fe_opts = command.load_options(&GlobalOptions::default()).unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(fe_opts.mysql.runtime_size, 11);

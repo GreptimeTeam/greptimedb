@@ -93,7 +93,7 @@ impl SstVersion {
                     .files
                     .values()
                     .map(|file_handle| {
-                        let meta = file_handle.meta();
+                        let meta = file_handle.meta_ref();
                         meta.file_size + meta.index_file_size
                     })
                     .sum::<u64>()

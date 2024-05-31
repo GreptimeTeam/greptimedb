@@ -159,7 +159,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             ConcreteDataType::String(_) => Ok(ScalarValue::Utf8(Some(
                 String::from_utf8_lossy(b).to_string(),
             ))),
-            ConcreteDataType::Binary(_) => Ok(ScalarValue::LargeBinary(Some(b.to_vec()))),
+            ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
 
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,

@@ -109,6 +109,7 @@ impl SchedulerEnv {
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                 },
+                Default::default(),
             )
             .await
             .unwrap(),

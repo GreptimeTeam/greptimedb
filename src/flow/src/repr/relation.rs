@@ -262,6 +262,19 @@ impl RelationType {
 
         true
     }
+
+    /// Return relation describe with column names
+    pub fn into_named(self, names: Vec<ColumnName>) -> RelationDesc {
+        RelationDesc { typ: self, names }
+    }
+
+    /// Return relation describe without column names
+    pub fn into_unnamed(self) -> RelationDesc {
+        RelationDesc {
+            typ: self,
+            names: vec![],
+        }
+    }
 }
 
 /// The type of a `Value`
@@ -325,8 +338,8 @@ fn return_true() -> bool {
 /// Individual column names are optional.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct RelationDesc {
-    typ: RelationType,
-    names: Vec<ColumnName>,
+    pub typ: RelationType,
+    pub names: Vec<ColumnName>,
 }
 
 impl RelationDesc {

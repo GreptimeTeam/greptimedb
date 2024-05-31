@@ -34,6 +34,7 @@ mod test {
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::plan::LogicalPlan;
+    use query::query_engine::DefaultSerializer;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
     use store_api::storage::RegionId;
@@ -544,7 +545,9 @@ CREATE TABLE {table_name} (
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = DFLogicalSubstraitConvertor.encode(&plan).unwrap();
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
 
         for (region, dn) in region_to_dn_map.iter() {
             let region_server = instance.datanodes().get(dn).unwrap().region_server();

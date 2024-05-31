@@ -20,11 +20,14 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
+use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
@@ -224,6 +227,14 @@ pub enum Error {
         source: datatypes::Error,
     },
 
+    #[snafu(display("Failed to build entry, region_id: {}", region_id))]
+    BuildEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
     EncodeWal {
         region_id: RegionId,
@@ -240,9 +251,9 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
+    #[snafu(display("Failed to read WAL, provider: {}", provider))]
     ReadWal {
-        region_id: RegionId,
+        provider: Provider,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -315,6 +326,13 @@ pub enum Error {
 
     #[snafu(display("Invalid arrow record batch, {}", reason))]
     InvalidRecordBatch {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid wal read request, {}", reason))]
+    InvalidWalReadRequest {
         reason: String,
         #[snafu(implicit)]
         location: Location,
@@ -626,6 +644,13 @@ pub enum Error {
         unexpected_entry_id: u64,
     },
 
+    #[snafu(display("Read the corrupted log entry, region_id: {}", region_id))]
+    CorruptedEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to upload file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
@@ -693,6 +718,32 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Time range predicate overflows, timestamp: {:?}, target unit: {}",
+        timestamp,
+        unit
+    ))]
+    TimeRangePredicateOverflow {
+        timestamp: Timestamp,
+        unit: TimeUnit,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
+    BuildTimeRangeFilter {
+        timestamp: Timestamp,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to open region"))]
+    OpenRegion {
+        #[snafu(implicit)]
+        location: Location,
+        source: Arc<Error>,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -743,7 +794,8 @@ impl ErrorExt for Error {
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
             | InvalidMetadata { .. }
-            | InvalidRegionOptions { .. } => StatusCode::InvalidArguments,
+            | InvalidRegionOptions { .. }
+            | InvalidWalReadRequest { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 
@@ -752,7 +804,10 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. } => StatusCode::Internal,
+            | DecodeWal { .. }
+            | BuildEntry { .. } => StatusCode::Internal,
+            OpenRegion { source, .. } => source.status_code(),
+
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
@@ -799,9 +854,13 @@ impl ErrorExt for Error {
 
             Upload { .. } => StatusCode::StorageUnavailable,
             BiError { .. } => StatusCode::Internal,
-            EncodeMemtable { .. } | ReadDataPart { .. } => StatusCode::Internal,
+            EncodeMemtable { .. } | ReadDataPart { .. } | CorruptedEntry { .. } => {
+                StatusCode::Internal
+            }
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
+            TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
+            BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
         }
     }
 

@@ -212,7 +212,14 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
-      - name: Fuzz Test
+      - name: Build Fuzz Test
+        shell: bash
+        run: |
+          cd tests-fuzz &
+          cargo install cargo-gc-bin &
+          cargo gc &
+          cd ..
+      - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
@@ -231,6 +238,130 @@ jobs:
           path: /tmp/unstable-greptime/
           retention-days: 3
 
+  build-greptime-ci:
+    name: Build GreptimeDB binary (profile-CI)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04 ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-greptime-ci"
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin
+      - name: Build greptime bianry
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: cargo build --bin greptime --profile ci
+      - name: Pack greptime binary
+        shell: bash
+        run: |
+          mkdir bin && \
+          mv ./target/ci/greptime bin
+      - name: Print greptime binaries info
+        run: ls -lh bin
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bin
+          version: current
+
+  distributed-fuzztest: 
+    name: Fuzz Test (Distributed, Disk)
+    runs-on: ubuntu-latest
+    needs:  build-greptime-ci
+    strategy:
+      matrix:
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - name: Setup Etcd cluser
+        uses: ./.github/actions/setup-etcd-cluster
+      # Prepares for fuzz tests
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "fuzz-test-targets"
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz
+      # Downloads ci image
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: tar -xvf ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - name: Print etcd info
+        shell: bash
+        run: kubectl get all --show-labels -n etcd-cluster
+      # Setup cluster for test
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
+      - name: Port forward (mysql)
+        run: |
+          kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+      - name: Describe Nodes
+        if: failure()
+        shell: bash
+        run: | 
+          kubectl describe nodes      
+      - name: Export kind logs
+        if: failure()
+        shell: bash
+        run: | 
+          kind export logs /tmp/kind
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-kind-logs-${{ matrix.target }}
+          path: /tmp/kind
+          retention-days: 3
+        
 
   sqlness:
     name: Sqlness Test

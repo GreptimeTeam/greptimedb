@@ -20,6 +20,9 @@ pub(crate) mod insert_expr;
 pub(crate) mod select_expr;
 
 use core::fmt;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 pub use alter_expr::AlterTableExpr;
 use common_time::{Date, DateTime, Timestamp};
@@ -34,6 +37,8 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use self::insert_expr::{RowValue, RowValues};
+use crate::context::TableContextRef;
 use crate::generator::Random;
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
@@ -116,38 +121,31 @@ pub fn generate_random_value<R: Rng>(
         },
         ConcreteDataType::Date(_) => generate_random_date(rng),
         ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
-        &ConcreteDataType::Timestamp(ts_type) => generate_random_timestamp(rng, ts_type),
 
         _ => unimplemented!("unsupported type: {datatype}"),
     }
 }
 
-/// Generates a random [Value] for MySQL.
-pub fn generate_random_value_for_mysql<R: Rng>(
-    rng: &mut R,
-    datatype: &ConcreteDataType,
-    random_str: Option<&dyn Random<Ident, R>>,
-) -> Value {
-    match datatype {
-        &ConcreteDataType::Boolean(_) => Value::from(rng.gen::<bool>()),
-        ConcreteDataType::Int16(_) => Value::from(rng.gen::<i16>()),
-        ConcreteDataType::Int32(_) => Value::from(rng.gen::<i32>()),
-        ConcreteDataType::Int64(_) => Value::from(rng.gen::<i64>()),
-        ConcreteDataType::Float32(_) => Value::from(rng.gen::<f32>()),
-        ConcreteDataType::Float64(_) => Value::from(rng.gen::<f64>()),
-        ConcreteDataType::String(_) => match random_str {
-            Some(random) => Value::from(random.gen(rng).value),
-            None => Value::from(rng.gen::<char>().to_string()),
-        },
-        ConcreteDataType::Date(_) => generate_random_date(rng),
-        ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
-        &ConcreteDataType::Timestamp(ts_type) => generate_random_timestamp_for_mysql(rng, ts_type),
+/// Generate monotonically increasing timestamps for MySQL.
+pub fn generate_unique_timestamp_for_mysql<R: Rng>(
+    base: i64,
+) -> impl Fn(&mut R, TimestampType) -> Value {
+    let base = Arc::new(AtomicI64::new(base));
 
-        _ => unimplemented!("unsupported type: {datatype}"),
+    move |_rng, ts_type| -> Value {
+        let value = base.fetch_add(1, Ordering::Relaxed);
+        let v = match ts_type {
+            TimestampType::Second(_) => Timestamp::new_second(1 + value),
+            TimestampType::Millisecond(_) => Timestamp::new_millisecond(1000 + value),
+            TimestampType::Microsecond(_) => Timestamp::new_microsecond(1_000_000 + value),
+            TimestampType::Nanosecond(_) => Timestamp::new_nanosecond(1_000_000_000 + value),
+        };
+        Value::from(v)
     }
 }
 
-fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
+/// Generate random timestamps.
+pub fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
     let v = match ts_type {
         TimestampType::Second(_) => {
             let min = i64::from(Timestamp::MIN_SECOND);
@@ -178,7 +176,7 @@ fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Val
 }
 
 // MySQL supports timestamp from '1970-01-01 00:00:01.000000' to '2038-01-19 03:14:07.499999'
-fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
+pub fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
     let v = match ts_type {
         TimestampType::Second(_) => {
             let min = 1;
@@ -295,6 +293,15 @@ pub struct Column {
 }
 
 impl Column {
+    /// Returns [TimestampType] if it's [ColumnOption::TimeIndex] [Column].
+    pub fn timestamp_type(&self) -> Option<TimestampType> {
+        if let ConcreteDataType::Timestamp(ts_type) = self.column_type {
+            Some(ts_type)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if it's [ColumnOption::TimeIndex] [Column].
     pub fn is_time_index(&self) -> bool {
         self.options
@@ -435,6 +442,42 @@ pub fn generate_columns<R: Rng + 'static>(
             }
         })
         .collect()
+}
+
+/// Replace Value::Default with the corresponding default value in the rows for comparison.
+pub fn replace_default(
+    rows: &[RowValues],
+    table_ctx_ref: &TableContextRef,
+    insert_expr: &InsertIntoExpr,
+) -> Vec<RowValues> {
+    let index_map: HashMap<usize, usize> = insert_expr
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(insert_idx, insert_column)| {
+            let create_idx = table_ctx_ref
+                .columns
+                .iter()
+                .position(|create_column| create_column.name == insert_column.name)
+                .expect("Column not found in create_expr");
+            (insert_idx, create_idx)
+        })
+        .collect();
+
+    let mut new_rows = Vec::new();
+    for row in rows {
+        let mut new_row = Vec::new();
+        for (idx, value) in row.iter().enumerate() {
+            if let RowValue::Default = value {
+                let column = &table_ctx_ref.columns[index_map[&idx]];
+                new_row.push(RowValue::Value(column.default_value().unwrap().clone()));
+            } else {
+                new_row.push(value.clone());
+            }
+        }
+        new_rows.push(new_row);
+    }
+    new_rows
 }
 
 #[cfg(test)]

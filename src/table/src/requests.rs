@@ -25,6 +25,7 @@ use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::ColumnSchema;
+use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
@@ -53,6 +54,7 @@ pub fn validate_table_option(key: &str) -> bool {
         WRITE_BUFFER_SIZE_KEY,
         TTL_KEY,
         STORAGE_KEY,
+        COMMENT_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
         FILE_TABLE_FORMAT_KEY,
@@ -79,6 +81,7 @@ pub struct TableOptions {
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
 pub const STORAGE_KEY: &str = "storage";
+pub const COMMENT_KEY: &str = "comment";
 
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
@@ -238,11 +241,23 @@ pub struct FlushTableRequest {
     pub table_name: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactTableRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+    pub compact_options: compact_request::Options,
+}
+
+impl Default for CompactTableRequest {
+    fn default() -> Self {
+        Self {
+            catalog_name: Default::default(),
+            schema_name: Default::default(),
+            table_name: Default::default(),
+            compact_options: compact_request::Options::Regular(Default::default()),
+        }
+    }
 }
 
 /// Truncate table request

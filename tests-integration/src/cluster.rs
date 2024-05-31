@@ -53,6 +53,7 @@ use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
 use tempfile::TempDir;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tower::service_fn;
 use uuid::Uuid;
@@ -363,16 +364,12 @@ impl GreptimeDbClusterBuilder {
             .build(),
         );
 
-        let table_cache = cache_registry.get().unwrap();
-        let table_route_cache = cache_registry.get().unwrap();
         let catalog_manager = KvBackendCatalogManager::new(
             Mode::Distributed,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
-            table_cache,
-            table_route_cache,
-        )
-        .await;
+            cache_registry.clone(),
+        );
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
@@ -436,8 +433,20 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
     let _handle = tokio::spawn(async move {
         Server::builder()
-            .add_service(FlightServiceServer::new(flight_handler))
-            .add_service(RegionServer::new(region_server_handler))
+            .add_service(
+                FlightServiceServer::new(flight_handler)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Zstd)
+                    .send_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Zstd),
+            )
+            .add_service(
+                RegionServer::new(region_server_handler)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Zstd)
+                    .send_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Zstd),
+            )
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

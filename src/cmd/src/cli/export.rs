@@ -30,6 +30,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
+use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::cli::{Instance, Tool};
 use crate::error::{
@@ -80,7 +81,7 @@ pub struct ExportCommand {
 }
 
 impl ExportCommand {
-    pub async fn build(&self) -> Result<Instance> {
+    pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
         let (catalog, schema) = split_database(&self.database)?;
 
         let auth_header = if let Some(basic) = &self.auth_basic {
@@ -90,15 +91,18 @@ impl ExportCommand {
             None
         };
 
-        Ok(Instance::new(Box::new(Export {
-            addr: self.addr.clone(),
-            catalog,
-            schema,
-            output_dir: self.output_dir.clone(),
-            parallelism: self.export_jobs,
-            target: self.target.clone(),
-            auth_header,
-        })))
+        Ok(Instance::new(
+            Box::new(Export {
+                addr: self.addr.clone(),
+                catalog,
+                schema,
+                output_dir: self.output_dir.clone(),
+                parallelism: self.export_jobs,
+                target: self.target.clone(),
+                auth_header,
+            }),
+            guard,
+        ))
     }
 }
 
@@ -176,8 +180,12 @@ impl Export {
     }
 
     /// Return a list of [`TableReference`] to be exported.
-    /// Includes all tables under the given `catalog` and `schema`
-    async fn get_table_list(&self, catalog: &str, schema: &str) -> Result<Vec<TableReference>> {
+    /// Includes all tables under the given `catalog` and `schema`.
+    async fn get_table_list(
+        &self,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<(Vec<TableReference>, Vec<TableReference>)> {
         // Puts all metric table first
         let sql = format!(
             "select table_catalog, table_schema, table_name from \
@@ -214,7 +222,7 @@ impl Export {
         debug!("Fetched table list: {:?}", records);
 
         if records.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
 
         let mut remaining_tables = Vec::with_capacity(records.len());
@@ -232,11 +240,11 @@ impl Export {
                 remaining_tables.push(table);
             }
         }
-        let mut tables = Vec::with_capacity(metric_physical_tables.len() + remaining_tables.len());
-        tables.extend(metric_physical_tables.into_iter());
-        tables.extend(remaining_tables);
 
-        Ok(tables)
+        Ok((
+            metric_physical_tables.into_iter().collect(),
+            remaining_tables,
+        ))
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
@@ -265,15 +273,16 @@ impl Export {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let table_list = self.get_table_list(&catalog, &schema).await?;
-                let table_count = table_list.len();
+                let (metric_physical_tables, remaining_tables) =
+                    self.get_table_list(&catalog, &schema).await?;
+                let table_count = metric_physical_tables.len() + remaining_tables.len();
                 tokio::fs::create_dir_all(&self.output_dir)
                     .await
                     .context(FileIoSnafu)?;
                 let output_file =
                     Path::new(&self.output_dir).join(format!("{catalog}-{schema}.sql"));
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
-                for (c, s, t) in table_list {
+                for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
                     match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
                             error!(e; r#"Failed to export table "{}"."{}"."{}""#, c, s, t)
@@ -322,15 +331,25 @@ impl Export {
                     .await
                     .context(FileIoSnafu)?;
                 let output_dir = Path::new(&self.output_dir).join(format!("{catalog}-{schema}/"));
-
-                // copy database to
-                let sql = format!(
-                    "copy database {} to '{}' with (format='parquet');",
-                    schema,
-                    output_dir.to_str().unwrap()
-                );
-                self.sql(&sql).await?;
-                info!("finished exporting {catalog}.{schema} data");
+                // Ignores metric physical tables
+                let (metrics_tables, table_list) = self.get_table_list(&catalog, &schema).await?;
+                for (_, _, table_name) in metrics_tables {
+                    warn!("Ignores metric physical table: {table_name}");
+                }
+                for (catalog_name, schema_name, table_name) in table_list {
+                    // copy table to
+                    let sql = format!(
+                        r#"Copy "{}"."{}"."{}" TO '{}{}.parquet' WITH (format='parquet');"#,
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        output_dir.to_str().unwrap(),
+                        table_name,
+                    );
+                    info!("Executing sql: {sql}");
+                    self.sql(&sql).await?;
+                }
+                info!("Finished exporting {catalog}.{schema} data");
 
                 // export copy from sql
                 let dir_filenames = match output_dir.read_dir() {
@@ -413,5 +432,82 @@ fn split_database(database: &str) -> Result<(String, Option<String>)> {
         Ok((catalog.to_string(), None))
     } else {
         Ok((catalog.to_string(), Some(schema.to_string())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use client::{Client, Database};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_telemetry::logging::LoggingOptions;
+
+    use crate::error::Result as CmdResult;
+    use crate::options::GlobalOptions;
+    use crate::{cli, standalone, App};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let standalone = standalone::Command::parse_from([
+            "standalone",
+            "start",
+            "--data-home",
+            &*output_dir.path().to_string_lossy(),
+        ]);
+
+        let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
+        let mut instance = standalone.build(standalone_opts).await?;
+        instance.start().await?;
+
+        let client = Client::with_urls(["127.0.0.1:4001"]);
+        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        database
+            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
+            .await
+            .unwrap();
+        database
+            .sql(
+                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
+                        ts TIMESTAMP,
+                        TIME INDEX (ts)
+                    ) engine=mito;
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let cli = cli::Command::parse_from([
+            "cli",
+            "export",
+            "--addr",
+            "127.0.0.1:4000",
+            "--output-dir",
+            &*output_dir.path().to_string_lossy(),
+            "--target",
+            "create-table",
+        ]);
+        let mut cli_app = cli.build(LoggingOptions::default()).await?;
+        cli_app.start().await?;
+
+        instance.stop().await?;
+
+        let output_file = output_dir
+            .path()
+            .join("greptime-cli.export.create_table.sql");
+        let res = std::fs::read_to_string(output_file).unwrap();
+        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts")
+)
+
+ENGINE=mito
+;
+"#;
+        assert_eq!(res.trim(), expect.trim());
+
+        Ok(())
     }
 }

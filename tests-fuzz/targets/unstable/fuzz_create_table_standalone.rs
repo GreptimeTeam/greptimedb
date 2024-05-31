@@ -76,7 +76,6 @@ impl Arbitrary<'_> for FuzzInput {
 const DEFAULT_TEMPLATE: &str = "standalone.template.toml";
 const DEFAULT_CONFIG_NAME: &str = "standalone.template.toml";
 const DEFAULT_ROOT_DIR: &str = "/tmp/unstable_greptime/";
-const DEFAULT_DATA_HOME: &str = "/tmp/unstable_greptime/datahome/";
 const DEFAULT_MYSQL_URL: &str = "127.0.0.1:4002";
 const DEFAULT_HTTP_HEALTH_URL: &str = "http://127.0.0.1:4000/health";
 
@@ -94,11 +93,11 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> CreateTableExpr 
     create_table_generator.generate(rng).unwrap()
 }
 
-async fn connect_mysql(addr: &str) -> Pool<MySql> {
+async fn connect_mysql(addr: &str, database: &str) -> Pool<MySql> {
     loop {
         match MySqlPoolOptions::new()
             .acquire_timeout(Duration::from_secs(30))
-            .connect(&format!("mysql://{addr}/public"))
+            .connect(&format!("mysql://{addr}/{database}"))
             .await
         {
             Ok(mysql) => return mysql,
@@ -109,6 +108,8 @@ async fn connect_mysql(addr: &str) -> Pool<MySql> {
     }
 }
 
+const FUZZ_TESTS_DATABASE: &str = "fuzz_tests";
+
 async fn execute_unstable_create_table(
     unstable_process_controller: Arc<UnstableProcessController>,
     rx: watch::Receiver<ProcessState>,
@@ -117,10 +118,20 @@ async fn execute_unstable_create_table(
     // Starts the unstable process.
     let moved_unstable_process_controller = unstable_process_controller.clone();
     let handler = tokio::spawn(async move { moved_unstable_process_controller.start().await });
+    let mysql_public = connect_mysql(DEFAULT_MYSQL_URL, "public").await;
+    loop {
+        let sql = format!("CREATE DATABASE IF NOT EXISTS {FUZZ_TESTS_DATABASE}");
+        match sqlx::query(&sql).execute(&mysql_public).await {
+            Ok(result) => {
+                info!("Create database: {}, result: {result:?}", sql);
+                break;
+            }
+            Err(err) => warn!("Failed to create database: {}, error: {err}", sql),
+        }
+    }
+    let mysql = connect_mysql(DEFAULT_MYSQL_URL, FUZZ_TESTS_DATABASE).await;
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
-    let mysql = connect_mysql(DEFAULT_MYSQL_URL).await;
     let ctx = FuzzContext { greptime: mysql };
-
     let mut table_states = HashMap::new();
 
     for _ in 0..input.num {
@@ -140,10 +151,15 @@ async fn execute_unstable_create_table(
             Ok(result) => {
                 let state = *rx.borrow();
                 table_states.insert(table_name, state);
-                validate_columns(&ctx.greptime, &table_ctx).await;
+                validate_columns(&ctx.greptime, FUZZ_TESTS_DATABASE, &table_ctx).await;
                 info!("Create table: {sql}, result: {result:?}");
             }
             Err(err) => {
+                // FIXME(weny): support to retry it later.
+                if matches!(err, sqlx::Error::PoolTimedOut { .. }) {
+                    warn!("ignore pool timeout, sql: {sql}");
+                    continue;
+                }
                 let state = *rx.borrow();
                 ensure!(
                     !state.health(),
@@ -158,13 +174,13 @@ async fn execute_unstable_create_table(
     }
 
     loop {
-        let sql = "DROP DATABASE IF EXISTS public";
-        match sqlx::query(sql).execute(&ctx.greptime).await {
+        let sql = format!("DROP DATABASE IF EXISTS {FUZZ_TESTS_DATABASE}");
+        match sqlx::query(&sql).execute(&mysql_public).await {
             Ok(result) => {
-                info!("Drop table: {}, result: {result:?}", sql);
+                info!("Drop database: {}, result: {result:?}", sql);
                 break;
             }
-            Err(err) => warn!("Failed to drop table: {}, error: {err}", sql),
+            Err(err) => warn!("Failed to drop database: {}, error: {err}", sql),
         }
     }
     // Cleans up
@@ -175,9 +191,9 @@ async fn execute_unstable_create_table(
     Ok(())
 }
 
-async fn validate_columns(client: &Pool<MySql>, table_ctx: &TableContext) {
+async fn validate_columns(client: &Pool<MySql>, schema_name: &str, table_ctx: &TableContext) {
     loop {
-        match validator::column::fetch_columns(client, "public".into(), table_ctx.name.clone())
+        match validator::column::fetch_columns(client, schema_name.into(), table_ctx.name.clone())
             .await
         {
             Ok(mut column_entries) => {
@@ -202,6 +218,8 @@ fuzz_target!(|input: FuzzInput| {
         let root_dir = variables.root_dir.unwrap_or(DEFAULT_ROOT_DIR.to_string());
         create_dir_all(&root_dir).unwrap();
         let output_config_path = format!("{root_dir}{DEFAULT_CONFIG_NAME}");
+        let data_home = format!("{root_dir}datahome");
+
         let mut conf_path = get_conf_path();
         conf_path.push(DEFAULT_TEMPLATE);
         let template_path = conf_path.to_str().unwrap().to_string();
@@ -211,15 +229,9 @@ fuzz_target!(|input: FuzzInput| {
         struct Context {
             data_home: String,
         }
-        write_config_file(
-            &template_path,
-            &Context {
-                data_home: DEFAULT_DATA_HOME.to_string(),
-            },
-            &output_config_path,
-        )
-        .await
-        .unwrap();
+        write_config_file(&template_path, &Context { data_home }, &output_config_path)
+            .await
+            .unwrap();
 
         let args = vec![
             "standalone".to_string(),

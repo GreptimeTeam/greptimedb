@@ -21,8 +21,8 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowTables,
-    ShowVariables,
+    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowStatus,
+    ShowTables, ShowVariables,
 };
 use crate::statements::statement::Statement;
 
@@ -87,6 +87,8 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
             Ok(Statement::ShowVariables(ShowVariables { variable }))
+        } else if self.consume_token("STATUS") {
+            Ok(Statement::ShowStatus(ShowStatus {}))
         } else {
             self.unsupported(self.peek_token_as_string())
         }

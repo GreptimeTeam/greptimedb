@@ -19,7 +19,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ChangeColumnType, ChangeColumnTypes, Column, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, RenameTable, SemanticType, TableName,
+    DropColumns, ExpireAfter, RenameTable, SemanticType, TableName,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -519,6 +519,7 @@ pub(crate) fn to_alter_expr(
 pub fn to_create_view_expr(
     stmt: CreateView,
     logical_plan: Vec<u8>,
+    table_names: Vec<TableName>,
     query_ctx: QueryContextRef,
 ) -> Result<CreateViewExpr> {
     let (catalog_name, schema_name, view_name) = table_idents_to_full_name(&stmt.name, &query_ctx)
@@ -532,6 +533,7 @@ pub fn to_create_view_expr(
         logical_plan,
         create_if_not_exists: stmt.if_not_exists,
         or_replace: stmt.or_replace,
+        table_names,
     };
 
     Ok(expr)
@@ -591,10 +593,7 @@ pub fn to_create_flow_task_expr(
         sink_table_name: Some(sink_table_name),
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
-        expire_when: create_flow
-            .expire_when
-            .map(|e| e.to_string())
-            .unwrap_or_default(),
+        expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
         flow_options: HashMap::new(),
@@ -792,6 +791,21 @@ mod tests {
         assert!(change_column_type.target_type_extension.is_none());
     }
 
+    fn new_test_table_names() -> Vec<TableName> {
+        vec![
+            TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "a_table".to_string(),
+            },
+            TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn test_to_create_view_expr() {
         let sql = "CREATE VIEW test AS SELECT * FROM NUMBERS";
@@ -806,8 +820,15 @@ mod tests {
         };
 
         let logical_plan = vec![1, 2, 3];
+        let table_names = new_test_table_names();
 
-        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+        let expr = to_create_view_expr(
+            stmt,
+            logical_plan.clone(),
+            table_names.clone(),
+            QueryContext::arc(),
+        )
+        .unwrap();
 
         assert_eq!("greptime", expr.catalog_name);
         assert_eq!("public", expr.schema_name);
@@ -815,6 +836,7 @@ mod tests {
         assert!(!expr.create_if_not_exists);
         assert!(!expr.or_replace);
         assert_eq!(logical_plan, expr.logical_plan);
+        assert_eq!(table_names, expr.table_names);
     }
 
     #[test]
@@ -831,8 +853,15 @@ mod tests {
         };
 
         let logical_plan = vec![1, 2, 3];
+        let table_names = new_test_table_names();
 
-        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+        let expr = to_create_view_expr(
+            stmt,
+            logical_plan.clone(),
+            table_names.clone(),
+            QueryContext::arc(),
+        )
+        .unwrap();
 
         assert_eq!("greptime", expr.catalog_name);
         assert_eq!("test", expr.schema_name);
@@ -840,5 +869,6 @@ mod tests {
         assert!(expr.create_if_not_exists);
         assert!(expr.or_replace);
         assert_eq!(logical_plan, expr.logical_plan);
+        assert_eq!(table_names, expr.table_names);
     }
 }

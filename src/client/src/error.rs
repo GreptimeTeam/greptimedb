@@ -82,6 +82,13 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
+    #[snafu(display("Failed to create Tls channel manager"))]
+    CreateTlsChannel {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_grpc::error::Error,
+    },
+
     #[snafu(display("Failed to request RegionServer, code: {}", code))]
     RegionServer {
         code: Code,
@@ -129,9 +136,9 @@ impl ErrorExt for Error {
             Error::FlightGet { source, .. }
             | Error::HandleRequest { source, .. }
             | Error::RegionServer { source, .. } => source.status_code(),
-            Error::CreateChannel { source, .. } | Error::ConvertFlightData { source, .. } => {
-                source.status_code()
-            }
+            Error::CreateChannel { source, .. }
+            | Error::ConvertFlightData { source, .. }
+            | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
         }
     }
