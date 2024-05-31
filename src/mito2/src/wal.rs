@@ -16,10 +16,13 @@
 
 /// TODO(weny): remove it
 #[allow(unused)]
-pub(crate) mod raw_entry_reader;
+pub(crate) mod entry_distributor;
 /// TODO(weny): remove it
 #[allow(unused)]
-pub(crate) mod wal_entry_reader;
+pub(crate) mod entry_reader;
+/// TODO(weny): remove it
+#[allow(unused)]
+pub(crate) mod raw_entry_reader;
 
 use std::collections::HashMap;
 use std::mem;
@@ -36,8 +39,8 @@ use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{BuildEntrySnafu, DeleteWalSnafu, EncodeWalSnafu, Result, WriteWalSnafu};
+use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
-use crate::wal::wal_entry_reader::{LogStoreEntryReader, WalEntryReader};
 
 /// WAL entry id.
 pub type EntryId = store_api::logstore::entry::Id;
