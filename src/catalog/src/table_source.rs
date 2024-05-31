@@ -133,7 +133,10 @@ impl DfTableSourceProvider {
                     name: &table.table_info().name,
                 })?;
 
-            Arc::new(ViewTable::try_new(logical_plan, None).context(DatafusionSnafu)?)
+            Arc::new(
+                ViewTable::try_new(logical_plan, Some(view_info.definition.to_string()))
+                    .context(DatafusionSnafu)?,
+            )
         } else {
             Arc::new(DfTableProviderAdapter::new(table))
         };
@@ -277,7 +280,12 @@ mod tests {
         let logical_plan = vec![1, 2, 3];
         // Create view metadata
         table_metadata_manager
-            .create_view_metadata(view_info.clone().into(), logical_plan, HashSet::new())
+            .create_view_metadata(
+                view_info.clone().into(),
+                logical_plan,
+                HashSet::new(),
+                "definition".to_string(),
+            )
             .await
             .unwrap();
 

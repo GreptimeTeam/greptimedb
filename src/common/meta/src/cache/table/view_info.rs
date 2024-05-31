@@ -111,6 +111,7 @@ mod tests {
             });
             set
         };
+        let definition = "CREATE VIEW test AS SELECT * FROM numbers";
 
         task.view_info.ident.table_id = 1024;
         table_metadata_manager
@@ -118,6 +119,7 @@ mod tests {
                 task.view_info.clone(),
                 task.create_view.logical_plan.clone(),
                 table_names,
+                definition.to_string(),
             )
             .await
             .unwrap();
@@ -132,6 +134,7 @@ mod tests {
                 .map(|t| t.clone().into())
                 .collect::<HashSet<_>>()
         );
+        assert_eq!(view_info.definition, task.create_view.definition);
 
         assert!(cache.contains_key(&1024));
         cache

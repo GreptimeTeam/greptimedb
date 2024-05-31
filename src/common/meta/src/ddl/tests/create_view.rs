@@ -69,6 +69,7 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
         create_if_not_exists: false,
         logical_plan: vec![1, 2, 3],
         table_names,
+        definition: "CREATE VIEW test AS SELECT * FROM numbers".to_string(),
     };
 
     let view_info = RawTableInfo {
@@ -104,6 +105,7 @@ async fn test_on_prepare_view_exists_err() {
             task.view_info.clone(),
             task.create_view.logical_plan.clone(),
             test_table_names(),
+            "the definition".to_string(),
         )
         .await
         .unwrap();
@@ -128,6 +130,7 @@ async fn test_on_prepare_with_create_if_view_exists() {
             task.view_info.clone(),
             task.create_view.logical_plan.clone(),
             test_table_names(),
+            "the definition".to_string(),
         )
         .await
         .unwrap();
@@ -213,6 +216,8 @@ async fn test_replace_view_metadata() {
     // Set `or_replce` to be `true` and try again
     task.create_view.or_replace = true;
     task.create_view.logical_plan = vec![4, 5, 6];
+    task.create_view.definition = "new_definition".to_string();
+
     let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
@@ -233,6 +238,7 @@ async fn test_replace_view_metadata() {
         .unwrap();
 
     assert_eq!(current_view_info.view_info, vec![4, 5, 6]);
+    assert_eq!(current_view_info.definition, "new_definition");
 }
 
 #[tokio::test]
