@@ -375,11 +375,11 @@ impl ErrorExt for Error {
 
             Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
 
-            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
-
             Error::Other { source, .. } => source.status_code(),
 
             Error::BuildRuntime { source, .. } => source.status_code(),
+
+            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
         }
     }
 

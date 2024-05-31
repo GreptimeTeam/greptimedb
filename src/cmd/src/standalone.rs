@@ -16,10 +16,7 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use async_trait::async_trait;
-use cache::{
-    build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
-    TABLE_ROUTE_CACHE_NAME,
-};
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -61,14 +58,14 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu,
-    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
+    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::GlobalOptions;
 use crate::{log_versions, App};
@@ -421,20 +418,12 @@ impl StartCommand {
             .build(),
         );
 
-        let table_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: TABLE_CACHE_NAME,
-        })?;
-        let table_route_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: TABLE_ROUTE_CACHE_NAME,
-        })?;
         let catalog_manager = KvBackendCatalogManager::new(
             dn_opts.mode,
             None,
             kv_backend.clone(),
-            table_cache,
-            table_route_cache,
-        )
-        .await;
+            layered_cache_registry.clone(),
+        );
 
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;

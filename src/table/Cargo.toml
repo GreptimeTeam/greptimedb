@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+api.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
 common-base.workspace = true

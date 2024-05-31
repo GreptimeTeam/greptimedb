@@ -32,7 +32,6 @@ use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
 use common_time::range::TimestampRange;
@@ -50,6 +49,7 @@ use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 use table::TableRef;
 

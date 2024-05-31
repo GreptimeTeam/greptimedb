@@ -14,6 +14,7 @@
 
 #![feature(let_chains)]
 #![feature(int_roundings)]
+#![feature(option_get_or_insert_default)]
 
 mod analyze;
 pub mod dataframe;
@@ -31,6 +32,7 @@ pub mod physical_planner;
 pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
+pub mod promql;
 pub mod query_engine;
 mod range_select;
 pub mod region_query;

@@ -72,12 +72,8 @@ impl DatanodeTableKey {
         }
     }
 
-    fn prefix(datanode_id: DatanodeId) -> String {
-        format!("{}/{datanode_id}", DATANODE_TABLE_KEY_PREFIX)
-    }
-
-    pub fn range_start_key(datanode_id: DatanodeId) -> String {
-        format!("{}/", Self::prefix(datanode_id))
+    pub fn prefix(datanode_id: DatanodeId) -> String {
+        format!("{}/{datanode_id}/", DATANODE_TABLE_KEY_PREFIX)
     }
 }
 
@@ -114,7 +110,7 @@ impl<'a> MetaKey<'a, DatanodeTableKey> for DatanodeTableKey {
 
 impl Display for DatanodeTableKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", Self::prefix(self.datanode_id), self.table_id)
+        write!(f, "{}{}", Self::prefix(self.datanode_id), self.table_id)
     }
 }
 
@@ -164,7 +160,7 @@ impl DatanodeTableManager {
         &self,
         datanode_id: DatanodeId,
     ) -> BoxStream<'static, Result<DatanodeTableValue>> {
-        let start_key = DatanodeTableKey::range_start_key(datanode_id);
+        let start_key = DatanodeTableKey::prefix(datanode_id);
         let req = RangeRequest::new().with_prefix(start_key.as_bytes());
 
         let stream = PaginationStream::new(

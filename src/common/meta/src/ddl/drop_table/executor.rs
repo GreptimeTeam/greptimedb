@@ -23,6 +23,7 @@ use futures::future::join_all;
 use snafu::ensure;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::add_peer_context_if_needed;
@@ -32,7 +33,6 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::table_name::TableName;
 
 /// [Control] indicated to the caller whether to go to the next step.
 #[derive(Debug)]
@@ -224,6 +224,7 @@ mod tests {
     use api::v1::{ColumnDataType, SemanticType};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use table::metadata::RawTableInfo;
+    use table::table_name::TableName;
 
     use super::*;
     use crate::ddl::test_util::columns::TestColumnDefBuilder;
@@ -231,7 +232,6 @@ mod tests {
         build_raw_table_info_from_expr, TestCreateTableExprBuilder,
     };
     use crate::key::table_route::TableRouteValue;
-    use crate::table_name::TableName;
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
     fn test_create_raw_table_info(name: &str) -> RawTableInfo {

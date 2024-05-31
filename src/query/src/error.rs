@@ -56,20 +56,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Catalog not found: {}", catalog))]
-    CatalogNotFound {
-        catalog: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Schema not found: {}", schema))]
-    SchemaNotFound {
-        schema: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Table not found: {}", table))]
     TableNotFound {
         table: String,
@@ -133,13 +119,6 @@ pub enum Error {
         raw: String,
         #[snafu(source)]
         error: chrono::ParseError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid timestamp `{}`", raw))]
-    InvalidTimestamp {
-        raw: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -347,13 +326,10 @@ impl ErrorExt for Error {
             }
             UnsupportedExpr { .. }
             | Unimplemented { .. }
-            | CatalogNotFound { .. }
-            | SchemaNotFound { .. }
             | TableNotFound { .. }
             | UnknownTable { .. }
             | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }
-            | InvalidTimestamp { .. }
             | ParseFloat { .. }
             | MissingRequiredField { .. }
             | BuildRegex { .. }

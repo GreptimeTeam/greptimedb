@@ -23,9 +23,6 @@ mod helper;
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
 #[allow(unused)]
 mod repl;
-// TODO(tisonkun): migrate deprecated methods
-#[allow(deprecated)]
-mod upgrade;
 
 use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
@@ -33,7 +30,6 @@ use clap::Parser;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 pub use repl::Repl;
 use tracing_appender::non_blocking::WorkerGuard;
-use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;
 use crate::error::Result;
@@ -116,7 +112,6 @@ impl Command {
 #[derive(Parser)]
 enum SubCommand {
     // Attach(AttachCommand),
-    Upgrade(UpgradeCommand),
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
 }
@@ -125,7 +120,6 @@ impl SubCommand {
     async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
         match self {
             // SubCommand::Attach(cmd) => cmd.build().await,
-            SubCommand::Upgrade(cmd) => cmd.build(guard).await,
             SubCommand::Bench(cmd) => cmd.build(guard).await,
             SubCommand::Export(cmd) => cmd.build(guard).await,
         }

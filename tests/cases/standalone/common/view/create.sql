@@ -1,8 +1,8 @@
 --- test CREATE VIEW ---
 
-CREATE DATABASE for_test_view;
+CREATE DATABASE schema_for_view_test;
 
-USE for_test_view;
+USE schema_for_view_test;
 
 CREATE TABLE test_table(a STRING, ts TIMESTAMP TIME INDEX);
 
@@ -44,9 +44,8 @@ SHOW FULL COLUMNS FROM test_view;
 
 SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'test_view';
 
---- FIXED in the following PR ---
-SELECT * FROM test_view;
+SELECT * FROM test_view LIMIT 10;
 
 USE public;
 
-DROP DATABASE for_test_view;
+DROP DATABASE schema_for_view_test;

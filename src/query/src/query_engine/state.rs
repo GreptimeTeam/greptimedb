@@ -37,7 +37,6 @@ use datafusion_optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
 use datafusion_optimizer::optimizer::Optimizer;
 use promql::extension_plan::PromExtensionPlanner;
-use substrait::extension_serializer::ExtensionSerializer;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
@@ -49,6 +48,7 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::query_engine::options::QueryOptions;
+use crate::query_engine::DefaultSerializer;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
 use crate::QueryEngineContext;
@@ -115,8 +115,8 @@ impl QueryEngineState {
         physical_optimizer.rules.push(Arc::new(RemoveDuplicate));
 
         let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
-            .with_serializer_registry(Arc::new(ExtensionSerializer))
             .with_analyzer_rules(analyzer.rules)
+            .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
                 region_query_handler,

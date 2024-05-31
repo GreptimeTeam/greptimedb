@@ -80,7 +80,7 @@ impl TableFlowKey {
 
     /// The prefix used to retrieve all [TableFlowKey]s with the specified `table_id`.
     pub fn range_start_key(table_id: TableId) -> Vec<u8> {
-        let inner = BytesAdapter::from(TableFlowKeyInner::range_start_key(table_id).into_bytes());
+        let inner = BytesAdapter::from(TableFlowKeyInner::prefix(table_id).into_bytes());
 
         FlowScoped::new(inner).to_bytes()
     }
@@ -123,12 +123,7 @@ impl TableFlowKeyInner {
     }
 
     fn prefix(table_id: TableId) -> String {
-        format!("{}/{table_id}", TABLE_FLOW_KEY_PREFIX)
-    }
-
-    /// The prefix used to retrieve all [TableFlowKey]s with the specified `table_id`.
-    fn range_start_key(table_id: TableId) -> String {
-        format!("{}/", Self::prefix(table_id))
+        format!("{}/{table_id}/", TABLE_FLOW_KEY_PREFIX)
     }
 }
 

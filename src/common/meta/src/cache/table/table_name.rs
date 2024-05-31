@@ -18,6 +18,7 @@ use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
@@ -25,7 +26,6 @@ use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_name::{TableNameKey, TableNameManager, TableNameManagerRef};
 use crate::kv_backend::KvBackendRef;
-use crate::table_name::TableName;
 
 /// [TableNameCache] caches the [TableName] to [TableId] mapping.
 pub type TableNameCache = CacheContainer<TableName, TableId, CacheIdent>;

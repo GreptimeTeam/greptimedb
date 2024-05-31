@@ -22,12 +22,12 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::table_name::TableName;
 use common_meta::ClusterId;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
+use table::table_name::TableName;
 
 use crate::error::{self, Result};
 use crate::procedure::region_migration::{
