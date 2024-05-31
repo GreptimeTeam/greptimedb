@@ -238,9 +238,13 @@ impl StatementExecutor {
             )
             .await?;
 
-        let table_id = resp.table_id.context(error::UnexpectedSnafu {
-            violated: "expected table_id",
-        })?;
+        let table_id = resp
+            .table_ids
+            .into_iter()
+            .next()
+            .context(error::UnexpectedSnafu {
+                violated: "expected table_id",
+            })?;
         info!("Successfully created table '{table_name}' with table id {table_id}");
 
         table_info.ident.table_id = table_id;
@@ -531,9 +535,13 @@ impl StatementExecutor {
             resp
         );
 
-        let view_id = resp.table_id.context(error::UnexpectedSnafu {
-            violated: "expected table_id",
-        })?;
+        let view_id = resp
+            .table_ids
+            .into_iter()
+            .next()
+            .context(error::UnexpectedSnafu {
+                violated: "expected table_id",
+            })?;
         info!("Successfully created view '{view_name}' with view id {view_id}");
 
         // Invalidates local cache ASAP.
