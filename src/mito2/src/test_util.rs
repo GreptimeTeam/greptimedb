@@ -20,6 +20,7 @@ pub mod meta_util;
 pub mod scheduler_util;
 pub mod sst_util;
 pub mod version_util;
+pub mod wal_util;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -356,11 +357,11 @@ impl TestEnv {
         };
 
         if let Some(metadata) = initial_metadata {
-            RegionManifestManager::new(metadata, manifest_opts)
+            RegionManifestManager::new(metadata, manifest_opts, Default::default())
                 .await
                 .map(Some)
         } else {
-            RegionManifestManager::open(manifest_opts).await
+            RegionManifestManager::open(manifest_opts, Default::default()).await
         }
     }
 

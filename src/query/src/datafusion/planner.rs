@@ -34,7 +34,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
-use crate::query_engine::QueryEngineState;
+use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
 pub struct DfContextProviderAdapter {
     engine_state: Arc<QueryEngineState>,
@@ -63,6 +63,7 @@ impl DfContextProviderAdapter {
             engine_state.catalog_manager().clone(),
             engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
+            Arc::new(DefaultPlanDecoder::new(session_state.clone(), &query_ctx)?),
         );
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;

@@ -75,7 +75,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let timer = Instant::now();
         let last_entry_id = replay_memtable(
             &self.wal,
-            &region.wal_options,
+            &region.provider,
             region_id,
             flushed_entry_id,
             &region.version_control,

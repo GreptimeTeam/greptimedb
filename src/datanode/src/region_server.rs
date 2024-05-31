@@ -51,13 +51,13 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
     self, BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
-    FindLogicalRegionsSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
-    RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    FindLogicalRegionsSnafu, HandleRegionRequestSnafu, NewPlanDecoderSnafu,
+    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu,
+    UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -189,7 +189,7 @@ impl RegionServer {
 
     pub async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         match self.inner.region_map.get(&region_id) {
-            Some(e) => e.region_disk_usage(region_id).await,
+            Some(e) => e.region_disk_usage(region_id),
             None => None,
         }
     }
@@ -653,14 +653,13 @@ impl RegionServerInner {
 
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
         let query_engine_ctx = self.query_engine.engine_context(ctx.clone());
+        let plan_decoder = query_engine_ctx
+            .new_plan_decoder()
+            .context(NewPlanDecoderSnafu)?;
+
         // decode substrait plan to logical plan and execute it
-        let logical_plan = DFLogicalSubstraitConvertor
-            .decode(
-                Bytes::from(plan),
-                catalog_list,
-                query_engine_ctx.state().clone(),
-                ctx.clone(),
-            )
+        let logical_plan = plan_decoder
+            .decode(Bytes::from(plan), catalog_list, false)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 

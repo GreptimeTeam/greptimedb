@@ -202,9 +202,9 @@ impl RegionEngine for MetricEngine {
     /// Retrieves region's disk usage.
     ///
     /// Note: Returns `None` if it's a logical region.
-    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         if self.inner.is_physical_region(region_id) {
-            self.inner.mito.region_disk_usage(region_id).await
+            self.inner.mito.region_disk_usage(region_id)
         } else {
             None
         }
@@ -383,15 +383,7 @@ mod test {
         let logical_region_id = env.default_logical_region_id();
         let physical_region_id = env.default_physical_region_id();
 
-        assert!(env
-            .metric()
-            .region_disk_usage(logical_region_id)
-            .await
-            .is_none());
-        assert!(env
-            .metric()
-            .region_disk_usage(physical_region_id)
-            .await
-            .is_some());
+        assert!(env.metric().region_disk_usage(logical_region_id).is_none());
+        assert!(env.metric().region_disk_usage(physical_region_id).is_some());
     }
 }

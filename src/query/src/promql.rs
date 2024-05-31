@@ -12,13 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use store_api::storage::RegionId;
-
-use crate::error::Result;
-use crate::wal::raw_entry_reader::LogStoreNamespace;
-use crate::wal::{EntryId, WalEntryStream};
-
-/// [OneshotWalEntryReader] provides the ability to read and decode entries from the underlying store.
-pub(crate) trait OneshotWalEntryReader: Send + Sync {
-    fn read(self, ctx: LogStoreNamespace, start_id: EntryId) -> Result<WalEntryStream>;
-}
+pub(crate) mod error;
+pub mod planner;

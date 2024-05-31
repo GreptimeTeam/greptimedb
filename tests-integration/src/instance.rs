@@ -32,6 +32,7 @@ mod tests {
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::plan::LogicalPlan;
+    use query::query_engine::DefaultSerializer;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::{QueryContext, QueryContextRef};
@@ -238,7 +239,9 @@ mod tests {
             .plan(stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = DFLogicalSubstraitConvertor.encode(&plan).unwrap();
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
 
         for (region, dn) in region_to_dn_map.iter() {
             let region_server = instance.datanodes().get(dn).unwrap().region_server();

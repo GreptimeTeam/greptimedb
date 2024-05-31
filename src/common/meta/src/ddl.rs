@@ -48,7 +48,7 @@ pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod truncate_table;
 pub mod utils;
 

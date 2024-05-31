@@ -1,0 +1,46 @@
+create schema abc;
+
+Affected Rows: 1
+
+use abc;
+
+Affected Rows: 0
+
+create table t (ts timestamp time index);
+
+Affected Rows: 0
+
+create schema abcde;
+
+Affected Rows: 1
+
+use abcde;
+
+Affected Rows: 0
+
+create table t (ts timestamp time index);
+
+Affected Rows: 0
+
+select table_catalog, table_schema, table_name from information_schema.tables where table_schema != 'information_schema';
+
++---------------+--------------+------------+
+| table_catalog | table_schema | table_name |
++---------------+--------------+------------+
+| greptime      | abc          | t          |
+| greptime      | abcde        | t          |
+| greptime      | public       | numbers    |
++---------------+--------------+------------+
+
+use public;
+
+Affected Rows: 0
+
+drop schema abc;
+
+Affected Rows: 0
+
+drop schema abcde;
+
+Affected Rows: 0
+

@@ -101,8 +101,7 @@ impl TypedExpr {
             .unzip();
 
         match arg_len {
-            // because variadic function can also have 1 arguments, we need to check if it's a variadic function first
-            1 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
+            1 if UnaryFunc::is_valid_func_name(fn_name) => {
                 let func = UnaryFunc::from_str_and_type(fn_name, None)?;
                 let arg = arg_exprs[0].clone();
                 let ret_type = ColumnType::new_nullable(func.signature().output.clone());
@@ -124,8 +123,7 @@ impl TypedExpr {
 
                 Ok(TypedExpr::new(arg.call_unary(func), ret_type))
             }
-            // because variadic function can also have 2 arguments, we need to check if it's a variadic function first
-            2 if VariadicFunc::from_str_and_types(fn_name, &arg_types).is_err() => {
+            2 if BinaryFunc::is_valid_func_name(fn_name) => {
                 let (func, signature) =
                     BinaryFunc::from_str_expr_and_type(fn_name, &arg_exprs, &arg_types[0..2])?;
 
@@ -167,7 +165,8 @@ impl TypedExpr {
                 Ok(TypedExpr::new(ret_expr, ret_type))
             }
             _var => {
-                if let Ok(func) = VariadicFunc::from_str_and_types(fn_name, &arg_types) {
+                if VariadicFunc::is_valid_func_name(fn_name) {
+                    let func = VariadicFunc::from_str_and_types(fn_name, &arg_types)?;
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     let mut expr = ScalarExpr::CallVariadic {
                         func,
@@ -175,9 +174,8 @@ impl TypedExpr {
                     };
                     expr.optimize();
                     Ok(TypedExpr::new(expr, ret_type))
-                } else if let Ok(func) =
-                    UnmaterializableFunc::from_str_args(fn_name, arg_typed_exprs)
-                {
+                } else if UnmaterializableFunc::is_valid_func_name(fn_name) {
+                    let func = UnmaterializableFunc::from_str_args(fn_name, arg_typed_exprs)?;
                     let ret_type = ColumnType::new_nullable(func.signature().output.clone());
                     Ok(TypedExpr::new(
                         ScalarExpr::CallUnmaterializable(func),
@@ -324,8 +322,12 @@ impl TypedExpr {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
+    use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
+    use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::expr::{GlobalId, MapFilterProject};
@@ -509,5 +511,163 @@ mod test {
         };
 
         assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_func_sig() {
+        fn lit(v: impl ToString) -> substrait_proto::proto::FunctionArgument {
+            use substrait_proto::proto::expression;
+            let expr = Expression {
+                rex_type: Some(expression::RexType::Literal(expression::Literal {
+                    nullable: false,
+                    type_variation_reference: 0,
+                    literal_type: Some(expression::literal::LiteralType::String(v.to_string())),
+                })),
+            };
+            substrait_proto::proto::FunctionArgument {
+                arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
+                    expr,
+                )),
+            }
+        }
+        fn col(i: usize) -> substrait_proto::proto::FunctionArgument {
+            use substrait_proto::proto::expression;
+            let expr = Expression {
+                rex_type: Some(expression::RexType::Selection(Box::new(
+                    expression::FieldReference {
+                        reference_type: Some(
+                            expression::field_reference::ReferenceType::DirectReference(
+                                expression::ReferenceSegment {
+                                    reference_type: Some(
+                                        expression::reference_segment::ReferenceType::StructField(
+                                            Box::new(expression::reference_segment::StructField {
+                                                field: i as i32,
+                                                child: None,
+                                            }),
+                                        ),
+                                    ),
+                                },
+                            ),
+                        ),
+                        root_type: None,
+                    },
+                ))),
+            };
+            substrait_proto::proto::FunctionArgument {
+                arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
+                    expr,
+                )),
+            }
+        }
+
+        let f = substrait_proto::proto::expression::ScalarFunction {
+            function_reference: 0,
+            arguments: vec![col(0)],
+            options: vec![],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
+        let extensions = FunctionExtensions {
+            anchor_to_name: HashMap::from([(0, "is_null".to_string())]),
+        };
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+
+        assert_eq!(
+            res,
+            TypedExpr {
+                expr: ScalarExpr::Column(0).call_unary(UnaryFunc::IsNull),
+                typ: ColumnType {
+                    scalar_type: CDT::boolean_datatype(),
+                    nullable: true,
+                },
+            }
+        );
+
+        let f = substrait_proto::proto::expression::ScalarFunction {
+            function_reference: 0,
+            arguments: vec![col(0), col(1)],
+            options: vec![],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationType::new(vec![
+            ColumnType::new(CDT::uint32_datatype(), false),
+            ColumnType::new(CDT::uint32_datatype(), false),
+        ]);
+        let extensions = FunctionExtensions {
+            anchor_to_name: HashMap::from([(0, "add".to_string())]),
+        };
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+
+        assert_eq!(
+            res,
+            TypedExpr {
+                expr: ScalarExpr::Column(0)
+                    .call_binary(ScalarExpr::Column(1), BinaryFunc::AddUInt32,),
+                typ: ColumnType {
+                    scalar_type: CDT::uint32_datatype(),
+                    nullable: true,
+                },
+            }
+        );
+
+        let f = substrait_proto::proto::expression::ScalarFunction {
+            function_reference: 0,
+            arguments: vec![col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
+            options: vec![],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationType::new(vec![
+            ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
+            ColumnType::new(CDT::string_datatype(), false),
+        ]);
+        let extensions = FunctionExtensions {
+            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
+        };
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+
+        assert_eq!(
+            res,
+            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
+                ts: Box::new(
+                    ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::timestamp_nanosecond_datatype(), false))
+                ),
+                window_size: Interval::from_month_day_nano(0, 0, 1_000_000_000),
+                start_time: Some(DateTime::new(1625097600000))
+            })
+            .with_type(ColumnType::new(CDT::timestamp_millisecond_datatype(), true)),
+        );
+
+        let f = substrait_proto::proto::expression::ScalarFunction {
+            function_reference: 0,
+            arguments: vec![col(0), lit("1 second")],
+            options: vec![],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationType::new(vec![
+            ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
+            ColumnType::new(CDT::string_datatype(), false),
+        ]);
+        let extensions = FunctionExtensions {
+            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
+        };
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+
+        assert_eq!(
+            res,
+            ScalarExpr::CallUnmaterializable(UnmaterializableFunc::TumbleWindow {
+                ts: Box::new(
+                    ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::timestamp_nanosecond_datatype(), false))
+                ),
+                window_size: Interval::from_month_day_nano(0, 0, 1_000_000_000),
+                start_time: None
+            })
+            .with_type(ColumnType::new(CDT::timestamp_millisecond_datatype(), true)),
+        )
     }
 }

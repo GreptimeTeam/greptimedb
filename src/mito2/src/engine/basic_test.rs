@@ -524,7 +524,7 @@ async fn test_region_usage() {
         .unwrap();
     // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert_eq!(region_stat.manifest_usage, 686);
 
     // put some rows
@@ -535,7 +535,7 @@ async fn test_region_usage() {
 
     put_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert!(region_stat.wal_usage > 0);
 
     // delete some rows
@@ -545,13 +545,13 @@ async fn test_region_usage() {
     };
     delete_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert!(region_stat.wal_usage > 0);
 
     // flush region
     flush_region(&engine, region_id, None).await;
 
-    let region_stat = region.region_usage().await;
+    let region_stat = region.region_usage();
     assert_eq!(region_stat.sst_usage, 3010);
 
     // region total usage
