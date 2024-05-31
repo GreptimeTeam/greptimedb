@@ -89,8 +89,9 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to request RegionServer, code: {}", code))]
+    #[snafu(display("Failed to request RegionServer {}, code: {}", addr, code))]
     RegionServer {
+        addr: String,
         code: Code,
         source: BoxedError,
         #[snafu(implicit)]

@@ -226,7 +226,7 @@ pub async fn write_system_metric_by_network(
                     error!("report export metrics error, msg: {:#?}", resp);
                 }
             }
-            Err(e) => error!("report export metrics failed, error {}", e),
+            Err(e) => error!(e; "report export metrics failed"),
         };
     }
 }
@@ -265,7 +265,7 @@ pub async fn write_system_metric_by_handler(
         };
 
         if let Err(e) = handler.write(requests, ctx.clone(), false).await {
-            error!("report export metrics by handler failed, error {}", e);
+            error!(e; "report export metrics by handler failed");
         } else {
             crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
         }
