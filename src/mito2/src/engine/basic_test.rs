@@ -22,8 +22,11 @@ use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
@@ -32,7 +35,9 @@ use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
+    rows_schema, CreateRequestBuilder, LogStoreFactory, TestEnv,
 };
 
 #[tokio::test]
@@ -83,14 +88,26 @@ async fn test_write_to_region() {
     put_rows(&engine, region_id, rows).await;
 }
 
-#[tokio::test]
-async fn test_region_replay() {
+#[apply(multiple_log_store_factories)]
+
+async fn test_region_replay(factory: Option<LogStoreFactory>) {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("region-replay");
+    let Some(factory) = factory else {
+        return;
+    };
+    let mut env = TestEnv::with_prefix("region-replay").with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let mut request = CreateRequestBuilder::new().build();
+    let topic_and_options = prepare_test_for_kafka_log_store(&factory).await;
+    if let Some((_, wal_options)) = &topic_and_options {
+        request.options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&wal_options).unwrap(),
+        );
+    };
+
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -113,13 +130,21 @@ async fn test_region_replay() {
 
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
+    let mut options = HashMap::new();
+    if let Some((_, wal_options)) = &topic_and_options {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&wal_options).unwrap(),
+        );
+    };
+
     let result = engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )

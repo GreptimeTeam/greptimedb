@@ -35,6 +35,7 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_wal::options::{KafkaWalOptions, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -45,6 +46,9 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
+use rskafka::client::partition::{Compression, UnknownTopicHandling};
+use rskafka::client::{Client, ClientBuilder};
+use rskafka::record::Record;
 use rstest_reuse::template;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
@@ -106,6 +110,7 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
 #[tokio::test]
 pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
 
+#[derive(Clone)]
 pub(crate) struct RaftEngineLogStoreFactory;
 
 impl RaftEngineLogStoreFactory {
@@ -114,6 +119,43 @@ impl RaftEngineLogStoreFactory {
     }
 }
 
+pub(crate) async fn prepare_test_for_kafka_log_store(
+    factory: &LogStoreFactory,
+) -> Option<(String, WalOptions)> {
+    if let LogStoreFactory::Kafka(factory) = factory {
+        let topic = uuid::Uuid::new_v4().to_string();
+        let wal_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: topic.to_string(),
+        });
+        let client = factory.client().await;
+        append_noop_record(&client, &topic).await;
+
+        Some((topic, wal_options))
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
+    let partition_client = client
+        .partition_client(topic, 0, UnknownTopicHandling::Retry)
+        .await
+        .unwrap();
+
+    partition_client
+        .produce(
+            vec![Record {
+                key: None,
+                value: None,
+                timestamp: rskafka::chrono::Utc::now(),
+                headers: Default::default(),
+            }],
+            Compression::NoCompression,
+        )
+        .await
+        .unwrap();
+}
+#[derive(Clone)]
 pub(crate) struct KafkaLogStoreFactory {
     broker_endpoints: Vec<String>,
 }
@@ -122,8 +164,16 @@ impl KafkaLogStoreFactory {
     async fn create_log_store(&self) -> KafkaLogStore {
         log_store_util::create_kafka_log_store(self.broker_endpoints.clone()).await
     }
+
+    pub(crate) async fn client(&self) -> Client {
+        ClientBuilder::new(self.broker_endpoints.clone())
+            .build()
+            .await
+            .unwrap()
+    }
 }
 
+#[derive(Clone)]
 pub(crate) enum LogStoreFactory {
     RaftEngine(RaftEngineLogStoreFactory),
     Kafka(KafkaLogStoreFactory),
@@ -185,10 +235,6 @@ impl TestEnv {
     pub(crate) fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
         self
-    }
-
-    pub(crate) fn get_log_store(&self) -> Option<LogStoreImpl> {
-        self.log_store.clone()
     }
 
     pub fn get_object_store(&self) -> Option<ObjectStore> {

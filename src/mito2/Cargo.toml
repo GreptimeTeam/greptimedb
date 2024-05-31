@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-test = ["common-test-util", "log-store", "rstest", "rstest_reuse"]
+test = ["common-test-util", "log-store", "rstest", "rstest_reuse", "rskafka"]
 
 [lints]
 workspace = true
@@ -55,6 +55,7 @@ prost.workspace = true
 puffin.workspace = true
 rand.workspace = true
 regex = "1.5"
+rskafka = { workspace = true, optional = true }
 rstest = { version = "0.20", optional = true }
 rstest_reuse = { version = "0.7", optional = true }
 serde.workspace = true
@@ -76,6 +77,7 @@ common-test-util.workspace = true
 criterion = "0.4"
 log-store.workspace = true
 object-store = { workspace = true, features = ["services-memory"] }
+rskafka.workspace = true
 rstest = { version = "0.20" }
 rstest_reuse = { version = "0.7" }
 toml.workspace = true
