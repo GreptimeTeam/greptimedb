@@ -18,7 +18,8 @@ use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
-use axum::extract::{Json, Query, State};
+use axum::extract::{Json, Query, State, TypedHeader};
+use axum::headers::ContentType;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
@@ -70,7 +71,7 @@ pub struct SqlQuery {
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
-    pub table_name: String,
+    pub table_name: Option<String>,
     pub db: Option<String>,
 }
 
@@ -79,7 +80,7 @@ fn validate_log_ingester_payload(payload: &Value) -> Result<(), String> {
         return Err("payload must be an object".to_string());
     }
 
-    if payload["pipeline_model"].as_str().is_none() {
+    if payload["pipeline_id"].as_str().is_none() {
         return Err("processors field is required".to_string());
     }
 
@@ -108,9 +109,13 @@ async fn log_ingester_inner(
         .map_err(|e| e.to_string())?;
     let transformed_data: Rows = pipeline.exec(pipeline_data)?;
 
+    let table_name = query_params
+        .table_name
+        .ok_or("table_name is required".to_string())?;
+
     let insert_request = RowInsertRequest {
         rows: Some(transformed_data),
-        table_name: query_params.table_name.clone(),
+        table_name: table_name.clone(),
     };
     let insert_requests = RowInsertRequests {
         inserts: vec![insert_request],
@@ -151,6 +156,29 @@ pub async fn log_ingester(
             StatusCode::InvalidArguments,
             e,
         )),
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn add_pipeline(
+    State(_state): State<LogHandlerRef>,
+    Query(_query_params): Query<LogIngesterQueryParams>,
+    Extension(_query_ctx): Extension<QueryContextRef>,
+    TypedHeader(_content_type): TypedHeader<ContentType>,
+    Json(paylod): Json<Value>,
+) -> String {
+    let name = paylod["name"].as_str().unwrap();
+    let pipeline = paylod["pipeline"].as_str().unwrap();
+    let content_type = "yaml";
+    let result = _state
+        .insert_pipeline(_query_ctx, name, content_type, pipeline)
+        .await;
+    match result {
+        Ok(_) => String::from("ok"),
+        Err(e) => {
+            common_telemetry::error!("failed to insert pipeline.{e:?}");
+            e.to_string()
+        }
     }
 }
 
