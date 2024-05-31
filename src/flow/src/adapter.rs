@@ -159,7 +159,7 @@ pub struct FlownodeManager {
     table_info_source: TableSource,
     frontend_invoker: RwLock<Option<Box<dyn FrontendInvoker + Send + Sync>>>,
     /// contains mapping from table name to global id, and table schema
-    node_context: Mutex<FlownodeContext>,
+    node_context: RwLock<FlownodeContext>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
@@ -194,7 +194,7 @@ impl FlownodeManager {
             query_engine,
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
-            node_context: Mutex::new(node_context),
+            node_context: RwLock::new(node_context),
             flow_err_collectors: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,
@@ -298,7 +298,7 @@ impl FlownodeManager {
             } else {
                 // TODO(discord9): condiser remove buggy auto create by schema
 
-                let node_ctx = self.node_context.lock().await;
+                let node_ctx = self.node_context.read().await;
                 let gid: GlobalId = node_ctx
                     .table_repr
                     .get_by_name(&table_name)
@@ -462,7 +462,7 @@ impl FlownodeManager {
         let mut output = BTreeMap::new();
         for (name, sink_recv) in self
             .node_context
-            .lock()
+            .write()
             .await
             .sink_receiver
             .iter_mut()
@@ -542,11 +542,11 @@ impl FlownodeManager {
             }
             // first check how many inputs were sent
             let (flush_res, buf_len) = if blocking {
-                let mut ctx = self.node_context.lock().await;
-                (ctx.flush_all_sender(), ctx.get_send_buf_size())
+                let ctx = self.node_context.read().await;
+                (ctx.flush_all_sender().await, ctx.get_send_buf_size().await)
             } else {
-                match self.node_context.try_lock() {
-                    Ok(mut ctx) => (ctx.flush_all_sender(), ctx.get_send_buf_size()),
+                match self.node_context.try_read() {
+                    Ok(ctx) => (ctx.flush_all_sender().await, ctx.get_send_buf_size().await),
                     Err(_) => return Ok(()),
                 }
             };
@@ -580,7 +580,7 @@ impl FlownodeManager {
             rows.len()
         );
         let table_id = region_id.table_id();
-        self.node_context.lock().await.send(table_id, rows)?;
+        self.node_context.read().await.send(table_id, rows).await?;
         // TODO(discord9): put it in a background task?
         // self.run_available(false).await?;
         Ok(())
@@ -628,7 +628,7 @@ impl FlownodeManager {
             }
         }
 
-        let mut node_ctx = self.node_context.lock().await;
+        let mut node_ctx = self.node_context.write().await;
         // assign global id to source and sink table
         for source in source_table_ids {
             node_ctx

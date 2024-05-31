@@ -116,7 +116,7 @@ impl Flownode for FlownodeManager {
             let now = self.tick_manager.tick();
 
             let fetch_order = {
-                let ctx = self.node_context.lock().await;
+                let ctx = self.node_context.read().await;
                 let table_col_names = ctx
                     .table_repr
                     .get_by_table_id(&table_id)
