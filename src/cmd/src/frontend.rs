@@ -363,7 +363,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
-    use frontend::service_config::GrpcOptions;
+    use servers::grpc::GrpcOptions;
     use servers::http::HttpOptions;
 
     use super::*;
