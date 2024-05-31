@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::WalEntry;
+use async_stream::stream;
 use common_telemetry::info;
 use futures::StreamExt;
 use prost::Message;
@@ -57,7 +58,7 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
         let LogStoreEntryReader { reader } = self;
         let mut stream = reader.read(ns, start_id)?;
 
-        let stream = async_stream::stream! {
+        let stream = stream! {
             let mut buffered_entry = None;
             while let Some(next_entry) = stream.next().await {
                 match buffered_entry.take() {

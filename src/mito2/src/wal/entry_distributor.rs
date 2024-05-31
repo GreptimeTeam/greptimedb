@@ -46,19 +46,11 @@ pub(crate) struct WalEntryDistributor {
 impl WalEntryDistributor {
     /// Distributes entries to specific [WalEntryReceiver]s based on [RegionId].
     pub async fn distribute(mut self) -> Result<()> {
-        let args_futures = self
+        let arg_futures = self
             .arg_receivers
             .iter_mut()
-            .map(|(region_id, receiver)| async {
-                {
-                    if let Ok(start_id) = receiver.await {
-                        (*region_id, Some(start_id))
-                    } else {
-                        (*region_id, None)
-                    }
-                }
-            });
-        let args = join_all(args_futures)
+            .map(|(region_id, receiver)| async { (*region_id, receiver.await.ok()) });
+        let args = join_all(arg_futures)
             .await
             .into_iter()
             .filter_map(|(region_id, start_id)| start_id.map(|start_id| (region_id, start_id)))
@@ -69,19 +61,19 @@ impl WalEntryDistributor {
             return Ok(());
         }
         // Safety: must exist
-        let mut min_start_id = args.first().unwrap().1;
-
-        let mut subscribers = HashMap::with_capacity(args.len());
-        for (region_id, start_id) in args {
-            subscribers.insert(
-                region_id,
-                EntryReceiver {
-                    start_id,
-                    sender: self.senders[&region_id].clone(),
-                },
-            );
-            min_start_id = min(min_start_id, start_id);
-        }
+        let min_start_id = args.iter().map(|(_, start_id)| *start_id).min().unwrap();
+        let receivers: HashMap<_, _> = args
+            .into_iter()
+            .map(|(region_id, start_id)| {
+                (
+                    region_id,
+                    EntryReceiver {
+                        start_id,
+                        sender: self.senders[&region_id].clone(),
+                    },
+                )
+            })
+            .collect();
 
         let mut stream = self.raw_wal_reader.read(&self.provider, min_start_id)?;
         while let Some(entry) = stream.next().await {
@@ -89,7 +81,7 @@ impl WalEntryDistributor {
             let entry_id = entry.entry_id();
             let region_id = entry.region_id();
 
-            if let Some(EntryReceiver { sender, start_id }) = subscribers.get(&region_id) {
+            if let Some(EntryReceiver { sender, start_id }) = receivers.get(&region_id) {
                 if entry_id >= *start_id {
                     if let Err(err) = sender.send(entry).await {
                         error!(err; "Failed to distribute raw entry, entry_id:{}, region_id: {}", entry_id, region_id);
@@ -145,7 +137,7 @@ impl WalEntryReader for WalEntryReceiver {
             .fail();
         }
 
-        let stream = async_stream::stream! {
+        let stream = stream! {
             let mut buffered_entry = None;
             while let Some(next_entry) = entry_receiver.recv().await {
                 match buffered_entry.take() {
@@ -226,7 +218,6 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::{Mutation, OpType};
-    use futures::executor::EnterError;
     use futures::{stream, TryStreamExt};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
