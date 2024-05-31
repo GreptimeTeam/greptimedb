@@ -274,10 +274,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 #[derive(Debug, Default)]
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
-    // For create physical table
-    // TODO(jeremy): remove it?
-    pub table_id: Option<TableId>,
-    // For create multi logical tables
+    // `table_id`s for `CREATE TABLE` or `CREATE LOGICAL TABLES` task.
     pub table_ids: Vec<TableId>,
 }
 
@@ -285,11 +282,9 @@ impl TryFrom<PbDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
 
     fn try_from(resp: PbDdlTaskResponse) -> Result<Self> {
-        let table_id = resp.table_id.map(|t| t.id);
         let table_ids = resp.table_ids.into_iter().map(|t| t.id).collect();
         Ok(Self {
             key: resp.pid.map(|pid| pid.key).unwrap_or_default(),
-            table_id,
             table_ids,
         })
     }
@@ -299,9 +294,6 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
     fn from(val: SubmitDdlTaskResponse) -> Self {
         Self {
             pid: Some(ProcedureId { key: val.key }),
-            table_id: val
-                .table_id
-                .map(|table_id| api::v1::TableId { id: table_id }),
             table_ids: val
                 .table_ids
                 .into_iter()

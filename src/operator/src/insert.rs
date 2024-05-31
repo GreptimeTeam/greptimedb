@@ -501,7 +501,7 @@ impl Inserter {
                 Ok(())
             }
             Err(err) => {
-                error!("Failed to create table {table_reference}: {err}",);
+                error!(err; "Failed to create table {table_reference}");
                 Err(err)
             }
         }
@@ -634,8 +634,9 @@ impl Inserter {
                     })
                     .collect::<Vec<_>>();
                 error!(
-                    "Failed to create logical tables {:?}: {}",
-                    failed_tables, err
+                    err;
+                    "Failed to create logical tables {:?}",
+                    failed_tables
                 );
                 Err(err)
             }
