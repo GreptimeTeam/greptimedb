@@ -165,11 +165,7 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
             start: self.start,
             end: self.end,
             interval: self.interval,
-            expr: if !exprs.is_empty() {
-                Some(exprs[0].clone())
-            } else {
-                None
-            },
+            expr: exprs.into_iter().next(),
             time_index_schema: self.time_index_schema.clone(),
             result_schema: self.result_schema.clone(),
         })

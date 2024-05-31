@@ -146,8 +146,9 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
             ));
         }
 
-        let left = inputs[0].clone();
-        let right = inputs[1].clone();
+        let mut inputs = inputs.into_iter();
+        let left = inputs.next().unwrap();
+        let right = inputs.next().unwrap();
 
         Ok(Self {
             left,

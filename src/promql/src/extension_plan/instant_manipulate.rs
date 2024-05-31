@@ -101,7 +101,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
             field_column: self.field_column.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
         })
     }
 }

@@ -249,7 +249,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
             range: self.range,
             time_index: self.time_index.clone(),
             field_columns: self.field_columns.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
             output_schema: self.output_schema.clone(),
         })
     }

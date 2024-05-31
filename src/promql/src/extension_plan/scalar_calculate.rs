@@ -232,7 +232,7 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
             time_index: self.time_index.clone(),
             tag_columns: self.tag_columns.clone(),
             field_column: self.field_column.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
             output_schema: self.output_schema.clone(),
         })
     }

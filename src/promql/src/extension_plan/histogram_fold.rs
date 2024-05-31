@@ -103,7 +103,7 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
         Ok(Self {
             le_column: self.le_column.clone(),
             ts_column: self.ts_column.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
             field_column: self.field_column.clone(),
             quantile: self.quantile,
             // This method cannot return error. Otherwise we should re-calculate

@@ -96,7 +96,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap()
         })
     }
 }
