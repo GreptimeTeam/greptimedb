@@ -543,7 +543,9 @@ pub fn check_permission(
             validate_param(&stmt.source_name, query_ctx)?;
         }
         Statement::DropTable(drop_stmt) => {
-            validate_param(drop_stmt.table_name(), query_ctx)?;
+            for table_name in drop_stmt.table_names() {
+                validate_param(table_name, query_ctx)?;
+            }
         }
         Statement::ShowTables(stmt) => {
             validate_db_permission!(stmt, query_ctx);

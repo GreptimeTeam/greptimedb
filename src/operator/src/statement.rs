@@ -185,13 +185,15 @@ impl StatementExecutor {
             }
             Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
-                        .map_err(BoxedError::new)
-                        .context(error::ExternalSnafu)?;
-                let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name, stmt.drop_if_exists(), query_ctx)
-                    .await
+                let mut table_names = Vec::new();
+                for table_name_stmt in stmt.table_names() {
+                    let (catalog, schema, table) =
+                        table_idents_to_full_name(table_name_stmt, &query_ctx)
+                            .map_err(BoxedError::new)
+                            .context(error::ExternalSnafu)?;
+                    table_names.push(TableName::new(catalog, schema, table));
+                }
+                self.drop_tables(table_names, stmt.drop_if_exists(), query_ctx.clone()).await
             }
             Statement::DropDatabase(stmt) => {
                 self.drop_database(

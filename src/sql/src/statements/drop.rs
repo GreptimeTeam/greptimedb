@@ -20,23 +20,22 @@ use sqlparser_derive::{Visit, VisitMut};
 /// DROP TABLE statement.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct DropTable {
-    table_name: ObjectName,
+    table_names: Vec<ObjectName>,
+
     /// drop table if exists
     drop_if_exists: bool,
 }
 
 impl DropTable {
     /// Creates a statement for `DROP TABLE`
-    pub fn new(table_name: ObjectName, if_exists: bool) -> Self {
+    pub fn new(table_names: Vec<ObjectName>,if_exists: bool) -> Self {
         Self {
-            table_name,
+            table_names,
             drop_if_exists: if_exists,
         }
     }
 
-    pub fn table_name(&self) -> &ObjectName {
-        &self.table_name
-    }
+    pub fn table_names(&self) -> &Vec<ObjectName> { &self.table_names }
 
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
@@ -49,8 +48,16 @@ impl Display for DropTable {
         if self.drop_if_exists() {
             f.write_str(" IF EXISTS")?;
         }
-        let table_name = self.table_name();
-        write!(f, r#" {table_name}"#)
+        // let table_name = self.table_name();
+        // write!(f, r#" {table_name}"#)
+        let table_names = self.table_names();
+        for i in 0..table_names.len() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            f.write_str( format!(" {}", table_names[i]).as_str())?
+        }
+        Ok(())
     }
 }
 
@@ -198,6 +205,27 @@ DROP DATABASE IF EXISTS test"#,
                 assert_eq!(
                     r#"
 DROP TABLE test"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"drop table test1, test2;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DropTable { .. });
+
+        match &stmts[0] {
+            Statement::DropTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+DROP TABLE test1, test2"#,
                     &new_sql
                 );
             }
