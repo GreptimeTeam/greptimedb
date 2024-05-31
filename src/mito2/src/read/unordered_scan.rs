@@ -188,6 +188,7 @@ impl RegionScanner for UnorderedScan {
             }
             // Then scans file ranges.
             let mut reader_metrics = ReaderMetrics::default();
+            // Safety: UnorderedDistributor::build_parts() ensures this.
             for file_range in &part.file_ranges[0] {
                 let reader = file_range.reader().await.map_err(BoxedError::new).context(ExternalSnafu)?;
                 let compat_batch = file_range.compat_batch();
@@ -275,7 +276,7 @@ impl ScanPartList {
     }
 }
 
-/// Context shared by different streams.
+/// Context shared by different streams from a scanner.
 /// It contains the input and distributes input to multiple parts
 /// to scan.
 struct StreamContext {

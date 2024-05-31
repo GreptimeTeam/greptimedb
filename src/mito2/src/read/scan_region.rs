@@ -40,7 +40,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{compat, Source};
 use crate::region::version::VersionRef;
-use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::file::{overlaps, FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
@@ -641,6 +641,33 @@ impl fmt::Debug for ScanPart {
                 .sum::<usize>(),
             self.time_range,
         )
+    }
+}
+
+impl ScanPart {
+    /// Returns true if the time range given `part` overlaps with this part.
+    pub(crate) fn overlaps(&self, part: &ScanPart) -> bool {
+        let (Some(current_range), Some(part_range)) = (self.time_range, part.time_range) else {
+            return true;
+        };
+
+        overlaps(&current_range, &part_range)
+    }
+
+    /// Merges given `part` to this part.
+    pub(crate) fn merge(&mut self, mut part: ScanPart) {
+        self.memtables.append(&mut part.memtables);
+        self.file_ranges.append(&mut part.file_ranges);
+        let Some(part_range) = part.time_range else {
+            return;
+        };
+        let Some(current_range) = self.time_range else {
+            self.time_range = part.time_range;
+            return;
+        };
+        let start = current_range.0.min(part_range.0);
+        let end = current_range.1.max(part_range.1);
+        self.time_range = Some((start, end));
     }
 }
 

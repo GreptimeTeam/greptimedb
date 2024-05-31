@@ -25,6 +25,7 @@ use common_telemetry::debug;
 use common_time::Timestamp;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
+use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
 use store_api::storage::ColumnId;
@@ -67,7 +68,7 @@ impl SeqScan {
         let prepare_scan_cost = query_start.elapsed();
         let mut distributor = SeqDistributor::default();
         input.prune_file_ranges(&mut distributor).await?;
-        let parts = group_parts(distributor.build_parts(&input.memtables));
+        let parts = group_parts_by_range(distributor.build_parts(&input.memtables));
         let parts = maybe_split_parts(parts, input.parallelism.parallelism);
         let properties = ScannerProperties::new(ScannerPartitioning::Unknown(parts.len()));
         let build_parts_cost = build_start.elapsed();
@@ -153,6 +154,7 @@ impl SeqScan {
         ))
     }
 
+    // TODO(yingwen): Remove this.
     /// Builds a [BoxedBatchReader] from sequential scan.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
@@ -223,15 +225,16 @@ impl FileRangeCollector for SeqDistributor {
         file_ranges: impl Iterator<Item = FileRange>,
     ) {
         // Creates a [ScanPart] for each file.
-        let part = ScanPart {
-            memtables: Vec::new(),
-            file_ranges: file_ranges.collect(),
-            time_range: Some(file_meta.time_range),
-        };
-        if part.file_ranges.is_empty() {
+        let ranges: Vec<_> = file_ranges.collect();
+        if ranges.is_empty() {
             // No ranges to read.
             return;
         }
+        let part = ScanPart {
+            memtables: Vec::new(),
+            file_ranges: smallvec![ranges],
+            time_range: Some(file_meta.time_range),
+        };
         self.parts.push(part);
     }
 }
@@ -243,7 +246,7 @@ impl SeqDistributor {
             let stats = mem.stats();
             let part = ScanPart {
                 memtables: vec![mem.clone()],
-                file_ranges: vec![],
+                file_ranges: smallvec![],
                 time_range: stats.time_range(),
             };
             self.parts.push(part);
@@ -253,189 +256,93 @@ impl SeqDistributor {
     }
 }
 
-/// Parts to scan in the same time range.
-#[derive(Debug, Default)]
-struct PartsInTimeRange {
-    /// Parts to scan. Each [ScanPart] scans a file or a memtable.
-    parts: Vec<ScanPart>,
-    /// Inclusive time range of parts.
-    time_range: Option<(Timestamp, Timestamp)>,
-}
-
-impl PartsInTimeRange {
-    fn overlaps(&self, part: &ScanPart) -> bool {
-        let (Some(current_range), Some(part_range)) = (self.time_range, part.time_range) else {
-            return true;
-        };
-
-        overlaps(&current_range, &part_range)
+/// Builds sources to merge from a `part`.
+fn build_sources_to_merge(
+    part: &ScanPart,
+    projection: Option<&[ColumnId]>,
+    predicate: Option<&Predicate>,
+    sources: &mut Vec<Source>,
+) -> Result<()> {
+    sources.reserve(part.memtables.len() + part.file_ranges.len());
+    // Read memtables.
+    for mem in &part.memtables {
+        let iter = mem.iter(projection, predicate.cloned())?;
+        sources.push(Source::Iter(iter));
     }
-
-    fn merge(&mut self, part: ScanPart) {
-        let Some(current_range) = self.time_range else {
-            self.time_range = part.time_range;
-            self.parts.push(part);
-            return;
-        };
-        let part_range = part.time_range.unwrap();
-        let start = current_range.0.min(part_range.0);
-        let end = current_range.1.max(part_range.1);
-        self.time_range = Some((start, end));
-        self.parts.push(part);
-    }
-
-    fn can_split(&self) -> bool {
-        self.parts.len() == 1
-            && self.parts[0].memtables.is_empty()
-            && self.parts[0].file_ranges.len() > 1
-    }
-
-    fn build_sources(
-        &self,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<&Predicate>,
-        sources: &mut Vec<Source>,
-    ) -> Result<()> {
-        sources.reserve(self.parts.len());
-        for part in &self.parts {
-            if let Some(mem) = part.memtables.first() {
-                // Each part only has one memtable.
-                let iter = mem.iter(projection, predicate.cloned())?;
-                sources.push(Source::Iter(iter));
-                continue;
-            }
-
-            if part.file_ranges.is_empty() {
-                continue;
-            }
-
-            let ranges = part.file_ranges.clone();
-            let stream = try_stream! {
-                let mut reader_metrics = ReaderMetrics::default();
-                let file_id = ranges[0].file_handle().file_id();
-                let region_id = ranges[0].file_handle().region_id();
-                for range in ranges {
-                    let mut reader = range.reader().await?;
-                    let compat_batch = range.compat_batch();
-                    while let Some(mut batch) = reader.next_batch().await? {
-                        if let Some(compat) = compat_batch {
-                            batch = compat
-                                .compat_batch(batch)?;
-                        }
-
-                        yield batch;
-                    }
-                    reader_metrics.merge_from(reader.metrics());
-                }
-                debug!(
-                    "Seq scan region {} file {} ranges finished, metrics: {:?}",
-                    region_id, file_id, reader_metrics
-                );
-            };
-            let stream = Box::pin(stream);
-            sources.push(Source::Stream(stream));
+    // Read files.
+    for file in &part.file_ranges {
+        if file.is_empty() {
+            continue;
         }
-        Ok(())
+
+        // Creates a stream to read the file.
+        let ranges = file.clone();
+        let stream = try_stream! {
+            let mut reader_metrics = ReaderMetrics::default();
+            let file_id = ranges[0].file_handle().file_id();
+            let region_id = ranges[0].file_handle().region_id();
+            for range in ranges {
+                let mut reader = range.reader().await?;
+                let compat_batch = range.compat_batch();
+                while let Some(mut batch) = reader.next_batch().await? {
+                    if let Some(compat) = compat_batch {
+                        batch = compat
+                            .compat_batch(batch)?;
+                    }
+
+                    yield batch;
+                }
+                reader_metrics.merge_from(reader.metrics());
+            }
+            debug!(
+                "Seq scan region {} file {} ranges finished, metrics: {:?}",
+                region_id, file_id, reader_metrics
+            );
+        };
+        let stream = Box::pin(stream);
+        sources.push(Source::Stream(stream));
     }
+
+    Ok(())
 }
 
 /// Groups parts by time range. It may generate parts more than parallelism.
 /// All time ranges are not None.
-fn group_parts(mut parts: Vec<ScanPart>) -> Vec<PartsInTimeRange> {
+fn group_parts_by_range(mut parts: Vec<ScanPart>) -> Vec<ScanPart> {
     if parts.is_empty() {
         return Vec::new();
     }
 
-    // Groups parts by time range.
+    // Sorts parts by time range.
     parts.sort_unstable_by(|a, b| {
         // Safety: time ranges of parts from [SeqPartBuilder] are not None.
         let a = a.time_range.unwrap();
         let b = b.time_range.unwrap();
         a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1))
     });
-    let mut parts_in_range = PartsInTimeRange::default();
-    let mut exclusive_parts = Vec::new();
+    let mut part_in_range = None;
+    // Parts with exclusive time ranges.
+    let mut part_groups = Vec::new();
     for part in parts {
-        if parts_in_range.parts.is_empty() {
-            parts_in_range.time_range = part.time_range;
-            parts_in_range.parts.push(part);
+        let Some(mut prev_part) = part_in_range.take() else {
+            part_in_range = Some(part);
             continue;
-        }
+        };
 
-        if parts_in_range.overlaps(&part) {
-            parts_in_range.merge(part);
+        if prev_part.overlaps(&part) {
+            prev_part.merge(part);
+            part_in_range = Some(prev_part);
         } else {
-            exclusive_parts.push(parts_in_range);
-            let part_range = part.time_range;
-            parts_in_range = PartsInTimeRange {
-                parts: vec![part],
-                time_range: part_range,
-            };
+            // A new group.
+            part_groups.push(prev_part);
+            part_in_range = Some(part);
         }
     }
-    exclusive_parts.push(parts_in_range);
-
-    exclusive_parts
-}
-
-/// Splits parts to increase concurrency.
-fn maybe_split_parts(parts: Vec<PartsInTimeRange>, parallelism: usize) -> Vec<PartsInTimeRange> {
-    if parts.len() >= parallelism || parallelism <= 1 {
-        return parts;
+    if let Some(part) = part_in_range {
+        part_groups.push(part);
     }
 
-    let num_parts_to_split = parts
-        .iter()
-        .filter(|part| {
-            // Only has one part and no memtable in the part.
-            part.can_split()
-        })
-        .count();
-
-    if num_parts_to_split == 0 {
-        return parts;
-    }
-
-    let parallelism_per_file =
-        ((parallelism - parts.len() + num_parts_to_split) / num_parts_to_split).max(2);
-    let mut split_parts =
-        Vec::with_capacity(parts.len() + num_parts_to_split * parallelism_per_file);
-    for part in parts {
-        if part.can_split() {
-            let num_ranges = part.parts[0].file_ranges.len();
-            let ranges_per_part =
-                ((num_ranges + parallelism_per_file - 1) / parallelism_per_file).max(1);
-            // If there is only one file, we can split the file into multiple parts.
-            part.parts[0]
-                .file_ranges
-                .chunks(ranges_per_part)
-                .map(|ranges| PartsInTimeRange {
-                    parts: vec![ScanPart {
-                        memtables: vec![],
-                        file_ranges: ranges.to_vec(),
-                        time_range: part.time_range,
-                    }],
-                    time_range: part.time_range,
-                })
-                .for_each(|split_part| split_parts.push(split_part));
-
-            continue;
-        }
-
-        split_parts.push(part);
-    }
-
-    split_parts
-}
-
-// FIXME(yingwen): Use overlaps() in twcs mod.
-/// Checks if two inclusive timestamp ranges overlap with each other.
-fn overlaps(l: &(Timestamp, Timestamp), r: &(Timestamp, Timestamp)) -> bool {
-    let (l, r) = if l.0 <= r.0 { (l, r) } else { (r, l) };
-    let (_, l_end) = l;
-    let (r_start, _) = r;
-
-    r_start <= l_end
+    part_groups
 }
 
 #[cfg(test)]
@@ -462,20 +369,16 @@ mod tests {
                     memtables: vec![Arc::new(
                         EmptyMemtable::new(*id).with_time_range(Some(range)),
                     )],
-                    file_ranges: vec![],
+                    file_ranges: smallvec![],
                     time_range: Some(range),
                 }
             })
             .collect();
-        let output = group_parts(parts);
+        let output = group_parts_by_range(parts);
         let actual: Vec<_> = output
             .iter()
             .map(|part| {
-                let ids: Vec<_> = part
-                    .parts
-                    .iter()
-                    .map(|part| part.memtables[0].id())
-                    .collect();
+                let ids: Vec<_> = part.memtables.iter().map(|mem| mem.id()).collect();
                 let range = part.time_range.unwrap();
                 (ids, range.0.value(), range.1.value())
             })
