@@ -311,4 +311,42 @@ mod test {
         ]);
         run_and_check(&mut state, &mut df, 1..5, expected, output);
     }
+
+    /// test if mfp operator can run multiple times within same tick
+    #[test]
+    fn test_render_mfp_multiple_times() {
+        let mut df = Hydroflow::new();
+        let mut state = DataflowState::default();
+        let mut ctx = harness_test_ctx(&mut df, &mut state);
+
+        let (sender, recv) = tokio::sync::broadcast::channel(1000);
+        let collection = ctx.render_source(recv).unwrap();
+        ctx.insert_global(GlobalId::User(1), collection);
+        let input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(1)),
+        };
+        let typ = RelationType::new(vec![ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
+        // filter: col(0)>1
+        let mfp = MapFilterProject::new(1)
+            .filter(vec![ScalarExpr::Column(0).call_binary(
+                ScalarExpr::literal(1.into(), ConcreteDataType::int32_datatype()),
+                BinaryFunc::Gt,
+            )])
+            .unwrap();
+        let bundle = ctx
+            .render_mfp(Box::new(input_plan.with_types(typ)), mfp)
+            .unwrap();
+
+        let output = get_output_handle(&mut ctx, bundle);
+        drop(ctx);
+        sender.send((Row::new(vec![2.into()]), 0, 1)).unwrap();
+        state.run_available_with_schedule(&mut df);
+        assert_eq!(output.borrow().len(), 1);
+        output.borrow_mut().clear();
+        sender.send((Row::new(vec![3.into()]), 0, 1)).unwrap();
+        state.run_available_with_schedule(&mut df);
+        assert_eq!(output.borrow().len(), 1);
+    }
 }
