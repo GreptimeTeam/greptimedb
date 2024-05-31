@@ -115,7 +115,13 @@ fn mfp_subgraph(
 ) {
     let run_mfp = || {
         let all_updates = eval_mfp_core(input, mfp_plan, now, err_collector);
-        arrange.write().apply_updates(now, all_updates)?;
+        // if run mfp in the same tick for multiple times, we need to set last_compaction_time to now-1
+        // so that current rows doesn't get compacted(into nothing) and get missed, that's because mfp's arrangement is future only
+        let mut arrange = arrange.write();
+        if arrange.last_compaction_time() >= Some(now - 1) {
+            arrange.set_compaction_time(now - 1)
+        }
+        arrange.apply_updates(now, all_updates)?;
         Ok(())
     };
     err_collector.run(run_mfp);
