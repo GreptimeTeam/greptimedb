@@ -644,7 +644,8 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         // Reserved for grpc call
-        self.drop_tables(vec![table_name], drop_if_exists, query_context).await
+        self.drop_tables(vec![table_name], drop_if_exists, query_context)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -664,20 +665,22 @@ impl StatementExecutor {
                     &table_name.table_name,
                 )
                 .await
-                .context(CatalogSnafu)? {
+                .context(CatalogSnafu)?
+            {
                 tables.push(table.table_info().table_id());
             } else if drop_if_exists {
                 // DROP TABLE IF EXISTS meets table not found - ignored
-                continue
+                continue;
             } else {
                 return TableNotFoundSnafu {
                     table_name: table_name.to_string(),
-                }.fail();
+                }
+                .fail();
             }
         }
 
         for (table_name, table_id) in table_names.iter().zip(tables.iter()) {
-            self.drop_table_procedure(&table_name, *table_id, drop_if_exists, query_context.clone())
+            self.drop_table_procedure(table_name, *table_id, drop_if_exists, query_context.clone())
                 .await?;
 
             // Invalidates local cache ASAP.

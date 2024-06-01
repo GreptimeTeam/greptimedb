@@ -193,7 +193,8 @@ impl StatementExecutor {
                             .context(error::ExternalSnafu)?;
                     table_names.push(TableName::new(catalog, schema, table));
                 }
-                self.drop_tables(table_names, stmt.drop_if_exists(), query_ctx.clone()).await
+                self.drop_tables(table_names, stmt.drop_if_exists(), query_ctx.clone())
+                    .await
             }
             Statement::DropDatabase(stmt) => {
                 self.drop_database(

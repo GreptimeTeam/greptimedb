@@ -90,7 +90,7 @@ impl<'a> ParserContext<'a> {
             }
         }
 
-        Ok(Statement::DropTable(DropTable::new(table_names,if_exists)))
+        Ok(Statement::DropTable(DropTable::new(table_names, if_exists)))
     }
 
     fn parse_drop_database(&mut self) -> Result<Statement> {
@@ -129,7 +129,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(vec![ObjectName(vec![Ident::new("foo")])],false))
+            Statement::DropTable(DropTable::new(
+                vec![ObjectName(vec![Ident::new("foo")])],
+                false
+            ))
         );
 
         let sql = "DROP TABLE IF EXISTS foo";
@@ -138,7 +141,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(vec![ObjectName(vec![Ident::new("foo")])],true))
+            Statement::DropTable(DropTable::new(
+                vec![ObjectName(vec![Ident::new("foo")])],
+                true
+            ))
         );
 
         let sql = "DROP TABLE my_schema.foo";
@@ -148,9 +154,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(
-                    vec![Ident::new("my_schema"), Ident::new("foo")]
-                )],
+                vec![ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")])],
                 false
             ))
         );

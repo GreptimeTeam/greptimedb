@@ -28,14 +28,16 @@ pub struct DropTable {
 
 impl DropTable {
     /// Creates a statement for `DROP TABLE`
-    pub fn new(table_names: Vec<ObjectName>,if_exists: bool) -> Self {
+    pub fn new(table_names: Vec<ObjectName>, if_exists: bool) -> Self {
         Self {
             table_names,
             drop_if_exists: if_exists,
         }
     }
 
-    pub fn table_names(&self) -> &Vec<ObjectName> { &self.table_names }
+    pub fn table_names(&self) -> &Vec<ObjectName> {
+        &self.table_names
+    }
 
     pub fn drop_if_exists(&self) -> bool {
         self.drop_if_exists
@@ -51,11 +53,11 @@ impl Display for DropTable {
         // let table_name = self.table_name();
         // write!(f, r#" {table_name}"#)
         let table_names = self.table_names();
-        for i in 0..table_names.len() {
+        for (i, table_name) in table_names.iter().enumerate() {
             if i > 0 {
                 f.write_str(",")?;
             }
-            f.write_str( format!(" {}", table_names[i]).as_str())?
+            f.write_str(format!(" {}", table_name).as_str())?;
         }
         Ok(())
     }
