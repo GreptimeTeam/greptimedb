@@ -100,10 +100,12 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn show_create_flow(
         &self,
-        obj_name: &ObjectName,
+        flow_name: ObjectName,
         flow_val: FlowInfoValue,
+        query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        query::sql::show_create_flow(obj_name, flow_val).context(error::ExecuteStatementSnafu)
+        query::sql::show_create_flow(flow_name, flow_val, query_ctx)
+            .context(error::ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

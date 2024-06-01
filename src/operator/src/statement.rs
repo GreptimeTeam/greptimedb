@@ -271,7 +271,8 @@ impl StatementExecutor {
                         flow_name: &flow_name,
                     })?;
 
-                self.show_create_flow(obj_name, flow_val).await
+                self.show_create_flow(obj_name.clone(), flow_val, query_ctx)
+                    .await
             }
             Statement::SetVariables(set_var) => {
                 let var_name = set_var.variable.to_string().to_uppercase();

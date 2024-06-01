@@ -50,11 +50,14 @@ use regex::Regex;
 use session::context::QueryContextRef;
 pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::create::Partitions;
+use sql::ast::Ident;
+use sql::error::SyntaxSnafu;
+use sql::statements::create::{CreateFlow, Partitions};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
 use sqlparser::ast::ObjectName;
+use sqlparser::parser::{Parser, ParserOptions};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
@@ -615,21 +618,44 @@ pub fn show_create_table(
     Ok(Output::new_with_record_batches(records))
 }
 
-pub fn show_create_flow(obj_name: &ObjectName, flow_val: FlowInfoValue) -> Result<Output> {
-    let mut sql = String::new();
-    sql.push_str(&format!(
-        "CREATE OR REPLACE TASK IF NOT EXISTS {} ",
-        &obj_name
-    ));
-    sql.push_str(&format!("OUTPUT AS {} ", flow_val.sink_table_name()));
-//    if !flow_val.expire_after().is_some() {
-//        sql.push_str(&format!("EXPIRE WHEN {} ", flow_val.expire_after()));
-//    }
-    if !flow_val.comment().is_empty() {
-        sql.push_str(&format!("COMMENT '{}' ", flow_val.comment()));
-    }
-    sql.push_str(&format!("AS `{}`", flow_val.raw_sql()));
+pub fn show_create_flow(
+    flow_name: ObjectName,
+    flow_val: FlowInfoValue,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let mut parser = Parser::new(query_ctx.sql_dialect())
+        .with_options(ParserOptions::new().with_trailing_commas(true))
+        .try_with_sql(flow_val.raw_sql())
+        .context(SyntaxSnafu)
+        .context(error::SqlSnafu)?;
 
+    let query = Box::new(
+        parser
+            .parse_query()
+            .context(SyntaxSnafu)
+            .context(error::SqlSnafu)?,
+    );
+
+    let comment = if flow_val.comment().is_empty() {
+        None
+    } else {
+        Some(flow_val.comment().clone())
+    };
+
+    let stmt = CreateFlow {
+        flow_name,
+        sink_table_name: ObjectName(vec![Ident {
+            value: flow_val.sink_table_name().table_name.clone(),
+            quote_style: None,
+        }]),
+        or_replace: true,
+        if_not_exists: true,
+        expire_after: flow_val.expire_after(),
+        comment,
+        query,
+    };
+
+    let sql = format!("{}", stmt);
     let columns = vec![
         Arc::new(StringVector::from(vec![flow_val.flow_name().clone()])) as _,
         Arc::new(StringVector::from(vec![sql])) as _,
