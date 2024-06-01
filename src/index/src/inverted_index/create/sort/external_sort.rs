@@ -256,7 +256,7 @@ impl ExternalSorter {
         IntermediateWriter::new(writer).write_all(values, bitmap_leading_zeros as _).await.inspect(|_|
             debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
         ).inspect_err(|e|
-            error!("Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}. Error: {e}")
+            error!(e; "Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}")
         )
     }
 

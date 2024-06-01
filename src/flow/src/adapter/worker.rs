@@ -285,8 +285,8 @@ impl<'s> Worker<'s> {
                 Ok(Some((id, resp))) => {
                     if let Err(err) = self.itc_server.blocking_lock().resp(id, resp) {
                         common_telemetry::error!(
-                            "Worker's itc server has been closed unexpectedly, shutting down worker: {}",
-                            err
+                            err;
+                            "Worker's itc server has been closed unexpectedly, shutting down worker"
                         );
                         break;
                     };

@@ -20,6 +20,7 @@ pub mod meta_util;
 pub mod scheduler_util;
 pub mod sst_util;
 pub mod version_util;
+pub mod wal_util;
 
 use std::collections::HashMap;
 use std::path::Path;

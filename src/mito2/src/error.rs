@@ -331,6 +331,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid wal read request, {}", reason))]
+    InvalidWalReadRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert array to vector"))]
     ConvertVector {
         #[snafu(implicit)]
@@ -787,7 +794,8 @@ impl ErrorExt for Error {
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
             | InvalidMetadata { .. }
-            | InvalidRegionOptions { .. } => StatusCode::InvalidArguments,
+            | InvalidRegionOptions { .. }
+            | InvalidWalReadRequest { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 

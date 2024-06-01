@@ -489,8 +489,7 @@ async fn handle_create_table_task(
 
     Ok(SubmitDdlTaskResponse {
         key: procedure_id.into(),
-        table_id: Some(table_id),
-        ..Default::default()
+        table_ids: vec![table_id],
     })
 }
 
@@ -534,7 +533,6 @@ async fn handle_create_logical_table_tasks(
     Ok(SubmitDdlTaskResponse {
         key: procedure_id.into(),
         table_ids,
-        ..Default::default()
     })
 }
 
@@ -690,8 +688,7 @@ async fn handle_create_view_task(
 
     Ok(SubmitDdlTaskResponse {
         key: procedure_id.into(),
-        table_id: Some(view_id),
-        ..Default::default()
+        table_ids: vec![view_id],
     })
 }
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::WalEntry;
+use async_stream::stream;
 use common_telemetry::info;
 use futures::StreamExt;
 use prost::Message;
@@ -57,7 +58,7 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
         let LogStoreEntryReader { reader } = self;
         let mut stream = reader.read(ns, start_id)?;
 
-        let stream = async_stream::stream! {
+        let stream = stream! {
             let mut buffered_entry = None;
             while let Some(next_entry) = stream.next().await {
                 match buffered_entry.take() {
@@ -94,21 +95,10 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::error::{self, Result};
+    use crate::test_util::wal_util::MockRawEntryStream;
+    use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
     use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
-    use crate::wal::wal_entry_reader::{LogStoreEntryReader, WalEntryReader};
     use crate::wal::EntryId;
-
-    struct MockRawEntryStream {
-        entries: Vec<Entry>,
-    }
-
-    impl RawEntryReader for MockRawEntryStream {
-        fn read(&self, ns: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
-            let entries = self.entries.clone().into_iter().map(Ok);
-
-            Ok(Box::pin(stream::iter(entries)))
-        }
-    }
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {
