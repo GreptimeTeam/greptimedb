@@ -156,19 +156,19 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
         )
     }
 
-    fn from_template(&self, expr: &[Expr], _inputs: &[LogicalPlan]) -> Self {
-        Self {
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        Ok(Self {
             start: self.start,
             end: self.end,
             interval: self.interval,
-            expr: if !expr.is_empty() {
-                Some(expr[0].clone())
-            } else {
-                None
-            },
+            expr: exprs.into_iter().next(),
             time_index_schema: self.time_index_schema.clone(),
             result_schema: self.result_schema.clone(),
-        }
+        })
     }
 }
 
@@ -204,7 +204,7 @@ impl ExecutionPlan for EmptyMetricExec {
         vec![]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 

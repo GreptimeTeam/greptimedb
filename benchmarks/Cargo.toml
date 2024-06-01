@@ -12,7 +12,6 @@ api.workspace = true
 arrow.workspace = true
 chrono.workspace = true
 clap.workspace = true
-client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-telemetry.workspace = true
 common-wal.workspace = true

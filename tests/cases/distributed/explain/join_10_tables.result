@@ -75,7 +75,6 @@ limit 1;
 +-+-+
 | logical_plan_| Limit: skip=0, fetch=1_|
 |_|_Sort: t_1.ts DESC NULLS FIRST, fetch=1_|
-|_|_Projection: t_1.ts, t_1.vin, t_1.val, t_2.ts, t_2.vin, t_2.val, t_3.ts, t_3.vin, t_3.val, t_4.ts, t_4.vin, t_4.val, t_5.ts, t_5.vin, t_5.val, t_6.ts, t_6.vin, t_6.val, t_7.ts, t_7.vin, t_7.val, t_8.ts, t_8.vin, t_8.val, t_9.ts, t_9.vin, t_9.val, t_10.ts, t_10.vin, t_10.val |
 |_|_Inner Join: t_9.ts = t_10.ts, t_9.vin = t_10.vin_|
 |_|_Inner Join: t_8.ts = t_9.ts, t_8.vin = t_9.vin_|
 |_|_Inner Join: t_7.ts = t_8.ts, t_7.vin = t_8.vin_|
@@ -99,7 +98,7 @@ limit 1;
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | GlobalLimitExec: skip=0, fetch=1_|
 |_|_SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
-|_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC]_|
+|_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|

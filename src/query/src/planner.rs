@@ -149,7 +149,7 @@ impl DfLogicalPlanner {
                 &query_ctx,
             )?),
         );
-        PromPlanner::stmt_to_plan(table_provider, stmt)
+        PromPlanner::stmt_to_plan(table_provider, stmt, &self.session_state)
             .await
             .map(LogicalPlan::DfPlan)
             .map_err(BoxedError::new)

@@ -27,10 +27,6 @@ pub enum TypeSignature {
     /// arbitrary number of arguments of an common type out of a list of valid types
     // A function such as `concat` is `Variadic(vec![ConcreteDataType::String, ConcreteDataType::String])`
     Variadic(Vec<ConcreteDataType>),
-    /// arbitrary number of arguments of an arbitrary but equal type
-    // A function such as `array` is `VariadicEqual`
-    // The first argument decides the type used for coercion
-    VariadicEqual,
     /// One or more arguments with arbitrary types
     VariadicAny,
     /// fixed number of arguments of an arbitrary but equal type out of a list of valid types
@@ -67,17 +63,11 @@ impl Signature {
             volatility,
         }
     }
+
     /// variadic - Creates a variadic signature that represents an arbitrary number of arguments all from a type in common_types.
     pub fn variadic(common_types: Vec<ConcreteDataType>, volatility: Volatility) -> Self {
         Self {
             type_signature: TypeSignature::Variadic(common_types),
-            volatility,
-        }
-    }
-    /// variadic_equal - Creates a variadic signature that represents an arbitrary number of arguments of the same type.
-    pub fn variadic_equal(volatility: Volatility) -> Self {
-        Self {
-            type_signature: TypeSignature::VariadicEqual,
             volatility,
         }
     }
@@ -131,7 +121,6 @@ impl From<TypeSignature> for DfTypeSignature {
             TypeSignature::Variadic(types) => {
                 DfTypeSignature::Variadic(concrete_types_to_arrow_types(types))
             }
-            TypeSignature::VariadicEqual => DfTypeSignature::VariadicEqual,
             TypeSignature::Uniform(n, types) => {
                 DfTypeSignature::Uniform(n, concrete_types_to_arrow_types(types))
             }
