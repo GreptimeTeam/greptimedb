@@ -16,6 +16,7 @@ use api::v1::WalEntry;
 use async_stream::stream;
 use common_telemetry::info;
 use futures::StreamExt;
+use opendal::Buffer;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Entry;
@@ -30,9 +31,9 @@ pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> 
     let entry_id = raw_entry.entry_id();
     let region_id = raw_entry.region_id();
     ensure!(raw_entry.is_complete(), CorruptedEntrySnafu { region_id });
-    // TODO(weny): implement the [Buf] for return value, avoid extra memory allocation.
-    let bytes = raw_entry.into_bytes();
-    let wal_entry = WalEntry::decode(bytes.as_slice()).context(DecodeWalSnafu { region_id })?;
+    // TODO(yuliu): implement the [Buf] for return value, avoid extra memory allocation.
+    let buffer: Buffer = raw_entry.into_bytes().into();
+    let wal_entry = WalEntry::decode(buffer).context(DecodeWalSnafu { region_id })?;
 
     Ok((entry_id, wal_entry))
 }

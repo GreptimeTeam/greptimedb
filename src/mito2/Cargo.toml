@@ -33,9 +33,9 @@ common-time.workspace = true
 common-wal.workspace = true
 crc32fast = "1"
 crossbeam-utils.workspace = true
-datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
@@ -46,6 +46,7 @@ log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
 moka = { workspace = true, features = ["sync", "future"] }
 object-store.workspace = true
+opendal = { version = "*" }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
 pin-project.workspace = true
@@ -62,9 +63,9 @@ snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
-tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
