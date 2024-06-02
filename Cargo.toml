@@ -250,7 +250,6 @@ incremental = false
 
 [profile.ci]
 inherits = "dev"
-debug = false
 strip = true
 
 [profile.dev.package.sqlness-runner]
