@@ -168,7 +168,9 @@ jobs:
           name: bins
           path: .
       - name: Unzip binaries
-        run: tar -xvf ./bins.tar.gz
+        run: | 
+          tar -xvf ./bins.tar.gz
+          rm ./bins.tar.gz
       - name: Run GreptimeDB
         run: |
           ./bins/greptime standalone start&
@@ -219,7 +221,9 @@ jobs:
           name: bins
           path: .
       - name: Unzip binaries
-        run: tar -xvf ./bins.tar.gz
+        run: |
+          tar -xvf ./bins.tar.gz
+          rm ./bins.tar.gz
       - name: Build Fuzz Test
         shell: bash
         run: |
@@ -323,7 +327,9 @@ jobs:
           name: bin
           path: .
       - name: Unzip binary
-        run: tar -xvf ./bin.tar.gz
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
       - name: Build and push GreptimeDB image
         uses: ./.github/actions/build-and-push-ci-image
       - name: Wait for etcd
