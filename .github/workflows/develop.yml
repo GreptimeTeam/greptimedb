@@ -367,7 +367,14 @@ jobs:
           name: fuzz-tests-kind-logs-${{ matrix.target }}
           path: /tmp/kind
           retention-days: 3
-        
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: | 
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f
 
   sqlness:
     name: Sqlness Test
