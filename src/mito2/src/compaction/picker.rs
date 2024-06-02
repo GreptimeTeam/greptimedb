@@ -15,9 +15,14 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::compaction::CompactionRequest;
+use api::v1::region::compact_request;
 
-pub type CompactionPickerRef = Arc<dyn Picker + Send + Sync>;
+use crate::compaction::twcs::TwcsPicker;
+use crate::compaction::window::WindowedCompactionPicker;
+use crate::compaction::CompactionOutput;
+use crate::region::options::CompactionOptions;
+use crate::region::version::VersionRef;
+use crate::sst::file::FileHandle;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
@@ -26,6 +31,35 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
-pub trait Picker: Debug + Send + 'static {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>>;
+pub trait Picker: Debug + Send + Sync + 'static {
+    fn pick(&self, current_version: VersionRef) -> Option<PickerOutput>;
+}
+
+#[derive(Clone)]
+pub struct PickerOutput {
+    pub outputs: Vec<CompactionOutput>,
+    pub expired_ssts: Vec<FileHandle>,
+    pub time_window_size: i64,
+}
+
+pub fn new_picker(
+    compact_request_options: compact_request::Options,
+    compaction_options: &CompactionOptions,
+) -> Arc<dyn Picker> {
+    if let compact_request::Options::StrictWindow(window) = &compact_request_options {
+        let window = if window.window_seconds == 0 {
+            None
+        } else {
+            Some(window.window_seconds)
+        };
+        Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
+    } else {
+        match compaction_options {
+            CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
+                twcs_opts.max_active_window_files,
+                twcs_opts.max_inactive_window_files,
+                twcs_opts.time_window_seconds(),
+            )) as Arc<_>,
+        }
+    }
 }
