@@ -294,10 +294,9 @@
 | `node_id` | Integer | `None` | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
-| `rpc_addr` | String | `127.0.0.1:3001` | The gRPC address of the datanode. |
 | `rpc_hostname` | String | `None` | The hostname of the datanode. |
 | `grpc` | -- | -- | The gRPC server options. |
-| `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
+| `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |

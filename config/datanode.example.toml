@@ -13,9 +13,6 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
-## The gRPC address of the datanode.
-rpc_addr = "127.0.0.1:3001"
-
 ## The hostname of the datanode.
 ## +toml2docs:none-default
 rpc_hostname = "127.0.0.1"
@@ -23,7 +20,7 @@ rpc_hostname = "127.0.0.1"
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
-addr = "127.0.0.1:4001"
+addr = "127.0.0.1:3001"
 ## The number of server worker threads.
 runtime_size = 8
 
