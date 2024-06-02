@@ -75,9 +75,9 @@ impl OrderHintRule {
                     {
                         let mut opts = Vec::with_capacity(order_expr.len());
                         for sort in order_expr {
-                            let name = match sort.expr.try_into_col() {
-                                Ok(col) => col.name,
-                                Err(_) => return Ok(Transformed::no(plan)),
+                            let name = match sort.expr.try_as_col() {
+                                Some(col) => col.name.clone(),
+                                None => return Ok(Transformed::no(plan)),
                             };
                             opts.push(OrderOption {
                                 name,
@@ -108,7 +108,7 @@ struct OrderHintVisitor {
     order_expr: Option<Vec<Sort>>,
 }
 
-impl TreeNodeVisitor for OrderHintVisitor {
+impl TreeNodeVisitor<'_> for OrderHintVisitor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {

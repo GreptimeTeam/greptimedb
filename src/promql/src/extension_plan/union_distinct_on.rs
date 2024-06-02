@@ -135,18 +135,28 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert_eq!(inputs.len(), 2);
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.len() != 2 {
+            return Err(DataFusionError::Internal(
+                "UnionDistinctOn must have exactly 2 inputs".to_string(),
+            ));
+        }
 
-        let left = inputs[0].clone();
-        let right = inputs[1].clone();
-        Self {
+        let mut inputs = inputs.into_iter();
+        let left = inputs.next().unwrap();
+        let right = inputs.next().unwrap();
+
+        Ok(Self {
             left,
             right,
             compare_keys: self.compare_keys.clone(),
             ts_col: self.ts_col.clone(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 
@@ -181,8 +191,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
         self.properties.as_ref()
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.left.clone(), self.right.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.left, &self.right]
     }
 
     fn with_new_children(
