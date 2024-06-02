@@ -86,10 +86,10 @@ pub trait Compactor: Send + Sync + 'static {
     async fn update_manifest(
         &self,
         compaction_region: CompactionRegion,
-        compaction_result: MergeOutput,
+        merge_output: MergeOutput,
     ) -> Result<()> {
         let files_to_add = {
-            if let Some(files) = compaction_result.files_to_add {
+            if let Some(files) = merge_output.files_to_add {
                 files
             } else {
                 return Ok(());
@@ -97,7 +97,7 @@ pub trait Compactor: Send + Sync + 'static {
         };
 
         let files_to_remove = {
-            if let Some(files) = compaction_result.fileds_to_remove {
+            if let Some(files) = merge_output.fileds_to_remove {
                 files
             } else {
                 return Ok(());
@@ -108,7 +108,7 @@ pub trait Compactor: Send + Sync + 'static {
         let edit = RegionEdit {
             files_to_add,
             files_to_remove,
-            compaction_time_window: compaction_result
+            compaction_time_window: merge_output
                 .compaction_time_window
                 .map(|seconds| Duration::from_secs(seconds as u64)),
             flushed_entry_id: None,
@@ -132,6 +132,23 @@ pub trait Compactor: Send + Sync + 'static {
     }
 
     fn picker(&self) -> Arc<dyn Picker>;
+
+    async fn compact(&self, compaction_region: CompactionRegion) -> Result<()> {
+        let picker_output = self
+            .picker()
+            .pick(compaction_region.version_control.current().version);
+        let merge_output = self
+            .merge_ssts(compaction_region.clone(), picker_output)
+            .await?;
+        if merge_output.is_empty() {
+            info!(
+                "No files to compact for region_id: {}",
+                compaction_region.region_id
+            );
+            return Ok(());
+        }
+        self.update_manifest(compaction_region, merge_output).await
+    }
 }
 
 async fn do_merge_ssts(

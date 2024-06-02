@@ -25,7 +25,7 @@ pub mod test_util;
 
 mod access_layer;
 mod cache;
-mod compaction;
+pub mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;
