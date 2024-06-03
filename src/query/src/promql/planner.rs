@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -22,13 +21,14 @@ use catalog::table_source::DfTableSourceProvider;
 use common_query::prelude::GREPTIME_VALUE;
 use datafusion::common::{DFSchemaRef, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
+use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::expr::{
     AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
 };
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
-    LogicalPlan, LogicalPlanBuilder, Operator, ScalarFunctionDefinition, ScalarUDF as ScalarUdfDef,
+    AggregateFunction as AggregateFunctionEnum, BinaryExpr, Cast, Extension, LogicalPlan,
+    LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
 };
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
@@ -151,17 +151,22 @@ impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
         stmt: EvalStmt,
+        session_state: &SessionState,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(&stmt),
         };
 
-        planner.prom_expr_to_plan(stmt.expr).await
+        planner.prom_expr_to_plan(stmt.expr, session_state).await
     }
 
     #[async_recursion]
-    pub async fn prom_expr_to_plan(&mut self, prom_expr: PromExpr) -> Result<LogicalPlan> {
+    pub async fn prom_expr_to_plan(
+        &mut self,
+        prom_expr: PromExpr,
+        session_state: &SessionState,
+    ) -> Result<LogicalPlan> {
         let res = match &prom_expr {
             PromExpr::Aggregate(AggregateExpr {
                 op,
@@ -170,7 +175,7 @@ impl PromPlanner {
                 param: _param,
                 modifier,
             }) => {
-                let input = self.prom_expr_to_plan(*expr.clone()).await?;
+                let input = self.prom_expr_to_plan(*expr.clone(), session_state).await?;
 
                 // calculate columns to group by
                 // Need to append time index column into group by columns
@@ -194,7 +199,7 @@ impl PromPlanner {
             }
             PromExpr::Unary(UnaryExpr { expr }) => {
                 // Unary Expr in PromQL implys the `-` operator
-                let input = self.prom_expr_to_plan(*expr.clone()).await?;
+                let input = self.prom_expr_to_plan(*expr.clone(), session_state).await?;
                 self.projection_for_each_field_column(input, |col| {
                     Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
                 })?
@@ -250,7 +255,7 @@ impl PromPlanner {
                     }
                     // lhs is a literal, rhs is a column
                     (Some(mut expr), None) => {
-                        let input = self.prom_expr_to_plan(*rhs.clone()).await?;
+                        let input = self.prom_expr_to_plan(*rhs.clone(), session_state).await?;
                         // check if the literal is a special time expr
                         if let Some(time_expr) = Self::try_build_special_time_expr(
                             lhs,
@@ -279,7 +284,7 @@ impl PromPlanner {
                     }
                     // lhs is a column, rhs is a literal
                     (None, Some(mut expr)) => {
-                        let input = self.prom_expr_to_plan(*lhs.clone()).await?;
+                        let input = self.prom_expr_to_plan(*lhs.clone(), session_state).await?;
                         // check if the literal is a special time expr
                         if let Some(time_expr) = Self::try_build_special_time_expr(
                             rhs,
@@ -308,14 +313,16 @@ impl PromPlanner {
                     }
                     // both are columns. join them on time index
                     (None, None) => {
-                        let left_input = self.prom_expr_to_plan(*lhs.clone()).await?;
+                        let left_input =
+                            self.prom_expr_to_plan(*lhs.clone(), session_state).await?;
                         let left_field_columns = self.ctx.field_columns.clone();
                         let mut left_table_ref = self
                             .table_ref()
                             .unwrap_or_else(|_| TableReference::bare(""));
                         let left_context = self.ctx.clone();
 
-                        let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
+                        let right_input =
+                            self.prom_expr_to_plan(*rhs.clone(), session_state).await?;
                         let right_field_columns = self.ctx.field_columns.clone();
                         let mut right_table_ref = self
                             .table_ref()
@@ -399,7 +406,9 @@ impl PromPlanner {
                     }
                 }
             }
-            PromExpr::Paren(ParenExpr { expr }) => self.prom_expr_to_plan(*expr.clone()).await?,
+            PromExpr::Paren(ParenExpr { expr }) => {
+                self.prom_expr_to_plan(*expr.clone(), session_state).await?
+            }
             PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Subquery",
             }
@@ -510,16 +519,18 @@ impl PromPlanner {
             PromExpr::Call(Call { func, args }) => {
                 // some special functions that are not expression but a plan
                 match func.name {
-                    SPECIAL_HISTOGRAM_QUANTILE => return self.create_histogram_plan(args).await,
+                    SPECIAL_HISTOGRAM_QUANTILE => {
+                        return self.create_histogram_plan(args, session_state).await
+                    }
                     SPECIAL_VECTOR_FUNCTION => return self.create_vector_plan(args).await,
-                    SCALAR_FUNCTION => return self.create_scalar_plan(args).await,
+                    SCALAR_FUNCTION => return self.create_scalar_plan(args, session_state).await,
                     _ => {}
                 }
 
                 // transform function arguments
                 let args = self.create_function_args(&args.args)?;
                 let input = if let Some(prom_expr) = args.input {
-                    self.prom_expr_to_plan(prom_expr).await?
+                    self.prom_expr_to_plan(prom_expr, session_state).await?
                 } else {
                     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
                     self.ctx.reset_table_name_and_schema();
@@ -537,7 +548,8 @@ impl PromPlanner {
                         ),
                     })
                 };
-                let mut func_exprs = self.create_function_expr(func, args.literals)?;
+                let mut func_exprs =
+                    self.create_function_expr(func, args.literals, session_state)?;
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
                 func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
 
@@ -551,7 +563,9 @@ impl PromPlanner {
             }
             PromExpr::Extension(promql_parser::parser::ast::Extension { expr }) => {
                 let children = expr.children();
-                let plan = self.prom_expr_to_plan(children[0].clone()).await?;
+                let plan = self
+                    .prom_expr_to_plan(children[0].clone(), session_state)
+                    .await?;
                 // Wrapper for the explanation/analyze of the existing plan
                 // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
                 // if `analyze` is true, runs the actual plan and produces
@@ -1063,6 +1077,7 @@ impl PromPlanner {
         &mut self,
         func: &Function,
         other_input_exprs: Vec<DfExpr>,
+        session_state: &SessionState,
     ) -> Result<Vec<DfExpr>> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
@@ -1071,30 +1086,30 @@ impl PromPlanner {
         let field_column_pos = 0;
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
         let scalar_func = match func.name {
-            "increase" => ScalarFunc::ExtrapolateUdf(Increase::scalar_udf(
+            "increase" => ScalarFunc::ExtrapolateUdf(Arc::new(Increase::scalar_udf(
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            )),
-            "rate" => ScalarFunc::ExtrapolateUdf(Rate::scalar_udf(
+            ))),
+            "rate" => ScalarFunc::ExtrapolateUdf(Arc::new(Rate::scalar_udf(
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            )),
-            "delta" => ScalarFunc::ExtrapolateUdf(Delta::scalar_udf(
+            ))),
+            "delta" => ScalarFunc::ExtrapolateUdf(Arc::new(Delta::scalar_udf(
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            )),
-            "idelta" => ScalarFunc::Udf(IDelta::<false>::scalar_udf()),
-            "irate" => ScalarFunc::Udf(IDelta::<true>::scalar_udf()),
-            "resets" => ScalarFunc::Udf(Resets::scalar_udf()),
-            "changes" => ScalarFunc::Udf(Changes::scalar_udf()),
-            "deriv" => ScalarFunc::Udf(Deriv::scalar_udf()),
-            "avg_over_time" => ScalarFunc::Udf(AvgOverTime::scalar_udf()),
-            "min_over_time" => ScalarFunc::Udf(MinOverTime::scalar_udf()),
-            "max_over_time" => ScalarFunc::Udf(MaxOverTime::scalar_udf()),
-            "sum_over_time" => ScalarFunc::Udf(SumOverTime::scalar_udf()),
-            "count_over_time" => ScalarFunc::Udf(CountOverTime::scalar_udf()),
-            "last_over_time" => ScalarFunc::Udf(LastOverTime::scalar_udf()),
-            "absent_over_time" => ScalarFunc::Udf(AbsentOverTime::scalar_udf()),
-            "present_over_time" => ScalarFunc::Udf(PresentOverTime::scalar_udf()),
-            "stddev_over_time" => ScalarFunc::Udf(StddevOverTime::scalar_udf()),
-            "stdvar_over_time" => ScalarFunc::Udf(StdvarOverTime::scalar_udf()),
+            ))),
+            "idelta" => ScalarFunc::Udf(Arc::new(IDelta::<false>::scalar_udf())),
+            "irate" => ScalarFunc::Udf(Arc::new(IDelta::<true>::scalar_udf())),
+            "resets" => ScalarFunc::Udf(Arc::new(Resets::scalar_udf())),
+            "changes" => ScalarFunc::Udf(Arc::new(Changes::scalar_udf())),
+            "deriv" => ScalarFunc::Udf(Arc::new(Deriv::scalar_udf())),
+            "avg_over_time" => ScalarFunc::Udf(Arc::new(AvgOverTime::scalar_udf())),
+            "min_over_time" => ScalarFunc::Udf(Arc::new(MinOverTime::scalar_udf())),
+            "max_over_time" => ScalarFunc::Udf(Arc::new(MaxOverTime::scalar_udf())),
+            "sum_over_time" => ScalarFunc::Udf(Arc::new(SumOverTime::scalar_udf())),
+            "count_over_time" => ScalarFunc::Udf(Arc::new(CountOverTime::scalar_udf())),
+            "last_over_time" => ScalarFunc::Udf(Arc::new(LastOverTime::scalar_udf())),
+            "absent_over_time" => ScalarFunc::Udf(Arc::new(AbsentOverTime::scalar_udf())),
+            "present_over_time" => ScalarFunc::Udf(Arc::new(PresentOverTime::scalar_udf())),
+            "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
+            "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
             "quantile_over_time" => {
                 let quantile_expr = match other_input_exprs.pop_front() {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => quantile,
@@ -1103,7 +1118,7 @@ impl PromPlanner {
                     }
                     .fail()?,
                 };
-                ScalarFunc::Udf(QuantileOverTime::scalar_udf(quantile_expr))
+                ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf(quantile_expr)))
             }
             "predict_linear" => {
                 let t_expr = match other_input_exprs.pop_front() {
@@ -1114,7 +1129,7 @@ impl PromPlanner {
                     }
                     .fail()?,
                 };
-                ScalarFunc::Udf(PredictLinear::scalar_udf(t_expr))
+                ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf(t_expr)))
             }
             "holt_winters" => {
                 let sf_exp = match other_input_exprs.pop_front() {
@@ -1134,7 +1149,7 @@ impl PromPlanner {
                     }
                     .fail()?,
                 };
-                ScalarFunc::Udf(HoltWinters::scalar_udf(sf_exp, tf_exp))
+                ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf(sf_exp, tf_exp)))
             }
             "time" => {
                 exprs.push(build_special_time_expr(
@@ -1201,9 +1216,7 @@ impl PromPlanner {
                     right: Box::new(interval_1day_lit_expr),
                 });
                 let date_trunc_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    func_def: ScalarFunctionDefinition::UDF(
-                        datafusion_functions::datetime::date_trunc(),
-                    ),
+                    func: datafusion_functions::datetime::date_trunc(),
                     args: vec![month_lit_expr, self.create_time_index_column_expr()?],
                 });
                 let date_trunc_plus_interval_expr = DfExpr::BinaryExpr(BinaryExpr {
@@ -1212,9 +1225,7 @@ impl PromPlanner {
                     right: Box::new(the_1month_minus_1day_expr),
                 });
                 let date_part_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    func_def: ScalarFunctionDefinition::UDF(
-                        datafusion_functions::datetime::date_part(),
-                    ),
+                    func: datafusion_functions::datetime::date_part(),
                     args: vec![day_lit_expr, date_trunc_plus_interval_expr],
                 });
 
@@ -1222,8 +1233,8 @@ impl PromPlanner {
                 ScalarFunc::GeneratedExpr
             }
             _ => {
-                if let Ok(f) = BuiltinScalarFunction::from_str(func.name) {
-                    ScalarFunc::DataFusionBuiltin(f)
+                if let Some(f) = session_state.scalar_functions().get(func.name) {
+                    ScalarFunc::DataFusionBuiltin(f.clone())
                 } else if let Some(f) = datafusion_functions::math::functions()
                     .iter()
                     .find(|f| f.name() == func.name)
@@ -1242,28 +1253,25 @@ impl PromPlanner {
             let col_expr = DfExpr::Column(Column::from_name(value));
 
             match scalar_func.clone() {
-                ScalarFunc::DataFusionBuiltin(fun) => {
+                ScalarFunc::DataFusionBuiltin(func) => {
                     other_input_exprs.insert(field_column_pos, col_expr);
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-                        func_def: ScalarFunctionDefinition::BuiltIn(fun),
+                        func,
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
                     let _ = other_input_exprs.remove(field_column_pos);
                 }
-                ScalarFunc::DataFusionUdf(f) => {
+                ScalarFunc::DataFusionUdf(func) => {
                     let args = itertools::chain!(
                         other_input_exprs.iter().take(field_column_pos).cloned(),
                         std::iter::once(col_expr),
                         other_input_exprs.iter().skip(field_column_pos).cloned()
                     )
                     .collect_vec();
-                    exprs.push(DfExpr::ScalarFunction(ScalarFunction {
-                        func_def: ScalarFunctionDefinition::UDF(f),
-                        args,
-                    }))
+                    exprs.push(DfExpr::ScalarFunction(ScalarFunction { func, args }))
                 }
-                ScalarFunc::Udf(fun) => {
+                ScalarFunc::Udf(func) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
                         RangeManipulate::build_timestamp_range_name(
                             self.ctx.time_index_column.as_ref().unwrap(),
@@ -1272,14 +1280,14 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos, ts_range_expr);
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-                        func_def: ScalarFunctionDefinition::UDF(Arc::new(fun)),
+                        func,
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
                     let _ = other_input_exprs.remove(field_column_pos + 1);
                     let _ = other_input_exprs.remove(field_column_pos);
                 }
-                ScalarFunc::ExtrapolateUdf(fun) => {
+                ScalarFunc::ExtrapolateUdf(func) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
                         RangeManipulate::build_timestamp_range_name(
                             self.ctx.time_index_column.as_ref().unwrap(),
@@ -1290,7 +1298,7 @@ impl PromPlanner {
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-                        func_def: ScalarFunctionDefinition::UDF(Arc::new(fun)),
+                        func,
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
@@ -1418,7 +1426,11 @@ impl PromPlanner {
     }
 
     /// Create a [SPECIAL_HISTOGRAM_QUANTILE] plan.
-    async fn create_histogram_plan(&mut self, args: &PromFunctionArgs) -> Result<LogicalPlan> {
+    async fn create_histogram_plan(
+        &mut self,
+        args: &PromFunctionArgs,
+        session_state: &SessionState,
+    ) -> Result<LogicalPlan> {
         if args.args.len() != 2 {
             return FunctionInvalidArgumentSnafu {
                 fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
@@ -1431,7 +1443,7 @@ impl PromPlanner {
             }
         })?;
         let input = args.args[1].as_ref().clone();
-        let input_plan = self.prom_expr_to_plan(input).await?;
+        let input_plan = self.prom_expr_to_plan(input, session_state).await?;
 
         if !self.ctx.has_le_tag() {
             return ColumnNotFoundSnafu {
@@ -1505,7 +1517,11 @@ impl PromPlanner {
     }
 
     /// Create a [SCALAR_FUNCTION] plan
-    async fn create_scalar_plan(&mut self, args: &PromFunctionArgs) -> Result<LogicalPlan> {
+    async fn create_scalar_plan(
+        &mut self,
+        args: &PromFunctionArgs,
+        session_state: &SessionState,
+    ) -> Result<LogicalPlan> {
         ensure!(
             args.len() == 1,
             FunctionInvalidArgumentSnafu {
@@ -1513,7 +1529,7 @@ impl PromPlanner {
             }
         );
         let input = self
-            .prom_expr_to_plan(args.args[0].as_ref().clone())
+            .prom_expr_to_plan(args.args[0].as_ref().clone(), session_state)
             .await?;
         ensure!(
             self.ctx.field_columns.len() == 1,
@@ -1653,16 +1669,13 @@ impl PromPlanner {
             token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
             token::T_POW => Ok(Box::new(|lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
-                    func_def: ScalarFunctionDefinition::UDF(datafusion_functions::math::power()),
+                    func: datafusion_functions::math::power(),
                     args: vec![lhs, rhs],
                 }))
             })),
             token::T_ATAN2 => Ok(Box::new(|lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
-                    // func_def: ScalarFunctionDefinition::BuiltIn(BuiltinScalarFunction::Atan2),
-                    func_def: datafusion_expr::ScalarFunctionDefinition::UDF(
-                        datafusion_functions::math::atan2(),
-                    ),
+                    func: datafusion_functions::math::atan2(),
                     args: vec![lhs, rhs],
                 }))
             })),
@@ -2153,7 +2166,7 @@ impl PromPlanner {
                 })?,
         );
         let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
-            func_def: ScalarFunctionDefinition::UDF(datafusion_functions::datetime::date_part()),
+            func: datafusion_functions::datetime::date_part(),
             args: vec![lit_expr, input_expr],
         });
         Ok(fn_expr)
@@ -2168,13 +2181,13 @@ struct FunctionArgs {
 
 #[derive(Debug, Clone)]
 enum ScalarFunc {
-    DataFusionBuiltin(BuiltinScalarFunction),
+    DataFusionBuiltin(Arc<ScalarUdfDef>),
     /// The UDF that is defined by Datafusion itself.
     DataFusionUdf(Arc<ScalarUdfDef>),
-    Udf(ScalarUdfDef),
+    Udf(Arc<ScalarUdfDef>),
     // todo(ruihang): maybe merge with Udf later
     /// UDF that require extra information like range length to be evaluated.
-    ExtrapolateUdf(ScalarUdfDef),
+    ExtrapolateUdf(Arc<ScalarUdfDef>),
     /// Func that doesn't require input, like `time()`.
     GeneratedExpr,
 }
@@ -2187,8 +2200,10 @@ mod test {
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::test_util::DummyDecoder;
+    use datafusion::execution::runtime_env::RuntimeEnv;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
+    use df_prelude::SessionConfig;
     use promql_parser::label::Labels;
     use promql_parser::parser;
     use session::context::QueryContext;
@@ -2196,6 +2211,10 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+
+    fn build_session_state() -> SessionState {
+        SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
+    }
 
     async fn build_test_table_provider(
         table_name_tuples: &[(String, String)],
@@ -2295,7 +2314,7 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
             .await
             .unwrap();
 
@@ -2505,9 +2524,10 @@ mod test {
             2,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
-            .await
-            .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone(), &build_session_state())
+                .await
+                .unwrap();
         let expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(Millisecond, None), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -2535,7 +2555,7 @@ mod test {
             2,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
             .await
             .unwrap();
         let expected_without = String::from(
@@ -2660,7 +2680,7 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
             .await
             .unwrap();
 
@@ -2710,7 +2730,7 @@ mod test {
             1,
         )
         .await;
-        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt)
+        let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state())
             .await
             .unwrap();
 
@@ -2954,9 +2974,13 @@ mod test {
                 3,
             )
             .await;
-            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone())
-                .await
-                .unwrap();
+            let plan = PromPlanner::stmt_to_plan(
+                table_provider,
+                eval_stmt.clone(),
+                &build_session_state(),
+            )
+            .await
+            .unwrap();
             let mut fields = plan.schema().field_names();
             let mut expected = case.1.into_iter().map(String::from).collect::<Vec<_>>();
             fields.sort();
@@ -2978,7 +3002,12 @@ mod test {
                 3,
             )
             .await;
-            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt.clone()).await;
+            let plan = PromPlanner::stmt_to_plan(
+                table_provider,
+                eval_stmt.clone(),
+                &build_session_state(),
+            )
+            .await;
             assert!(plan.is_err(), "case: {:?}", case);
         }
     }
@@ -3030,7 +3059,8 @@ mod test {
             )
             .await;
 
-            let plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt).await;
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, eval_stmt, &build_session_state()).await;
             assert!(plan.is_err(), "query: {:?}", query);
         }
     }
@@ -3096,6 +3126,7 @@ mod test {
                 interval: Duration::from_secs(5),
                 lookback_delta: Duration::from_secs(1),
             },
+            &build_session_state(),
         )
         .await
         .unwrap();
@@ -3124,6 +3155,7 @@ mod test {
                 interval: Duration::from_secs(5),
                 lookback_delta: Duration::from_secs(1),
             },
+            &build_session_state(),
         )
         .await
         .unwrap();

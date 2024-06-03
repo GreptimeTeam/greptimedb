@@ -215,18 +215,26 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
         write!(f, "ScalarCalculate: tags={:?}", self.tag_columns)
     }
 
-    fn from_template(&self, _expr: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
-        ScalarCalculate {
+    fn with_exprs_and_inputs(
+        &self,
+        exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if !exprs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "ScalarCalculate should not have any expressions".to_string(),
+            ));
+        }
+        Ok(ScalarCalculate {
             start: self.start,
             end: self.end,
             interval: self.interval,
             time_index: self.time_index.clone(),
             tag_columns: self.tag_columns.clone(),
             field_column: self.field_column.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 
@@ -264,8 +272,8 @@ impl ExecutionPlan for ScalarCalculateExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn with_new_children(

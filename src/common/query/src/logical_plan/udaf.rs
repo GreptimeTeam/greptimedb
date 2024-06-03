@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::Field;
 use datafusion_common::Result;
-use datafusion_expr::function::AccumulatorArgs;
+use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::{
     Accumulator, AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf, AggregateUDFImpl,
 };
@@ -129,13 +129,13 @@ impl AggregateUDFImpl for DfUdafAdapter {
         (self.accumulator)(acc_args)
     }
 
-    fn state_fields(&self, name: &str, _: ArrowDataType, _: Vec<Field>) -> Result<Vec<Field>> {
+    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
         let state_types = self.creator.state_types()?;
         let fields = state_types
             .into_iter()
             .enumerate()
             .map(|(i, t)| {
-                let name = format!("{name}_{i}");
+                let name = format!("{}_{i}", args.name);
                 Field::new(name, t.as_arrow_type(), true)
             })
             .collect::<Vec<_>>();

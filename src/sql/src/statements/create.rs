@@ -72,7 +72,6 @@ pub const TIME_INDEX: &str = "__time_index";
 pub fn is_time_index(constraint: &TableConstraint) -> bool {
     matches!(constraint, TableConstraint::Unique {
         name: Some(name),
-        is_primary: false,
         ..
     }  if name.value == TIME_INDEX)
 }
