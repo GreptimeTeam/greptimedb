@@ -51,13 +51,12 @@ use session::context::QueryContextRef;
 pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
-use sql::error::SyntaxSnafu;
+use sql::parser::ParserContext;
 use sql::statements::create::{CreateFlow, Partitions};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
 use sqlparser::ast::ObjectName;
-use sqlparser::parser::{Parser, ParserOptions};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
@@ -623,18 +622,10 @@ pub fn show_create_flow(
     flow_val: FlowInfoValue,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let mut parser = Parser::new(query_ctx.sql_dialect())
-        .with_options(ParserOptions::new().with_trailing_commas(true))
-        .try_with_sql(flow_val.raw_sql())
-        .context(SyntaxSnafu)
-        .context(error::SqlSnafu)?;
+    let mut parser_ctx =
+        ParserContext::new(query_ctx.sql_dialect(), flow_val.raw_sql()).context(error::SqlSnafu)?;
 
-    let query = Box::new(
-        parser
-            .parse_query()
-            .context(SyntaxSnafu)
-            .context(error::SqlSnafu)?,
-    );
+    let query = parser_ctx.parser_query().context(error::SqlSnafu)?;
 
     let comment = if flow_val.comment().is_empty() {
         None

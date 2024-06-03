@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::Ident;
+use sqlparser::ast::{Ident, Query};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
@@ -38,6 +38,21 @@ pub struct ParserContext<'a> {
 }
 
 impl<'a> ParserContext<'a> {
+    /// Construct a new ParserContext.
+    pub fn new(dialect: &'a dyn Dialect, sql: &'a str) -> Result<ParserContext<'a>> {
+        let parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
+            .try_with_sql(sql)
+            .context(SyntaxSnafu)?;
+
+        Ok(ParserContext { parser, sql })
+    }
+
+    /// Parses parser context to Query.
+    pub fn parser_query(&mut self) -> Result<Box<Query>> {
+        Ok(Box::new(self.parser.parse_query().context(SyntaxSnafu)?))
+    }
+
     /// Parses SQL with given dialect
     pub fn create_with_dialect(
         sql: &'a str,
