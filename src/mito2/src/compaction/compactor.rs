@@ -78,7 +78,7 @@ pub struct CompactionRequest {
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
     req: CompactionRequest,
-    mito_config: Arc<MitoConfig>,
+    data_home: &str,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
     let region_options = RegionOptions::try_from(&req.options)?;
@@ -99,6 +99,9 @@ pub async fn open_compaction_region(
             object_store_manager.default_object_store()
         }
     };
+
+    let mut mito_config = MitoConfig::default();
+    mito_config.sanitize(data_home)?;
 
     let access_layer = {
         let intermediate_manager =
@@ -142,7 +145,7 @@ pub async fn open_compaction_region(
     };
 
     let version_control = {
-        let memtable_builder = MemtableBuilderProvider::new(None, mito_config.clone())
+        let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
             .builder_for_options(
                 region_options.memtable.as_ref(),
                 !region_options.append_mode,
@@ -174,7 +177,7 @@ pub async fn open_compaction_region(
         version_control,
         region_id: req.region_id,
         cache_manager: Arc::new(CacheManager::default()),
-        engine_config: mito_config.clone(),
+        engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
         file_purger: file_purger.clone(),
     })
