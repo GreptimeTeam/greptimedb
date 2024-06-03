@@ -152,7 +152,7 @@ impl SeqScan {
             };
 
             Self::build_part_sources(
-                &part,
+                part,
                 Some(input.mapper.column_ids()),
                 input.predicate.as_ref(),
                 &mut sources,
@@ -161,7 +161,7 @@ impl SeqScan {
             // Safety: We initialized parts before.
             for part in parts.0.as_ref().unwrap() {
                 Self::build_part_sources(
-                    &part,
+                    part,
                     Some(input.mapper.column_ids()),
                     input.predicate.as_ref(),
                     &mut sources,
