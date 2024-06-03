@@ -122,9 +122,9 @@ impl ExecutionPlan for RegionScanExec {
 }
 
 impl DisplayAs for RegionScanExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // The scanner contains all information needed to display the plan.
-        write!(f, "{:?}", self.scanner)
+        self.scanner.fmt_as(t, f)
     }
 }
 
