@@ -177,8 +177,8 @@ jobs:
       - name: Build Fuzz Test
         shell: bash
         run: |
-          cd tests-fuzz &
-          cargo gc &
+          cd tests-fuzz && \
+          cargo gc && \
           cd ..
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
@@ -227,8 +227,8 @@ jobs:
       - name: Build Fuzz Test
         shell: bash
         run: |
-          cd tests-fuzz &
-          cargo gc &
+          cd tests-fuzz && \
+          cargo gc && \
           cd ..
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
@@ -274,7 +274,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo build --bin greptime --profile ci
+        run: cargo gc --profile ci -- --bin greptime 
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -353,8 +353,8 @@ jobs:
       - name: Build Fuzz Test
         shell: bash
         run: |
-          cd tests-fuzz &
-          cargo gc &
+          cd tests-fuzz && \
+          cargo gc && \
           cd ..
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
