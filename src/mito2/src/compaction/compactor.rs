@@ -77,7 +77,7 @@ pub struct CompactionRequest {
 /// Open a compaction region from a compaction request.
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
-    req: CompactionRequest,
+    req: &CompactionRequest,
     data_home: &str,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
