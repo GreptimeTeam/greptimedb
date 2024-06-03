@@ -15,15 +15,19 @@ Affected Rows: 0
 
 CREATE FLOW filter_numbers  SINK TO out_num_cnt AS SELECT number FROM numbers_input where number > 10;
 
-Error: 1002(Unexpected), Procedure panics, procedure_id: 74239ce6-2c26-4e9c-bbb8-3312198d1f78
+Affected Rows: 0
 
 SHOW CREATE FLOW filter_numbers;
 
-Error: 8001(FlowNotFound), Flow not found: filter_numbers
++----------------+---------------------------------------------------------------------------------------------------------------------------------+
+| Flow           | Create Flow                                                                                                                     |
++----------------+---------------------------------------------------------------------------------------------------------------------------------+
+| filter_numbers | CREATE OR REPLACE TASK IF NOT EXISTS filter_numbers OUTPUT AS out_num_cnt AS SELECT number FROM numbers_input WHERE number > 10 |
++----------------+---------------------------------------------------------------------------------------------------------------------------------+
 
 drop flow filter_numbers;
 
-Error: 8001(FlowNotFound), Flow not found: greptime.filter_numbers
+Affected Rows: 0
 
 drop table out_num_cnt;
 
