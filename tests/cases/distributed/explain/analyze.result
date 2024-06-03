@@ -35,7 +35,7 @@ explain analyze SELECT count(*) FROM system_metrics;
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[COUNT(greptime.public.system_REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: [Mutex { data: ScanPartList(Some([ScanPart(1 memtables, 0 file ranges, time range Some((Timestamp { value: 1667446797450, unit: Millisecond }, Timestamp { value: 1667446797450, unit: Millisecond })))])) }] REDACTED
+|_|_|_SeqScan: [ScanPart(1 memtables, 0 file ranges, time range: (1667446797450::Millisecond, 1667446797450::Millisecond))] REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+

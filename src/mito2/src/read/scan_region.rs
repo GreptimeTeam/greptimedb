@@ -587,14 +587,18 @@ impl fmt::Debug for ScanPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ScanPart({} memtables, {} file ranges, time range {:?})",
+            "ScanPart({} memtables, {} file ranges",
             self.memtables.len(),
             self.file_ranges
                 .iter()
                 .map(|ranges| ranges.len())
                 .sum::<usize>(),
-            self.time_range,
-        )
+        )?;
+        if let Some(time_range) = &self.time_range {
+            write!(f, ", time range: {:?})", time_range)
+        } else {
+            write!(f, ")")
+        }
     }
 }
 
