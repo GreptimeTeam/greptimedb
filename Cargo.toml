@@ -46,6 +46,7 @@ members = [
     "src/object-store",
     "src/operator",
     "src/partition",
+    "src/pipeline",
     "src/plugins",
     "src/promql",
     "src/puffin",
@@ -59,7 +60,7 @@ members = [
     "src/index",
     "tests-fuzz",
     "tests-integration",
-    "tests/runner", "src/pipeline",
+    "tests/runner",
 ]
 resolver = "2"
 
@@ -222,12 +223,12 @@ mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
 partition = { path = "src/partition" }
+pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }
 script = { path = "src/script" }
-pipeline = { path = "src/pipeline" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }

@@ -69,6 +69,7 @@ opentelemetry-proto.workspace = true
 parking_lot = "0.12"
 pgwire = "0.20"
 pin-project = "1.0"
+pipeline = { git = "ssh://git@github.com/GreptimeTeam/pipeline.git", rev = "3eb890c551b8d7f60c4491fcfec18966e2b210a4" }
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [
     "flamegraph",
@@ -104,8 +105,6 @@ tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
 zstd.workspace = true
-#pipeline = { git = "ssh://git@github.com/GreptimeTeam/pipeline.git", rev = "6b88c3c627da9e20f8fd160071e9c69b3ebd4e6a" }
-pipeline = { path = "../../../pipeline" }
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 

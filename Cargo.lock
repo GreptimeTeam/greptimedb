@@ -3932,7 +3932,7 @@ dependencies = [
  "opentelemetry-proto 0.5.0",
  "operator",
  "partition",
- "pipeline 0.8.0",
+ "pipeline 0.8.1",
  "prometheus",
  "prost 0.12.6",
  "query",
@@ -7240,6 +7240,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 [[package]]
 name = "pipeline"
 version = "0.1.0"
+source = "git+ssh://git@github.com/GreptimeTeam/pipeline.git?rev=3eb890c551b8d7f60c4491fcfec18966e2b210a4#3eb890c551b8d7f60c4491fcfec18966e2b210a4"
 dependencies = [
  "chrono",
  "chrono-tz 0.9.0",
@@ -7256,7 +7257,7 @@ dependencies = [
 
 [[package]]
 name = "pipeline"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -7277,11 +7278,11 @@ dependencies = [
  "console",
  "criterion",
  "crossbeam-utils",
- "datafusion 37.0.0",
- "datafusion-common 37.0.0",
- "datafusion-expr 37.0.0",
- "datafusion-functions 37.0.0",
- "datafusion-physical-expr 37.0.0",
+ "datafusion 38.0.0",
+ "datafusion-common 38.0.0",
+ "datafusion-expr 38.0.0",
+ "datafusion-functions 38.0.0",
+ "datafusion-physical-expr 38.0.0",
  "datatypes",
  "futures",
  "lazy_static",
@@ -7297,7 +7298,7 @@ dependencies = [
  "serde",
  "servers",
  "session",
- "snafu 0.8.2",
+ "snafu 0.8.3",
  "sql",
  "table",
  "tokio",
