@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -27,13 +27,14 @@ use smallvec::SmallVec;
 use store_api::region_engine::RegionScannerRef;
 use store_api::storage::ScanRequest;
 use table::predicate::{build_time_range_predicate, Predicate};
+use tokio::sync::Mutex;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::READ_SST_COUNT;
+use crate::metrics::{READ_SST_COUNT, READ_STAGE_ELAPSED};
 use crate::read::compat::{CompatBatch, CompatReader};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
@@ -57,7 +58,7 @@ impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
+            Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
@@ -210,14 +211,14 @@ impl ScanRegion {
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
         } else {
-            self.seq_scan().await.map(Scanner::Seq)
+            self.seq_scan().map(Scanner::Seq)
         }
     }
 
     /// Scan sequentially.
-    pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
+    pub(crate) fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input(true)?;
-        SeqScan::new(input).await
+        Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
@@ -227,9 +228,9 @@ impl ScanRegion {
     }
 
     #[cfg(test)]
-    pub(crate) async fn scan_without_filter_deleted(self) -> Result<SeqScan> {
+    pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
         let input = self.scan_input(false)?;
-        SeqScan::new(input).await
+        Ok(SeqScan::new(input))
     }
 
     /// Creates a scan input.
@@ -679,4 +680,66 @@ pub(crate) trait FileRangeCollector {
         file_meta: &FileMeta,
         file_ranges: impl Iterator<Item = FileRange>,
     );
+}
+
+/// Optional list of [ScanPart]s.
+#[derive(Debug, Default)]
+pub(crate) struct ScanPartList(pub(crate) Option<Vec<ScanPart>>);
+
+impl ScanPartList {
+    /// Returns true if the list is None.
+    pub(crate) fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Sets parts to the list.
+    pub(crate) fn set_parts(&mut self, parts: Vec<ScanPart>) {
+        self.0 = Some(parts);
+    }
+
+    /// Gets the part by index, returns None if the index is out of bound.
+    /// # Panics
+    /// Panics if parts are not initialized.
+    pub(crate) fn get_part(&mut self, index: usize) -> Option<&ScanPart> {
+        let parts = self.0.as_ref().unwrap();
+        parts.get(index)
+    }
+}
+
+/// Context shared by different streams from a scanner.
+/// It contains the input and distributes input to multiple parts
+/// to scan.
+pub(crate) struct StreamContext {
+    /// Input memtables and files.
+    pub(crate) input: ScanInput,
+    /// Parts to scan.
+    /// The scanner builds parts to scan from the input lazily.
+    /// The mutex is used to ensure the parts are only built once.
+    pub(crate) parts: Mutex<ScanPartList>,
+
+    // Metrics:
+    /// The start time of the query.
+    pub(crate) query_start: Instant,
+    /// Time elapsed before creating the scanner.
+    pub(crate) prepare_scan_cost: Duration,
+}
+
+impl StreamContext {
+    /// Creates a new [StreamContext].
+    pub(crate) fn new(input: ScanInput) -> Self {
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let prepare_scan_cost = query_start.elapsed();
+
+        // Observes metrics.
+        READ_STAGE_ELAPSED
+            .with_label_values(&["prepare_scan"])
+            .observe(prepare_scan_cost.as_secs_f64());
+
+        Self {
+            input,
+            parts: Mutex::new(ScanPartList::default()),
+            query_start,
+            prepare_scan_cost,
+        }
+    }
 }

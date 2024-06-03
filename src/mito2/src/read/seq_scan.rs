@@ -15,14 +15,14 @@
 //! Sequential scan.
 
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::debug;
-use common_time::Timestamp;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use smallvec::smallvec;
@@ -33,8 +33,11 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::read::merge::MergeReaderBuilder;
-use crate::read::scan_region::{FileRangeCollector, ScanInput, ScanPart};
+use crate::metrics::READ_STAGE_ELAPSED;
+use crate::read::merge::{MergeReader, MergeReaderBuilder};
+use crate::read::scan_region::{
+    FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
+};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
@@ -44,82 +47,154 @@ use crate::sst::parquet::reader::ReaderMetrics;
 ///
 /// The output order is always `order by primary key, time index`.
 pub struct SeqScan {
-    /// Input memtable and files.
-    input: ScanInput,
     /// Properties of the scanner.
     properties: ScannerProperties,
-    /// Parts to scan.
-    parts: Vec<PartsInTimeRange>,
-
-    // Metrics:
-    /// The start time of the query.
-    query_start: Instant,
-    /// Time elapsed before creating the scanner.
-    prepare_scan_cost: Duration,
-    /// Duration to build parts to scan.
-    build_parts_cost: Duration,
+    /// Context of streams.
+    stream_ctx: Arc<StreamContext>,
 }
 
 impl SeqScan {
     /// Creates a new [SeqScan].
-    pub(crate) async fn new(input: ScanInput) -> Result<SeqScan> {
-        let build_start = Instant::now();
-        let query_start = input.query_start.unwrap_or(build_start);
-        let prepare_scan_cost = query_start.elapsed();
-        let mut distributor = SeqDistributor::default();
-        input.prune_file_ranges(&mut distributor).await?;
-        let parts = group_parts_by_range(distributor.build_parts(&input.memtables));
-        let parts = maybe_split_parts(parts, input.parallelism.parallelism);
-        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(parts.len()));
-        let build_parts_cost = build_start.elapsed();
+    pub(crate) fn new(input: ScanInput) -> Self {
+        let properties =
+            ScannerProperties::new(ScannerPartitioning::Unknown(input.parallelism.parallelism));
+        let stream_ctx = Arc::new(StreamContext::new(input));
 
-        // Observes metrics.
-        ScannerMetrics::observe_metrics_on_create(&prepare_scan_cost, &build_parts_cost);
-
-        Ok(SeqScan {
-            input,
+        Self {
             properties,
-            parts,
-            query_start,
-            prepare_scan_cost,
-            build_parts_cost,
-        })
+            stream_ctx,
+        }
     }
 
     /// Builds a stream for the query.
-    pub async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        let mut sources = Vec::with_capacity(self.parts.len());
-        for part in &self.parts {
-            part.build_sources(
-                Some(self.input.mapper.column_ids()),
-                self.input.predicate.as_ref(),
-                &mut sources,
-            )
-            .map_err(BoxedError::new)?;
-        }
-        let stream = self.sources_to_stream(sources);
-        Ok(stream)
+    pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.scan_partition_opt(None)
     }
 
-    fn sources_to_stream(&self, sources: Vec<Source>) -> SendableRecordBatchStream {
-        let dedup = !self.input.append_mode;
-        let mut builder =
-            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
-        let mapper = self.input.mapper.clone();
-        let cache_manager = self.input.cache_manager.clone();
+    /// Builds a [BoxedBatchReader] from sequential scan for compaction.
+    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.prepare_scan_cost,
-            build_parts_cost: self.build_parts_cost,
+            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
             ..Default::default()
         };
-        let query_start = self.query_start;
+        let maybe_reader = Self::build_merge_reader(&self.stream_ctx, None, &mut metrics).await?;
+        // Safety: `build_merge_reader()` always returns a reader if partition is None.
+        let reader = maybe_reader.unwrap();
+        Ok(Box::new(reader))
+    }
+
+    /// Builds sources from a [ScanPart].
+    fn build_part_sources(
+        part: &ScanPart,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<&Predicate>,
+        sources: &mut Vec<Source>,
+    ) -> Result<()> {
+        sources.reserve(part.memtables.len() + part.file_ranges.len());
+        // Read memtables.
+        for mem in &part.memtables {
+            let iter = mem.iter(projection, predicate.cloned())?;
+            sources.push(Source::Iter(iter));
+        }
+        // Read files.
+        for file in &part.file_ranges {
+            if file.is_empty() {
+                continue;
+            }
+
+            // Creates a stream to read the file.
+            let ranges = file.clone();
+            let stream = try_stream! {
+                let mut reader_metrics = ReaderMetrics::default();
+                // Safety: We checked whether it is empty before.
+                let file_id = ranges[0].file_handle().file_id();
+                let region_id = ranges[0].file_handle().region_id();
+                for range in ranges {
+                    let mut reader = range.reader().await?;
+                    let compat_batch = range.compat_batch();
+                    while let Some(mut batch) = reader.next_batch().await? {
+                        if let Some(compat) = compat_batch {
+                            batch = compat
+                                .compat_batch(batch)?;
+                        }
+
+                        yield batch;
+                    }
+                    reader_metrics.merge_from(reader.metrics());
+                }
+                debug!(
+                    "Seq scan region {} file {} ranges finished, metrics: {:?}",
+                    region_id, file_id, reader_metrics
+                );
+            };
+            let stream = Box::pin(stream);
+            sources.push(Source::Stream(stream));
+        }
+
+        Ok(())
+    }
+
+    /// Builds a merge reader.
+    /// If `partition` is None, reads all partitions.
+    /// If the `partition` is out of bound, returns None.
+    async fn build_merge_reader(
+        stream_ctx: &StreamContext,
+        partition: Option<usize>,
+        metrics: &mut ScannerMetrics,
+    ) -> Result<Option<MergeReader>> {
+        let mut parts = stream_ctx.parts.lock().await;
+        maybe_init_parts(&mut parts, &stream_ctx.input, metrics).await?;
+
+        let input = &stream_ctx.input;
+        let mut sources = Vec::new();
+        if let Some(index) = partition {
+            let Some(part) = parts.get_part(index) else {
+                return Ok(None);
+            };
+
+            Self::build_part_sources(
+                &part,
+                Some(input.mapper.column_ids()),
+                input.predicate.as_ref(),
+                &mut sources,
+            )?;
+        } else {
+            // Safety: We initialized parts before.
+            for part in parts.0.as_ref().unwrap() {
+                Self::build_part_sources(
+                    &part,
+                    Some(input.mapper.column_ids()),
+                    input.predicate.as_ref(),
+                    &mut sources,
+                )?;
+            }
+        }
+
+        let dedup = !stream_ctx.input.append_mode;
+        let mut builder =
+            MergeReaderBuilder::from_sources(sources, dedup, stream_ctx.input.filter_deleted);
+        builder.build().await.map(Some)
+    }
+
+    /// Scans one partition or all partitions.
+    fn scan_partition_opt(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        let mut metrics = ScannerMetrics {
+            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            ..Default::default()
+        };
+        let stream_ctx = self.stream_ctx.clone();
         let stream = try_stream! {
-            let mut reader = builder
-                .build()
+            let maybe_reader = Self::build_merge_reader(&stream_ctx, partition, &mut metrics)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
-            let cache = cache_manager.as_deref();
+            let Some(mut reader) = maybe_reader else {
+                return;
+            };
+            let cache = stream_ctx.input.cache_manager.as_deref();
             let mut fetch_start = Instant::now();
             while let Some(batch) = reader
                 .next_batch()
@@ -132,38 +207,28 @@ impl SeqScan {
                 metrics.num_rows += batch.num_rows();
 
                 let convert_start = Instant::now();
-                let record_batch = mapper.convert(&batch, cache)?;
+                let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
                 metrics.convert_cost += convert_start.elapsed();
                 yield record_batch;
 
                 fetch_start = Instant::now();
             }
             metrics.scan_cost += fetch_start.elapsed();
-            metrics.total_cost = query_start.elapsed();
+            metrics.total_cost = stream_ctx.query_start.elapsed();
             metrics.observe_metrics_on_finish();
 
             debug!(
                 "Seq scan finished, region_id: {:?}, metrics: {:?}",
-                mapper.metadata().region_id, metrics,
+                stream_ctx.input.mapper.metadata().region_id, metrics,
             );
         };
 
-        Box::pin(RecordBatchStreamWrapper::new(
-            self.input.mapper.output_schema(),
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.stream_ctx.input.mapper.output_schema(),
             Box::pin(stream),
-        ))
-    }
+        ));
 
-    // TODO(yingwen): Remove this.
-    /// Builds a [BoxedBatchReader] from sequential scan.
-    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
-        // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let sources = self.input.build_sources().await?;
-        let dedup = !self.input.append_mode;
-        let mut builder =
-            MergeReaderBuilder::from_sources(sources, dedup, self.input.filter_deleted);
-        let reader = builder.build().await?;
-        Ok(Box::new(reader))
+        Ok(stream)
     }
 }
 
@@ -173,33 +238,25 @@ impl RegionScanner for SeqScan {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.input.mapper.output_schema()
+        self.stream_ctx.input.mapper.output_schema()
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part = &self.parts[partition];
-        let mut sources = Vec::new();
-        part.build_sources(
-            Some(self.input.mapper.column_ids()),
-            self.input.predicate.as_ref(),
-            &mut sources,
-        )
-        .map_err(BoxedError::new)?;
-        let stream = self.sources_to_stream(sources);
-        Ok(stream)
+        self.scan_partition_opt(Some(partition))
     }
 }
 
 impl DisplayAs for SeqScan {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SeqScan: [{:?}]", self.parts)
+        write!(f, "SeqScan: [{:?}]", self.stream_ctx.parts)
     }
 }
 
 impl fmt::Debug for SeqScan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SeqScan")
-            .field("parts", &self.parts)
+            .field("parts", &self.stream_ctx.parts)
+            .field("prepare_scan_cost", &self.stream_ctx.prepare_scan_cost)
             .finish()
     }
 }
@@ -208,8 +265,30 @@ impl fmt::Debug for SeqScan {
 impl SeqScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
-        &self.input
+        &self.stream_ctx.input
     }
+}
+
+// TODO(yingwen): Reuse code.
+/// Initializes parts if they are not built yet.
+async fn maybe_init_parts(
+    part_list: &mut ScanPartList,
+    input: &ScanInput,
+    metrics: &mut ScannerMetrics,
+) -> Result<()> {
+    if part_list.is_none() {
+        let now = Instant::now();
+        let mut distributor = SeqDistributor::default();
+        input.prune_file_ranges(&mut distributor).await?;
+        part_list
+            .set_parts(distributor.build_parts(&input.memtables, input.parallelism.parallelism));
+
+        metrics.build_parts_cost = now.elapsed();
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_parts"])
+            .observe(metrics.build_parts_cost.as_secs_f64());
+    }
+    Ok(())
 }
 
 /// Builds [ScanPart]s that preserves order.
@@ -240,7 +319,8 @@ impl FileRangeCollector for SeqDistributor {
 }
 
 impl SeqDistributor {
-    fn build_parts(mut self, memtables: &[MemtableRef]) -> Vec<ScanPart> {
+    // TODO(yingwen): group parts and reduce by parallelism.
+    fn build_parts(mut self, memtables: &[MemtableRef], _parallelism: usize) -> Vec<ScanPart> {
         // Creates a part for each memtable.
         for mem in memtables {
             let stats = mem.stats();
@@ -254,56 +334,6 @@ impl SeqDistributor {
 
         self.parts
     }
-}
-
-/// Builds sources to merge from a `part`.
-fn build_sources_to_merge(
-    part: &ScanPart,
-    projection: Option<&[ColumnId]>,
-    predicate: Option<&Predicate>,
-    sources: &mut Vec<Source>,
-) -> Result<()> {
-    sources.reserve(part.memtables.len() + part.file_ranges.len());
-    // Read memtables.
-    for mem in &part.memtables {
-        let iter = mem.iter(projection, predicate.cloned())?;
-        sources.push(Source::Iter(iter));
-    }
-    // Read files.
-    for file in &part.file_ranges {
-        if file.is_empty() {
-            continue;
-        }
-
-        // Creates a stream to read the file.
-        let ranges = file.clone();
-        let stream = try_stream! {
-            let mut reader_metrics = ReaderMetrics::default();
-            let file_id = ranges[0].file_handle().file_id();
-            let region_id = ranges[0].file_handle().region_id();
-            for range in ranges {
-                let mut reader = range.reader().await?;
-                let compat_batch = range.compat_batch();
-                while let Some(mut batch) = reader.next_batch().await? {
-                    if let Some(compat) = compat_batch {
-                        batch = compat
-                            .compat_batch(batch)?;
-                    }
-
-                    yield batch;
-                }
-                reader_metrics.merge_from(reader.metrics());
-            }
-            debug!(
-                "Seq scan region {} file {} ranges finished, metrics: {:?}",
-                region_id, file_id, reader_metrics
-            );
-        };
-        let stream = Box::pin(stream);
-        sources.push(Source::Stream(stream));
-    }
-
-    Ok(())
 }
 
 /// Groups parts by time range. It may generate parts more than parallelism.
@@ -350,6 +380,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
 
     use super::*;
     use crate::memtable::MemtableId;

@@ -85,9 +85,9 @@ async fn test_scan_without_filtering_deleted() {
         .scan_region(region_id, ScanRequest::default())
         .unwrap();
 
-    let seq_scan = scan.scan_without_filter_deleted().await.unwrap();
+    let seq_scan = scan.scan_without_filter_deleted().unwrap();
 
-    let stream = seq_scan.build_stream().await.unwrap();
+    let stream = seq_scan.build_stream().unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+

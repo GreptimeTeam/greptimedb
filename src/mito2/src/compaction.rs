@@ -446,7 +446,7 @@ async fn build_sst_reader(
         scan_input = scan_input.with_predicate(time_range_to_predicate(time_range, &metadata)?);
     }
 
-    SeqScan::new(scan_input).await?.build_reader().await
+    SeqScan::new(scan_input).build_reader().await
 }
 
 /// Converts time range to predicates so that rows outside the range will be filtered.
