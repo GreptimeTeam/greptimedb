@@ -35,11 +35,10 @@ use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::{CompatBatch, CompatReader};
+use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
-use crate::read::{compat, Source};
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
@@ -491,52 +490,6 @@ impl ScanInput {
     pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
         self.filter_deleted = filter_deleted;
         self
-    }
-
-    /// Builds and returns sources to read.
-    pub(crate) async fn build_sources(&self) -> Result<Vec<Source>> {
-        let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
-        for mem in &self.memtables {
-            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone())?;
-            sources.push(Source::Iter(iter));
-        }
-        for file in &self.files {
-            let maybe_reader = self
-                .access_layer
-                .read_sst(file.clone())
-                .predicate(self.predicate.clone())
-                .time_range(self.time_range)
-                .projection(Some(self.mapper.column_ids().to_vec()))
-                .cache(self.cache_manager.clone())
-                .index_applier(self.index_applier.clone())
-                .expected_metadata(Some(self.mapper.metadata().clone()))
-                .build()
-                .await;
-            let reader = match maybe_reader {
-                Ok(reader) => reader,
-                Err(e) => {
-                    if e.is_object_not_found() && self.ignore_file_not_found {
-                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
-                sources.push(Source::Reader(Box::new(reader)));
-            } else {
-                // They have different schema. We need to adapt the batch first so the
-                // mapper can convert it.
-                let compat_reader =
-                    CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
-                sources.push(Source::Reader(Box::new(compat_reader)));
-            }
-        }
-
-        READ_SST_COUNT.observe(self.files.len() as f64);
-
-        Ok(sources)
     }
 
     /// Prunes file ranges to scan and adds them to the `collector`.
