@@ -564,6 +564,22 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
     Ok(Output::new_with_record_batches(records))
 }
 
+pub async fn show_status(_query_ctx: QueryContextRef) -> Result<Output> {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("Variable_name", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Value", ConcreteDataType::string_datatype(), true),
+    ]));
+    let records = RecordBatches::try_from_columns(
+        schema,
+        vec![
+            Arc::new(StringVector::from(Vec::<&str>::new())) as _,
+            Arc::new(StringVector::from(Vec::<&str>::new())) as _,
+        ],
+    )
+    .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(records))
+}
+
 pub fn show_create_table(
     table: TableRef,
     partitions: Option<Partitions>,

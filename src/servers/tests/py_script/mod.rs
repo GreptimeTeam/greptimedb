@@ -28,6 +28,7 @@ use table::test_util::MemTable;
 
 use crate::create_testing_instance;
 
+#[ignore = "rust-python backend is not active support at present"]
 #[tokio::test]
 async fn test_insert_py_udf_and_query() -> Result<()> {
     let catalog = "greptime";

@@ -94,7 +94,7 @@ pub fn init_default_ut_logging() {
             env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
 
         let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_|
-            "debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info".to_string()
+            "debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info,rskafka=info".to_string()
         );
         let opts = LoggingOptions {
             dir: dir.clone(),

@@ -19,7 +19,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
+use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
@@ -483,8 +483,11 @@ impl<'a> ParserContext<'a> {
                             value: column.name.value.clone(),
                             quote_style: None,
                         }],
-                        is_primary: false,
                         characteristics: None,
+                        index_name: None,
+                        index_type_display: KeyOrIndexDisplay::None,
+                        index_type: None,
+                        index_options: vec![],
                     };
                     constraints.push(constraint);
                 }
@@ -653,10 +656,12 @@ impl<'a> ParserContext<'a> {
                     .into_iter()
                     .map(Self::canonicalize_identifier)
                     .collect();
-                Ok(Some(TableConstraint::Unique {
+                Ok(Some(TableConstraint::PrimaryKey {
                     name,
+                    index_name: None,
+                    index_type: None,
                     columns,
-                    is_primary: true,
+                    index_options: vec![],
                     characteristics: None,
                 }))
             }
@@ -696,8 +701,11 @@ impl<'a> ParserContext<'a> {
                         quote_style: None,
                     }),
                     columns,
-                    is_primary: false,
                     characteristics: None,
+                    index_name: None,
+                    index_type_display: KeyOrIndexDisplay::None,
+                    index_type: None,
+                    index_options: vec![],
                 }))
             }
             unexpected => {
@@ -741,7 +749,6 @@ fn validate_time_index(columns: &[ColumnDef], constraints: &[TableConstraint]) -
             if let TableConstraint::Unique {
                 name: Some(ident),
                 columns,
-                is_primary: false,
                 ..
             } = c
             {
@@ -1035,20 +1042,11 @@ mod tests {
                 assert_column_def(&columns[3], "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
-                assert_matches!(
-                    &constraints[0],
-                    TableConstraint::Unique {
-                        is_primary: false,
+                assert!(matches!(&constraints[0], TableConstraint::Unique {
+                        name: Some(name),
                         ..
-                    }
-                );
-                assert_matches!(
-                    &constraints[1],
-                    TableConstraint::Unique {
-                        is_primary: true,
-                        ..
-                    }
-                );
+                    }  if name.value == TIME_INDEX));
+                assert_matches!(&constraints[1], TableConstraint::PrimaryKey { .. });
             }
             _ => unreachable!(),
         }
@@ -1354,16 +1352,10 @@ ENGINE=mito";
             assert_eq!(c.constraints.len(), 2);
             let tc = c.constraints[0].clone();
             match tc {
-                TableConstraint::Unique {
-                    name,
-                    columns,
-                    is_primary,
-                    ..
-                } => {
+                TableConstraint::Unique { name, columns, .. } => {
                     assert_eq!(name.unwrap().to_string(), "__time_index");
                     assert_eq!(columns.len(), 1);
                     assert_eq!(&columns[0].value, "ts");
-                    assert!(!is_primary);
                 }
                 _ => panic!("should be time index constraint"),
             };
@@ -1561,16 +1553,10 @@ ENGINE=mito";
         if let Statement::CreateTable(c) = &result[0] {
             let tc = c.constraints[0].clone();
             match tc {
-                TableConstraint::Unique {
-                    name,
-                    columns,
-                    is_primary,
-                    ..
-                } => {
+                TableConstraint::Unique { name, columns, .. } => {
                     assert_eq!(name.unwrap().to_string(), "__time_index");
                     assert_eq!(columns.len(), 1);
                     assert_eq!(&columns[0].value, "ts");
-                    assert!(!is_primary);
                 }
                 _ => panic!("should be time index constraint"),
             }
@@ -1677,20 +1663,11 @@ ENGINE=mito";
                 assert_column_def(&columns[3], "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
-                assert_matches!(
-                    &constraints[0],
-                    TableConstraint::Unique {
-                        is_primary: false,
+                assert!(matches!(&constraints[0], TableConstraint::Unique {
+                        name: Some(name),
                         ..
-                    }
-                );
-                assert_matches!(
-                    &constraints[1],
-                    TableConstraint::Unique {
-                        is_primary: true,
-                        ..
-                    }
-                );
+                    }  if name.value == TIME_INDEX));
+                assert_matches!(&constraints[1], TableConstraint::PrimaryKey { .. });
                 assert_eq!(1, c.options.len());
                 assert_eq!(
                     [("ttl", "10s")].into_iter().collect::<HashMap<_, _>>(),

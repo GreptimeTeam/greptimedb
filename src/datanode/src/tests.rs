@@ -200,7 +200,7 @@ impl RegionEngine for MockRegionEngine {
         unimplemented!()
     }
 
-    async fn region_disk_usage(&self, _region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, _region_id: RegionId) -> Option<i64> {
         unimplemented!()
     }
 

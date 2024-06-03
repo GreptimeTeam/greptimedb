@@ -104,15 +104,20 @@ impl MitoEngine {
         self.inner.workers.is_region_exists(region_id)
     }
 
+    /// Returns true if the specific region exists.
+    pub fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_opening(region_id)
+    }
+
     /// Returns the region disk/memory usage information.
-    pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
+    pub fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
         let region = self
             .inner
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        Ok(region.region_usage().await)
+        Ok(region.region_usage())
     }
 
     /// Handle substrait query and return a stream of record batches
@@ -121,12 +126,11 @@ impl MitoEngine {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scanner(region_id, request)
             .map_err(BoxedError::new)?
             .scan()
             .await
-            .map_err(BoxedError::new)
     }
 
     /// Returns a scanner to scan for `request`.
@@ -364,10 +368,9 @@ impl RegionEngine for MitoEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         let size = self
             .get_region_usage(region_id)
-            .await
             .map(|usage| usage.disk_usage())
             .ok()?;
         size.try_into().ok()

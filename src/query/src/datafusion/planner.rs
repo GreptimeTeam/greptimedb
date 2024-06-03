@@ -23,19 +23,18 @@ use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
-use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::variable::VarType;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::DataFusionError;
 use datafusion_expr::var_provider::is_system_variables;
-use datafusion_expr::{AggregateUDF, TableSource, WindowUDF};
+use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
-use crate::query_engine::QueryEngineState;
+use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
 pub struct DfContextProviderAdapter {
     engine_state: Arc<QueryEngineState>,
@@ -64,6 +63,7 @@ impl DfContextProviderAdapter {
             engine_state.catalog_manager().clone(),
             engine_state.disallow_cross_catalog_query(),
             query_ctx.as_ref(),
+            Arc::new(DefaultPlanDecoder::new(session_state.clone(), &query_ctx)?),
         );
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;
@@ -127,11 +127,14 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        self.engine_state.aggregate_function(name).map(|func| {
-            Arc::new(
-                create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
-            )
-        })
+        self.engine_state.aggregate_function(name).map_or_else(
+            || self.session_state.aggregate_functions().get(name).cloned(),
+            |func| {
+                Some(Arc::new(
+                    create_aggregate_function(func.name(), func.args_count(), func.create()).into(),
+                ))
+            },
+        )
     }
 
     fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
@@ -160,17 +163,17 @@ impl ContextProvider for DfContextProviderAdapter {
         self.session_state.config_options()
     }
 
-    fn udfs_names(&self) -> Vec<String> {
+    fn udf_names(&self) -> Vec<String> {
         // TODO(LFC): Impl it.
         vec![]
     }
 
-    fn udafs_names(&self) -> Vec<String> {
+    fn udaf_names(&self) -> Vec<String> {
         // TODO(LFC): Impl it.
         vec![]
     }
 
-    fn udwfs_names(&self) -> Vec<String> {
+    fn udwf_names(&self) -> Vec<String> {
         // TODO(LFC): Impl it.
         vec![]
     }

@@ -35,4 +35,4 @@ pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
-pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

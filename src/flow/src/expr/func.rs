@@ -76,6 +76,13 @@ impl UnmaterializableFunc {
         }
     }
 
+    pub fn is_valid_func_name(name: &str) -> bool {
+        matches!(
+            name.to_lowercase().as_str(),
+            "now" | "current_schema" | "tumble"
+        )
+    }
+
     /// Create a UnmaterializableFunc from a string of the function name
     pub fn from_str_args(name: &str, args: Vec<TypedExpr>) -> Result<Self, Error> {
         match name.to_lowercase().as_str() {
@@ -183,6 +190,13 @@ impl UnaryFunc {
         }
     }
 
+    pub fn is_valid_func_name(name: &str) -> bool {
+        matches!(
+            name.to_lowercase().as_str(),
+            "not" | "is_null" | "is_true" | "is_false" | "step_timestamp" | "cast"
+        )
+    }
+
     /// Create a UnaryFunc from a string of the function name and given argument type(optional)
     pub fn from_str_and_type(
         name: &str,
@@ -278,9 +292,9 @@ impl UnaryFunc {
                 start_time,
             } => {
                 let ts = get_ts_as_millisecond(arg)?;
-                let start_time = start_time.map(|t| t.val()).unwrap_or(0);
+                let start_time = start_time.map(|t| t.val());
                 let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
-                let window_start = start_time + (ts - start_time) / window_size * window_size;
+                let window_start = get_window_start(ts, window_size, start_time);
 
                 let ret = Timestamp::new_millisecond(window_start);
                 Ok(Value::from(ret))
@@ -290,9 +304,9 @@ impl UnaryFunc {
                 start_time,
             } => {
                 let ts = get_ts_as_millisecond(arg)?;
-                let start_time = start_time.map(|t| t.val()).unwrap_or(0);
+                let start_time = start_time.map(|t| t.val());
                 let window_size = (window_size.to_nanosecond() / 1_000_000) as repr::Duration; // nanosecond to millisecond
-                let window_start = start_time + (ts - start_time) / window_size * window_size;
+                let window_start = get_window_start(ts, window_size, start_time);
 
                 let window_end = window_start + window_size;
                 let ret = Timestamp::new_millisecond(window_end);
@@ -300,6 +314,35 @@ impl UnaryFunc {
             }
         }
     }
+}
+
+fn get_window_start(
+    ts: repr::Timestamp,
+    window_size: repr::Duration,
+    start_time: Option<repr::Timestamp>,
+) -> repr::Timestamp {
+    let start_time = start_time.unwrap_or(0);
+    // left close right open
+    if ts >= start_time {
+        start_time + (ts - start_time) / window_size * window_size
+    } else {
+        start_time + (ts - start_time) / window_size * window_size
+            - if ((start_time - ts) % window_size) != 0 {
+                window_size
+            } else {
+                0
+            }
+    }
+}
+
+#[test]
+fn test_get_window_start() {
+    assert_eq!(get_window_start(1, 3, None), 0);
+    assert_eq!(get_window_start(3, 3, None), 3);
+    assert_eq!(get_window_start(0, 3, None), 0);
+
+    assert_eq!(get_window_start(-1, 3, None), -3);
+    assert_eq!(get_window_start(-3, 3, None), -3);
 }
 
 fn get_ts_as_millisecond(arg: Value) -> Result<repr::Timestamp, EvalError> {
@@ -550,6 +593,27 @@ impl BinaryFunc {
         Ok(ret)
     }
 
+    pub fn is_valid_func_name(name: &str) -> bool {
+        matches!(
+            name.to_lowercase().as_str(),
+            "eq" | "equal"
+                | "not_eq"
+                | "not_equal"
+                | "lt"
+                | "lte"
+                | "gt"
+                | "gte"
+                | "add"
+                | "sub"
+                | "subtract"
+                | "mul"
+                | "multiply"
+                | "div"
+                | "divide"
+                | "mod"
+        )
+    }
+
     /// choose the appropriate specialization based on the input types
     /// return a specialization of the binary function and it's actual input and output type(so no null type present)
     ///
@@ -739,6 +803,10 @@ impl VariadicFunc {
                 Self::Or => GenericFn::Or,
             },
         }
+    }
+
+    pub fn is_valid_func_name(name: &str) -> bool {
+        matches!(name.to_lowercase().as_str(), "and" | "or")
     }
 
     /// Create a VariadicFunc from a string of the function name and given argument types(optional)

@@ -231,19 +231,27 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "RangeManipulate should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             start: self.start,
             end: self.end,
             interval: self.interval,
             range: self.range,
             time_index: self.time_index.clone(),
             field_columns: self.field_columns.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 
@@ -280,8 +288,8 @@ impl ExecutionPlan for RangeManipulateExec {
         vec![true; self.children().len()]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {

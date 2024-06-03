@@ -19,6 +19,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use super::cursor::DropDatabaseCursor;
 use super::{DropDatabaseContext, DropTableTarget};
@@ -29,7 +30,6 @@ use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::router::{operating_leader_regions, RegionRoute};
-use crate::table_name::TableName;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseExecutor {
@@ -135,6 +135,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_error::ext::BoxedError;
     use common_recordbatch::SendableRecordBatchStream;
+    use table::table_name::TableName;
 
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;
     use crate::ddl::drop_database::executor::DropDatabaseExecutor;
@@ -144,7 +145,6 @@ mod tests {
     use crate::key::datanode_table::DatanodeTableKey;
     use crate::peer::Peer;
     use crate::rpc::router::region_distribution;
-    use crate::table_name::TableName;
     use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
 
     #[derive(Clone)]

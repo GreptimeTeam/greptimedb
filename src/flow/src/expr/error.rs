@@ -100,4 +100,11 @@ pub enum EvalError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Incoming data already expired by {} ms", expired_by))]
+    DataAlreadyExpired {
+        expired_by: i64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }

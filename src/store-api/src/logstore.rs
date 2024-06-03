@@ -14,68 +14,64 @@
 
 //! LogStore APIs.
 
+pub mod entry;
+pub mod provider;
+
 use std::collections::HashMap;
+use std::pin::Pin;
 
 use common_error::ext::ErrorExt;
-use common_wal::options::WalOptions;
+use entry::Entry;
+use futures::Stream;
 
-use crate::logstore::entry::Entry;
+pub type SendableEntryStream<'a, I, E> = Pin<Box<dyn Stream<Item = Result<Vec<I>, E>> + Send + 'a>>;
+
 pub use crate::logstore::entry::Id as EntryId;
-use crate::logstore::entry_stream::SendableEntryStream;
-pub use crate::logstore::namespace::Id as NamespaceId;
-use crate::logstore::namespace::Namespace;
-
-pub mod entry;
-pub mod entry_stream;
-pub mod namespace;
+use crate::logstore::provider::Provider;
+use crate::storage::RegionId;
 
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Error: ErrorExt + Send + Sync + 'static;
-    type Namespace: Namespace;
-    type Entry: Entry;
 
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
-    /// Appends an entry to the log store and returns a response containing the id of the append entry.
-    async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
-
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
-    async fn append_batch(
-        &self,
-        entries: Vec<Self::Entry>,
-    ) -> Result<AppendBatchResponse, Self::Error>;
+    async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse, Self::Error>;
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
     async fn read(
         &self,
-        ns: &Self::Namespace,
+        provider: &Provider,
         id: EntryId,
-    ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
+    ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>;
 
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
+    async fn create_namespace(&self, ns: &Provider) -> Result<(), Self::Error>;
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
+    async fn delete_namespace(&self, ns: &Provider) -> Result<(), Self::Error>;
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
+    async fn list_namespaces(&self) -> Result<Vec<Provider>, Self::Error>;
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
+    async fn obsolete(&self, provider: &Provider, entry_id: EntryId) -> Result<(), Self::Error>;
 
     /// Makes an entry instance of the associated Entry type
-    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry;
-
-    /// Makes a namespace instance of the associated Namespace type
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
+    fn entry(
+        &self,
+        data: &mut Vec<u8>,
+        entry_id: EntryId,
+        region_id: RegionId,
+        provider: &Provider,
+    ) -> Result<Entry, Self::Error>;
 }
 
 /// The response of an `append` operation.
@@ -89,5 +85,5 @@ pub struct AppendResponse {
 #[derive(Debug, Default)]
 pub struct AppendBatchResponse {
     /// Key: region id (as u64). Value: the id of the last successfully written entry of the region.
-    pub last_entry_ids: HashMap<u64, EntryId>,
+    pub last_entry_ids: HashMap<RegionId, EntryId>,
 }

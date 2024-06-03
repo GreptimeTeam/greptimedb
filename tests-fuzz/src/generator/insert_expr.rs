@@ -19,12 +19,13 @@ use derive_builder::Builder;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
+use super::TsValueGenerator;
 use crate::context::TableContextRef;
 use crate::error::{Error, Result};
 use crate::fake::WordGenerator;
 use crate::generator::{Generator, Random, ValueGenerator};
 use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
-use crate::ir::{generate_random_value, Ident};
+use crate::ir::{generate_random_timestamp, generate_random_value, Ident};
 
 /// Generates [InsertIntoExpr].
 #[derive(Builder)]
@@ -39,6 +40,8 @@ pub struct InsertExprGenerator<R: Rng + 'static> {
     word_generator: Box<dyn Random<Ident, R>>,
     #[builder(default = "Box::new(generate_random_value)")]
     value_generator: ValueGenerator<R>,
+    #[builder(default = "Box::new(generate_random_timestamp)")]
+    ts_value_generator: TsValueGenerator<R>,
     #[builder(default)]
     _phantom: PhantomData<R>,
 }
@@ -82,12 +85,18 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
                     row.push(RowValue::Default);
                     continue;
                 }
-
-                row.push(RowValue::Value((self.value_generator)(
-                    rng,
-                    &column.column_type,
-                    Some(self.word_generator.as_ref()),
-                )));
+                if column.is_time_index() {
+                    row.push(RowValue::Value((self.ts_value_generator)(
+                        rng,
+                        column.timestamp_type().unwrap(),
+                    )));
+                } else {
+                    row.push(RowValue::Value((self.value_generator)(
+                        rng,
+                        &column.column_type,
+                        Some(self.word_generator.as_ref()),
+                    )));
+                }
             }
 
             values_list.push(row);

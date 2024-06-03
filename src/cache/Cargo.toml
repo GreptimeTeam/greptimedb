@@ -11,3 +11,4 @@ common-macro.workspace = true
 common-meta.workspace = true
 moka.workspace = true
 snafu.workspace = true
+substrait.workspace = true

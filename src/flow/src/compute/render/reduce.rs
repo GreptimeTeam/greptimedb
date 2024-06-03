@@ -26,7 +26,7 @@ use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
-use crate::expr::error::{DataTypeSnafu, InternalSnafu};
+use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
 use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
@@ -301,9 +301,13 @@ fn update_reduce_distinct_arrange(
     // Deal with output:
 
     // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
-    let from = arrange.read().last_compaction_time().map(|n| n + 1);
+    let from = arrange.read().last_compaction_time();
     let from = from.unwrap_or(repr::Timestamp::MIN);
-    let output_kv = arrange.read().get_updates_in_range(from..=now);
+    let range = (
+        std::ops::Bound::Excluded(from),
+        std::ops::Bound::Included(now),
+    );
+    let output_kv = arrange.read().get_updates_in_range(range);
 
     // 2. Truncate all updates stored in arrangement within that range.
     let run_compaction = || {
@@ -397,6 +401,29 @@ fn reduce_accum_subgraph(
     // TODO(discord9): consider key-based lock
     let mut arrange = arrange.write();
     for (key, value_diffs) in key_to_vals {
+        if let Some(expire_man) = &arrange.get_expire_state() {
+            let mut is_expired = false;
+            err_collector.run(|| {
+                if let Some(expired) = expire_man.get_expire_duration(now, &key)? {
+                    is_expired = true;
+                    // expired data is ignored in computation, and a simple warning is logged
+                    common_telemetry::warn!(
+                        "Data already expired: {}",
+                        DataAlreadyExpiredSnafu {
+                            expired_by: expired,
+                        }
+                        .build()
+                    );
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            });
+            if is_expired {
+                // errors already collected, we can just continue to next key
+                continue;
+            }
+        }
         let col_diffs = {
             let row_len = value_diffs[0].0.len();
             let res = err_collector.run(|| get_col_diffs(value_diffs, row_len));

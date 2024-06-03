@@ -27,7 +27,7 @@ explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY hos
 +-+-+
 | logical_plan_| Sort: demo.host ASC NULLS LAST_|
 |_|_MergeScan [is_placeholder=false]_|
-| physical_plan | SortExec: expr=[host@0 ASC NULLS LAST]_|
+| physical_plan | SortExec: expr=[host@0 ASC NULLS LAST], preserve_partitioning=[false]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

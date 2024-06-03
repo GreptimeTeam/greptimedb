@@ -292,7 +292,7 @@ impl ExecutionPlanVisitor for MetricCollector {
         // skip if no metric available
         let Some(metric) = plan.metrics() else {
             self.record_batch_metrics.plan_metrics.push(PlanMetrics {
-                plan: plan.name().to_string(),
+                plan: std::any::type_name::<Self>().to_string(),
                 level: self.current_level,
                 metrics: vec![],
             });

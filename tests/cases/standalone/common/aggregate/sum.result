@@ -24,7 +24,11 @@ SELECT SUM(-1) FROM numbers;
 
 SELECT SUM(-1) FROM numbers WHERE number=-1;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value -1 to type UInt32
++----------------+
+| SUM(Int64(-1)) |
++----------------+
+|                |
++----------------+
 
 SELECT SUM(-1) FROM numbers WHERE number>10000 limit 1000;
 

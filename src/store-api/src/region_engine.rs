@@ -170,6 +170,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
     fn schema(&self) -> SchemaRef;
 
     /// Scans the partition and returns a stream of record batches.
+    /// # Panics
+    /// Panics if the `partition` is out of bound.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
 }
 
@@ -198,7 +200,7 @@ pub trait RegionEngine: Send + Sync {
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 
     /// Retrieves region's disk usage.
-    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64>;
+    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64>;
 
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;

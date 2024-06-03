@@ -213,6 +213,7 @@ impl HeartbeatTask {
         let epoch = self.region_alive_keeper.epoch();
 
         self.region_alive_keeper.start(Some(event_receiver)).await?;
+        let mut last_sent = Instant::now();
 
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -271,6 +272,10 @@ impl HeartbeatTask {
                     }
                 };
                 if let Some(req) = req {
+                    metrics::LAST_SENT_HEARTBEAT_ELAPSED
+                        .set(last_sent.elapsed().as_millis() as i64);
+                    // Resets the timer.
+                    last_sent = Instant::now();
                     debug!("Sending heartbeat request: {:?}", req);
                     if let Err(e) = tx.send(req).await {
                         error!(e; "Failed to send heartbeat to metasrv");

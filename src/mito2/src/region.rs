@@ -18,14 +18,15 @@ pub(crate) mod opener;
 pub mod options;
 pub(crate) mod version;
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info, warn};
-use common_wal::options::WalOptions;
 use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
+use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
@@ -35,7 +36,7 @@ use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
-use crate::request::OnFailure;
+use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::time_provider::TimeProviderRef;
 
@@ -97,14 +98,16 @@ pub(crate) struct MitoRegion {
     pub(crate) manifest_ctx: ManifestContextRef,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
-    /// Wal options of this region.
-    pub(crate) wal_options: WalOptions,
+    /// The provider of log store.
+    pub(crate) provider: Provider,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
+    /// manifest stats
+    stats: ManifestStats,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -232,7 +235,7 @@ impl MitoRegion {
     }
 
     /// Returns the region usage in bytes.
-    pub(crate) async fn region_usage(&self) -> RegionUsage {
+    pub(crate) fn region_usage(&self) -> RegionUsage {
         let region_id = self.region_id;
 
         let version = self.version();
@@ -242,13 +245,7 @@ impl MitoRegion {
         let sst_usage = version.ssts.sst_usage();
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
-
-        let manifest_usage = self
-            .manifest_ctx
-            .manifest_manager
-            .read()
-            .await
-            .manifest_usage();
+        let manifest_usage = self.stats.total_manifest_size();
 
         RegionUsage {
             region_id,
@@ -470,6 +467,72 @@ impl RegionMap {
 }
 
 pub(crate) type RegionMapRef = Arc<RegionMap>;
+
+/// Opening regions
+#[derive(Debug, Default)]
+pub(crate) struct OpeningRegions {
+    regions: RwLock<HashMap<RegionId, Vec<OptionOutputTx>>>,
+}
+
+impl OpeningRegions {
+    /// Registers `sender` for an opening region; Otherwise, it returns `None`.
+    pub(crate) fn wait_for_opening_region(
+        &self,
+        region_id: RegionId,
+        sender: OptionOutputTx,
+    ) -> Option<OptionOutputTx> {
+        let mut regions = self.regions.write().unwrap();
+        match regions.entry(region_id) {
+            Entry::Occupied(mut senders) => {
+                senders.get_mut().push(sender);
+                None
+            }
+            Entry::Vacant(_) => Some(sender),
+        }
+    }
+
+    /// Returns true if the region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        let regions = self.regions.read().unwrap();
+        regions.contains_key(&region_id)
+    }
+
+    /// Inserts a new region into the map.
+    pub(crate) fn insert_sender(&self, region: RegionId, sender: OptionOutputTx) {
+        let mut regions = self.regions.write().unwrap();
+        regions.insert(region, vec![sender]);
+    }
+
+    /// Remove region by id.
+    pub(crate) fn remove_sender(&self, region_id: RegionId) -> Vec<OptionOutputTx> {
+        let mut regions = self.regions.write().unwrap();
+        regions.remove(&region_id).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sender_len(&self, region_id: RegionId) -> usize {
+        let regions = self.regions.read().unwrap();
+        if let Some(senders) = regions.get(&region_id) {
+            senders.len()
+        } else {
+            0
+        }
+    }
+}
+
+pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
+
+/// Manifest stats.
+#[derive(Default, Debug, Clone)]
+pub(crate) struct ManifestStats {
+    total_manifest_size: Arc<AtomicU64>,
+}
+
+impl ManifestStats {
+    fn total_manifest_size(&self) -> u64 {
+        self.total_manifest_size.load(Ordering::Relaxed)
+    }
+}
 
 #[cfg(test)]
 mod tests {

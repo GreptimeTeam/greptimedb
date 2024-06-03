@@ -1,9 +1,9 @@
 --- test CREATE VIEW ---
-CREATE DATABASE for_test_view;
+CREATE DATABASE schema_for_view_test;
 
 Affected Rows: 1
 
-USE for_test_view;
+USE schema_for_view_test;
 
 Affected Rows: 0
 
@@ -22,17 +22,17 @@ Error: 2000(InvalidSyntax), sql parser error: Expected SELECT, VALUES, or a subq
 --- Table already exists ---
 CREATE VIEW test_table as SELECT * FROM public.numbers;
 
-Error: 4000(TableAlreadyExists), Table already exists: `greptime.for_test_view.test_table`
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.schema_for_view_test.test_table`
 
 --- Table already exists even when create_if_not_exists ---
 CREATE VIEW IF NOT EXISTS test_table as SELECT * FROM public.numbers;
 
-Error: 4000(TableAlreadyExists), Table already exists: `greptime.for_test_view.test_table`
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.schema_for_view_test.test_table`
 
 --- Table already exists even when or_replace ---
 CREATE OR REPLACE VIEW test_table as SELECT * FROM public.numbers;
 
-Error: 4000(TableAlreadyExists), Table already exists: `greptime.for_test_view.test_table`
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.schema_for_view_test.test_table`
 
 CREATE VIEW test_view as SELECT * FROM public.numbers;
 
@@ -41,7 +41,7 @@ Affected Rows: 0
 --- View already exists ----
 CREATE VIEW test_view as SELECT * FROM public.numbers;
 
-Error: 4000(TableAlreadyExists), View already exists: `greptime.for_test_view.test_view`
+Error: 4000(TableAlreadyExists), View already exists: `greptime.schema_for_view_test.test_view`
 
 CREATE VIEW IF NOT EXISTS test_view as SELECT * FROM public.numbers;
 
@@ -72,51 +72,51 @@ SHOW FULL TABLES;
 -- SQLNESS REPLACE (\s\d+\s) ID
 SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 
-+---------------+--------------------+---------------------------------------+-----------------+----------+-------------+
-| table_catalog | table_schema       | table_name                            | table_type      | table_id | engine      |
-+---------------+--------------------+---------------------------------------+-----------------+----------+-------------+
-| greptime      | information_schema | build_info                            | LOCAL TEMPORARY |ID       |             |
-| greptime      | information_schema | character_sets                        | LOCAL TEMPORARY |ID       |             |
-| greptime      | information_schema | check_constraints                     | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | cluster_info                          | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | collation_character_set_applicability | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | collations                            | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | column_privileges                     | LOCAL TEMPORARY |ID       |             |
-| greptime      | information_schema | column_statistics                     | LOCAL TEMPORARY |ID       |             |
-| greptime      | information_schema | columns                               | LOCAL TEMPORARY |ID       |             |
-| greptime      | information_schema | engines                               | LOCAL TEMPORARY |ID       |             |
-| greptime      | information_schema | events                                | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | files                                 | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | global_status                         | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | key_column_usage                      | LOCAL TEMPORARY |ID      |             |
-| greptime      | public             | numbers                               | LOCAL TEMPORARY |ID       | test_engine |
-| greptime      | information_schema | optimizer_trace                       | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | parameters                            | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | partitions                            | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | profiling                             | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | referential_constraints               | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | region_peers                          | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | routines                              | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | runtime_metrics                       | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | schema_privileges                     | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | schemata                              | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | session_status                        | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | table_constraints                     | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | table_privileges                      | LOCAL TEMPORARY |ID      |             |
-| greptime      | information_schema | tables                                | LOCAL TEMPORARY |ID       |             |
-| greptime      | for_test_view      | test_table                            | BASE TABLE      |ID    | mito        |
-| greptime      | for_test_view      | test_view                             | VIEW            |ID    |             |
-| greptime      | information_schema | triggers                              | LOCAL TEMPORARY |ID      |             |
-+---------------+--------------------+---------------------------------------+-----------------+----------+-------------+
++---------------+----------------------+---------------------------------------+-----------------+----------+-------------+
+| table_catalog | table_schema         | table_name                            | table_type      | table_id | engine      |
++---------------+----------------------+---------------------------------------+-----------------+----------+-------------+
+| greptime      | information_schema   | build_info                            | LOCAL TEMPORARY |ID       |             |
+| greptime      | information_schema   | character_sets                        | LOCAL TEMPORARY |ID       |             |
+| greptime      | information_schema   | check_constraints                     | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | cluster_info                          | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | collation_character_set_applicability | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | collations                            | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | column_privileges                     | LOCAL TEMPORARY |ID       |             |
+| greptime      | information_schema   | column_statistics                     | LOCAL TEMPORARY |ID       |             |
+| greptime      | information_schema   | columns                               | LOCAL TEMPORARY |ID       |             |
+| greptime      | information_schema   | engines                               | LOCAL TEMPORARY |ID       |             |
+| greptime      | information_schema   | events                                | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | files                                 | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | global_status                         | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | key_column_usage                      | LOCAL TEMPORARY |ID      |             |
+| greptime      | public               | numbers                               | LOCAL TEMPORARY |ID       | test_engine |
+| greptime      | information_schema   | optimizer_trace                       | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | parameters                            | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | partitions                            | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | profiling                             | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | referential_constraints               | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | region_peers                          | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | routines                              | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | runtime_metrics                       | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | schema_privileges                     | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | schemata                              | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | session_status                        | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | table_constraints                     | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | table_privileges                      | LOCAL TEMPORARY |ID      |             |
+| greptime      | information_schema   | tables                                | LOCAL TEMPORARY |ID       |             |
+| greptime      | schema_for_view_test | test_table                            | BASE TABLE      |ID    | mito        |
+| greptime      | schema_for_view_test | test_view                             | VIEW            |ID    |             |
+| greptime      | information_schema   | triggers                              | LOCAL TEMPORARY |ID      |             |
++---------------+----------------------+---------------------------------------+-----------------+----------+-------------+
 
 -- SQLNESS REPLACE (\s\d+\s) ID
 SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'VIEW';
 
-+---------------+---------------+------------+------------+----------+--------+
-| table_catalog | table_schema  | table_name | table_type | table_id | engine |
-+---------------+---------------+------------+------------+----------+--------+
-| greptime      | for_test_view | test_view  | VIEW       |ID    |        |
-+---------------+---------------+------------+------------+----------+--------+
++---------------+----------------------+------------+------------+----------+--------+
+| table_catalog | table_schema         | table_name | table_type | table_id | engine |
++---------------+----------------------+------------+------------+----------+--------+
+| greptime      | schema_for_view_test | test_view  | VIEW       |ID    |        |
++---------------+----------------------+------------+------------+----------+--------+
 
 SHOW COLUMNS FROM test_view;
 
@@ -133,16 +133,28 @@ SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'test_view';
 ++
 ++
 
---- FIXED in the following PR ---
-SELECT * FROM test_view;
+SELECT * FROM test_view LIMIT 10;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Unsupported operation: get stream from a distributed table
++--------+
+| number |
++--------+
+| 0      |
+| 1      |
+| 2      |
+| 3      |
+| 4      |
+| 5      |
+| 6      |
+| 7      |
+| 8      |
+| 9      |
++--------+
 
 USE public;
 
 Affected Rows: 0
 
-DROP DATABASE for_test_view;
+DROP DATABASE schema_for_view_test;
 
 Affected Rows: 0
 

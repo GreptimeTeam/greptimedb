@@ -18,7 +18,6 @@ use api::v1::query_request::Query;
 use api::v1::{DeleteRequests, DropFlowExpr, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
 use query::parser::PromQuery;
@@ -27,6 +26,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use table::table_name::TableName;
 
 use crate::error::{
     Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result,

@@ -16,26 +16,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use common_function::function_registry::FUNCTION_REGISTRY;
-use common_function::scalars::udf::create_udf;
 use datafusion::catalog::CatalogProviderList;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::execution::FunctionRegistry;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
 use prost::Message;
-use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use crate::error::{
-    DFInternalSnafu, DecodeDfPlanSnafu, DecodeRelSnafu, EncodeDfPlanSnafu, EncodeRelSnafu, Error,
-};
-use crate::extension_serializer::ExtensionSerializer;
-use crate::SubstraitPlan;
+use crate::error::{DecodeDfPlanSnafu, DecodeRelSnafu, EncodeDfPlanSnafu, EncodeRelSnafu, Error};
+use crate::{SerializerRegistry, SubstraitPlan};
 
 pub struct DFLogicalSubstraitConvertor;
 
@@ -49,15 +42,8 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         &self,
         message: B,
         catalog_list: Arc<dyn CatalogProviderList>,
-        mut state: SessionState,
-        query_ctx: QueryContextRef,
+        state: SessionState,
     ) -> Result<Self::Plan, Self::Error> {
-        // substrait decoder will look up the UDFs in SessionState, so we need to register them
-        for func in FUNCTION_REGISTRY.functions() {
-            let udf = Arc::new(create_udf(func, query_ctx.clone(), Default::default()).into());
-            state.register_udf(udf).context(DFInternalSnafu)?;
-        }
-
         let mut context = SessionContext::new_with_state(state);
         context.register_catalog_list(catalog_list);
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
@@ -67,10 +53,13 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         Ok(df_plan)
     }
 
-    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error> {
+    fn encode(
+        &self,
+        plan: &Self::Plan,
+        serializer: impl SerializerRegistry + 'static,
+    ) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
-
-        let substrait_plan = self.to_sub_plan(plan)?;
+        let substrait_plan = self.to_sub_plan(plan, serializer)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())
@@ -78,10 +67,14 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn to_sub_plan(&self, plan: &LogicalPlan) -> Result<Box<Plan>, Error> {
+    pub fn to_sub_plan(
+        &self,
+        plan: &LogicalPlan,
+        serializer: impl SerializerRegistry + 'static,
+    ) -> Result<Box<Plan>, Error> {
         let session_state =
             SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
-                .with_serializer_registry(Arc::new(ExtensionSerializer));
+                .with_serializer_registry(Arc::new(serializer));
         let context = SessionContext::new_with_state(session_state);
 
         to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)

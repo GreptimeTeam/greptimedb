@@ -20,8 +20,12 @@ pub mod process;
 use std::env;
 
 use common_telemetry::info;
+use snafu::ResultExt;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
+
+use crate::error::{self, Result};
+use crate::ir::Ident;
 
 /// Database connections
 pub struct Connections {
@@ -82,4 +86,28 @@ pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
         binary_path,
         root_dir,
     }
+}
+
+/// Flushes memtable to SST file.
+pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
+    let sql = format!("SELECT flush_table(\"{}\")", table_name);
+    let result = sqlx::query(&sql)
+        .execute(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    info!("Flush table: {}\n\nResult: {result:?}\n\n", table_name);
+
+    Ok(())
+}
+
+/// Triggers a compaction for table
+pub async fn compact_table(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
+    let sql = format!("SELECT compact_table(\"{}\")", table_name);
+    let result = sqlx::query(&sql)
+        .execute(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    info!("Compact table: {}\n\nResult: {result:?}\n\n", table_name);
+
+    Ok(())
 }

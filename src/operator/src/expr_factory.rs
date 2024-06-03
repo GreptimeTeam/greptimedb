@@ -322,11 +322,8 @@ fn find_primary_keys(
     let constraints_pk = constraints
         .iter()
         .filter_map(|constraint| match constraint {
-            TableConstraint::Unique {
-                name: _,
-                columns,
-                is_primary: true,
-                ..
+            TableConstraint::PrimaryKey {
+                name: _, columns, ..
             } => Some(columns.iter().map(|ident| ident.value.clone())),
             _ => None,
         })
@@ -353,7 +350,6 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
             TableConstraint::Unique {
                 name: Some(name),
                 columns,
-                is_primary: false,
                 ..
             } => {
                 if name.value == TIME_INDEX {
@@ -519,6 +515,7 @@ pub(crate) fn to_alter_expr(
 pub fn to_create_view_expr(
     stmt: CreateView,
     logical_plan: Vec<u8>,
+    table_names: Vec<TableName>,
     query_ctx: QueryContextRef,
 ) -> Result<CreateViewExpr> {
     let (catalog_name, schema_name, view_name) = table_idents_to_full_name(&stmt.name, &query_ctx)
@@ -532,6 +529,7 @@ pub fn to_create_view_expr(
         logical_plan,
         create_if_not_exists: stmt.if_not_exists,
         or_replace: stmt.or_replace,
+        table_names,
     };
 
     Ok(expr)
@@ -789,6 +787,21 @@ mod tests {
         assert!(change_column_type.target_type_extension.is_none());
     }
 
+    fn new_test_table_names() -> Vec<TableName> {
+        vec![
+            TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "a_table".to_string(),
+            },
+            TableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "b_table".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn test_to_create_view_expr() {
         let sql = "CREATE VIEW test AS SELECT * FROM NUMBERS";
@@ -803,8 +816,15 @@ mod tests {
         };
 
         let logical_plan = vec![1, 2, 3];
+        let table_names = new_test_table_names();
 
-        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+        let expr = to_create_view_expr(
+            stmt,
+            logical_plan.clone(),
+            table_names.clone(),
+            QueryContext::arc(),
+        )
+        .unwrap();
 
         assert_eq!("greptime", expr.catalog_name);
         assert_eq!("public", expr.schema_name);
@@ -812,6 +832,7 @@ mod tests {
         assert!(!expr.create_if_not_exists);
         assert!(!expr.or_replace);
         assert_eq!(logical_plan, expr.logical_plan);
+        assert_eq!(table_names, expr.table_names);
     }
 
     #[test]
@@ -828,8 +849,15 @@ mod tests {
         };
 
         let logical_plan = vec![1, 2, 3];
+        let table_names = new_test_table_names();
 
-        let expr = to_create_view_expr(stmt, logical_plan.clone(), QueryContext::arc()).unwrap();
+        let expr = to_create_view_expr(
+            stmt,
+            logical_plan.clone(),
+            table_names.clone(),
+            QueryContext::arc(),
+        )
+        .unwrap();
 
         assert_eq!("greptime", expr.catalog_name);
         assert_eq!("test", expr.schema_name);
@@ -837,5 +865,6 @@ mod tests {
         assert!(expr.create_if_not_exists);
         assert!(expr.or_replace);
         assert_eq!(logical_plan, expr.logical_plan);
+        assert_eq!(table_names, expr.table_names);
     }
 }
