@@ -22,6 +22,7 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use table::metadata::TableType;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -697,6 +698,18 @@ pub enum Error {
         location: Location,
         source: substrait::error::Error,
     },
+
+    #[snafu(display(
+        "Show create table only for base table. {} is {}",
+        table_name,
+        table_type
+    ))]
+    ShowCreateTableBaseOnly {
+        table_name: String,
+        table_type: TableType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -734,7 +747,9 @@ impl ErrorExt for Error {
                 StatusCode::TableAlreadyExists
             }
 
-            Error::NotSupported { .. } => StatusCode::Unsupported,
+            Error::NotSupported { .. } | Error::ShowCreateTableBaseOnly { .. } => {
+                StatusCode::Unsupported
+            }
 
             Error::TableMetadataManager { source, .. } => source.status_code(),
 
