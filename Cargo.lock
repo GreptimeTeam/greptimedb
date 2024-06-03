@@ -1752,6 +1752,7 @@ dependencies = [
  "async-compression 0.3.15",
  "async-trait",
  "bytes",
+ "common-base",
  "common-error",
  "common-macro",
  "common-recordbatch",

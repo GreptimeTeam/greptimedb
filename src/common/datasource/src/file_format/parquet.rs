@@ -39,6 +39,7 @@ use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder, LazyBuffer
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
@@ -197,6 +198,7 @@ impl BufferedWriter {
                 store
                     .writer_with(&path)
                     .concurrent(concurrency)
+                    .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
                     .await
                     .map(|v| v.into_futures_async_write().compat_write())
                     .context(error::WriteObjectSnafu { path })
