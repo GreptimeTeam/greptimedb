@@ -23,6 +23,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use snafu::ResultExt;
 use sqlx::{MySql, Pool};
+use strum::{EnumIter, IntoEnumIterator};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -41,7 +42,6 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
 use tests_fuzz::validator;
-
 struct FuzzContext {
     greptime: Pool<MySql>,
 }
@@ -56,6 +56,14 @@ impl FuzzContext {
 struct FuzzInput {
     seed: u64,
     actions: usize,
+}
+
+#[derive(Debug, EnumIter)]
+enum AlterTableOption {
+    AddColumn,
+    DropColumn,
+    RenameTable,
+    ModifyDataType,
 }
 
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
@@ -76,23 +84,23 @@ fn generate_alter_table_expr<R: Rng + 'static>(
     table_ctx: TableContextRef,
     rng: &mut R,
 ) -> Result<AlterTableExpr> {
-    let options = ["addColumn", "dropColumn", "renameTable", "modifyDataType"];
-    match options[rng.gen_range(0..4)] {
-        "dropColumn" if !droppable_columns(&table_ctx.columns).is_empty() => {
+    let options = AlterTableOption::iter().collect::<Vec<_>>();
+    match options[rng.gen_range(0..options.len())] {
+        AlterTableOption::DropColumn if !droppable_columns(&table_ctx.columns).is_empty() => {
             AlterExprDropColumnGeneratorBuilder::default()
                 .table_ctx(table_ctx)
                 .build()
                 .unwrap()
                 .generate(rng)
         }
-        "modifyDataType" if !modifiable_columns(&table_ctx.columns).is_empty() => {
+        AlterTableOption::ModifyDataType if !modifiable_columns(&table_ctx.columns).is_empty() => {
             AlterExprModifyDataTypeGeneratorBuilder::default()
                 .table_ctx(table_ctx)
                 .build()
                 .unwrap()
                 .generate(rng)
         }
-        "renameTable" => AlterExprRenameGeneratorBuilder::default()
+        AlterTableOption::RenameTable => AlterExprRenameGeneratorBuilder::default()
             .table_ctx(table_ctx)
             .name_generator(Box::new(MappedGenerator::new(
                 WordGenerator,

@@ -130,11 +130,8 @@ impl TableContext {
                 Ok(self)
             }
             AlterTableOperation::ModifyDataType { column } => {
-                for iter in self.columns.iter_mut() {
-                    if iter.name != column.name {
-                        continue;
-                    }
-                    iter.column_type = column.column_type.clone();
+                if let Some(idx) = self.columns.iter().position(|col| col.name == column.name) {
+                    self.columns[idx].column_type = column.column_type;
                 }
                 Ok(self)
             }
