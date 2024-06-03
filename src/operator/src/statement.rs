@@ -244,7 +244,7 @@ impl StatementExecutor {
                     _ => {
                         return InvalidSqlSnafu {
                             err_msg: format!(
-                "expect flow name to be <schema>.<table> or <table>, actual: {obj_name}",
+                "expect flow name to be <catalog>.<flow_name> or <flow_name>, actual: {obj_name}",
             ),
                         }
                         .fail()
