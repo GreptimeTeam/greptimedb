@@ -4,6 +4,7 @@ ALTER TABLE table_should_not_break_after_incorrect_alter ADD column k string NOT
 
 INSERT INTO table_should_not_break_after_incorrect_alter VALUES (1, 1), (2, 2);
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM table_should_not_break_after_incorrect_alter;
 
 DROP TABLE table_should_not_break_after_incorrect_alter;
