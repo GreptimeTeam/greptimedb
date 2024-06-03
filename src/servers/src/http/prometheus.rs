@@ -460,7 +460,7 @@ async fn retrieve_series_from_query_result(
     }?;
 
     if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan.clone(), &mut [metrics]);
+        collect_plan_metrics(plan, &mut [metrics]);
     }
     Ok(())
 }
@@ -486,7 +486,7 @@ async fn retrieve_labels_name_from_query_result(
         .fail(),
     }?;
     if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan.clone(), &mut [metrics]);
+        collect_plan_metrics(plan, &mut [metrics]);
     }
     Ok(())
 }
@@ -830,7 +830,7 @@ async fn retrieve_label_values(
     }?;
 
     if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan.clone(), &mut [metrics]);
+        collect_plan_metrics(plan, &mut [metrics]);
     }
 
     Ok(())

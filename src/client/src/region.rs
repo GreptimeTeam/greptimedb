@@ -177,7 +177,7 @@ impl RegionRequester {
             .with_label_values(&[request_type.as_str()])
             .start_timer();
 
-        let mut client = self.client.raw_region_client()?;
+        let (addr, mut client) = self.client.raw_region_client()?;
 
         let response = client
             .handle(request)
@@ -187,6 +187,7 @@ impl RegionRequester {
                 let err: error::Error = e.into();
                 // Uses `Error::RegionServer` instead of `Error::Server`
                 error::Error::RegionServer {
+                    addr,
                     code,
                     source: BoxedError::new(err),
                     location: location!(),

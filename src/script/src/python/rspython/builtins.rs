@@ -619,17 +619,6 @@ pub(crate) mod greptime_builtin {
         );
     }
 
-    #[pyfunction]
-    fn median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_aggr_fn!(
-            Median,
-            vm,
-            &[values.to_arrow_array()],
-            values.arrow_data_type(),
-            expr0
-        );
-    }
-
     /// Not implement in datafusion
     /// TODO(discord9): use greptime's own impl instead
     /*
@@ -719,38 +708,6 @@ pub(crate) mod greptime_builtin {
             &[values.to_arrow_array()],
             values.arrow_data_type(),
             expr0
-        );
-    }
-
-    #[pyfunction]
-    fn covariance(
-        arg0: PyVectorRef,
-        arg1: PyVectorRef,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyObjectRef> {
-        bind_aggr_fn!(
-            Covariance,
-            vm,
-            &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.arrow_data_type(),
-            expr0,
-            expr1
-        );
-    }
-
-    #[pyfunction]
-    fn covariance_pop(
-        arg0: PyVectorRef,
-        arg1: PyVectorRef,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyObjectRef> {
-        bind_aggr_fn!(
-            CovariancePop,
-            vm,
-            &[arg0.to_arrow_array(), arg1.to_arrow_array()],
-            arg0.arrow_data_type(),
-            expr0,
-            expr1
         );
     }
 

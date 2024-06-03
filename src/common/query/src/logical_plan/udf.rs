@@ -108,6 +108,10 @@ impl ScalarUDFImpl for DfUdfAdapter {
     fn invoke(&self, args: &[DfColumnarValue]) -> datafusion_common::Result<DfColumnarValue> {
         (self.fun)(args)
     }
+
+    fn invoke_no_args(&self, number_rows: usize) -> datafusion_common::Result<DfColumnarValue> {
+        Ok((self.fun)(&[])?.into_array(number_rows)?.into())
+    }
 }
 
 impl From<ScalarUdf> for DfScalarUDF {

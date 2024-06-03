@@ -26,7 +26,7 @@ pub struct StringNormalizationRule;
 
 impl AnalyzerRule for StringNormalizationRule {
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform(&|plan| {
+        plan.transform(|plan| {
             let mut converter = StringNormalizationConverter;
             let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
             let expr = plan

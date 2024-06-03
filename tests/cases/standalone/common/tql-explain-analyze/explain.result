@@ -22,7 +22,7 @@ TQL EXPLAIN (0, 10, '5s') test;
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                    |
 |               |     PromSeriesDivideExec: tags=["k"]                                                          |
-|               |       SortExec: expr=[k@2 ASC NULLS LAST]                                                     |
+|               |       SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false]                      |
 |               |         MergeScanExec: REDACTED
 |               |                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------+
@@ -43,7 +43,7 @@ TQL EXPLAIN (0, 10, '1s', '2s') test;
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[2000], interval=[300000], time index=[j] |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                  |
 |               |     PromSeriesDivideExec: tags=["k"]                                                        |
-|               |       SortExec: expr=[k@2 ASC NULLS LAST]                                                   |
+|               |       SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false]                    |
 |               |         MergeScanExec: REDACTED
 |               |                                                                                             |
 +---------------+---------------------------------------------------------------------------------------------+
@@ -63,7 +63,7 @@ TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                    |
 |               |     PromSeriesDivideExec: tags=["k"]                                                          |
-|               |       SortExec: expr=[k@2 ASC NULLS LAST]                                                     |
+|               |       SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false]                      |
 |               |         MergeScanExec: REDACTED
 |               |                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------+
@@ -120,6 +120,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after OrderHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
@@ -151,31 +152,32 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@2 ASC NULLS LAST]_|
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
+| physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after coalesce_batches_| SAME TEXT AS ABOVE_|
 | physical_plan after OutputRequirements_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@2 ASC NULLS LAST]_|
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan after PipelineChecker_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after PipelineChecker_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@2 ASC NULLS LAST]_|
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan_with_stats_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j], statistics=[Rows=Inexact(0), Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]] |
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_SortExec: expr=[k@2 ASC NULLS LAST], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[false], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

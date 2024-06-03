@@ -1055,15 +1055,6 @@ ret"#
             expect: vector!(Float64Vector, [0.0, consts::LOG10_2, 0.47712125471966244,]),
         },
         CodeBlockTestCase {
-            input: ronish! {},
-            script: r#"
-from greptime import *
-ret = 0.0<=random(3)<=1.0
-ret"#
-                .to_string(),
-            expect: vector!(BooleanVector, &[true, true, true]),
-        },
-        CodeBlockTestCase {
             input: ronish! {
                 "values": vector!(Int64Vector, [1, 2, 2, 3])
             },
@@ -1129,30 +1120,6 @@ ret = vector([count(values)])
 ret"#
                 .to_string(),
             expect: vector!(Int64Vector, [10]),
-        },
-        CodeBlockTestCase {
-            input: ronish! {
-                "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
-                "b": vector!(Float64Vector, [1.0, 0.0, -1.0])
-            },
-            script: r#"
-from greptime import *
-ret = vector([covariance(a, b)])
-ret"#
-                .to_string(),
-            expect: vector!(Float64Vector, [-1.0]),
-        },
-        CodeBlockTestCase {
-            input: ronish! {
-                "a": vector!(Float64Vector, [1.0, 2.0, 3.0]),
-                "b": vector!(Float64Vector, [1.0, 0.0, -1.0])
-            },
-            script: r#"
-from greptime import *
-ret = vector([covariance_pop(a, b)])
-ret"#
-                .to_string(),
-            expect: vector!(Float64Vector, [-0.6666666666666666]),
         },
         CodeBlockTestCase {
             input: ronish! {

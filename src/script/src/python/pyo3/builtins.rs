@@ -100,14 +100,14 @@ pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
             log10,
             random,
             approx_distinct,
-            median,
+            // median,
             approx_percentile_cont,
             array_agg,
             avg,
             correlation,
             count,
-            covariance,
-            covariance_pop,
+            // covariance,
+            // covariance_pop,
             max,
             min,
             stddev,
@@ -351,7 +351,7 @@ fn approx_distinct(py: Python<'_>, v0: &PyVector) -> PyResult<PyObject> {
  */
 bind_aggr_expr!(approx_distinct, ApproxDistinct,[v0], v0, expr0=>0);
 
-bind_aggr_expr!(median, Median,[v0], v0, expr0=>0);
+// bind_aggr_expr!(median, Median,[v0], v0, expr0=>0);
 
 #[pyfunction]
 fn approx_percentile_cont(py: Python<'_>, values: &PyVector, percent: f64) -> PyResult<PyObject> {
@@ -391,9 +391,9 @@ bind_aggr_expr!(correlation, Correlation,[v0, v1], v0, expr0=>0, expr1=>1);
 
 bind_aggr_expr!(count, Count,[v0], v0, expr0=>0);
 
-bind_aggr_expr!(covariance, Covariance,[v0, v1], v0, expr0=>0, expr1=>1);
+// bind_aggr_expr!(covariance, Covariance,[v0, v1], v0, expr0=>0, expr1=>1);
 
-bind_aggr_expr!(covariance_pop, CovariancePop,[v0, v1], v0, expr0=>0, expr1=>1);
+// bind_aggr_expr!(covariance_pop, CovariancePop,[v0, v1], v0, expr0=>0, expr1=>1);
 
 bind_aggr_expr!(max, Max,[v0], v0, expr0=>0);
 
