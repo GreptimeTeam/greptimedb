@@ -29,11 +29,10 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::future::BoxFuture;
 use futures::StreamExt;
-use object_store::{FuturesAsyncReader, ObjectStore};
+use object_store::{ObjectStore, Reader, Writer};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
-use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
 use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::error::{self, Result};
@@ -46,16 +45,10 @@ pub struct ParquetFormat {}
 #[async_trait]
 impl FileFormat for ParquetFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
-        let meta = store
-            .stat(path)
-            .await
-            .context(error::ReadObjectSnafu { path })?;
         let mut reader = store
             .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path })?
-            .into_futures_async_read(0..meta.content_length())
-            .compat();
+            .context(error::ReadObjectSnafu { path })?;
 
         let metadata = reader
             .get_metadata()
@@ -105,7 +98,7 @@ impl ParquetFileReaderFactory for DefaultParquetFileReaderFactory {
 
 pub struct LazyParquetFileReader {
     object_store: ObjectStore,
-    reader: Option<Compat<FuturesAsyncReader>>,
+    reader: Option<Reader>,
     path: String,
 }
 
@@ -121,13 +114,7 @@ impl LazyParquetFileReader {
     /// Must initialize the reader, or throw an error from the future.
     async fn maybe_initialize(&mut self) -> result::Result<(), object_store::Error> {
         if self.reader.is_none() {
-            let meta = self.object_store.stat(&self.path).await?;
-            let reader = self
-                .object_store
-                .reader(&self.path)
-                .await?
-                .into_futures_async_read(0..meta.content_length())
-                .compat();
+            let reader = self.object_store.reader(&self.path).await?;
             self.reader = Some(reader);
         }
 
@@ -180,17 +167,16 @@ pub struct BufferedWriter {
 }
 
 type InnerBufferedWriter = LazyBufferedWriter<
-    Compat<object_store::FuturesAsyncWriter>,
+    object_store::Writer,
     ArrowWriter<SharedBuffer>,
-    impl Fn(String) -> BoxFuture<'static, Result<Compat<object_store::FuturesAsyncWriter>>>,
+    impl Fn(String) -> BoxFuture<'static, Result<Writer>>,
 >;
 
 impl BufferedWriter {
     fn make_write_factory(
         store: ObjectStore,
         concurrency: usize,
-    ) -> impl Fn(String) -> BoxFuture<'static, Result<Compat<object_store::FuturesAsyncWriter>>>
-    {
+    ) -> impl Fn(String) -> BoxFuture<'static, Result<Writer>> {
         move |path| {
             let store = store.clone();
             Box::pin(async move {
@@ -198,7 +184,6 @@ impl BufferedWriter {
                     .writer_with(&path)
                     .concurrent(concurrency)
                     .await
-                    .map(|v| v.into_futures_async_write().compat_write())
                     .context(error::WriteObjectSnafu { path })
             })
         }

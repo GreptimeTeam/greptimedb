@@ -71,8 +71,7 @@ impl FileRegionManifest {
         let bs = object_store
             .read(path)
             .await
-            .context(LoadRegionManifestSnafu { region_id })?
-            .to_vec();
+            .context(LoadRegionManifestSnafu { region_id })?;
         Self::decode(bs.as_slice())
     }
 

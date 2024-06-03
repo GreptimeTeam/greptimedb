@@ -16,7 +16,6 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use object_store::util::join_path;
@@ -51,7 +50,7 @@ impl<S> RegionWorkerLoop<S> {
         region
             .access_layer
             .object_store()
-            .write(&marker_path, Bytes::new())
+            .write(&marker_path, vec![])
             .await
             .context(OpenDalSnafu)
             .inspect_err(|e| {

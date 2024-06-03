@@ -36,7 +36,6 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use self::csv::CsvFormat;
 use self::json::JsonFormat;
@@ -147,8 +146,7 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
         let reader = object_store
             .reader(&path)
             .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?
-            .into_bytes_stream(..);
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         let mut upstream = compression_type.convert_stream(reader).fuse();
 
@@ -205,7 +203,6 @@ pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
             .writer_with(&path)
             .concurrent(concurrency)
             .await
-            .map(|v| v.into_futures_async_write().compat_write())
             .context(error::WriteObjectSnafu { path })
     });
 
