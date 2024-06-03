@@ -29,7 +29,6 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use derive_builder::Builder;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tokio_util::io::SyncIoBridge;
 
 use super::stream_to_file;
@@ -165,16 +164,10 @@ impl FileOpener for CsvOpener {
 #[async_trait]
 impl FileFormat for CsvFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
-        let meta = store
-            .stat(path)
-            .await
-            .context(error::ReadObjectSnafu { path })?;
         let reader = store
             .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path })?
-            .into_futures_async_read(0..meta.content_length())
-            .compat();
+            .context(error::ReadObjectSnafu { path })?;
 
         let decoded = self.compression_type.convert_async_read(reader);
 

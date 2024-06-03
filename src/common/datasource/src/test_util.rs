@@ -120,7 +120,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
-    assert_eq_lines(written.to_vec(), origin.to_vec());
+    assert_eq_lines(written, origin);
 }
 
 pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
@@ -158,7 +158,7 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
-    assert_eq_lines(written.to_vec(), origin.to_vec());
+    assert_eq_lines(written, origin);
 }
 
 // Ignore the CRLF difference across operating systems.

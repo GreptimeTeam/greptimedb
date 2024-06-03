@@ -32,7 +32,6 @@
 
 use std::convert::TryFrom;
 use std::net::{SocketAddr, TcpListener};
-use std::str::FromStr;
 
 use axum::body::HttpBody;
 use axum::BoxError;
@@ -170,15 +169,7 @@ impl RequestBuilder {
         HeaderValue: TryFrom<V>,
         <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
-        // TODO(tisonkun): revert once http bump to 1.x
-        let key: HeaderName = key.try_into().map_err(Into::into).unwrap();
-        let key = reqwest::header::HeaderName::from_bytes(key.as_ref()).unwrap();
-
-        let value: HeaderValue = value.try_into().map_err(Into::into).unwrap();
-        let value = reqwest::header::HeaderValue::from_bytes(value.as_bytes()).unwrap();
-
         self.builder = self.builder.header(key, value);
-
         self
     }
 
@@ -219,19 +210,12 @@ impl TestResponse {
 
     /// Get the response status.
     pub fn status(&self) -> StatusCode {
-        StatusCode::from_u16(self.response.status().as_u16()).unwrap()
+        self.response.status()
     }
 
     /// Get the response headers.
-    pub fn headers(&self) -> http::HeaderMap {
-        // TODO(tisonkun): revert once http bump to 1.x
-        let mut headers = http::HeaderMap::new();
-        for (key, value) in self.response.headers() {
-            let key = HeaderName::from_str(key.as_str()).unwrap();
-            let value = HeaderValue::from_bytes(value.as_bytes()).unwrap();
-            headers.insert(key, value);
-        }
-        headers
+    pub fn headers(&self) -> &http::HeaderMap {
+        self.response.headers()
     }
 
     /// Get the response in chunks.

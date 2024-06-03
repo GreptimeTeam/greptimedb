@@ -15,11 +15,16 @@
 //! code originally from <https://github.com/apache/incubator-opendal/blob/main/core/src/layers/prometheus.rs>, make a tiny change to avoid crash in multi thread env
 
 use std::fmt::{Debug, Formatter};
+use std::io;
+use std::task::{Context, Poll};
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use common_telemetry::debug;
+use futures::FutureExt;
 use lazy_static::lazy_static;
 use opendal::raw::*;
-use opendal::{Buffer, ErrorKind};
+use opendal::ErrorKind;
 use prometheus::{
     exponential_buckets, histogram_opts, register_histogram_vec, register_int_counter_vec,
     Histogram, HistogramTimer, HistogramVec, IntCounterVec,
@@ -84,14 +89,14 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
 #[derive(Default, Debug, Clone)]
 pub struct PrometheusMetricsLayer;
 
-impl<A: Access> Layer<A> for PrometheusMetricsLayer {
-    type LayeredAccess = PrometheusAccess<A>;
+impl<A: Accessor> Layer<A> for PrometheusMetricsLayer {
+    type LayeredAccessor = PrometheusAccessor<A>;
 
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
+    fn layer(&self, inner: A) -> Self::LayeredAccessor {
         let meta = inner.info();
         let scheme = meta.scheme();
 
-        PrometheusAccess {
+        PrometheusAccessor {
             inner,
             scheme: scheme.to_string(),
         }
@@ -99,12 +104,12 @@ impl<A: Access> Layer<A> for PrometheusMetricsLayer {
 }
 
 #[derive(Clone)]
-pub struct PrometheusAccess<A: Access> {
+pub struct PrometheusAccessor<A: Accessor> {
     inner: A,
     scheme: String,
 }
 
-impl<A: Access> Debug for PrometheusAccess<A> {
+impl<A: Accessor> Debug for PrometheusAccessor<A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrometheusAccessor")
             .field("inner", &self.inner)
@@ -112,7 +117,8 @@ impl<A: Access> Debug for PrometheusAccess<A> {
     }
 }
 
-impl<A: Access> LayeredAccess for PrometheusAccess<A> {
+#[async_trait]
+impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
     type Inner = A;
     type Reader = PrometheusMetricWrapper<A::Reader>;
     type BlockingReader = PrometheusMetricWrapper<A::BlockingReader>;
@@ -151,20 +157,27 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             .with_label_values(&[&self.scheme, Operation::Read.into_static()])
             .start_timer();
 
-        let (rp, r) = self.inner.read(path, args).await.map_err(|e| {
-            increment_errors_total(Operation::Read, e.kind());
-            e
-        })?;
-
-        Ok((
-            rp,
-            PrometheusMetricWrapper::new(
-                r,
-                Operation::Read,
-                BYTES_TOTAL.with_label_values(&[&self.scheme, Operation::Read.into_static()]),
-                timer,
-            ),
-        ))
+        self.inner
+            .read(path, args)
+            .map(|v| {
+                v.map(|(rp, r)| {
+                    (
+                        rp,
+                        PrometheusMetricWrapper::new(
+                            r,
+                            Operation::Read,
+                            BYTES_TOTAL
+                                .with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                            timer,
+                        ),
+                    )
+                })
+            })
+            .await
+            .map_err(|e| {
+                increment_errors_total(Operation::Read, e.kind());
+                e
+            })
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -176,20 +189,27 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             .with_label_values(&[&self.scheme, Operation::Write.into_static()])
             .start_timer();
 
-        let (rp, r) = self.inner.write(path, args).await.map_err(|e| {
-            increment_errors_total(Operation::Write, e.kind());
-            e
-        })?;
-
-        Ok((
-            rp,
-            PrometheusMetricWrapper::new(
-                r,
-                Operation::Write,
-                BYTES_TOTAL.with_label_values(&[&self.scheme, Operation::Write.into_static()]),
-                timer,
-            ),
-        ))
+        self.inner
+            .write(path, args)
+            .map(|v| {
+                v.map(|(rp, r)| {
+                    (
+                        rp,
+                        PrometheusMetricWrapper::new(
+                            r,
+                            Operation::Write,
+                            BYTES_TOTAL
+                                .with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                            timer,
+                        ),
+                    )
+                })
+            })
+            .await
+            .map_err(|e| {
+                increment_errors_total(Operation::Write, e.kind());
+                e
+            })
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
@@ -441,46 +461,103 @@ impl<R> PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
-    async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
-        self.inner.read_at(offset, limit).await.map_err(|err| {
-            increment_errors_total(self.op, err.kind());
-            err
+    fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize>> {
+        self.inner.poll_read(cx, buf).map(|res| match res {
+            Ok(bytes) => {
+                self.bytes += bytes as u64;
+                Ok(bytes)
+            }
+            Err(e) => {
+                increment_errors_total(self.op, e.kind());
+                Err(e)
+            }
+        })
+    }
+
+    fn poll_seek(&mut self, cx: &mut Context<'_>, pos: io::SeekFrom) -> Poll<Result<u64>> {
+        self.inner.poll_seek(cx, pos).map(|res| match res {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                increment_errors_total(self.op, e.kind());
+                Err(e)
+            }
+        })
+    }
+
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes>>> {
+        self.inner.poll_next(cx).map(|res| match res {
+            Some(Ok(bytes)) => {
+                self.bytes += bytes.len() as u64;
+                Some(Ok(bytes))
+            }
+            Some(Err(e)) => {
+                increment_errors_total(self.op, e.kind());
+                Some(Err(e))
+            }
+            None => None,
         })
     }
 }
 
 impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
-    fn read_at(&self, offset: u64, limit: usize) -> opendal::Result<Buffer> {
-        self.inner.read_at(offset, limit).map_err(|err| {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.inner
+            .read(buf)
+            .map(|n| {
+                self.bytes += n as u64;
+                n
+            })
+            .map_err(|e| {
+                increment_errors_total(self.op, e.kind());
+                e
+            })
+    }
+
+    fn seek(&mut self, pos: io::SeekFrom) -> Result<u64> {
+        self.inner.seek(pos).map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
+        })
+    }
+
+    fn next(&mut self) -> Option<Result<Bytes>> {
+        self.inner.next().map(|res| match res {
+            Ok(bytes) => {
+                self.bytes += bytes.len() as u64;
+                Ok(bytes)
+            }
+            Err(e) => {
+                increment_errors_total(self.op, e.kind());
+                Err(e)
+            }
         })
     }
 }
 
+#[async_trait]
 impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
-    async fn write(&mut self, bs: Buffer) -> Result<usize> {
-        match self.inner.write(bs).await {
-            Ok(n) => {
+    fn poll_write(&mut self, cx: &mut Context<'_>, bs: &dyn oio::WriteBuf) -> Poll<Result<usize>> {
+        self.inner
+            .poll_write(cx, bs)
+            .map_ok(|n| {
                 self.bytes += n as u64;
-                Ok(n)
-            }
-            Err(err) => {
+                n
+            })
+            .map_err(|err| {
                 increment_errors_total(self.op, err.kind());
-                Err(err)
-            }
-        }
+                err
+            })
     }
 
-    async fn close(&mut self) -> Result<()> {
-        self.inner.close().await.map_err(|err| {
+    fn poll_abort(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.inner.poll_abort(cx).map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
         })
     }
 
-    async fn abort(&mut self) -> Result<()> {
-        self.inner.close().await.map_err(|err| {
+    fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.inner.poll_close(cx).map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
         })
@@ -488,7 +565,7 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
-    fn write(&mut self, bs: Buffer) -> Result<usize> {
+    fn write(&mut self, bs: &dyn oio::WriteBuf) -> Result<usize> {
         self.inner
             .write(bs)
             .map(|n| {

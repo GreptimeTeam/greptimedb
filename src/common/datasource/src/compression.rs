@@ -92,44 +92,34 @@ impl CompressionType {
 macro_rules! impl_compression_type {
     ($(($enum_item:ident, $prefix:ident)),*) => {
         paste::item! {
-            use bytes::{Buf, BufMut, BytesMut};
-
             impl CompressionType {
-                pub async fn encode<B: Buf>(&self, mut content: B) -> io::Result<Vec<u8>> {
+                pub async fn encode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
                     match self {
                         $(
                             CompressionType::$enum_item => {
-                                let mut buffer = Vec::with_capacity(content.remaining());
+                                let mut buffer = Vec::with_capacity(content.as_ref().len());
                                 let mut encoder = write::[<$prefix Encoder>]::new(&mut buffer);
-                                encoder.write_all_buf(&mut content).await?;
+                                encoder.write_all(content.as_ref()).await?;
                                 encoder.shutdown().await?;
                                 Ok(buffer)
                             }
                         )*
-                        CompressionType::Uncompressed => {
-                            let mut bs = BytesMut::with_capacity(content.remaining());
-                            bs.put(content);
-                            Ok(bs.to_vec())
-                        },
+                        CompressionType::Uncompressed => Ok(content.as_ref().to_vec()),
                     }
                 }
 
-                pub async fn decode<B: Buf>(&self, mut content: B) -> io::Result<Vec<u8>> {
+                pub async fn decode(&self, content: impl AsRef<[u8]>) -> io::Result<Vec<u8>> {
                     match self {
                         $(
                             CompressionType::$enum_item => {
-                                let mut buffer = Vec::with_capacity(content.remaining() * 2);
+                                let mut buffer = Vec::with_capacity(content.as_ref().len() * 2);
                                 let mut encoder = write::[<$prefix Decoder>]::new(&mut buffer);
-                                encoder.write_all_buf(&mut content).await?;
+                                encoder.write_all(content.as_ref()).await?;
                                 encoder.shutdown().await?;
                                 Ok(buffer)
                             }
                         )*
-                        CompressionType::Uncompressed => {
-                            let mut bs = BytesMut::with_capacity(content.remaining());
-                            bs.put(content);
-                            Ok(bs.to_vec())
-                        },
+                        CompressionType::Uncompressed => Ok(content.as_ref().to_vec()),
                     }
                 }
 
@@ -161,13 +151,13 @@ macro_rules! impl_compression_type {
                 $(
                 #[tokio::test]
                 async fn [<test_ $enum_item:lower _compression>]() {
-                    let string = "foo_bar".as_bytes();
+                    let string = "foo_bar".as_bytes().to_vec();
                     let compress = CompressionType::$enum_item
-                        .encode(string)
+                        .encode(&string)
                         .await
                         .unwrap();
                     let decompress = CompressionType::$enum_item
-                        .decode(compress.as_slice())
+                        .decode(&compress)
                         .await
                         .unwrap();
                     assert_eq!(decompress, string);
@@ -175,13 +165,13 @@ macro_rules! impl_compression_type {
 
                 #[tokio::test]
                 async fn test_uncompression() {
-                    let string = "foo_bar".as_bytes();
+                    let string = "foo_bar".as_bytes().to_vec();
                     let compress = CompressionType::Uncompressed
-                        .encode(string)
+                        .encode(&string)
                         .await
                         .unwrap();
                     let decompress = CompressionType::Uncompressed
-                        .decode(compress.as_slice())
+                        .decode(&compress)
                         .await
                         .unwrap();
                     assert_eq!(decompress, string);

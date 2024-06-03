@@ -26,8 +26,6 @@ use crate::error::{OpenDalSnafu, Result};
 
 /// A wrapper around [`ObjectStore`] that adds instrumentation for monitoring
 /// metrics such as bytes read, bytes written, and the number of seek operations.
-///
-/// TODO: Consider refactor InstrumentedStore to use async in trait instead of AsyncRead.
 #[derive(Clone)]
 pub(crate) struct InstrumentedStore {
     /// The underlying object store.
@@ -60,14 +58,8 @@ impl InstrumentedStore {
         read_byte_count: &'a IntCounter,
         read_count: &'a IntCounter,
         seek_count: &'a IntCounter,
-    ) -> Result<InstrumentedAsyncRead<'a, object_store::FuturesAsyncReader>> {
-        let meta = self.object_store.stat(path).await.context(OpenDalSnafu)?;
-        let reader = self
-            .object_store
-            .reader(path)
-            .await
-            .context(OpenDalSnafu)?
-            .into_futures_async_read(0..meta.content_length());
+    ) -> Result<InstrumentedAsyncRead<'a, object_store::Reader>> {
+        let reader = self.object_store.reader(path).await.context(OpenDalSnafu)?;
         Ok(InstrumentedAsyncRead::new(
             reader,
             read_byte_count,
@@ -85,21 +77,15 @@ impl InstrumentedStore {
         write_byte_count: &'a IntCounter,
         write_count: &'a IntCounter,
         flush_count: &'a IntCounter,
-    ) -> Result<InstrumentedAsyncWrite<'a, object_store::FuturesAsyncWriter>> {
+    ) -> Result<InstrumentedAsyncWrite<'a, object_store::Writer>> {
         let writer = match self.write_buffer_size {
             Some(size) => self
                 .object_store
                 .writer_with(path)
-                .chunk(size)
+                .buffer(size)
                 .await
-                .context(OpenDalSnafu)?
-                .into_futures_async_write(),
-            None => self
-                .object_store
-                .writer(path)
-                .await
-                .context(OpenDalSnafu)?
-                .into_futures_async_write(),
+                .context(OpenDalSnafu)?,
+            None => self.object_store.writer(path).await.context(OpenDalSnafu)?,
         };
         Ok(InstrumentedAsyncWrite::new(
             writer,
