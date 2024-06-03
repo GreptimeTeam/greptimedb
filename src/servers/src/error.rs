@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{http, Json};
 use base64::DecodeError;
 use catalog;
+use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -29,7 +30,6 @@ use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
-use tonic::Code;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -693,75 +693,6 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
-}
-
-/// Returns the tonic [Code] of a [StatusCode].
-pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
-    match status_code {
-        StatusCode::Success => Code::Ok,
-        StatusCode::Unknown => Code::Unknown,
-        StatusCode::Unsupported => Code::Unimplemented,
-        StatusCode::Unexpected
-        | StatusCode::Internal
-        | StatusCode::PlanQuery
-        | StatusCode::EngineExecuteQuery => Code::Internal,
-        StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::RequestOutdated => {
-            Code::InvalidArgument
-        }
-        StatusCode::Cancelled => Code::Cancelled,
-        StatusCode::TableAlreadyExists
-        | StatusCode::TableColumnExists
-        | StatusCode::RegionAlreadyExists
-        | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
-        StatusCode::TableNotFound
-        | StatusCode::RegionNotFound
-        | StatusCode::TableColumnNotFound
-        | StatusCode::DatabaseNotFound
-        | StatusCode::UserNotFound
-        | StatusCode::FlowNotFound => Code::NotFound,
-        StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
-        StatusCode::RuntimeResourcesExhausted
-        | StatusCode::RateLimited
-        | StatusCode::RegionBusy => Code::ResourceExhausted,
-        StatusCode::UnsupportedPasswordType
-        | StatusCode::UserPasswordMismatch
-        | StatusCode::AuthHeaderNotFound
-        | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
-        StatusCode::AccessDenied | StatusCode::PermissionDenied | StatusCode::RegionReadonly => {
-            Code::PermissionDenied
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! define_into_tonic_status {
-    ($Error: ty) => {
-        impl From<$Error> for tonic::Status {
-            fn from(err: $Error) -> Self {
-                use tonic::codegen::http::{HeaderMap, HeaderValue};
-                use tonic::metadata::MetadataMap;
-                use $crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
-
-                let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
-
-                // If either of the status_code or error msg cannot convert to valid HTTP header value
-                // (which is a very rare case), just ignore. Client will use Tonic status code and message.
-                let status_code = err.status_code();
-                headers.insert(
-                    GREPTIME_DB_HEADER_ERROR_CODE,
-                    HeaderValue::from(status_code as u32),
-                );
-                let root_error = err.output_msg();
-
-                let metadata = MetadataMap::from_headers(headers);
-                tonic::Status::with_metadata(
-                    $crate::error::status_to_tonic_code(status_code),
-                    root_error,
-                    metadata,
-                )
-            }
-        }
-    };
 }
 
 define_into_tonic_status!(Error);
