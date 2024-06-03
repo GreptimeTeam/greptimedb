@@ -5852,8 +5852,8 @@ dependencies = [
  "rand",
  "regex",
  "rskafka",
- "rstest 0.20.0",
- "rstest_reuse 0.7.0",
+ "rstest",
+ "rstest_reuse",
  "serde",
  "serde_json",
  "serde_with",
@@ -8532,47 +8532,21 @@ dependencies = [
 
 [[package]]
 name = "rstest"
-version = "0.17.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de1bb486a691878cd320c2f0d319ba91eeaa2e894066d8b5f8f117c000e9d962"
+checksum = "9afd55a67069d6e434a95161415f5beeada95a01c7b815508a82dcb0e1593682"
 dependencies = [
  "futures",
  "futures-timer",
- "rstest_macros 0.17.0",
- "rustc_version",
-]
-
-[[package]]
-name = "rstest"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27059f51958c5f8496a6f79511e7c0ac396dd815dc8894e9b6e2efb5779cf6f0"
-dependencies = [
- "futures",
- "futures-timer",
- "rstest_macros 0.20.0",
+ "rstest_macros",
  "rustc_version",
 ]
 
 [[package]]
 name = "rstest_macros"
-version = "0.17.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290ca1a1c8ca7edb7c3283bd44dc35dd54fdec6253a3912e201ba1072018fca8"
-dependencies = [
- "cfg-if",
- "proc-macro2",
- "quote",
- "rustc_version",
- "syn 1.0.109",
- "unicode-ident",
-]
-
-[[package]]
-name = "rstest_macros"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6132d64df104c0b3ea7a6ad7766a43f587bd773a4a9cf4cd59296d426afaf3a"
+checksum = "4165dfae59a39dd41d8dec720d3cbfbc71f69744efb480a3920f5d4e0cc6798d"
 dependencies = [
  "cfg-if",
  "glob",
@@ -8584,18 +8558,6 @@ dependencies = [
  "rustc_version",
  "syn 2.0.66",
  "unicode-ident",
-]
-
-[[package]]
-name = "rstest_reuse"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45f80dcc84beab3a327bbe161f77db25f336a1452428176787c8c79ac79d7073"
-dependencies = [
- "quote",
- "rand",
- "rustc_version",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -10815,8 +10777,8 @@ dependencies = [
  "prost 0.12.6",
  "query",
  "rand",
- "rstest 0.17.0",
- "rstest_reuse 0.5.0",
+ "rstest",
+ "rstest_reuse",
  "script",
  "serde_json",
  "servers",
