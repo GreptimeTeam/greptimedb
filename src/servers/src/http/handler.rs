@@ -34,8 +34,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::QueryContextRef;
+use snafu::ResultExt;
 
 use super::header::collect_plan_metrics;
+use crate::error::{
+    Error, InsertLogSnafu, ParseJsonSnafu, UnsupportedContentTypeSnafu,
+};
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
@@ -73,38 +77,30 @@ pub struct SqlQuery {
 pub struct LogIngesterQueryParams {
     pub table_name: Option<String>,
     pub db: Option<String>,
+    pub pipeline_name: Option<String>,
 }
 
-fn validate_log_ingester_payload(payload: &Value) -> Result<(), String> {
-    if !payload.is_object() {
-        return Err("payload must be an object".to_string());
-    }
-
-    if payload["pipeline_id"].as_str().is_none() {
-        return Err("processors field is required".to_string());
-    }
-
-    if payload["data"].as_array().is_none() && payload["data"].as_object().is_none() {
-        return Err("data field is required".to_string());
-    }
-
-    Ok(())
+fn parse_space_separated_log(payload: String) -> Result<Value, Error> {
+    // ToStructedLogSnafu
+    let _log = payload.split_whitespace().collect::<Vec<&str>>();
+    // TODO (qtang): implement this
+    todo!()
 }
 
 async fn log_ingester_inner(
     state: LogHandlerRef,
     query_params: LogIngesterQueryParams,
     query_ctx: QueryContextRef,
-    mut payload: Value,
+    payload: Value,
 ) -> Result<HttpResponse, String> {
-    let pipeline_id = payload["pipeline_id"].take();
-    let pipeline_id = pipeline_id.as_str().unwrap();
-    let data = payload["data"].take();
+    let pipeline_id = query_params
+        .pipeline_name
+        .ok_or("pipeline_name is required".to_string())?;
 
-    let pipeline_data = PipelineValue::try_from(data)?;
+    let pipeline_data = PipelineValue::try_from(payload)?;
 
     let pipeline = state
-        .get_pipeline(query_ctx.clone(), pipeline_id)
+        .get_pipeline(query_ctx.clone(), &pipeline_id)
         .await
         .map_err(|e| e.to_string())?;
     let transformed_data: Rows = pipeline.exec(pipeline_data)?;
@@ -136,27 +132,26 @@ async fn log_ingester_inner(
 /// handler to log ingester
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
-    State(_state): State<LogHandlerRef>,
-    Query(_query_params): Query<LogIngesterQueryParams>,
-    Extension(_query_ctx): Extension<QueryContextRef>,
-    Json(mut _payload): Json<Value>,
-) -> HttpResponse {
-    match validate_log_ingester_payload(&_payload) {
-        Ok(_) => (),
-        Err(e) => {
-            return HttpResponse::Error(ErrorResponse::from_error_message(
-                StatusCode::InvalidArguments,
-                e,
-            ))
-        }
-    };
-    match log_ingester_inner(_state, _query_params, _query_ctx, _payload).await {
-        Ok(resp) => resp,
-        Err(e) => HttpResponse::Error(ErrorResponse::from_error_message(
-            StatusCode::InvalidArguments,
-            e,
-        )),
+    State(state): State<LogHandlerRef>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Extension(query_ctx): Extension<QueryContextRef>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    payload: String,
+) -> Result<HttpResponse, Error> {
+    let value;
+    // TODO (qtang): we should decide json or jsonl
+    if content_type == ContentType::json() {
+        value = serde_json::from_str(&payload).context(ParseJsonSnafu)?;
+    // TODO (qtang): we should decide which content type to support
+    // form_url_cncoded type is only placeholder
+    } else if content_type == ContentType::form_url_encoded() {
+        value = parse_space_separated_log(payload)?;
+    } else {
+        return UnsupportedContentTypeSnafu { content_type }.fail();
     }
+    log_ingester_inner(state, query_params, query_ctx, value)
+        .await
+        .or_else(|e| InsertLogSnafu { msg: e }.fail())
 }
 
 #[axum_macros::debug_handler]

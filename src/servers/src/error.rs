@@ -26,6 +26,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{debug, error};
 use datatypes::prelude::ConcreteDataType;
+use headers::ContentType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
@@ -549,6 +550,34 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse payload as json"))]
+    ParseJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to conver to structed log"))]
+    ToStructedLog {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupport content type: {:?}", content_type))]
+    UnsupportedContentType {
+        content_type: ContentType,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to insert log. msg: {}", msg))]
+    InsertLog {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode url"))]
     UrlDecode {
         #[snafu(source)]
@@ -655,6 +684,10 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | UnexpectedPhysicalTable { .. }
+            | ParseJson { .. }
+            | ToStructedLog { .. }
+            | UnsupportedContentType { .. }
+            | InsertLog { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
             RowWriter { source, .. }

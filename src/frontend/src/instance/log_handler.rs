@@ -35,8 +35,7 @@ impl LogHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            // This is a bug, it should be PermissionReq::LogWrite
-            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
+            .check_permission(ctx.current_user(), PermissionReq::LogWrite)
             .context(AuthSnafu)?;
 
         self.handle_log_inserts(log, ctx).await
