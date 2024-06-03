@@ -164,7 +164,7 @@ impl CompactionTaskImpl {
         info!(
             "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
             self.region_id,
-            compaction_result.fileds_to_remove,
+            compaction_result.files_to_remove,
             compaction_result.files_to_add,
             compaction_result.compaction_time_window,
             self.waiters.len(),

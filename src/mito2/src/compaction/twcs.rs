@@ -145,7 +145,7 @@ impl Picker for TwcsPicker {
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             // Nothing to compact, we are done.
-            // You can notifiy all waiters as we consume the compaction request.
+            // You can notify all waiters as we consume the compaction request.
             return None;
         }
 

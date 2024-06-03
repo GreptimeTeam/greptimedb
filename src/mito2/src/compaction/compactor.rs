@@ -186,13 +186,13 @@ pub async fn open_compaction_region(
 /// MergeOutput represents the output of merging SST files.
 pub struct MergeOutput {
     pub files_to_add: Option<Vec<FileMeta>>,
-    pub fileds_to_remove: Option<Vec<FileMeta>>,
+    pub files_to_remove: Option<Vec<FileMeta>>,
     pub compaction_time_window: Option<i64>,
 }
 
 impl MergeOutput {
     pub fn is_empty(&self) -> bool {
-        self.files_to_add.is_none() && self.fileds_to_remove.is_none()
+        self.files_to_add.is_none() && self.files_to_remove.is_none()
     }
 }
 
@@ -208,7 +208,7 @@ pub trait Compactor: Send + Sync + 'static {
         } else {
             Ok(MergeOutput {
                 files_to_add: None,
-                fileds_to_remove: None,
+                files_to_remove: None,
                 compaction_time_window: None,
             })
         }
@@ -228,7 +228,7 @@ pub trait Compactor: Send + Sync + 'static {
         };
 
         let files_to_remove = {
-            if let Some(files) = merge_output.fileds_to_remove {
+            if let Some(files) = merge_output.files_to_remove {
                 files
             } else {
                 return Ok(());
@@ -403,7 +403,7 @@ async fn do_merge_ssts(
 
     Ok(MergeOutput {
         files_to_add: Some(output_files),
-        fileds_to_remove: Some(inputs),
+        files_to_remove: Some(inputs),
         compaction_time_window: Some(picker_output.time_window_size),
     })
 }
