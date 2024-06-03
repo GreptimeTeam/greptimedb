@@ -636,8 +636,17 @@ pub(crate) trait FileRangeCollector {
 }
 
 /// Optional list of [ScanPart]s.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct ScanPartList(pub(crate) Option<Vec<ScanPart>>);
+
+impl fmt::Debug for ScanPartList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(parts) => write!(f, "{:?}", parts),
+            None => write!(f, "[]"),
+        }
+    }
+}
 
 impl ScanPartList {
     /// Returns true if the list is None.
@@ -688,6 +697,14 @@ impl StreamContext {
             parts: Mutex::new(ScanPartList::default()),
             query_start,
             prepare_scan_cost,
+        }
+    }
+
+    /// Format parts for explain.
+    pub(crate) fn format_parts(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.parts.try_lock() {
+            Ok(inner) => write!(f, "{:?}", &&*inner),
+            Err(_) => write!(f, "<locked>"),
         }
     }
 }
