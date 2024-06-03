@@ -73,6 +73,8 @@ pub struct StatementExecutor {
     inserter: InserterRef,
 }
 
+pub type StatementExecutorRef = Arc<StatementExecutor>;
+
 impl StatementExecutor {
     pub fn new(
         catalog_manager: CatalogManagerRef,

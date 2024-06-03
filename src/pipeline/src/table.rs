@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDef, ColumnSchema as PbColumnSchema, Row, RowInsertRequest,
     RowInsertRequests, Rows, SemanticType,
 };
-use common_error::ext::{BoxedError, ErrorExt, PlainError};
+use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
@@ -19,11 +18,12 @@ use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{StringVector, Vector};
+use operator::insert::InserterRef;
+use operator::statement::StatementExecutorRef;
 use pipeline::transform::GreptimeTransformer;
 use pipeline::{parse, Content, Pipeline};
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
-use servers::query_handler::grpc::GrpcQueryHandlerRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableInfo;
@@ -35,24 +35,27 @@ use crate::error::{
     InsertPipelineSnafu, ParsePipelineSnafu, PipelineNotFoundSnafu, Result,
 };
 
-pub type PipelineTableRef<E> = Arc<PipelineTable<E>>;
+pub type PipelineTableRef = Arc<PipelineTable>;
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
-pub struct PipelineTable<E: ErrorExt + Send + Sync + 'static> {
-    grpc_handler: GrpcQueryHandlerRef<E>,
+pub struct PipelineTable {
+    inserter: InserterRef,
+    statement_executor: StatementExecutorRef,
     table: TableRef,
     query_engine: QueryEngineRef,
     pipelines: RwLock<HashMap<String, Pipeline<GreptimeTransformer>>>,
 }
 
-impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
+impl PipelineTable {
     pub fn new(
+        inserter: InserterRef,
+        statement_executor: StatementExecutorRef,
         table: TableRef,
-        grpc_handler: GrpcQueryHandlerRef<E>,
         query_engine: QueryEngineRef,
     ) -> Self {
         Self {
-            grpc_handler,
+            inserter,
+            statement_executor,
             table,
             query_engine,
             pipelines: RwLock::new(HashMap::default()),
@@ -238,8 +241,12 @@ impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
         };
 
         let output = self
-            .grpc_handler
-            .do_query(Request::RowInserts(requests), Self::query_ctx(&table_info))
+            .inserter
+            .handle_row_inserts(
+                requests,
+                Self::query_ctx(&table_info),
+                &self.statement_executor,
+            )
             .await
             .map_err(BoxedError::new)
             .context(InsertPipelineSnafu { name })?;

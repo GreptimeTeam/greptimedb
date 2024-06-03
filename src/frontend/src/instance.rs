@@ -111,7 +111,6 @@ pub trait FrontendInstance:
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
-pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 #[derive(Clone)]
 pub struct Instance {
@@ -267,7 +266,6 @@ impl FrontendInstance for Instance {
         }
 
         self.script_executor.start(self)?;
-        self.pipeline_operator.start(self);
 
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {

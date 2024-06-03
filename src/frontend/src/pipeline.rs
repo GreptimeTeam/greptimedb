@@ -15,65 +15,38 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use api::v1::ddl_request::Expr;
-use api::v1::greptime_request::Request;
-use api::v1::{CreateTableExpr, DdlRequest};
-use arc_swap::ArcSwap;
+use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_query::Output;
 use common_telemetry::{error, info};
+use operator::insert::InserterRef;
+use operator::statement::StatementExecutorRef;
 use pipeline::table::{PipelineTable, PipelineTableRef};
 use pipeline::{GreptimeTransformer, Pipeline};
 use query::QueryEngineRef;
-use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, Error, GetPipelineSnafu, InsertPipelineSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, GetPipelineSnafu, InsertPipelineSnafu, Result, TableNotFoundSnafu,
 };
-use crate::instance::Instance;
-
-type FrontendGrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler<Error = Error> + Send + Sync>;
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
 
-struct DummyHandler;
-
-impl DummyHandler {
-    pub fn arc() -> Arc<Self> {
-        Arc::new(Self {})
-    }
-}
-
-#[async_trait::async_trait]
-impl GrpcQueryHandler for DummyHandler {
-    type Error = Error;
-
-    async fn do_query(
-        &self,
-        _query: Request,
-        _ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
-        unreachable!();
-    }
-}
-
 pub struct PipelineOperator {
-    grpc_handler: ArcSwap<FrontendGrpcQueryHandlerRef>,
+    inserter: InserterRef,
+    statement_executor: StatementExecutorRef,
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    tables: RwLock<HashMap<String, PipelineTableRef<Error>>>,
+    tables: RwLock<HashMap<String, PipelineTableRef>>,
 }
 
 impl PipelineOperator {
     pub fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
-        let (time_index, primary_keys, column_defs) =
-            PipelineTable::<Error>::build_pipeline_schema();
+        let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
         let create_table_expr = CreateTableExpr {
             catalog_name: catalog.to_string(),
@@ -103,8 +76,9 @@ impl PipelineOperator {
         tables.insert(
             catalog.to_string(),
             Arc::new(PipelineTable::new(
+                self.inserter.clone(),
+                self.statement_executor.clone(),
                 table,
-                self.grpc_handler.load().as_ref().clone(),
                 self.query_engine.clone(),
             )),
         );
@@ -116,7 +90,7 @@ impl PipelineOperator {
         }
 
         let RegisterSystemTableRequest {
-            create_table_expr: expr,
+            create_table_expr: mut expr,
             open_hook,
         } = self.create_table_request(catalog);
 
@@ -138,14 +112,11 @@ impl PipelineOperator {
         let schema = expr.schema_name.clone();
         let table_name = expr.table_name.clone();
 
-        let _ = self
-            .grpc_handler
-            .load()
-            .do_query(
-                Request::Ddl(DdlRequest {
-                    expr: Some(Expr::CreateTable(expr)),
-                }),
-                QueryContext::arc(),
+        self.statement_executor
+            .create_table_inner(
+                &mut expr,
+                None,
+                Arc::new(QueryContext::with(catalog, &schema)),
             )
             .await?;
 
@@ -172,7 +143,7 @@ impl PipelineOperator {
         Ok(())
     }
 
-    pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef<Error>> {
+    pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef> {
         // FIXME (qtang): we should impl this
         self.tables.read().unwrap().get(catalog).cloned()
     }
@@ -185,7 +156,7 @@ impl PipelineOperator {
         content_type: &str,
         pipeline: &str,
     ) -> Result<()> {
-        let _compiled_pipeline = PipelineTable::<Error>::compile_pipeline(pipeline)
+        let _compiled_pipeline = PipelineTable::compile_pipeline(pipeline)
             .map_err(BoxedError::new)
             .context(InsertPipelineSnafu { name })?;
         self.get_pipeline_table_from_cache(catalog)
@@ -205,19 +176,19 @@ impl PipelineOperator {
 }
 
 impl PipelineOperator {
-    pub fn new(catalog_manager: CatalogManagerRef, query_engine: QueryEngineRef) -> Self {
-        let grpc_handler = ArcSwap::new(Arc::new(DummyHandler::arc() as _));
+    pub fn new(
+        inserter: InserterRef,
+        statement_executor: StatementExecutorRef,
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+    ) -> Self {
         Self {
-            grpc_handler,
+            inserter,
+            statement_executor,
             catalog_manager,
             tables: RwLock::new(HashMap::new()),
             query_engine,
         }
-    }
-
-    pub fn start(&self, instance: &Instance) {
-        self.grpc_handler
-            .store(Arc::new(Arc::new(instance.clone()) as _));
     }
 
     pub async fn get_pipeline(

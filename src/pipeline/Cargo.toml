@@ -36,11 +36,11 @@ datatypes.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
+operator.workspace = true
 paste = { workspace = true }
 pipeline = { git = "ssh://git@github.com/GreptimeTeam/pipeline.git", rev = "3eb890c551b8d7f60c4491fcfec18966e2b210a4" }
 prometheus.workspace = true
 query.workspace = true
-servers.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true
@@ -52,7 +52,6 @@ catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
 log-store.workspace = true
-operator.workspace = true
 rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
