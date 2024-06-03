@@ -33,7 +33,6 @@ use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProper
 use crate::cache::CacheManager;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{
@@ -242,10 +241,7 @@ async fn maybe_init_parts(
         part_list
             .set_parts(distributor.build_parts(&input.memtables, input.parallelism.parallelism));
 
-        metrics.build_parts_cost = now.elapsed();
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parts"])
-            .observe(metrics.build_parts_cost.as_secs_f64());
+        metrics.observe_init_part(now.elapsed());
     }
     Ok(())
 }

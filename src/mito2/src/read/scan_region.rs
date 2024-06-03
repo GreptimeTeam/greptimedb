@@ -34,7 +34,7 @@ use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::{READ_SST_COUNT, READ_STAGE_ELAPSED};
+use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{CompatBatch, CompatReader};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
@@ -729,11 +729,6 @@ impl StreamContext {
     pub(crate) fn new(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let prepare_scan_cost = query_start.elapsed();
-
-        // Observes metrics.
-        READ_STAGE_ELAPSED
-            .with_label_values(&["prepare_scan"])
-            .observe(prepare_scan_cost.as_secs_f64());
 
         Self {
             input,

@@ -768,14 +768,17 @@ pub(crate) struct ScannerMetrics {
 }
 
 impl ScannerMetrics {
-    /// Observes metrics on scanner created.
-    fn observe_metrics_on_create(prepare_scan_cost: &Duration, build_parts_cost: &Duration) {
+    /// Sets and observes metrics on initializing parts.
+    fn observe_init_part(&mut self, build_parts_cost: Duration) {
+        self.build_parts_cost = build_parts_cost;
+
+        // Observes metrics.
         READ_STAGE_ELAPSED
             .with_label_values(&["prepare_scan"])
-            .observe(prepare_scan_cost.as_secs_f64());
+            .observe(self.prepare_scan_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["build_parts"])
-            .observe(build_parts_cost.as_secs_f64());
+            .observe(self.build_parts_cost.as_secs_f64());
     }
 
     /// Observes metrics on scanner finish.

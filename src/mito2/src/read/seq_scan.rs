@@ -33,7 +33,6 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::merge::{MergeReader, MergeReaderBuilder};
 use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
@@ -269,7 +268,6 @@ impl SeqScan {
     }
 }
 
-// TODO(yingwen): Reuse code.
 /// Initializes parts if they are not built yet.
 async fn maybe_init_parts(
     part_list: &mut ScanPartList,
@@ -283,10 +281,7 @@ async fn maybe_init_parts(
         part_list
             .set_parts(distributor.build_parts(&input.memtables, input.parallelism.parallelism));
 
-        metrics.build_parts_cost = now.elapsed();
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parts"])
-            .observe(metrics.build_parts_cost.as_secs_f64());
+        metrics.observe_init_part(now.elapsed());
     }
     Ok(())
 }
@@ -319,8 +314,7 @@ impl FileRangeCollector for SeqDistributor {
 }
 
 impl SeqDistributor {
-    // TODO(yingwen): group parts and reduce by parallelism.
-    fn build_parts(mut self, memtables: &[MemtableRef], _parallelism: usize) -> Vec<ScanPart> {
+    fn build_parts(mut self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
         // Creates a part for each memtable.
         for mem in memtables {
             let stats = mem.stats();
@@ -332,7 +326,9 @@ impl SeqDistributor {
             self.parts.push(part);
         }
 
-        self.parts
+        let parts = group_parts_by_range(self.parts);
+
+        maybe_merge_parts(parts, parallelism)
     }
 }
 
@@ -373,6 +369,47 @@ fn group_parts_by_range(mut parts: Vec<ScanPart>) -> Vec<ScanPart> {
     }
 
     part_groups
+}
+
+/// Merges parts by parallelism.
+/// It merges parts if the number of parts is greater than `parallelism`.
+fn maybe_merge_parts(mut parts: Vec<ScanPart>, parallelism: usize) -> Vec<ScanPart> {
+    assert!(parallelism > 0);
+
+    if parts.len() <= parallelism {
+        // No need to merge parts.
+        return parts;
+    }
+
+    // Sort parts by number of memtables and ranges in reverse order.
+    parts.sort_unstable_by(|a, b| {
+        a.memtables
+            .len()
+            .cmp(&b.memtables.len())
+            .then_with(|| {
+                let a_ranges_len = a
+                    .file_ranges
+                    .iter()
+                    .map(|ranges| ranges.len())
+                    .sum::<usize>();
+                let b_ranges_len = b
+                    .file_ranges
+                    .iter()
+                    .map(|ranges| ranges.len())
+                    .sum::<usize>();
+                a_ranges_len.cmp(&b_ranges_len)
+            })
+            .reverse()
+    });
+
+    let parts_to_reduce = parts.len() - parallelism;
+    for _ in 0..parts_to_reduce {
+        // Safety: We ensure `parts.len() > parallelism`.
+        let part = parts.pop().unwrap();
+        parts.last_mut().unwrap().merge(part);
+    }
+
+    parts
 }
 
 #[cfg(test)]
