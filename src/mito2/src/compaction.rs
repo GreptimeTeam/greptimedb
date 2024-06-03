@@ -14,7 +14,7 @@
 
 mod buckets;
 pub mod compactor;
-mod picker;
+pub mod picker;
 mod task;
 #[cfg(test)]
 mod test_util;
@@ -377,7 +377,7 @@ impl CompactionStatus {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompactionOutput {
+pub struct CompactionOutput {
     pub output_file_id: FileId,
     /// Compaction output file level.
     pub output_level: Level,

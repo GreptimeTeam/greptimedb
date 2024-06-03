@@ -27,12 +27,11 @@ use store_api::path_utils::region_dir;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
-use crate::cache::CacheManagerRef;
+use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::build_sst_reader;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::config::MitoConfig;
-use crate::error::{JoinSnafu, ObjectStoreNotFoundSnafu, Result};
-use crate::flush::WriteBufferManagerImpl;
+use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
@@ -51,18 +50,21 @@ use crate::sst::parquet::WriteOptions;
 
 #[derive(Clone)]
 /// CompactionRegion represents a region that needs to be compacted.
+/// It's the subset of MitoRegion.
 pub struct CompactionRegion {
     pub region_id: RegionId,
     pub region_options: RegionOptions,
     pub engine_config: Arc<MitoConfig>,
     pub region_metadata: RegionMetadataRef,
-    pub manifest_ctx: Arc<ManifestContext>,
     pub cache_manager: CacheManagerRef,
     pub access_layer: AccessLayerRef,
-    pub version_control: VersionControlRef,
     pub file_purger: FilePurgerRef,
+
+    pub(crate) manifest_ctx: Arc<ManifestContext>,
+    pub(crate) version_control: VersionControlRef,
 }
 
+/// CompactionRequest represents the request to compact a region.
 pub struct CompactionRequest {
     pub catalog: String,
     pub schema: String,
@@ -71,11 +73,12 @@ pub struct CompactionRequest {
     pub compaction_options: compact_request::Options,
 }
 
+/// Open a compaction region from a compaction request.
+/// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
     req: CompactionRequest,
     mito_config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManager,
-    cache_manager: CacheManagerRef,
 ) -> Result<CompactionRegion> {
     let region_options = RegionOptions::try_from(&req.options)?;
     let region_dir = region_dir(
@@ -97,7 +100,6 @@ pub async fn open_compaction_region(
     };
 
     let access_layer = {
-        // TODO(zyy17): Should we really need to create intermediate manager here?
         let intermediate_manager =
             IntermediateManager::init_fs(mito_config.inverted_index.intermediate_path.clone())
                 .await?;
@@ -111,17 +113,18 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            // TODO(zyy17): It needs to add a new function instead of using join_dir.
             manifest_dir: join_dir(&region_dir, "manifest"),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
         };
 
-        // TODO(zyy17): handle error.
         RegionManifestManager::open(region_manifest_options, Default::default())
             .await?
-            .unwrap()
+            .context(EmptyRegionDirSnafu {
+                region_id: req.region_id,
+                region_dir,
+            })?
     };
 
     let manifest = manifest_manager.manifest();
@@ -138,24 +141,18 @@ pub async fn open_compaction_region(
     };
 
     let version_control = {
-        let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
-            mito_config.global_write_buffer_size.as_bytes() as usize,
-        ));
-        let memtable_builder_provider =
-            MemtableBuilderProvider::new(Some(write_buffer_manager.clone()), mito_config.clone());
-
-        let memtable_builder = memtable_builder_provider.builder_for_options(
-            region_options.memtable.as_ref(),
-            !region_options.append_mode,
-        );
+        let memtable_builder = MemtableBuilderProvider::new(None, mito_config.clone())
+            .builder_for_options(
+                region_options.memtable.as_ref(),
+                !region_options.append_mode,
+            );
 
         // Initial memtable id is 0.
-        let part_duration = region_options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
             region_metadata.clone(),
             memtable_builder.clone(),
             0,
-            part_duration,
+            region_options.compaction.time_window(),
         ));
 
         let version = VersionBuilder::new(region_metadata.clone(), mutable)
@@ -175,7 +172,7 @@ pub async fn open_compaction_region(
         access_layer,
         version_control,
         region_id: req.region_id,
-        cache_manager: cache_manager.clone(),
+        cache_manager: Arc::new(CacheManager::default()),
         engine_config: mito_config.clone(),
         region_metadata: region_metadata.clone(),
         file_purger: file_purger.clone(),

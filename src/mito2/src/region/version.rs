@@ -220,7 +220,7 @@ pub(crate) struct VersionControlData {
 
 /// Static metadata of a region.
 #[derive(Clone, Debug)]
-pub(crate) struct Version {
+pub struct Version {
     /// Metadata of the region.
     ///
     /// Altering metadata isn't frequent, storing metadata in Arc to allow sharing
