@@ -107,7 +107,7 @@ impl RegionEngine for FileRegionEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
         None
     }
 
@@ -229,8 +229,9 @@ impl EngineInner {
         let res = FileRegion::create(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
-                "Failed to create region, region_id: {}, err: {}",
-                region_id, err
+                err;
+                "Failed to create region, region_id: {}",
+                region_id
             );
         })?;
         self.regions.write().unwrap().insert(region_id, region);
@@ -259,8 +260,9 @@ impl EngineInner {
         let res = FileRegion::open(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
-                "Failed to open region, region_id: {}, err: {}",
-                region_id, err
+                err;
+                "Failed to open region, region_id: {}",
+                region_id
             );
         })?;
         self.regions.write().unwrap().insert(region_id, region);
@@ -302,8 +304,9 @@ impl EngineInner {
             let res = FileRegion::drop(&region, &self.object_store).await;
             res.inspect_err(|err| {
                 error!(
-                    "Failed to drop region, region_id: {}, err: {}",
-                    region_id, err
+                    err;
+                    "Failed to drop region, region_id: {}",
+                    region_id
                 );
             })?;
         }

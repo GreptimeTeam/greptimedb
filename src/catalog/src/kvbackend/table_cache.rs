@@ -17,11 +17,11 @@ use std::sync::Arc;
 use common_meta::cache::{CacheContainer, Initializer, TableInfoCacheRef, TableNameCacheRef};
 use common_meta::error::{Result as MetaResult, ValueNotExistSnafu};
 use common_meta::instruction::CacheIdent;
-use common_meta::table_name::TableName;
 use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use table::dist_table::DistTable;
+use table::table_name::TableName;
 use table::TableRef;
 
 pub type TableCacheRef = Arc<TableCache>;

@@ -218,7 +218,7 @@ impl PromStoreProtocolHandler for Instance {
                     let plan = output.meta.plan.clone();
                     query_results.push(to_query_result(&table_name, output).await?);
                     if let Some(ref plan) = plan {
-                        collect_plan_metrics(plan.clone(), &mut [&mut map]);
+                        collect_plan_metrics(plan, &mut [&mut map]);
                     }
                 }
 

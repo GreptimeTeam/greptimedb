@@ -34,6 +34,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
@@ -44,7 +45,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
-use crate::error::{Result, UnsupportedRegionRequestSnafu};
+use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::utils;
 
@@ -144,10 +145,33 @@ impl RegionEngine for MetricEngine {
                     .alter_region(region_id, alter, &mut extension_return_value)
                     .await
             }
-            RegionRequest::Delete(_)
-            | RegionRequest::Flush(_)
-            | RegionRequest::Compact(_)
-            | RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            RegionRequest::Flush(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(region_id, request)
+                        .await
+                        .context(error::MitoFlushOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::Compact(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(region_id, request)
+                        .await
+                        .context(error::MitoFlushOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::Delete(_) | RegionRequest::Truncate(_) => {
+                UnsupportedRegionRequestSnafu { request }.fail()
+            }
             RegionRequest::Catchup(ref req) => self.inner.catchup_region(region_id, *req).await,
         };
 
@@ -178,9 +202,9 @@ impl RegionEngine for MetricEngine {
     /// Retrieves region's disk usage.
     ///
     /// Note: Returns `None` if it's a logical region.
-    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+    fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
         if self.inner.is_physical_region(region_id) {
-            self.inner.mito.region_disk_usage(region_id).await
+            self.inner.mito.region_disk_usage(region_id)
         } else {
             None
         }
@@ -359,15 +383,7 @@ mod test {
         let logical_region_id = env.default_logical_region_id();
         let physical_region_id = env.default_physical_region_id();
 
-        assert!(env
-            .metric()
-            .region_disk_usage(logical_region_id)
-            .await
-            .is_none());
-        assert!(env
-            .metric()
-            .region_disk_usage(physical_region_id)
-            .await
-            .is_some());
+        assert!(env.metric().region_disk_usage(logical_region_id).is_none());
+        assert!(env.metric().region_disk_usage(physical_region_id).is_some());
     }
 }

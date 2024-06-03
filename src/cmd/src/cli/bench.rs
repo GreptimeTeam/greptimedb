@@ -23,13 +23,13 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::table_name::TableName;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use rand::Rng;
 use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
+use table::table_name::TableName;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use self::metadata::TableMetadataBencher;

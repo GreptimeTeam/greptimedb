@@ -17,7 +17,6 @@
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
-use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
@@ -25,7 +24,7 @@ use crate::adapter::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::adapter::TableName;
-use crate::repr::{self, ColumnType, RelationType};
+use crate::repr::{self, ColumnType, RelationDesc, RelationType};
 
 /// mapping of table name <-> table id should be query from tableinfo manager
 pub struct TableSource {
@@ -107,7 +106,7 @@ impl TableSource {
     pub async fn get_table_name_schema(
         &self,
         table_id: &TableId,
-    ) -> Result<(TableName, RelationType), Error> {
+    ) -> Result<(TableName, RelationDesc), Error> {
         let table_info_value = self
             .get_table_info_value(table_id)
             .await?
@@ -123,14 +122,20 @@ impl TableSource {
         ];
 
         let raw_schema = table_info_value.table_info.meta.schema;
-        let column_types = raw_schema
+        let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
             .column_schemas
+            .clone()
             .into_iter()
-            .map(|col| ColumnType {
-                nullable: col.is_nullable(),
-                scalar_type: col.data_type,
+            .map(|col| {
+                (
+                    ColumnType {
+                        nullable: col.is_nullable(),
+                        scalar_type: col.data_type,
+                    },
+                    col.name,
+                )
             })
-            .collect_vec();
+            .unzip();
 
         let key = table_info_value.table_info.meta.primary_key_indices;
         let keys = vec![repr::Key::from(key)];
@@ -138,10 +143,13 @@ impl TableSource {
         let time_index = raw_schema.timestamp_index;
         Ok((
             table_name,
-            RelationType {
-                column_types,
-                keys,
-                time_index,
+            RelationDesc {
+                typ: RelationType {
+                    column_types,
+                    keys,
+                    time_index,
+                },
+                names: col_names,
             },
         ))
     }

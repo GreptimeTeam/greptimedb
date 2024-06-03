@@ -19,12 +19,15 @@ mod udf;
 
 use std::sync::Arc;
 
+use datafusion::catalog::CatalogProviderList;
+use datafusion::logical_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 pub use expr::build_filter_from_timestamp;
 
 pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
 pub use self::udaf::AggregateFunction;
 pub use self::udf::ScalarUdf;
+use crate::error::Result;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
 use crate::logical_plan::accumulator::*;
 use crate::signature::{Signature, Volatility};
@@ -67,6 +70,25 @@ pub fn create_aggregate_function(
         creator,
     )
 }
+
+/// The datafusion `[LogicalPlan]` decoder.
+#[async_trait::async_trait]
+pub trait SubstraitPlanDecoder {
+    /// Decode the [`LogicalPlan`] from bytes with the [`CatalogProviderList`].
+    /// When `optimize` is true, it will do the optimization for decoded plan.
+    ///
+    /// TODO(dennis): It's not a good design for an API to do many things.
+    /// The `optimize` was introduced because of `query` and `catalog` cyclic dependency issue
+    /// I am happy to refactor it if we have a better solution.
+    async fn decode(
+        &self,
+        message: bytes::Bytes,
+        catalog_list: Arc<dyn CatalogProviderList>,
+        optimize: bool,
+    ) -> Result<LogicalPlan>;
+}
+
+pub type SubstraitPlanDecoderRef = Arc<dyn SubstraitPlanDecoder + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

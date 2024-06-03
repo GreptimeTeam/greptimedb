@@ -10,19 +10,15 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-catalog.workspace = true
 common-error.workspace = true
-common-function.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-substrait.workspace = true
-datatypes.workspace = true
 promql.workspace = true
 prost.workspace = true
-session.workspace = true
 snafu.workspace = true
 
 [dependencies.substrait_proto]

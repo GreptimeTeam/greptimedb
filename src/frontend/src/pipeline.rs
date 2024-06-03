@@ -21,8 +21,8 @@ use api::v1::{CreateTableExpr, DdlRequest};
 use arc_swap::ArcSwap;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
+use common_catalog::format_full_table_name;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{error, info};
 use pipeline::table::{PipelineTable, PipelineTableRef};
@@ -135,7 +135,8 @@ impl PipelineOperator {
             return Ok(());
         }
 
-        let table_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+        let schema = expr.schema_name.clone();
+        let table_name = expr.table_name.clone();
 
         let _ = self
             .grpc_handler
@@ -150,15 +151,11 @@ impl PipelineOperator {
 
         let table = self
             .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
+            .table(catalog, &schema, &table_name)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: table_name.to_string(),
+                table_name: format_full_table_name(catalog, &schema, &table_name),
             })?;
 
         if let Some(open_hook) = open_hook {

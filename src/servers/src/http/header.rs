@@ -126,7 +126,7 @@ fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u6
     }
 }
 
-pub fn collect_plan_metrics(plan: Arc<dyn ExecutionPlan>, maps: &mut [&mut HashMap<String, u64>]) {
+pub fn collect_plan_metrics(plan: &Arc<dyn ExecutionPlan>, maps: &mut [&mut HashMap<String, u64>]) {
     if let Some(m) = plan.metrics() {
         m.iter().for_each(|m| match m.value() {
             MetricValue::Count { name, count } => {

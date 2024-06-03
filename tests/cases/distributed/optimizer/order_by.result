@@ -12,50 +12,50 @@ explain select * from numbers;
 -- SQLNESS REPLACE (peers.*) REDACTED
 explain select * from numbers order by number desc;
 
-+---------------+-------------------------------------------------------+
-| plan_type     | plan                                                  |
-+---------------+-------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                      |
-| physical_plan | SortExec: expr=[number@0 DESC]                        |
-|               |   SinglePartitionScanner: <SendableRecordBatchStream> |
-|               |                                                       |
-+---------------+-------------------------------------------------------+
++---------------+---------------------------------------------------------------+
+| plan_type     | plan                                                          |
++---------------+---------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                              |
+| physical_plan | SortExec: expr=[number@0 DESC], preserve_partitioning=[false] |
+|               |   SinglePartitionScanner: <SendableRecordBatchStream>         |
+|               |                                                               |
++---------------+---------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 explain select * from numbers order by number asc;
 
-+---------------+-------------------------------------------------------+
-| plan_type     | plan                                                  |
-+---------------+-------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                      |
-| physical_plan | SortExec: expr=[number@0 ASC NULLS LAST]              |
-|               |   SinglePartitionScanner: <SendableRecordBatchStream> |
-|               |                                                       |
-+---------------+-------------------------------------------------------+
++---------------+-------------------------------------------------------------------------+
+| plan_type     | plan                                                                    |
++---------------+-------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                                        |
+| physical_plan | SortExec: expr=[number@0 ASC NULLS LAST], preserve_partitioning=[false] |
+|               |   SinglePartitionScanner: <SendableRecordBatchStream>                   |
+|               |                                                                         |
++---------------+-------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 explain select * from numbers order by number desc limit 10;
 
-+---------------+---------------------------------------------------------+
-| plan_type     | plan                                                    |
-+---------------+---------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                        |
-| physical_plan | GlobalLimitExec: skip=0, fetch=10                       |
-|               |   SortExec: TopK(fetch=10), expr=[number@0 DESC]        |
-|               |     SinglePartitionScanner: <SendableRecordBatchStream> |
-|               |                                                         |
-+---------------+---------------------------------------------------------+
++---------------+---------------------------------------------------------------------------------+
+| plan_type     | plan                                                                            |
++---------------+---------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                                                |
+| physical_plan | GlobalLimitExec: skip=0, fetch=10                                               |
+|               |   SortExec: TopK(fetch=10), expr=[number@0 DESC], preserve_partitioning=[false] |
+|               |     SinglePartitionScanner: <SendableRecordBatchStream>                         |
+|               |                                                                                 |
++---------------+---------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 explain select * from numbers order by number asc limit 10;
 
-+---------------+------------------------------------------------------------+
-| plan_type     | plan                                                       |
-+---------------+------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                           |
-| physical_plan | GlobalLimitExec: skip=0, fetch=10                          |
-|               |   SortExec: TopK(fetch=10), expr=[number@0 ASC NULLS LAST] |
-|               |     SinglePartitionScanner: <SendableRecordBatchStream>    |
-|               |                                                            |
-+---------------+------------------------------------------------------------+
++---------------+-------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                      |
++---------------+-------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                                                          |
+| physical_plan | GlobalLimitExec: skip=0, fetch=10                                                         |
+|               |   SortExec: TopK(fetch=10), expr=[number@0 ASC NULLS LAST], preserve_partitioning=[false] |
+|               |     SinglePartitionScanner: <SendableRecordBatchStream>                                   |
+|               |                                                                                           |
++---------------+-------------------------------------------------------------------------------------------+
 

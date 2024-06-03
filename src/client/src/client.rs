@@ -173,14 +173,14 @@ impl Client {
         Ok(FlightClient { addr, client })
     }
 
-    pub(crate) fn raw_region_client(&self) -> Result<PbRegionClient<Channel>> {
-        let (_, channel) = self.find_channel()?;
+    pub(crate) fn raw_region_client(&self) -> Result<(String, PbRegionClient<Channel>)> {
+        let (addr, channel) = self.find_channel()?;
         let client = PbRegionClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
             .max_encoding_message_size(self.max_grpc_send_message_size())
             .accept_compressed(CompressionEncoding::Zstd)
             .send_compressed(CompressionEncoding::Zstd);
-        Ok(client)
+        Ok((addr, client))
     }
 
     pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {

@@ -121,8 +121,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mito flush operation fails"))]
+    MitoFlushOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito catchup operation fails"))]
     MitoCatchupOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito compact operation fails"))]
+    MitoCompactOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -275,7 +289,9 @@ impl ErrorExt for Error {
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
-            | MitoCatchupOperation { source, .. } => source.status_code(),
+            | MitoCatchupOperation { source, .. }
+            | MitoFlushOperation { source, .. }
+            | MitoCompactOperation { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 

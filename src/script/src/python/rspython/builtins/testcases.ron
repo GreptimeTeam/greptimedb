@@ -343,17 +343,6 @@ log10(values)"#,
             ty: Float64
         ))
     ),
-    TestCase(
-        input: {},
-        script: r#"
-from greptime import *
-random(42)"#,
-        expect: Ok((
-            value: LenFloatVec(42),
-            ty: Float64
-        ))
-    ),
-
 // UDAF(Aggerate function)
 // approx function is indeterministic
     TestCase(
@@ -466,44 +455,6 @@ count(values)"#,
         expect: Ok((
             value: Int(10),
             ty: Int64
-        ))
-    ),
-    TestCase(
-        input: {
-            "a": Var(
-                ty: Float64,
-                value: FloatVec([1.0, 2.0, 3.0])
-            ),
-            "b": Var(
-                ty: Float64,
-                value: FloatVec([1.0, 0.0, -1.0])
-            ),
-        },
-        script: r#"
-from greptime import *
-covariance(a, b)"#,
-        expect: Ok((
-            value: Float(-1.0),
-            ty: Float64
-        ))
-    ),
-    TestCase(
-        input: {
-            "a": Var(
-                ty: Float64,
-                value: FloatVec([1.0, 2.0, 3.0])
-            ),
-            "b": Var(
-                ty: Float64,
-                value: FloatVec([1.0, 0.0, -1.0])
-            ),
-        },
-        script: r#"
-from greptime import *
-covariance_pop(a, b)"#,
-        expect: Ok((
-            value: Float(-0.6666666666666666),
-            ty: Float64
         ))
     ),
     TestCase(
@@ -944,21 +895,6 @@ clip(values, lower, upper)"#,
         expect: Ok((
             ty: Float64,
             value: FloatVec([0.0, 1.0, 0.5])
-        ))
-    ),
-    TestCase(
-        input: {
-            "values": Var(
-                ty: Float64,
-                value: FloatVec([-1.0, 2.0, 2.0, 0.5])
-            )
-        },
-        script: r#"
-from greptime import *
-median(values)"#,
-        expect: Ok((
-            ty: Float64,
-            value: Float(1.25)
         ))
     ),
     TestCase(

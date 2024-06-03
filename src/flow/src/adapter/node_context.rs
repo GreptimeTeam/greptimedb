@@ -21,13 +21,13 @@ use common_telemetry::debug;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::repr::{DiffRow, RelationType, BROADCAST_CAP};
+use crate::repr::{DiffRow, RelationDesc, RelationType, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -51,10 +51,8 @@ pub struct FlownodeContext {
             mpsc::UnboundedReceiver<DiffRow>,
         ),
     >,
-    /// store source in buffer for each source table, in case broadcast channel is full
-    pub send_buffer: BTreeMap<TableId, VecDeque<DiffRow>>,
     /// the schema of the table, query from metasrv or inferred from TypedPlan
-    pub schema: HashMap<GlobalId, RelationType>,
+    pub schema: HashMap<GlobalId, RelationDesc>,
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
     pub query_context: Option<Arc<QueryContext>>,
@@ -67,18 +65,20 @@ pub struct FlownodeContext {
 #[derive(Debug)]
 pub struct SourceSender {
     sender: broadcast::Sender<DiffRow>,
-    send_buf: VecDeque<DiffRow>,
+    send_buf: RwLock<VecDeque<DiffRow>>,
 }
 
 impl Default for SourceSender {
     fn default() -> Self {
         Self {
-            sender: broadcast::Sender::new(BROADCAST_CAP),
+            // TODO(discord9): found a better way then increase this to prevent lagging and hence missing input data
+            sender: broadcast::Sender::new(BROADCAST_CAP * 2),
             send_buf: Default::default(),
         }
     }
 }
 
+// TODO: make all send operation immut
 impl SourceSender {
     pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
         self.sender.subscribe()
@@ -86,15 +86,16 @@ impl SourceSender {
 
     /// send as many as possible rows from send buf
     /// until send buf is empty or broadchannel is full
-    pub fn try_send_all(&mut self) -> Result<usize, Error> {
+    pub async fn try_send_all(&self) -> Result<usize, Error> {
         let mut row_cnt = 0;
         loop {
+            let mut send_buf = self.send_buf.write().await;
             // if inner sender channel is empty or send buf is empty, there
             // is nothing to do for now, just break
-            if self.sender.len() >= BROADCAST_CAP || self.send_buf.is_empty() {
+            if self.sender.len() >= BROADCAST_CAP || send_buf.is_empty() {
                 break;
             }
-            if let Some(row) = self.send_buf.pop_front() {
+            if let Some(row) = send_buf.pop_front() {
                 self.sender
                     .send(row)
                     .map_err(|err| {
@@ -109,16 +110,20 @@ impl SourceSender {
         }
         if row_cnt > 0 {
             debug!("Send {} rows", row_cnt);
+            debug!(
+                "Remaining Send buf.len() = {}",
+                self.send_buf.read().await.len()
+            );
         }
 
         Ok(row_cnt)
     }
 
     /// return number of rows it actual send(including what's in the buffer)
-    pub fn send_rows(&mut self, rows: Vec<DiffRow>) -> Result<usize, Error> {
-        self.send_buf.extend(rows);
+    pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
+        self.send_buf.write().await.extend(rows);
 
-        let row_cnt = self.try_send_all()?;
+        let row_cnt = self.try_send_all().await?;
 
         Ok(row_cnt)
     }
@@ -128,23 +133,35 @@ impl FlownodeContext {
     /// return number of rows it actual send(including what's in the buffer)
     ///
     /// TODO(discord9): make this concurrent
-    pub fn send(&mut self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
+    pub async fn send(&self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
         let sender = self
             .source_sender
-            .get_mut(&table_id)
+            .get(&table_id)
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
         // debug!("FlownodeContext::send: trying to send {} rows", rows.len());
-        sender.send_rows(rows)
+        sender.send_rows(rows).await
     }
 
     /// flush all sender's buf
-    pub fn flush_all_sender(&mut self) -> Result<usize, Error> {
-        self.source_sender
-            .iter_mut()
-            .map(|(_table_id, src_sender)| src_sender.try_send_all())
-            .try_fold(0, |acc, x| x.map(|x| x + acc))
+    ///
+    /// return numbers being sent
+    pub async fn flush_all_sender(&self) -> Result<usize, Error> {
+        let mut sum = 0;
+        for sender in self.source_sender.values() {
+            sender.try_send_all().await.inspect(|x| sum += x)?;
+        }
+        Ok(sum)
+    }
+
+    /// Return the sum number of rows in all send buf
+    pub async fn get_send_buf_size(&self) -> usize {
+        let mut sum = 0;
+        for sender in self.source_sender.values() {
+            sum += sender.send_buf.read().await.len();
+        }
+        sum
     }
 }
 
@@ -226,7 +243,7 @@ impl FlownodeContext {
     /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationType), Error> {
+    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationDesc), Error> {
         let id = self
             .table_repr
             .get_by_name(name)
@@ -297,7 +314,7 @@ impl FlownodeContext {
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
             .unwrap();
-        self.schema.insert(gid, schema);
+        self.schema.insert(gid, schema.into_unnamed());
         Ok(())
     }
 

@@ -21,6 +21,7 @@ use std::time::Duration;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use client::Database;
 use common_base::secrets::ExposeSecret;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
@@ -56,7 +57,6 @@ use servers::tls::ReloadableTlsServerConfig;
 use servers::Mode;
 use session::context::QueryContext;
 
-use crate::database::Database;
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";

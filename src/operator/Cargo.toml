@@ -56,6 +56,7 @@ store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]

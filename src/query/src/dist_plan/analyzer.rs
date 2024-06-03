@@ -31,6 +31,7 @@ use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::query_engine::DefaultSerializer;
 
 pub struct DistPlannerAnalyzer;
 
@@ -150,7 +151,10 @@ impl PlanRewriter {
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
     fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
-        if DFLogicalSubstraitConvertor.encode(plan).is_err() {
+        if DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .is_err()
+        {
             return true;
         }
 

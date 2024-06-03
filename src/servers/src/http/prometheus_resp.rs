@@ -132,7 +132,7 @@ impl PrometheusJsonResponse {
             if let Some(physical_plan) = result.meta.plan {
                 let mut result_map = HashMap::new();
                 let mut tmp = vec![&mut result_map];
-                collect_plan_metrics(physical_plan, &mut tmp);
+                collect_plan_metrics(&physical_plan, &mut tmp);
 
                 let re = result_map
                     .into_iter()

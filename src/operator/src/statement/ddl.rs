@@ -32,7 +32,6 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
 };
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
-use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{debug, info, tracing};
 use common_time::Timezone;
@@ -43,6 +42,8 @@ use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
+use query::plan::extract_and_rewrite_full_table_names;
+use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
@@ -60,17 +61,19 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, TableOptions, COMMENT_KEY};
+use table::table_name::TableName;
 use table::TableRef;
 
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
-    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, FlowNotFoundSnafu,
-    InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, ExtractTableNamesSnafu,
+    FlowNotFoundSnafu, InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -235,9 +238,13 @@ impl StatementExecutor {
             )
             .await?;
 
-        let table_id = resp.table_id.context(error::UnexpectedSnafu {
-            violated: "expected table_id",
-        })?;
+        let table_id = resp
+            .table_ids
+            .into_iter()
+            .next()
+            .context(error::UnexpectedSnafu {
+                violated: "expected table_id",
+            })?;
         info!("Successfully created table '{table_name}' with table id {table_id}");
 
         table_info.ident.table_id = table_id;
@@ -398,16 +405,33 @@ impl StatementExecutor {
                 return InvalidViewStmtSnafu {}.fail();
             }
         };
-        let optimized_plan = self.optimize_logical_plan(logical_plan)?;
+
+        // Extract the table names from the origin plan
+        // and rewrite them as fully qualified names.
+        let (table_names, plan) =
+            extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
+                .context(ExtractTableNamesSnafu)?;
+
+        let table_names = table_names.into_iter().map(|t| t.into()).collect();
+
+        // TODO(dennis): we don't save the optimized plan yet,
+        // because there are some serialization issue with our own defined plan node (such as `MergeScanLogicalPlan`).
+        // When the issues are fixed, we can use the `optimized_plan` instead.
+        // let optimized_plan = self.optimize_logical_plan(logical_plan)?.unwrap_df_plan();
 
         // encode logical plan
         let encoded_plan = DFLogicalSubstraitConvertor
-            .encode(&optimized_plan.unwrap_df_plan())
+            .encode(&plan, DefaultSerializer)
             .context(SubstraitCodecSnafu)?;
 
-        let expr =
-            expr_factory::to_create_view_expr(create_view, encoded_plan.to_vec(), ctx.clone())?;
+        let expr = expr_factory::to_create_view_expr(
+            create_view,
+            encoded_plan.to_vec(),
+            table_names,
+            ctx.clone(),
+        )?;
 
+        //TODO(dennis): validate the logical plan
         self.create_view_by_expr(expr, ctx).await
     }
 
@@ -511,9 +535,13 @@ impl StatementExecutor {
             resp
         );
 
-        let view_id = resp.table_id.context(error::UnexpectedSnafu {
-            violated: "expected table_id",
-        })?;
+        let view_id = resp
+            .table_ids
+            .into_iter()
+            .next()
+            .context(error::UnexpectedSnafu {
+                violated: "expected table_id",
+            })?;
         info!("Successfully created view '{view_name}' with view id {view_id}");
 
         // Invalidates local cache ASAP.

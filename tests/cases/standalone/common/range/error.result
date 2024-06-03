@@ -59,18 +59,18 @@ Error: 3000(PlanQuery), DataFusion error: Error during planning: Missing argumen
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
 
-+-------------------------------------------------+
-| COVAR(ceil(host.val),floor(host.val)) RANGE 20s |
-+-------------------------------------------------+
-|                                                 |
-| 0.5                                             |
-| 0.5                                             |
-|                                                 |
-|                                                 |
-| 0.5                                             |
-| 0.5                                             |
-|                                                 |
-+-------------------------------------------------+
++------------------------------------------------------+
+| covar_samp(ceil(host.val),floor(host.val)) RANGE 20s |
++------------------------------------------------------+
+|                                                      |
+| 0.5                                                  |
+| 0.5                                                  |
+|                                                      |
+|                                                      |
+| 0.5                                                  |
+| 0.5                                                  |
+|                                                      |
++------------------------------------------------------+
 
 -- 2.4 nest query
 SELECT min(max(val) RANGE '20s') RANGE '20s' FROM host ALIGN '10s';

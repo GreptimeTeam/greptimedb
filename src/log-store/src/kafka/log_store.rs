@@ -17,21 +17,23 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use common_wal::options::WalOptions;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
-use snafu::ResultExt;
-use store_api::logstore::entry::{Entry as EntryTrait, Id as EntryId};
-use store_api::logstore::entry_stream::SendableEntryStream;
-use store_api::logstore::namespace::Id as NamespaceId;
-use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
+use snafu::{OptionExt, ResultExt};
+use store_api::logstore::entry::{
+    Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
+};
+use store_api::logstore::provider::{KafkaProvider, Provider};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
+use store_api::storage::RegionId;
 
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
+use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
-use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
-use crate::kafka::{EntryImpl, NamespaceImpl};
+use crate::kafka::util::record::{
+    maybe_emit_entry, remaining_entries, Record, RecordProducer, ESTIMATED_META_SIZE,
+};
 use crate::metrics;
 
 /// A log store backed by Kafka.
@@ -52,41 +54,81 @@ impl KafkaLogStore {
     }
 }
 
+fn build_entry(
+    data: &mut Vec<u8>,
+    entry_id: EntryId,
+    region_id: RegionId,
+    provider: &Provider,
+    max_data_size: usize,
+) -> Entry {
+    if data.len() <= max_data_size {
+        Entry::Naive(NaiveEntry {
+            provider: provider.clone(),
+            region_id,
+            entry_id,
+            data: std::mem::take(data),
+        })
+    } else {
+        let parts = std::mem::take(data)
+            .chunks(max_data_size)
+            .map(|s| s.into())
+            .collect::<Vec<_>>();
+        let num_parts = parts.len();
+
+        let mut headers = Vec::with_capacity(num_parts);
+        headers.push(MultiplePartHeader::First);
+        headers.extend((1..num_parts - 1).map(MultiplePartHeader::Middle));
+        headers.push(MultiplePartHeader::Last);
+
+        Entry::MultiplePart(MultiplePartEntry {
+            provider: provider.clone(),
+            region_id,
+            entry_id,
+            headers,
+            parts,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl LogStore for KafkaLogStore {
     type Error = Error;
-    type Entry = EntryImpl;
-    type Namespace = NamespaceImpl;
 
-    /// Creates an entry of the associated Entry type.
-    fn entry(&self, data: &mut Vec<u8>, entry_id: EntryId, ns: Self::Namespace) -> Self::Entry {
-        EntryImpl {
-            data: std::mem::take(data),
-            id: entry_id,
-            ns,
-        }
+    /// Creates an [Entry].
+    fn entry(
+        &self,
+        data: &mut Vec<u8>,
+        entry_id: EntryId,
+        region_id: RegionId,
+        provider: &Provider,
+    ) -> Result<Entry> {
+        provider
+            .as_kafka_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: KafkaProvider::type_name(),
+                actual: provider.type_name(),
+            })?;
+
+        let max_data_size =
+            self.client_manager.config.max_batch_size.as_bytes() as usize - ESTIMATED_META_SIZE;
+        Ok(build_entry(
+            data,
+            entry_id,
+            region_id,
+            provider,
+            max_data_size,
+        ))
     }
 
-    /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.
-    async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        let entry_id = RecordProducer::new(entry.ns.clone())
-            .with_entries(vec![entry])
-            .produce(&self.client_manager)
-            .await
-            .map(TryInto::try_into)??;
-        Ok(AppendResponse {
-            last_entry_id: entry_id,
-        })
-    }
-
+    // TODO(weny): refactor the writing.
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
-    async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
+    async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse> {
         metrics::METRIC_KAFKA_APPEND_BATCH_CALLS_TOTAL.inc();
         metrics::METRIC_KAFKA_APPEND_BATCH_BYTES_TOTAL.inc_by(
             entries
                 .iter()
-                .map(EntryTrait::estimated_size)
+                .map(|entry| entry.estimated_size())
                 .sum::<usize>() as u64,
         );
         let _timer = metrics::METRIC_KAFKA_APPEND_BATCH_ELAPSED.start_timer();
@@ -98,9 +140,17 @@ impl LogStore for KafkaLogStore {
         // Groups entries by region id and pushes them to an associated record producer.
         let mut producers = HashMap::with_capacity(entries.len());
         for entry in entries {
+            let provider = entry
+                .provider()
+                .as_kafka_provider()
+                .context(error::InvalidProviderSnafu {
+                    expected: KafkaProvider::type_name(),
+                    actual: entry.provider().type_name(),
+                })?
+                .clone();
             producers
-                .entry(entry.ns.region_id)
-                .or_insert_with(|| RecordProducer::new(entry.ns.clone()))
+                .entry(entry.region_id())
+                .or_insert_with(|| RecordProducer::new(provider))
                 .push(entry);
         }
 
@@ -122,20 +172,27 @@ impl LogStore for KafkaLogStore {
         Ok(AppendBatchResponse { last_entry_ids })
     }
 
-    /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
-    /// starting from `entry_id`. The generated entries will be filtered by the namespace.
+    /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids.
+    /// Returns entries belonging to `provider`, starting from `entry_id`.
     async fn read(
         &self,
-        ns: &Self::Namespace,
+        provider: &Provider,
         entry_id: EntryId,
-    ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
+    ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
+        let provider = provider
+            .as_kafka_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: KafkaProvider::type_name(),
+                actual: provider.type_name(),
+            })?;
+
         metrics::METRIC_KAFKA_READ_CALLS_TOTAL.inc();
         let _timer = metrics::METRIC_KAFKA_READ_ELAPSED.start_timer();
 
         // Gets the client associated with the topic.
         let client = self
             .client_manager
-            .get_or_insert(&ns.topic)
+            .get_or_insert(&provider.topic)
             .await?
             .raw_client
             .clone();
@@ -147,14 +204,16 @@ impl LogStore for KafkaLogStore {
         let end_offset = client
             .get_offset(OffsetAt::Latest)
             .await
-            .context(GetOffsetSnafu { ns: ns.clone() })?
+            .context(GetOffsetSnafu {
+                topic: &provider.topic,
+            })?
             - 1;
         // Reads entries with offsets in the range [start_offset, end_offset].
         let start_offset = Offset::try_from(entry_id)?.0;
 
         debug!(
             "Start reading entries in range [{}, {}] for ns {}",
-            start_offset, end_offset, ns
+            start_offset, end_offset, provider
         );
 
         // Abort if there're no new entries.
@@ -162,7 +221,7 @@ impl LogStore for KafkaLogStore {
         if start_offset > end_offset {
             warn!(
                 "No new entries for ns {} in range [{}, {}]",
-                ns, start_offset, end_offset
+                provider, start_offset, end_offset
             );
             return Ok(futures_util::stream::empty().boxed());
         }
@@ -174,20 +233,20 @@ impl LogStore for KafkaLogStore {
 
         debug!(
             "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
-            ns, start_offset, end_offset
+            provider, start_offset, end_offset
         );
 
-        // Key: entry id, Value: the records associated with the entry.
-        let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
-        let ns_clone = ns.clone();
+        // A buffer is used to collect records to construct a complete entry.
+        let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
+        let provider = provider.clone();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
                 // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
                 // The high watermark offset is the offset of the last record plus one.
                 let (record_and_offset, high_watermark) =
-                    consume_result.with_context(|_| ConsumeRecordSnafu {
-                        ns: ns_clone.clone(),
+                    consume_result.context(ConsumeRecordSnafu {
+                        topic: &provider.topic,
                     })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
 
@@ -195,37 +254,35 @@ impl LogStore for KafkaLogStore {
                     .inc_by(kafka_record.approximate_size() as u64);
 
                 debug!(
-                    "Read a record at offset {} for ns {}, high watermark: {}",
-                    offset, ns_clone, high_watermark
+                    "Read a record at offset {} for topic {}, high watermark: {}",
+                    offset, provider.topic, high_watermark
                 );
 
                 // Ignores no-op records.
                 if kafka_record.value.is_none() {
-                    if check_termination(offset, end_offset, &entry_records)? {
+                    if check_termination(offset, end_offset) {
+                        if let Some(entries) = remaining_entries(&provider, &mut entry_records) {
+                            yield Ok(entries);
+                        }
                         break;
                     }
                     continue;
                 }
 
-                // Filters records by namespace.
                 let record = Record::try_from(kafka_record)?;
-                if record.meta.ns != ns_clone {
-                    if check_termination(offset, end_offset, &entry_records)? {
-                        break;
-                    }
-                    continue;
-                }
-
                 // Tries to construct an entry from records consumed so far.
-                if let Some(mut entry) = maybe_emit_entry(record, &mut entry_records)? {
+                if let Some(mut entry) = maybe_emit_entry(&provider, record, &mut entry_records)? {
                     // We don't rely on the EntryId generated by mito2.
                     // Instead, we use the offset return from Kafka as EntryId.
                     // Therefore, we MUST overwrite the EntryId with RecordOffset.
-                    entry.id = offset as u64;
+                    entry.set_entry_id(offset as u64);
                     yield Ok(vec![entry]);
                 }
 
-                if check_termination(offset, end_offset, &entry_records)? {
+                if check_termination(offset, end_offset) {
+                    if let Some(entries) = remaining_entries(&provider, &mut entry_records) {
+                        yield Ok(entries);
+                    }
                     break;
                 }
             }
@@ -233,39 +290,25 @@ impl LogStore for KafkaLogStore {
         Ok(Box::pin(stream))
     }
 
-    /// Creates a namespace of the associated Namespace type.
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
-        // Safety: upon start, the datanode checks the consistency of the wal providers in the wal config of the
-        // datanode and that of the metasrv. Therefore, the wal options passed into the kafka log store
-        // must be of type WalOptions::Kafka.
-        let WalOptions::Kafka(kafka_options) = wal_options else {
-            unreachable!()
-        };
-        NamespaceImpl {
-            region_id: ns_id,
-            topic: kafka_options.topic.clone(),
-        }
-    }
-
     /// Creates a new `Namespace` from the given ref.
-    async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
+    async fn create_namespace(&self, _provider: &Provider) -> Result<()> {
         Ok(())
     }
 
     /// Deletes an existing `Namespace` specified by the given ref.
-    async fn delete_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
+    async fn delete_namespace(&self, _provider: &Provider) -> Result<()> {
         Ok(())
     }
 
     /// Lists all existing namespaces.
-    async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
+    async fn list_namespaces(&self) -> Result<Vec<Provider>> {
         Ok(vec![])
     }
 
     /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
     /// so that the log store can safely delete those entries. This method does not guarantee
     /// that the obsolete entries are deleted immediately.
-    async fn obsolete(&self, _ns: Self::Namespace, _entry_id: EntryId) -> Result<()> {
+    async fn obsolete(&self, _provider: &Provider, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }
 
@@ -275,227 +318,249 @@ impl LogStore for KafkaLogStore {
     }
 }
 
-fn check_termination(
-    offset: i64,
-    end_offset: i64,
-    entry_records: &HashMap<EntryId, Vec<Record>>,
-) -> Result<bool> {
+fn check_termination(offset: i64, end_offset: i64) -> bool {
     // Terminates the stream if the entry with the end offset was read.
     if offset >= end_offset {
         debug!("Stream consumer terminates at offset {}", offset);
         // There must have no records when the stream terminates.
-        if !entry_records.is_empty() {
-            return IllegalSequenceSnafu {
-                error: "Found records leftover",
-            }
-            .fail();
-        }
-        Ok(true)
+        true
     } else {
-        Ok(false)
+        false
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
+
     use common_base::readable_size::ReadableSize;
-    use rand::seq::IteratorRandom;
+    use common_telemetry::info;
+    use common_telemetry::tracing::warn;
+    use common_wal::config::kafka::DatanodeKafkaConfig;
+    use futures::TryStreamExt;
+    use rand::prelude::SliceRandom;
+    use rand::Rng;
+    use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
+    use store_api::logstore::provider::Provider;
+    use store_api::logstore::LogStore;
+    use store_api::storage::RegionId;
 
-    use super::*;
-    use crate::test_util::kafka::{
-        create_topics, entries_with_random_data, new_namespace, EntryBuilder,
-    };
+    use super::build_entry;
+    use crate::kafka::log_store::KafkaLogStore;
 
-    // Stores test context for a region.
-    struct RegionContext {
-        ns: NamespaceImpl,
-        entry_builder: EntryBuilder,
-        expected: Vec<EntryImpl>,
-        flushed_entry_id: EntryId,
-    }
+    #[test]
+    fn test_build_naive_entry() {
+        let provider = Provider::kafka_provider("my_topic".to_string());
+        let region_id = RegionId::new(1, 1);
+        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 120);
 
-    /// Prepares for a test in that a log store is constructed and a collection of topics is created.
-    async fn prepare(
-        test_name: &str,
-        num_topics: usize,
-        broker_endpoints: Vec<String>,
-    ) -> (KafkaLogStore, Vec<String>) {
-        let topics = create_topics(
-            num_topics,
-            |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
-            &broker_endpoints,
+        assert_eq!(
+            entry.into_naive_entry().unwrap(),
+            NaiveEntry {
+                provider,
+                region_id,
+                entry_id: 1,
+                data: vec![1; 100]
+            }
         )
-        .await;
-
-        let config = DatanodeKafkaConfig {
-            broker_endpoints,
-            max_batch_size: ReadableSize::kb(32),
-            ..Default::default()
-        };
-        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
-
-        // Appends a no-op record to each topic.
-        for topic in topics.iter() {
-            let last_entry_id = logstore
-                .append(EntryImpl {
-                    data: vec![],
-                    id: 0,
-                    ns: new_namespace(topic, 0),
-                })
-                .await
-                .unwrap()
-                .last_entry_id;
-            assert_eq!(last_entry_id, 0);
-        }
-
-        (logstore, topics)
     }
 
-    /// Creates a vector containing indexes of all regions if the `all` is true.
-    /// Otherwise, creates a subset of the indexes. The cardinality of the subset
-    /// is nearly a quarter of that of the universe set.
-    fn all_or_subset(all: bool, num_regions: usize) -> Vec<u64> {
-        assert!(num_regions > 0);
-        let amount = if all {
-            num_regions
-        } else {
-            (num_regions / 4).max(1)
-        };
-        (0..num_regions as u64).choose_multiple(&mut rand::thread_rng(), amount)
+    #[test]
+    fn test_build_into_multiple_part_entry() {
+        let provider = Provider::kafka_provider("my_topic".to_string());
+        let region_id = RegionId::new(1, 1);
+        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 50);
+
+        assert_eq!(
+            entry.into_multiple_part_entry().unwrap(),
+            MultiplePartEntry {
+                provider: provider.clone(),
+                region_id,
+                entry_id: 1,
+                headers: vec![MultiplePartHeader::First, MultiplePartHeader::Last],
+                parts: vec![vec![1; 50], vec![1; 50]],
+            }
+        );
+
+        let region_id = RegionId::new(1, 1);
+        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 21);
+
+        assert_eq!(
+            entry.into_multiple_part_entry().unwrap(),
+            MultiplePartEntry {
+                provider,
+                region_id,
+                entry_id: 1,
+                headers: vec![
+                    MultiplePartHeader::First,
+                    MultiplePartHeader::Middle(1),
+                    MultiplePartHeader::Middle(2),
+                    MultiplePartHeader::Middle(3),
+                    MultiplePartHeader::Last
+                ],
+                parts: vec![
+                    vec![1; 21],
+                    vec![1; 21],
+                    vec![1; 21],
+                    vec![1; 21],
+                    vec![1; 16]
+                ],
+            }
+        )
     }
 
-    /// Builds entries for regions specified by `which`. Builds large entries if `large` is true.
-    /// Returns the aggregated entries.
-    fn build_entries(
-        region_contexts: &mut HashMap<u64, RegionContext>,
-        which: &[u64],
-        large: bool,
-    ) -> Vec<EntryImpl> {
-        let mut aggregated = Vec::with_capacity(which.len());
-        for region_id in which {
-            let ctx = region_contexts.get_mut(region_id).unwrap();
-            // Builds entries for the region.
-            ctx.expected = if !large {
-                entries_with_random_data(3, &ctx.entry_builder)
-            } else {
-                // Builds a large entry of size 256KB which is way greater than the configured `max_batch_size` which is 32KB.
-                let large_entry = ctx.entry_builder.with_data([b'1'; 256 * 1024]);
-                vec![large_entry]
-            };
-            // Aggregates entries of all regions.
-            aggregated.push(ctx.expected.clone());
-        }
-        aggregated.into_iter().flatten().collect()
+    fn generate_entries(
+        logstore: &KafkaLogStore,
+        provider: &Provider,
+        num_entries: usize,
+        region_id: RegionId,
+        data_len: usize,
+    ) -> Vec<Entry> {
+        (0..num_entries)
+            .map(|_| {
+                let mut data: Vec<u8> = (0..data_len).map(|_| rand::random::<u8>()).collect();
+                // Always set `entry_id` to 0, the real entry_id will be set during the read.
+                logstore.entry(&mut data, 0, region_id, provider).unwrap()
+            })
+            .collect()
     }
 
-    /// Starts a test with:
-    /// * `test_name` - The name of the test.
-    /// * `num_topics` - Number of topics to be created in the preparation phase.
-    /// * `num_regions` - Number of regions involved in the test.
-    /// * `num_appends` - Number of append operations to be performed.
-    /// * `all` - All regions will be involved in an append operation if `all` is true. Otherwise,
-    /// an append operation will only randomly choose a subset of regions.
-    /// * `large` - Builds large entries for each region is `large` is true.
-    async fn test_with(
-        test_name: &str,
-        num_topics: usize,
-        num_regions: usize,
-        num_appends: usize,
-        all: bool,
-        large: bool,
-    ) {
+    #[tokio::test]
+    async fn test_append_batch_basic() {
+        common_telemetry::init_default_ut_logging();
         let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
-            warn!("The endpoints is empty, skipping the test {test_name}");
+            warn!("The endpoints is empty, skipping the test 'test_append_batch_basic'");
             return;
         };
         let broker_endpoints = broker_endpoints
             .split(',')
             .map(|s| s.trim().to_string())
             .collect::<Vec<_>>();
-
-        let (logstore, topics) = prepare(test_name, num_topics, broker_endpoints).await;
-        let mut region_contexts = (0..num_regions)
+        let config = DatanodeKafkaConfig {
+            broker_endpoints,
+            max_batch_size: ReadableSize::kb(32),
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        let provider = Provider::kafka_provider(topic_name);
+        let region_entries = (0..5)
             .map(|i| {
-                let topic = &topics[i % topics.len()];
-                let ns = new_namespace(topic, i as u64);
-                let entry_builder = EntryBuilder::new(ns.clone());
+                let region_id = RegionId::new(1, i);
                 (
-                    i as u64,
-                    RegionContext {
-                        ns,
-                        entry_builder,
-                        expected: Vec::new(),
-                        flushed_entry_id: 0,
-                    },
+                    region_id,
+                    generate_entries(&logstore, &provider, 20, region_id, 1024),
                 )
             })
-            .collect();
+            .collect::<HashMap<RegionId, Vec<_>>>();
 
-        for _ in 0..num_appends {
-            // Appends entries for a subset of regions.
-            let which = all_or_subset(all, num_regions);
-            let entries = build_entries(&mut region_contexts, &which, large);
-            let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
+        let mut all_entries = region_entries
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        all_entries.shuffle(&mut rand::thread_rng());
 
-            // Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
-            for region_id in which {
-                let ctx = region_contexts.get_mut(&region_id).unwrap();
-                let stream = logstore
-                    .read(&ctx.ns, ctx.flushed_entry_id + 1)
-                    .await
-                    .unwrap();
-                let mut got = stream
-                    .collect::<Vec<_>>()
-                    .await
-                    .into_iter()
-                    .flat_map(|x| x.unwrap())
-                    .collect::<Vec<_>>();
-                //FIXME(weny): https://github.com/GreptimeTeam/greptimedb/issues/3152
-                ctx.expected.iter_mut().for_each(|entry| entry.id = 0);
-                got.iter_mut().for_each(|entry| entry.id = 0);
-                assert_eq!(ctx.expected, got);
-            }
-
-            // Simulates a flush for regions.
-            for (region_id, last_entry_id) in last_entry_ids {
-                let ctx = region_contexts.get_mut(&region_id).unwrap();
-                ctx.flushed_entry_id = last_entry_id;
-            }
+        let response = logstore.append_batch(all_entries.clone()).await.unwrap();
+        // 5 region
+        assert_eq!(response.last_entry_ids.len(), 5);
+        let got_entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        for (region_id, _) in region_entries {
+            let expected_entries = all_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut actual_entries = got_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            actual_entries
+                .iter_mut()
+                .for_each(|entry| entry.set_entry_id(0));
+            assert_eq!(expected_entries, actual_entries);
         }
     }
 
-    /// Appends entries for one region and checks all entries can be read successfully.
     #[tokio::test]
-    async fn test_one_region() {
-        test_with("test_one_region", 1, 1, 1, true, false).await;
-    }
+    async fn test_append_batch_basic_large() {
+        common_telemetry::init_default_ut_logging();
+        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+            warn!("The endpoints is empty, skipping the test 'test_append_batch_basic_large'");
+            return;
+        };
+        let data_size_kb = rand::thread_rng().gen_range(9..31usize);
+        info!("Entry size: {}Ki", data_size_kb);
+        let broker_endpoints = broker_endpoints
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>();
+        let config = DatanodeKafkaConfig {
+            broker_endpoints,
+            max_batch_size: ReadableSize::kb(8),
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        let provider = Provider::kafka_provider(topic_name);
+        let region_entries = (0..5)
+            .map(|i| {
+                let region_id = RegionId::new(1, i);
+                (
+                    region_id,
+                    generate_entries(&logstore, &provider, 20, region_id, data_size_kb * 1024),
+                )
+            })
+            .collect::<HashMap<RegionId, Vec<_>>>();
 
-    /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-    /// A topic is assigned only a single region.
-    #[tokio::test]
-    async fn test_multi_regions_disjoint() {
-        test_with("test_multi_regions_disjoint", 5, 5, 1, true, false).await;
-    }
+        let mut all_entries = region_entries
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_matches!(all_entries[0], Entry::MultiplePart(_));
+        all_entries.shuffle(&mut rand::thread_rng());
 
-    /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-    /// A topic is assigned multiple regions.
-    #[tokio::test]
-    async fn test_multi_regions_overlapped() {
-        test_with("test_multi_regions_overlapped", 5, 20, 1, true, false).await;
-    }
-
-    /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-    /// A topic may be assigned multiple regions. The append operation repeats for a several iterations.
-    /// Each append operation will only append entries for a subset of randomly chosen regions.
-    #[tokio::test]
-    async fn test_multi_appends() {
-        test_with("test_multi_appends", 5, 20, 3, false, false).await;
-    }
-
-    /// Appends large entries for multiple regions and checks entries for each region can be read successfully.
-    /// A topic may be assigned multiple regions.
-    #[tokio::test]
-    async fn test_append_large_entries() {
-        test_with("test_append_large_entries", 5, 20, 3, true, true).await;
+        let response = logstore.append_batch(all_entries.clone()).await.unwrap();
+        // 5 region
+        assert_eq!(response.last_entry_ids.len(), 5);
+        let got_entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        for (region_id, _) in region_entries {
+            let expected_entries = all_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut actual_entries = got_entries
+                .iter()
+                .filter(|entry| entry.region_id() == region_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            actual_entries
+                .iter_mut()
+                .for_each(|entry| entry.set_entry_id(0));
+            assert_eq!(expected_entries, actual_entries);
+        }
     }
 }

@@ -21,7 +21,6 @@ use async_stream::stream;
 use common_base::bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
-use common_meta::table_name::TableName;
 use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
 use common_recordbatch::error::ExternalSnafu;
@@ -48,6 +47,7 @@ use meter_macros::read_meter;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use table::table_name::TableName;
 use tokio::time::Instant;
 
 use crate::error::ConvertSchemaSnafu;
@@ -86,8 +86,12 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
         write!(f, "MergeScan [is_placeholder={}]", self.is_placeholder)
     }
 
-    fn from_template(&self, _exprs: &[datafusion_expr::Expr], _inputs: &[LogicalPlan]) -> Self {
-        self.clone()
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::prelude::Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(self.clone())
     }
 }
 
@@ -118,7 +122,6 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 }
-
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,
@@ -307,7 +310,7 @@ impl ExecutionPlan for MergeScanExec {
         &self.properties
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 

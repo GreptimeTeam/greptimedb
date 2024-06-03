@@ -110,7 +110,7 @@ impl CompactionTaskImpl {
             Vec::with_capacity(self.outputs.iter().map(|o| o.inputs.len()).sum());
 
         for output in self.outputs.drain(..) {
-            compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
+            compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
 
             info!(
                 "Compaction region {} output [{}]-> {}",
@@ -229,7 +229,7 @@ impl CompactionTaskImpl {
                 return Err(e);
             }
         };
-        deleted.extend(self.expired_ssts.iter().map(FileHandle::meta));
+        deleted.extend(self.expired_ssts.iter().map(|f| f.meta_ref().clone()));
         let merge_time = merge_timer.stop_and_record();
         info!(
             "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",

@@ -25,11 +25,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
+use table::table_name::TableName;
 
 use crate::error::{self, Result};
 use crate::key::RegionDistribution;
 use crate::peer::Peer;
-use crate::table_name::TableName;
 use crate::DatanodeId;
 
 pub fn region_distribution(region_routes: &[RegionRoute]) -> RegionDistribution {

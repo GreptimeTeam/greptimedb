@@ -20,6 +20,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
@@ -27,7 +28,6 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetaKey, TableMetaValue};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::table_name::TableName;
 use crate::FlownodeId;
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";

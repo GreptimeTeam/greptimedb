@@ -149,7 +149,6 @@ impl Categorizer {
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
-            | Expr::GetIndexedField(_)
             | Expr::Case(_)
             | Expr::Cast(_)
             | Expr::TryCast(_)

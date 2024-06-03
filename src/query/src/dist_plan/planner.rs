@@ -19,7 +19,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_meta::table_name::TableName;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
@@ -35,10 +34,12 @@ use store_api::storage::RegionId;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
+use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::error;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
+use crate::query_engine::DefaultSerializer;
 use crate::region_query::RegionQueryHandlerRef;
 
 pub struct DistExtensionPlanner {
@@ -101,7 +102,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         // Pass down the original plan, allow execution nodes to do their optimization
         let amended_plan = Self::plan_with_full_table_name(input_plan.clone(), &table_name)?;
         let substrait_plan = DFLogicalSubstraitConvertor
-            .encode(&amended_plan)
+            .encode(&amended_plan, DefaultSerializer)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?
             .into();
 
@@ -170,7 +171,7 @@ struct TableNameExtractor {
     pub table_name: Option<TableName>,
 }
 
-impl TreeNodeVisitor for TableNameExtractor {
+impl TreeNodeVisitor<'_> for TableNameExtractor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {

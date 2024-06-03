@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure_test::execute_procedure_until_done;
+use table::table_name::TableName;
 
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task;
@@ -26,7 +27,6 @@ use crate::ddl::tests::create_flow::create_test_flow;
 use crate::error;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropFlowTask;
-use crate::table_name::TableName;
 use crate::test_util::{new_ddl_context, MockFlownodeManager};
 
 fn test_drop_flow_task(flow_name: &str, flow_id: u32, drop_if_exists: bool) -> DropFlowTask {

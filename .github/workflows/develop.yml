@@ -167,7 +167,9 @@ jobs:
           name: bins
           path: .
       - name: Unzip binaries
-        run: tar -xvf ./bins.tar.gz
+        run: | 
+          tar -xvf ./bins.tar.gz
+          rm ./bins.tar.gz
       - name: Run GreptimeDB
         run: |
           ./bins/greptime standalone start&
@@ -211,8 +213,17 @@ jobs:
           name: bins
           path: .
       - name: Unzip binaries
-        run: tar -xvf ./bins.tar.gz
-      - name: Fuzz Test
+        run: |
+          tar -xvf ./bins.tar.gz
+          rm ./bins.tar.gz
+      - name: Build Fuzz Test
+        shell: bash
+        run: |
+          cd tests-fuzz &
+          cargo install cargo-gc-bin &
+          cargo gc &
+          cd ..
+      - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
@@ -308,7 +319,9 @@ jobs:
           name: bin
           path: .
       - name: Unzip binary
-        run: tar -xvf ./bin.tar.gz
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
       - name: Build and push GreptimeDB image
         uses: ./.github/actions/build-and-push-ci-image
       - name: Wait for etcd
@@ -354,7 +367,14 @@ jobs:
           name: fuzz-tests-kind-logs-${{ matrix.target }}
           path: /tmp/kind
           retention-days: 3
-        
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: | 
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f
 
   sqlness:
     name: Sqlness Test

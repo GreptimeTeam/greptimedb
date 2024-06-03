@@ -20,12 +20,14 @@ use common_telemetry::{debug, info};
 use hydroflow::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
+use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
-use crate::expr::GlobalId;
+use crate::expr::error::InternalSnafu;
+use crate::expr::{EvalError, GlobalId};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
 
 #[allow(clippy::mutable_key_type)]
@@ -55,18 +57,43 @@ impl<'referred, 'df> Context<'referred, 'df> {
             .df
             .add_subgraph_source("source", send_port, move |_ctx, send| {
                 let now = *now.borrow();
-                let arr = arrange_handler_inner.write().get_updates_in_range(..=now);
-                err_collector.run(|| arrange_handler_inner.write().compact_to(now));
+                // write lock to prevent unexpected mutation
+                let mut arranged = arrange_handler_inner.write();
+                let arr = arranged.get_updates_in_range(..=now);
+                err_collector.run(|| arranged.compact_to(now));
 
+                debug!("Call source");
                 let prev_avail = arr.into_iter().map(|((k, _), t, d)| (k, t, d));
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();
                 // TODO(discord9): handling tokio broadcast error
-                while let Ok((r, t, d)) = src_recv.try_recv() {
-                    if t <= now {
-                        to_send.push((r, t, d));
-                    } else {
-                        to_arrange.push(((r, Row::empty()), t, d));
+                loop {
+                    match src_recv.try_recv() {
+                        Ok((r, t, d)) => {
+                            if t <= now {
+                                to_send.push((r, t, d));
+                            } else {
+                                to_arrange.push(((r, Row::empty()), t, d));
+                            }
+                        }
+                        Err(TryRecvError::Empty) => {
+                            break;
+                        }
+                        Err(TryRecvError::Lagged(lag_offset)) => {
+                            common_telemetry::error!("Flow missing {} rows behind", lag_offset);
+                            break;
+                        }
+                        Err(err) => {
+                            err_collector.run(|| -> Result<(), EvalError> {
+                                InternalSnafu {
+                                    reason: format!(
+                                        "Error receiving from broadcast channel: {}",
+                                        err
+                                    ),
+                                }
+                                .fail()
+                            });
+                        }
                     }
                 }
                 let all = prev_avail.chain(to_send).collect_vec();
@@ -77,10 +104,10 @@ impl<'referred, 'df> Context<'referred, 'df> {
                         to_arrange.len()
                     );
                 }
-                err_collector.run(|| arrange_handler_inner.write().apply_updates(now, to_arrange));
+                err_collector.run(|| arranged.apply_updates(now, to_arrange));
                 send.give(all);
-                // always schedule source to run at next tick
-                inner_schd.schedule_at(now + 1);
+                // always schedule source to run at now so we can repeatedly run source if needed
+                inner_schd.schedule_at(now);
             });
         schd.set_cur_subgraph(sub);
         let arranged = Arranged::new(arrange_handler);

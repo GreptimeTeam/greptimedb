@@ -51,7 +51,7 @@ use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_STALL_TOTAL;
-use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
+use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
@@ -212,6 +212,11 @@ impl WorkerGroup {
         self.worker(region_id).is_region_exists(region_id)
     }
 
+    /// Returns true if the specific region is opening.
+    pub(crate) fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.worker(region_id).is_region_opening(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     ///
     /// This method should not be public.
@@ -225,7 +230,7 @@ impl WorkerGroup {
     }
 
     /// Get worker for specific `region_id`.
-    fn worker(&self, region_id: RegionId) -> &RegionWorker {
+    pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
 
         &self.workers[index]
@@ -364,6 +369,7 @@ impl<S: LogStore> WorkerStarter<S> {
     /// Starts a region worker and its background thread.
     fn start(self) -> RegionWorker {
         let regions = Arc::new(RegionMap::default());
+        let opening_regions = Arc::new(OpeningRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
@@ -373,6 +379,7 @@ impl<S: LogStore> WorkerStarter<S> {
             config: self.config.clone(),
             regions: regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
+            opening_regions: opening_regions.clone(),
             sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
@@ -409,6 +416,7 @@ impl<S: LogStore> WorkerStarter<S> {
         RegionWorker {
             id: self.id,
             regions,
+            opening_regions,
             sender,
             handle: Mutex::new(Some(handle)),
             running,
@@ -422,6 +430,8 @@ pub(crate) struct RegionWorker {
     id: WorkerId,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// The opening regions.
+    opening_regions: OpeningRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequest>,
     /// Handle to the worker thread.
@@ -481,9 +491,20 @@ impl RegionWorker {
         self.regions.is_region_exists(region_id)
     }
 
+    /// Returns true if the region is opening.
+    fn is_region_opening(&self, region_id: RegionId) -> bool {
+        self.opening_regions.is_region_exists(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.regions.get_region(region_id)
+    }
+
+    #[cfg(test)]
+    /// Returns the [OpeningRegionsRef].
+    pub(crate) fn opening_regions(&self) -> &OpeningRegionsRef {
+        &self.opening_regions
     }
 }
 
@@ -531,6 +552,8 @@ struct RegionWorkerLoop<S> {
     regions: RegionMapRef,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
+    /// Regions that are opening.
+    opening_regions: OpeningRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequest>,
     /// Request receiver.
@@ -698,7 +721,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
-                DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
+                DdlRequest::Open(req) => {
+                    self.handle_open_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
                 DdlRequest::Alter(req) => {
                     self.handle_alter_request(ddl.region_id, req, ddl.sender)
