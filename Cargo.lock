@@ -9703,7 +9703,7 @@ dependencies = [
  "permutation",
  "pgwire",
  "pin-project",
- "pipeline 0.1.0",
+ "pipeline 0.8.1",
  "postgres-types",
  "pprof",
  "prometheus",

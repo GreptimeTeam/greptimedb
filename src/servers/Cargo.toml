@@ -69,7 +69,7 @@ opentelemetry-proto.workspace = true
 parking_lot = "0.12"
 pgwire = "0.20"
 pin-project = "1.0"
-pipeline = { git = "ssh://git@github.com/GreptimeTeam/pipeline.git", rev = "3eb890c551b8d7f60c4491fcfec18966e2b210a4" }
+pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [
     "flamegraph",

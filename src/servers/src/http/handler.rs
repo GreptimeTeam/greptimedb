@@ -28,7 +28,7 @@ use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use pipeline::value::Value as PipelineValue;
+use pipeline::Value as PipelineValue;
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
