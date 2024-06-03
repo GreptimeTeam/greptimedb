@@ -42,7 +42,7 @@ pub struct PickerOutput {
     pub time_window_size: i64,
 }
 
-pub fn new_picker(
+pub(crate) fn new_picker(
     compact_request_options: compact_request::Options,
     compaction_options: &CompactionOptions,
 ) -> Arc<dyn Picker> {

@@ -37,6 +37,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
+use crate::new_picker;
 use crate::read::Source;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
@@ -418,5 +419,12 @@ impl Compactor for DefaultCompactor {
 impl DefaultCompactor {
     pub fn new_with_picker(picker: Arc<dyn Picker>) -> Self {
         Self { picker }
+    }
+
+    pub fn new_from_request(req: &CompactionRequest) -> Result<Self> {
+        let region_options = RegionOptions::try_from(&req.options)?;
+        let compaction_options = region_options.compaction;
+        let picker = new_picker(req.compaction_options.clone(), &compaction_options);
+        Ok(Self { picker })
     }
 }
