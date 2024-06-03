@@ -35,7 +35,7 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use common_wal::options::{KafkaWalOptions, WalOptions};
+use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -119,18 +119,13 @@ impl RaftEngineLogStoreFactory {
     }
 }
 
-pub(crate) async fn prepare_test_for_kafka_log_store(
-    factory: &LogStoreFactory,
-) -> Option<(String, WalOptions)> {
+pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
     if let LogStoreFactory::Kafka(factory) = factory {
         let topic = uuid::Uuid::new_v4().to_string();
-        let wal_options = WalOptions::Kafka(KafkaWalOptions {
-            topic: topic.to_string(),
-        });
         let client = factory.client().await;
         append_noop_record(&client, &topic).await;
 
-        Some((topic, wal_options))
+        Some(topic)
     } else {
         None
     }
@@ -608,6 +603,8 @@ pub struct CreateRequestBuilder {
     all_not_null: bool,
     engine: String,
     ts_type: ConcreteDataType,
+    /// kafka topic name
+    kafka_topic: Option<String>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -621,6 +618,7 @@ impl Default for CreateRequestBuilder {
             all_not_null: false,
             engine: MITO_ENGINE_NAME.to_string(),
             ts_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            kafka_topic: None,
         }
     }
 }
@@ -673,6 +671,12 @@ impl CreateRequestBuilder {
         self
     }
 
+    #[must_use]
+    pub fn kafka_topic(mut self, topic: Option<String>) -> Self {
+        self.kafka_topic = topic;
+        self
+    }
+
     pub fn build(&self) -> RegionCreateRequest {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
@@ -713,12 +717,21 @@ impl CreateRequestBuilder {
             semantic_type: SemanticType::Timestamp,
             column_id,
         });
-
+        let mut options = self.options.clone();
+        if let Some(topic) = &self.kafka_topic {
+            let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            });
+            options.insert(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&wal_options).unwrap(),
+            );
+        }
         RegionCreateRequest {
             engine: self.engine.to_string(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
-            options: self.options.clone(),
+            options,
             region_dir: self.region_dir.clone(),
         }
     }

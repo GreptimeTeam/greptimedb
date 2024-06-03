@@ -91,6 +91,8 @@ async fn test_write_to_region() {
 #[apply(multiple_log_store_factories)]
 
 async fn test_region_replay(factory: Option<LogStoreFactory>) {
+    use common_wal::options::{KafkaWalOptions, WalOptions};
+
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -99,14 +101,10 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let mut request = CreateRequestBuilder::new().build();
-    let topic_and_options = prepare_test_for_kafka_log_store(&factory).await;
-    if let Some((_, wal_options)) = &topic_and_options {
-        request.options.insert(
-            WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&wal_options).unwrap(),
-        );
-    };
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
 
     let region_dir = request.region_dir.clone();
 
@@ -131,10 +129,13 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
     let mut options = HashMap::new();
-    if let Some((_, wal_options)) = &topic_and_options {
+    if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&wal_options).unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
         );
     };
 
