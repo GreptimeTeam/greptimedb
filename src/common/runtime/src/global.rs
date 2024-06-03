@@ -40,11 +40,11 @@ pub struct RuntimeOptions {
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        let two_fold_cpus = num_cpus::get() * 2;
+        let cpus = num_cpus::get();
         Self {
-            read_rt_size: two_fold_cpus,
-            write_rt_size: two_fold_cpus,
-            bg_rt_size: two_fold_cpus,
+            read_rt_size: cpus,
+            write_rt_size: cpus,
+            bg_rt_size: cpus,
         }
     }
 }
