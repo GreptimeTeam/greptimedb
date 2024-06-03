@@ -207,9 +207,8 @@ impl RegionScanner for UnorderedScan {
 
 impl DisplayAs for UnorderedScan {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "UnorderedScan: [")?;
-        self.stream_ctx.format_parts(f)?;
-        write!(f, "]")
+        write!(f, "UnorderedScan: ")?;
+        self.stream_ctx.format_parts(f)
     }
 }
 
