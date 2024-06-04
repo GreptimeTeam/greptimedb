@@ -20,8 +20,6 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{StringVector, Vector};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use pipeline::transform::GreptimeTransformer;
-use pipeline::{parse, Content, Pipeline};
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -34,6 +32,8 @@ use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
     InsertPipelineSnafu, ParsePipelineSnafu, PipelineNotFoundSnafu, Result,
 };
+use crate::etl::transform::GreptimeTransformer;
+use crate::etl::{parse, Content, Pipeline};
 
 pub type PipelineTableRef = Arc<PipelineTable>;
 

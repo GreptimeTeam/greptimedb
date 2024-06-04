@@ -11,10 +11,11 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-arc-swap = "1.0"
 arrow.workspace = true
 async-trait.workspace = true
 catalog.workspace = true
+chrono.workspace = true
+chrono-tz = "0.9.0"
 common-catalog.workspace = true
 common-error.workspace = true
 common-function.workspace = true
@@ -25,35 +26,36 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
-console = "0.15"
 crossbeam-utils.workspace = true
-datafusion = { workspace = true }
-datafusion-common = { workspace = true }
-datafusion-expr = { workspace = true }
-datafusion-functions = { workspace = true }
-datafusion-physical-expr = { workspace = true }
+csv = "1.3.0"
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-functions.workspace = true
+datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 futures.workspace = true
+greptime-proto.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 operator.workspace = true
-paste = { workspace = true }
-pipeline = { git = "ssh://git@github.com/GreptimeTeam/pipeline.git", rev = "3eb890c551b8d7f60c4491fcfec18966e2b210a4" }
+paste.workspace = true
 prometheus.workspace = true
 query.workspace = true
+regex.workspace = true
+serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true
 table.workspace = true
 tokio.workspace = true
+urlencoding = "2.1"
+yaml-rust = "0.4"
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
-common-test-util.workspace = true
-criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
-log-store.workspace = true
 rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
-tokio-test = "0.4"

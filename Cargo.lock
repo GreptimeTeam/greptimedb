@@ -3933,7 +3933,7 @@ dependencies = [
  "opentelemetry-proto 0.5.0",
  "operator",
  "partition",
- "pipeline 0.8.1",
+ "pipeline",
  "prometheus",
  "prost 0.12.6",
  "query",
@@ -7239,31 +7239,14 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pipeline"
-version = "0.1.0"
-source = "git+ssh://git@github.com/GreptimeTeam/pipeline.git?rev=3eb890c551b8d7f60c4491fcfec18966e2b210a4#3eb890c551b8d7f60c4491fcfec18966e2b210a4"
-dependencies = [
- "chrono",
- "chrono-tz 0.9.0",
- "csv",
- "greptime-proto",
- "itertools 0.12.1",
- "lazy_static",
- "log",
- "regex",
- "serde_json",
- "urlencoding",
- "yaml-rust",
-]
-
-[[package]]
-name = "pipeline"
 version = "0.8.1"
 dependencies = [
  "api",
- "arc-swap",
  "arrow",
  "async-trait",
  "catalog",
+ "chrono",
+ "chrono-tz 0.9.0",
  "common-catalog",
  "common-error",
  "common-function",
@@ -7273,11 +7256,9 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
- "common-test-util",
  "common-time",
- "console",
- "criterion",
  "crossbeam-utils",
+ "csv",
  "datafusion 38.0.0",
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
@@ -7285,23 +7266,26 @@ dependencies = [
  "datafusion-physical-expr 38.0.0",
  "datatypes",
  "futures",
+ "greptime-proto",
+ "itertools 0.10.5",
  "lazy_static",
- "log-store",
  "once_cell",
  "operator",
  "paste",
- "pipeline 0.1.0",
  "prometheus",
  "query",
  "rayon",
+ "regex",
  "ron",
  "serde",
+ "serde_json",
  "session",
  "snafu 0.8.3",
  "sql",
  "table",
  "tokio",
- "tokio-test",
+ "urlencoding",
+ "yaml-rust",
 ]
 
 [[package]]
@@ -9703,7 +9687,7 @@ dependencies = [
  "permutation",
  "pgwire",
  "pin-project",
- "pipeline 0.8.1",
+ "pipeline",
  "postgres-types",
  "pprof",
  "prometheus",

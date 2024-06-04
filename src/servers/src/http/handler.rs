@@ -37,9 +37,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use super::header::collect_plan_metrics;
-use crate::error::{
-    Error, InsertLogSnafu, ParseJsonSnafu, UnsupportedContentTypeSnafu,
-};
+use crate::error::{Error, InsertLogSnafu, ParseJsonSnafu, UnsupportedContentTypeSnafu};
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
