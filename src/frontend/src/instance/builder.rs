@@ -27,7 +27,7 @@ use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
-use operator::statement::StatementExecutor;
+use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
@@ -37,7 +37,7 @@ use snafu::OptionExt;
 use crate::error::{self, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
-use crate::instance::{Instance, StatementExecutorRef};
+use crate::instance::Instance;
 use crate::pipeline::PipelineOperator;
 use crate::script::ScriptExecutor;
 
@@ -174,6 +174,8 @@ impl FrontendBuilder {
         ));
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
+            inserter.clone(),
+            statement_executor.clone(),
             self.catalog_manager.clone(),
             query_engine.clone(),
         ));

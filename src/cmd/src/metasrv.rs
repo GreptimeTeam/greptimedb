@@ -21,13 +21,14 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
-use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
-use crate::options::GlobalOptions;
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
+
+type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
 
 pub const APP_NAME: &str = "greptime-metasrv";
 
@@ -139,22 +140,25 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
-        self.merge_with_cli_options(
-            global_options,
-            MetasrvOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
+        let mut opts = MetasrvOptions::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
         )
+        .context(LoadLayeredConfigSnafu)?;
+
+        self.merge_with_cli_options(global_options, &mut opts)?;
+
+        Ok(opts)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
     fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
-        mut opts: MetasrvOptions,
-    ) -> Result<MetasrvOptions> {
+        opts: &mut MetasrvOptions,
+    ) -> Result<()> {
+        let opts = &mut opts.component;
+
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -217,20 +221,27 @@ impl StartCommand {
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;
 
-        Ok(opts)
+        Ok(())
     }
 
-    async fn build(&self, mut opts: MetasrvOptions) -> Result<Instance> {
-        let guard =
-            common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
-        log_versions(version!(), short_version!());
+    async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
+        common_runtime::init_global_runtimes(&opts.runtime);
 
-        let plugins = plugins::setup_metasrv_plugins(&mut opts)
-            .await
-            .context(StartMetaServerSnafu)?;
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.component.logging,
+            &opts.component.tracing,
+            None,
+        );
+        log_versions(version!(), short_version!());
 
         info!("Metasrv start command: {:#?}", self);
         info!("Metasrv options: {:#?}", opts);
+
+        let mut opts = opts.component;
+        let plugins = plugins::setup_metasrv_plugins(&mut opts)
+            .await
+            .context(StartMetaServerSnafu)?;
 
         let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
             .await
@@ -266,7 +277,7 @@ mod tests {
             ..Default::default()
         };
 
-        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
+        let options = cmd.load_options(&Default::default()).unwrap().component;
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!(vec!["127.0.0.1:2380".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -299,7 +310,7 @@ mod tests {
             ..Default::default()
         };
 
-        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
+        let options = cmd.load_options(&Default::default()).unwrap().component;
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!(vec!["127.0.0.1:2379".to_string()], options.store_addrs);
@@ -349,7 +360,8 @@ mod tests {
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .component;
 
         let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
@@ -406,7 +418,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command.load_options(&GlobalOptions::default()).unwrap();
+                let opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.bind_addr, "127.0.0.1:14002");

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub mod error;
-mod global;
+pub mod global;
 mod metrics;
 mod repeated_task;
 pub mod runtime;

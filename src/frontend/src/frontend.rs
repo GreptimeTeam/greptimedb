@@ -74,7 +74,7 @@ impl Default for FrontendOptions {
     }
 }
 
-impl Configurable<'_> for FrontendOptions {
+impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client.metasrv_addrs"])
     }
