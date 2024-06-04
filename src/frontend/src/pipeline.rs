@@ -85,7 +85,7 @@ impl PipelineOperator {
         );
     }
 
-    pub async fn create_pipeline_table_if_not_exists(&self, catalog: &str) -> Result<()> {
+    async fn create_pipeline_table_if_not_exists(&self, catalog: &str) -> Result<()> {
         if self.get_pipeline_table_from_cache(catalog).is_some() {
             return Ok(());
         }
@@ -145,24 +145,21 @@ impl PipelineOperator {
     }
 
     pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef> {
-        // FIXME (qtang): we should impl this
         self.tables.read().unwrap().get(catalog).cloned()
     }
 
-    pub async fn insert_and_compile(
+    async fn insert_and_compile(
         &self,
         catalog: &str,
         schema: &str,
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<()> {
-        let _compiled_pipeline = PipelineTable::compile_pipeline(pipeline)
-            .map_err(BoxedError::new)
-            .context(InsertPipelineSnafu { name })?;
+    ) -> Result<Pipeline<GreptimeTransformer>> {
         self.get_pipeline_table_from_cache(catalog)
-            // FIXME (qtang): we should add error handling here
-            .unwrap()
+            .with_context(|| TableNotFoundSnafu {
+                table_name: PIPELINE_TABLE_NAME,
+            })?
             .insert_and_compile(schema, name, content_type, pipeline)
             .await
             .map_err(|e| {
@@ -171,8 +168,7 @@ impl PipelineOperator {
                 }
                 BoxedError::new(e)
             })
-            .context(InsertPipelineSnafu { name })?;
-        Ok(())
+            .context(InsertPipelineSnafu { name })
     }
 }
 

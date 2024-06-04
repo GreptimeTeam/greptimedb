@@ -57,6 +57,7 @@ runs:
         greptime/greptimedb-cluster \
         --create-namespace \
         -n my-greptimedb \
+        --values ./.github/actions/setup-greptimedb-cluster/values.yaml \
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB

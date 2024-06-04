@@ -13,6 +13,10 @@
 | `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
 | `default_timezone` | String | `None` | The default timezone of the server. |
+| `runtime` | -- | -- | The runtime options. |
+| `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
+| `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
+| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `30s` | HTTP request timeout. |
@@ -154,6 +158,10 @@
 | --- | -----| ------- | ----------- |
 | `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
 | `default_timezone` | String | `None` | The default timezone of the server. |
+| `runtime` | -- | -- | The runtime options. |
+| `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
+| `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
+| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `18s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
@@ -240,6 +248,10 @@
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
+| `runtime` | -- | -- | The runtime options. |
+| `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
+| `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
+| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
 | `procedure` | -- | -- | Procedure storage options. |
 | `procedure.max_retry_times` | Integer | `12` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
@@ -300,6 +312,10 @@
 | `rpc_max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `rpc_max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
+| `runtime` | -- | -- | The runtime options. |
+| `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
+| `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
+| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |

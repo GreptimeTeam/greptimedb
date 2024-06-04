@@ -63,7 +63,7 @@ toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
-catalog.workspace = true
+catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 datanode.workspace = true
 futures = "0.3"
@@ -71,3 +71,5 @@ meta-srv = { workspace = true, features = ["mock"] }
 strfmt = "0.2"
 tower.workspace = true
 uuid.workspace = true
+datatypes.workspace = true
+serde_json.workspace = true

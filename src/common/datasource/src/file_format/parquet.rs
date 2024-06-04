@@ -39,6 +39,7 @@ use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder, LazyBuffer
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
@@ -197,6 +198,7 @@ impl BufferedWriter {
                 store
                     .writer_with(&path)
                     .concurrent(concurrency)
+                    .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
                     .await
                     .map(|v| v.into_futures_async_write().compat_write())
                     .context(error::WriteObjectSnafu { path })
@@ -276,9 +278,19 @@ pub async fn stream_to_parquet(
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::sync::Arc;
+
+    use common_telemetry::warn;
     use common_test_util::find_workspace_path;
+    use datatypes::arrow::array::{ArrayRef, Int64Array, RecordBatch};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use object_store::services::S3;
+    use object_store::ObjectStore;
+    use rand::{thread_rng, Rng};
 
     use super::*;
+    use crate::file_format::parquet::BufferedWriter;
     use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
@@ -295,5 +307,65 @@ mod tests {
         let formatted: Vec<_> = format_schema(schema);
 
         assert_eq!(vec!["num: Int64: NULL", "str: Utf8: NULL"], formatted);
+    }
+
+    #[tokio::test]
+    async fn test_parquet_writer() {
+        common_telemetry::init_default_ut_logging();
+        let _ = dotenv::dotenv();
+        let Ok(bucket) = env::var("GT_MINIO_BUCKET") else {
+            warn!("ignoring test parquet writer");
+            return;
+        };
+
+        let mut builder = S3::default();
+        let _ = builder
+            .root(&uuid::Uuid::new_v4().to_string())
+            .access_key_id(&env::var("GT_MINIO_ACCESS_KEY_ID").unwrap())
+            .secret_access_key(&env::var("GT_MINIO_ACCESS_KEY").unwrap())
+            .bucket(&bucket)
+            .region(&env::var("GT_MINIO_REGION").unwrap())
+            .endpoint(&env::var("GT_MINIO_ENDPOINT_URL").unwrap());
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let file_path = uuid::Uuid::new_v4().to_string();
+        let fields = vec![
+            Field::new("field1", DataType::Int64, true),
+            Field::new("field0", DataType::Int64, true),
+        ];
+        let arrow_schema = Arc::new(Schema::new(fields));
+        let mut buffered_writer = BufferedWriter::try_new(
+            file_path.clone(),
+            object_store.clone(),
+            arrow_schema.clone(),
+            None,
+            // Sets a small value.
+            128,
+            8,
+        )
+        .await
+        .unwrap();
+        let rows = 200000;
+        let generator = || {
+            let columns: Vec<ArrayRef> = vec![
+                Arc::new(Int64Array::from(
+                    (0..rows)
+                        .map(|_| thread_rng().gen::<i64>())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    (0..rows)
+                        .map(|_| thread_rng().gen::<i64>())
+                        .collect::<Vec<_>>(),
+                )),
+            ];
+            RecordBatch::try_new(arrow_schema.clone(), columns).unwrap()
+        };
+        let batch = generator();
+        // Writes about ~30Mi
+        for _ in 0..10 {
+            buffered_writer.write(&batch).await.unwrap();
+        }
+        buffered_writer.close().await.unwrap();
     }
 }
