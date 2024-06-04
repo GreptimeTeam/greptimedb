@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use config::{Environment, File, FileFormat};
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu, TomlFormatSnafu};
@@ -25,7 +26,7 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 /// Configuration trait defines the common interface for configuration that can be loaded from multiple sources and serialized to TOML.
-pub trait Configurable<'de>: Serialize + Deserialize<'de> + Default + Sized {
+pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
     /// Load the configuration from multiple sources and merge them.
     /// The precedence order is: config file > environment variables > default values.
     /// `env_prefix` is the prefix of environment variables, e.g. "FRONTEND__xxx".
@@ -128,7 +129,7 @@ mod tests {
         }
     }
 
-    impl Configurable<'_> for TestDatanodeConfig {
+    impl Configurable for TestDatanodeConfig {
         fn env_list_keys() -> Option<&'static [&'static str]> {
             Some(&["meta_client.metasrv_addrs"])
         }

@@ -148,7 +148,7 @@ impl Default for MetasrvOptions {
     }
 }
 
-impl Configurable<'_> for MetasrvOptions {
+impl Configurable for MetasrvOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints"])
     }

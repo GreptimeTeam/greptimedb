@@ -33,16 +33,23 @@ use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
+use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
+use rskafka::client::partition::{Compression, UnknownTopicHandling};
+use rskafka::client::{Client, ClientBuilder};
+use rskafka::record::Record;
+use rstest_reuse::template;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
@@ -75,11 +82,110 @@ pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
     Arc::new(NoopFilePurger {})
 }
 
+pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {
+    Some(LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory))
+}
+
+pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
+    let _ = dotenv::dotenv();
+    let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+        warn!("env GT_KAFKA_ENDPOINTS not found");
+        return None;
+    };
+
+    let broker_endpoints = broker_endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+
+    Some(LogStoreFactory::Kafka(KafkaLogStoreFactory {
+        broker_endpoints,
+    }))
+}
+
+#[template]
+#[rstest]
+#[case::with_raft_engine(raft_engine_log_store_factory())]
+#[case::with_kafka(kafka_log_store_factory())]
+#[tokio::test]
+pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
+
+#[derive(Clone)]
+pub(crate) struct RaftEngineLogStoreFactory;
+
+impl RaftEngineLogStoreFactory {
+    async fn create_log_store<P: AsRef<Path>>(&self, wal_path: P) -> RaftEngineLogStore {
+        log_store_util::create_tmp_local_file_log_store(wal_path).await
+    }
+}
+
+pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
+    if let LogStoreFactory::Kafka(factory) = factory {
+        let topic = uuid::Uuid::new_v4().to_string();
+        let client = factory.client().await;
+        append_noop_record(&client, &topic).await;
+
+        Some(topic)
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
+    let partition_client = client
+        .partition_client(topic, 0, UnknownTopicHandling::Retry)
+        .await
+        .unwrap();
+
+    partition_client
+        .produce(
+            vec![Record {
+                key: None,
+                value: None,
+                timestamp: rskafka::chrono::Utc::now(),
+                headers: Default::default(),
+            }],
+            Compression::NoCompression,
+        )
+        .await
+        .unwrap();
+}
+#[derive(Clone)]
+pub(crate) struct KafkaLogStoreFactory {
+    broker_endpoints: Vec<String>,
+}
+
+impl KafkaLogStoreFactory {
+    async fn create_log_store(&self) -> KafkaLogStore {
+        log_store_util::create_kafka_log_store(self.broker_endpoints.clone()).await
+    }
+
+    pub(crate) async fn client(&self) -> Client {
+        ClientBuilder::new(self.broker_endpoints.clone())
+            .build()
+            .await
+            .unwrap()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum LogStoreFactory {
+    RaftEngine(RaftEngineLogStoreFactory),
+    Kafka(KafkaLogStoreFactory),
+}
+
+#[derive(Clone)]
+pub(crate) enum LogStoreImpl {
+    RaftEngine(Arc<RaftEngineLogStore>),
+    Kafka(Arc<KafkaLogStore>),
+}
+
 /// Env to test mito engine.
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
-    logstore: Option<Arc<RaftEngineLogStore>>,
+    log_store: Option<LogStoreImpl>,
+    log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
 }
 
@@ -94,7 +200,8 @@ impl TestEnv {
     pub fn new() -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(""),
-            logstore: None,
+            log_store: None,
+            log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
         }
     }
@@ -103,7 +210,8 @@ impl TestEnv {
     pub fn with_prefix(prefix: &str) -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(prefix),
-            logstore: None,
+            log_store: None,
+            log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
         }
     }
@@ -112,13 +220,16 @@ impl TestEnv {
     pub fn with_data_home(data_home: TempDir) -> TestEnv {
         TestEnv {
             data_home,
-            logstore: None,
+            log_store: None,
+            log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
         }
     }
 
-    pub fn get_logstore(&self) -> Option<Arc<RaftEngineLogStore>> {
-        self.logstore.clone()
+    /// Overwrites the original `log_store_factory`.
+    pub(crate) fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
+        self.log_store_factory = log_store_factory;
+        self
     }
 
     pub fn get_object_store(&self) -> Option<ObjectStore> {
@@ -139,24 +250,41 @@ impl TestEnv {
     pub async fn create_engine(&mut self, config: MitoConfig) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        let logstore = Arc::new(log_store);
         let object_store_manager = Arc::new(object_store_manager);
-        self.logstore = Some(logstore.clone());
+        self.log_store = Some(log_store.clone());
         self.object_store_manager = Some(object_store_manager.clone());
         let data_home = self.data_home().display().to_string();
-        MitoEngine::new(&data_home, config, logstore, object_store_manager)
-            .await
-            .unwrap()
+
+        match log_store {
+            LogStoreImpl::RaftEngine(log_store) => {
+                MitoEngine::new(&data_home, config, log_store, object_store_manager)
+                    .await
+                    .unwrap()
+            }
+            LogStoreImpl::Kafka(log_store) => {
+                MitoEngine::new(&data_home, config, log_store, object_store_manager)
+                    .await
+                    .unwrap()
+            }
+        }
     }
 
     /// Creates a new engine with specific config and existing logstore and object store manager.
     pub async fn create_follower_engine(&mut self, config: MitoConfig) -> MitoEngine {
-        let logstore = self.logstore.as_ref().unwrap().clone();
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
         let data_home = self.data_home().display().to_string();
-        MitoEngine::new(&data_home, config, logstore, object_store_manager)
-            .await
-            .unwrap()
+        match self.log_store.as_ref().unwrap().clone() {
+            LogStoreImpl::RaftEngine(log_store) => {
+                MitoEngine::new(&data_home, config, log_store, object_store_manager)
+                    .await
+                    .unwrap()
+            }
+            LogStoreImpl::Kafka(log_store) => {
+                MitoEngine::new(&data_home, config, log_store, object_store_manager)
+                    .await
+                    .unwrap()
+            }
+        }
     }
 
     /// Creates a new engine with specific config and manager/listener/purge_scheduler under this env.
@@ -168,24 +296,36 @@ impl TestEnv {
     ) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        let logstore = Arc::new(log_store);
         let object_store_manager = Arc::new(object_store_manager);
-        self.logstore = Some(logstore.clone());
+        self.log_store = Some(log_store.clone());
         self.object_store_manager = Some(object_store_manager.clone());
 
         let data_home = self.data_home().display().to_string();
 
-        MitoEngine::new_for_test(
-            &data_home,
-            config,
-            logstore,
-            object_store_manager,
-            manager,
-            listener,
-            Arc::new(StdTimeProvider),
-        )
-        .await
-        .unwrap()
+        match log_store {
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new_for_test(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                manager,
+                listener,
+                Arc::new(StdTimeProvider),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new_for_test(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                manager,
+                listener,
+                Arc::new(StdTimeProvider),
+            )
+            .await
+            .unwrap(),
+        }
     }
 
     pub async fn create_engine_with_multiple_object_stores(
@@ -195,7 +335,8 @@ impl TestEnv {
         listener: Option<EventListenerRef>,
         custom_storage_names: &[&str],
     ) -> MitoEngine {
-        let (logstore, mut object_store_manager) = self.create_log_and_object_store_manager().await;
+        let (log_store, mut object_store_manager) =
+            self.create_log_and_object_store_manager().await;
         for storage_name in custom_storage_names {
             let data_path = self
                 .data_home
@@ -210,23 +351,35 @@ impl TestEnv {
             let object_store = ObjectStore::new(builder).unwrap().finish();
             object_store_manager.add(storage_name, object_store);
         }
-        let logstore = Arc::new(logstore);
         let object_store_manager = Arc::new(object_store_manager);
-        self.logstore = Some(logstore.clone());
+        self.log_store = Some(log_store.clone());
         self.object_store_manager = Some(object_store_manager.clone());
         let data_home = self.data_home().display().to_string();
 
-        MitoEngine::new_for_test(
-            &data_home,
-            config,
-            logstore,
-            object_store_manager,
-            manager,
-            listener,
-            Arc::new(StdTimeProvider),
-        )
-        .await
-        .unwrap()
+        match log_store {
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new_for_test(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                manager,
+                listener,
+                Arc::new(StdTimeProvider),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new_for_test(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                manager,
+                listener,
+                Arc::new(StdTimeProvider),
+            )
+            .await
+            .unwrap(),
+        }
     }
 
     /// Creates a new engine with specific config and manager/listener/time provider under this env.
@@ -239,50 +392,82 @@ impl TestEnv {
     ) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        let logstore = Arc::new(log_store);
         let object_store_manager = Arc::new(object_store_manager);
-        self.logstore = Some(logstore.clone());
+        self.log_store = Some(log_store.clone());
         self.object_store_manager = Some(object_store_manager.clone());
 
         let data_home = self.data_home().display().to_string();
 
-        MitoEngine::new_for_test(
-            &data_home,
-            config,
-            logstore,
-            object_store_manager,
-            manager,
-            listener,
-            time_provider.clone(),
-        )
-        .await
-        .unwrap()
+        match log_store {
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new_for_test(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                manager,
+                listener,
+                time_provider.clone(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new_for_test(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                manager,
+                listener,
+                time_provider.clone(),
+            )
+            .await
+            .unwrap(),
+        }
     }
 
     /// Reopen the engine.
     pub async fn reopen_engine(&mut self, engine: MitoEngine, config: MitoConfig) -> MitoEngine {
         engine.stop().await.unwrap();
 
-        MitoEngine::new(
-            &self.data_home().display().to_string(),
-            config,
-            self.logstore.clone().unwrap(),
-            self.object_store_manager.clone().unwrap(),
-        )
-        .await
-        .unwrap()
+        match self.log_store.as_ref().unwrap().clone() {
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &self.data_home().display().to_string(),
+                config,
+                log_store,
+                self.object_store_manager.clone().unwrap(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &self.data_home().display().to_string(),
+                config,
+                log_store,
+                self.object_store_manager.clone().unwrap(),
+            )
+            .await
+            .unwrap(),
+        }
     }
 
     /// Open the engine.
     pub async fn open_engine(&mut self, config: MitoConfig) -> MitoEngine {
-        MitoEngine::new(
-            &self.data_home().display().to_string(),
-            config,
-            self.logstore.clone().unwrap(),
-            self.object_store_manager.clone().unwrap(),
-        )
-        .await
-        .unwrap()
+        match self.log_store.as_ref().unwrap().clone() {
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &self.data_home().display().to_string(),
+                config,
+                log_store,
+                self.object_store_manager.clone().unwrap(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &self.data_home().display().to_string(),
+                config,
+                log_store,
+                self.object_store_manager.clone().unwrap(),
+            )
+            .await
+            .unwrap(),
+        }
     }
 
     /// Only initializes the object store manager, returns the default object store.
@@ -297,25 +482,44 @@ impl TestEnv {
 
         let data_home = self.data_home().display().to_string();
         config.sanitize(&data_home).unwrap();
-        WorkerGroup::start(
-            Arc::new(config),
-            Arc::new(log_store),
-            Arc::new(object_store_manager),
-        )
-        .await
-        .unwrap()
+
+        match log_store {
+            LogStoreImpl::RaftEngine(log_store) => {
+                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
+                    .await
+                    .unwrap()
+            }
+            LogStoreImpl::Kafka(log_store) => {
+                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
+                    .await
+                    .unwrap()
+            }
+        }
     }
 
     /// Returns the log store and object store manager.
-    async fn create_log_and_object_store_manager(
-        &self,
-    ) -> (RaftEngineLogStore, ObjectStoreManager) {
+    async fn create_log_and_object_store_manager(&self) -> (LogStoreImpl, ObjectStoreManager) {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
-
         let object_store_manager = self.create_object_store_manager();
-        (log_store, object_store_manager)
+
+        match &self.log_store_factory {
+            LogStoreFactory::RaftEngine(factory) => {
+                let log_store = factory.create_log_store(wal_path).await;
+                (
+                    LogStoreImpl::RaftEngine(Arc::new(log_store)),
+                    object_store_manager,
+                )
+            }
+            LogStoreFactory::Kafka(factory) => {
+                let log_store = factory.create_log_store().await;
+
+                (
+                    LogStoreImpl::Kafka(Arc::new(log_store)),
+                    object_store_manager,
+                )
+            }
+        }
     }
 
     fn create_object_store_manager(&self) -> ObjectStoreManager {
@@ -399,6 +603,8 @@ pub struct CreateRequestBuilder {
     all_not_null: bool,
     engine: String,
     ts_type: ConcreteDataType,
+    /// kafka topic name
+    kafka_topic: Option<String>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -412,6 +618,7 @@ impl Default for CreateRequestBuilder {
             all_not_null: false,
             engine: MITO_ENGINE_NAME.to_string(),
             ts_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            kafka_topic: None,
         }
     }
 }
@@ -464,6 +671,12 @@ impl CreateRequestBuilder {
         self
     }
 
+    #[must_use]
+    pub fn kafka_topic(mut self, topic: Option<String>) -> Self {
+        self.kafka_topic = topic;
+        self
+    }
+
     pub fn build(&self) -> RegionCreateRequest {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
@@ -504,12 +717,21 @@ impl CreateRequestBuilder {
             semantic_type: SemanticType::Timestamp,
             column_id,
         });
-
+        let mut options = self.options.clone();
+        if let Some(topic) = &self.kafka_topic {
+            let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            });
+            options.insert(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&wal_options).unwrap(),
+            );
+        }
         RegionCreateRequest {
             engine: self.engine.to_string(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
-            options: self.options.clone(),
+            options,
             region_dir: self.region_dir.clone(),
         }
     }
