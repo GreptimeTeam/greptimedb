@@ -66,10 +66,10 @@ tonic.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 datanode.workspace = true
+datatypes.workspace = true
 futures = "0.3"
 meta-srv = { workspace = true, features = ["mock"] }
+serde_json.workspace = true
 strfmt = "0.2"
 tower.workspace = true
 uuid.workspace = true
-datatypes.workspace = true
-serde_json.workspace = true
