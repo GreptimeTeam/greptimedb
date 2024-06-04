@@ -124,17 +124,20 @@ pub trait OpenTelemetryProtocolHandler {
 #[async_trait]
 pub trait LogHandler {
     async fn insert_log(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+
     async fn get_pipeline(
         &self,
-        query_ctx: QueryContextRef,
         name: &str,
+        query_ctx: QueryContextRef,
     ) -> Result<Pipeline<GreptimeTransformer>>;
+
     async fn insert_pipeline(
         &self,
-        query_ctx: QueryContextRef,
         name: &str,
         content_type: &str,
         pipeline: &str,
+        query_ctx: QueryContextRef,
     ) -> Result<()>;
-    async fn delete_pipeline(&self, query_ctx: QueryContextRef, name: &str) -> Result<()>;
+
+    async fn delete_pipeline(&self, name: &str, query_ctx: QueryContextRef) -> Result<()>;
 }

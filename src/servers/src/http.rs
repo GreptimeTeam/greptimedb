@@ -73,6 +73,7 @@ use crate::query_handler::{
 use crate::server::Server;
 
 pub mod authorize;
+pub mod event;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
@@ -711,8 +712,8 @@ impl HttpServer {
 
     fn route_log<S>(log_handler: LogHandlerRef) -> Router<S> {
         Router::new()
-            .route("/logs", routing::post(handler::log_ingester))
-            .route("/pipelines", routing::post(handler::add_pipeline))
+            .route("/logs", routing::post(event::log_ingester))
+            .route("/pipelines", routing::post(event::add_pipeline))
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))

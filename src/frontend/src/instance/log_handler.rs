@@ -18,7 +18,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
 use pipeline::{GreptimeTransformer, Pipeline};
-use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu};
+use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -31,7 +31,7 @@ impl LogHandler for Instance {
         &self,
         log: RowInsertRequests,
         ctx: QueryContextRef,
-    ) -> servers::error::Result<Output> {
+    ) -> ServerResult<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -43,9 +43,9 @@ impl LogHandler for Instance {
 
     async fn get_pipeline(
         &self,
-        query_ctx: QueryContextRef,
         name: &str,
-    ) -> servers::error::Result<Pipeline<GreptimeTransformer>> {
+        query_ctx: QueryContextRef,
+    ) -> ServerResult<Pipeline<GreptimeTransformer>> {
         self.pipeline_operator
             .get_pipeline(query_ctx, name)
             .await
@@ -55,24 +55,17 @@ impl LogHandler for Instance {
 
     async fn insert_pipeline(
         &self,
-        query_ctx: QueryContextRef,
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> servers::error::Result<()> {
+        query_ctx: QueryContextRef,
+    ) -> ServerResult<()> {
         self.pipeline_operator
-            .insert_pipeline(query_ctx, name, content_type, pipeline)
+            .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await
-            .map_err(BoxedError::new)
-            .context(servers::error::InsertPipelineSnafu { name })?;
-        Ok(())
     }
 
-    async fn delete_pipeline(
-        &self,
-        _query_ctx: QueryContextRef,
-        _name: &str,
-    ) -> servers::error::Result<()> {
+    async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {
         todo!("delete_pipeline")
     }
 }
@@ -82,7 +75,7 @@ impl Instance {
         &self,
         log: RowInsertRequests,
         ctx: QueryContextRef,
-    ) -> servers::error::Result<Output> {
+    ) -> ServerResult<Output> {
         self.inserter
             .handle_log_inserts(log, ctx, self.statement_executor.as_ref())
             .await

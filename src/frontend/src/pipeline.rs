@@ -26,6 +26,7 @@ use operator::statement::StatementExecutorRef;
 use pipeline::table::{PipelineTable, PipelineTableRef};
 use pipeline::{GreptimeTransformer, Pipeline};
 use query::QueryEngineRef;
+use servers::error::Result as ServerResult;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
@@ -210,11 +211,11 @@ impl PipelineOperator {
 
     pub async fn insert_pipeline(
         &self,
-        query_ctx: QueryContextRef,
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> servers::error::Result<()> {
+        query_ctx: QueryContextRef,
+    ) -> ServerResult<()> {
         self.create_pipeline_table_if_not_exists(query_ctx.current_catalog())
             .await
             .map_err(|e| {

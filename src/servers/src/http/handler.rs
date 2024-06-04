@@ -17,9 +17,7 @@ use std::env;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
-use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
-use axum::extract::{Json, Query, State, TypedHeader};
-use axum::headers::ContentType;
+use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
@@ -28,16 +26,13 @@ use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use pipeline::Value as PipelineValue;
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
 
 use super::header::collect_plan_metrics;
-use crate::error::{Error, InsertLogSnafu, ParseJsonSnafu, UnsupportedContentTypeSnafu};
 use crate::http::arrow_result::ArrowResponse;
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
@@ -50,7 +45,6 @@ use crate::http::{
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-use crate::query_handler::LogHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -69,110 +63,6 @@ pub struct SqlQuery {
     // param too.
     pub epoch: Option<String>,
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct LogIngesterQueryParams {
-    pub table_name: Option<String>,
-    pub db: Option<String>,
-    pub pipeline_name: Option<String>,
-}
-
-fn parse_space_separated_log(payload: String) -> Result<Value, Error> {
-    // ToStructuredLogSnafu
-    let _log = payload.split_whitespace().collect::<Vec<&str>>();
-    // TODO (qtang): implement this
-    todo!()
-}
-
-async fn log_ingester_inner(
-    state: LogHandlerRef,
-    query_params: LogIngesterQueryParams,
-    query_ctx: QueryContextRef,
-    payload: Value,
-) -> Result<HttpResponse, String> {
-    let pipeline_id = query_params
-        .pipeline_name
-        .ok_or("pipeline_name is required".to_string())?;
-
-    let pipeline_data = PipelineValue::try_from(payload)?;
-
-    let pipeline = state
-        .get_pipeline(query_ctx.clone(), &pipeline_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let transformed_data: Rows = pipeline.exec(pipeline_data)?;
-
-    let table_name = query_params
-        .table_name
-        .ok_or("table_name is required".to_string())?;
-
-    let insert_request = RowInsertRequest {
-        rows: Some(transformed_data),
-        table_name: table_name.clone(),
-    };
-    let insert_requests = RowInsertRequests {
-        inserts: vec![insert_request],
-    };
-    state
-        .insert_log(insert_requests, query_ctx)
-        .await
-        .map(|_| {
-            HttpResponse::GreptimedbV1(GreptimedbV1Response {
-                output: vec![],
-                execution_time_ms: 0,
-                resp_metrics: HashMap::new(),
-            })
-        })
-        .map_err(|e| e.to_string())
-}
-
-/// handler to log ingester
-#[axum_macros::debug_handler]
-pub async fn log_ingester(
-    State(state): State<LogHandlerRef>,
-    Query(query_params): Query<LogIngesterQueryParams>,
-    Extension(query_ctx): Extension<QueryContextRef>,
-    TypedHeader(content_type): TypedHeader<ContentType>,
-    payload: String,
-) -> Result<HttpResponse, Error> {
-    let value;
-    // TODO (qtang): we should decide json or jsonl
-    if content_type == ContentType::json() {
-        value = serde_json::from_str(&payload).context(ParseJsonSnafu)?;
-    // TODO (qtang): we should decide which content type to support
-    // form_url_cncoded type is only placeholder
-    } else if content_type == ContentType::form_url_encoded() {
-        value = parse_space_separated_log(payload)?;
-    } else {
-        return UnsupportedContentTypeSnafu { content_type }.fail();
-    }
-    log_ingester_inner(state, query_params, query_ctx, value)
-        .await
-        .or_else(|e| InsertLogSnafu { msg: e }.fail())
-}
-
-#[axum_macros::debug_handler]
-pub async fn add_pipeline(
-    State(_state): State<LogHandlerRef>,
-    Query(_query_params): Query<LogIngesterQueryParams>,
-    Extension(_query_ctx): Extension<QueryContextRef>,
-    TypedHeader(_content_type): TypedHeader<ContentType>,
-    Json(paylod): Json<Value>,
-) -> String {
-    let name = paylod["name"].as_str().unwrap();
-    let pipeline = paylod["pipeline"].as_str().unwrap();
-    let content_type = "yaml";
-    let result = _state
-        .insert_pipeline(_query_ctx, name, content_type, pipeline)
-        .await;
-    match result {
-        Ok(_) => String::from("ok"),
-        Err(e) => {
-            common_telemetry::error!("failed to insert pipeline.{e:?}");
-            e.to_string()
-        }
-    }
 }
 
 /// Handler to execute sql
