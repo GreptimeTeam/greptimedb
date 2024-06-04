@@ -196,8 +196,10 @@ impl MergeOutput {
     }
 }
 
+/// Compactor is the trait that defines the compaction logic.
 #[async_trait::async_trait]
 pub trait Compactor: Send + Sync + 'static {
+    /// Merge SST files for a region.
     async fn merge_ssts(
         &self,
         compaction_region: CompactionRegion,
@@ -214,6 +216,7 @@ pub trait Compactor: Send + Sync + 'static {
         }
     }
 
+    /// Update the manifest after merging SST files.
     async fn update_manifest(
         &self,
         compaction_region: CompactionRegion,
@@ -262,8 +265,7 @@ pub trait Compactor: Send + Sync + 'static {
         Ok(())
     }
 
-    fn picker(&self) -> Arc<dyn Picker>;
-
+    /// Execute compaction for a region.
     async fn compact(&self, compaction_region: CompactionRegion) -> Result<()> {
         let picker_output = self
             .picker()
@@ -280,6 +282,9 @@ pub trait Compactor: Send + Sync + 'static {
         }
         self.update_manifest(compaction_region, merge_output).await
     }
+
+    /// Get the picker of the compactor.
+    fn picker(&self) -> Arc<dyn Picker>;
 }
 
 async fn do_merge_ssts(
@@ -408,6 +413,7 @@ async fn do_merge_ssts(
     })
 }
 
+/// DefaultCompactor is the default implementation of Compactor.
 pub struct DefaultCompactor {
     picker: Arc<dyn Picker>,
 }
@@ -420,10 +426,12 @@ impl Compactor for DefaultCompactor {
 }
 
 impl DefaultCompactor {
+    /// Create a new DefaultCompactor with a picker.
     pub fn new_with_picker(picker: Arc<dyn Picker>) -> Self {
         Self { picker }
     }
 
+    /// Create a new DefaultCompactor from a compaction request.
     pub fn new_from_request(req: &CompactionRequest) -> Result<Self> {
         let region_options = RegionOptions::try_from(&req.options)?;
         let compaction_options = region_options.compaction;
