@@ -679,7 +679,7 @@ impl StatementExecutor {
             }
         }
 
-        for (table_name, table_id) in table_names.iter().zip(tables.iter()) {
+        for (table_name, table_id) in table_names.into_iter().zip(tables.iter()) {
             self.drop_table_procedure(table_name, *table_id, drop_if_exists, query_context.clone())
                 .await?;
 
