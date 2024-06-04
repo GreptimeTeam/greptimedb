@@ -29,7 +29,7 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
     async fn run(&mut self);
 }
 
-/// Picker picks input SST files and builds the compaction task.
+/// Picker picks input SST files for compaction.
 /// Different compaction strategy may implement different pickers.
 pub trait Picker: Debug + Send + Sync + 'static {
     fn pick(&self, current_version: VersionRef) -> Option<PickerOutput>;
