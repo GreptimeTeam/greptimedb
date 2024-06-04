@@ -13,5 +13,5 @@
 // limitations under the License.
 
 pub mod error;
-pub mod table;
 pub mod pipeline_operator;
+pub mod table;

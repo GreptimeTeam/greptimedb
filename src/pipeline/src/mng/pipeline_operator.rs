@@ -203,7 +203,7 @@ impl PipelineOperator {
             content_type,
             pipeline,
         )
-        .await?;
-        Ok(())
+        .await
+        .map(|_| ())
     }
 }
