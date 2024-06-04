@@ -179,7 +179,7 @@ pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
 
 pub type RegionScannerRef = Arc<dyn RegionScanner>;
 
-pub type BatchResponses = Vec<Result<(RegionId, RegionResponse), BoxedError>>;
+pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
@@ -201,9 +201,10 @@ pub trait RegionEngine: Send + Sync {
             tasks.push(async move {
                 // Safety: semaphore must exist
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                self.handle_request(region_id, RegionRequest::Open(request))
-                    .await
-                    .map(|response| (region_id, response))
+                let result = self
+                    .handle_request(region_id, RegionRequest::Open(request))
+                    .await;
+                (region_id, result)
             });
         }
 
