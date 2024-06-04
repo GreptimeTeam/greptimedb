@@ -679,8 +679,8 @@ impl StatementExecutor {
             }
         }
 
-        for (table_name, table_id) in table_names.into_iter().zip(tables.iter()) {
-            self.drop_table_procedure(table_name, *table_id, drop_if_exists, query_context.clone())
+        for (table_name, table_id) in table_names.iter().zip(tables.into_iter()) {
+            self.drop_table_procedure(table_name, table_id, drop_if_exists, query_context.clone())
                 .await?;
 
             // Invalidates local cache ASAP.
@@ -688,7 +688,7 @@ impl StatementExecutor {
                 .invalidate(
                     &Context::default(),
                     &[
-                        CacheIdent::TableId(*table_id),
+                        CacheIdent::TableId(table_id),
                         CacheIdent::TableName(table_name.clone()),
                     ],
                 )
