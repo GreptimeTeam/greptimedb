@@ -72,7 +72,7 @@ impl Display for PartitionDef {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "VALUES LESS THAN ({})",
+            "{}",
             self.partition_bounds
                 .iter()
                 .map(|b| format!("{b}"))
