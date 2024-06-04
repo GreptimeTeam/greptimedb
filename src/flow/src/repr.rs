@@ -53,7 +53,7 @@ pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 
 /// broadcast channel capacity, can be important to memory consumption, since this influence how many
 /// updates can be buffered in memory in the entire dataflow
-/// TODO(discord9): add config for this, so cpu&mem usage can be balanced and configed by this
+/// TODO(discord9): add config for this, so cpu&mem usage can be balanced and configured by this
 pub const BROADCAST_CAP: usize = 65535;
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp

@@ -125,9 +125,9 @@ fn mfp_subgraph(
                 false
             }
         });
-        let future_udpates = all_updates;
+        let future_updates = all_updates;
 
-        arrange.write().apply_updates(now, future_udpates)?;
+        arrange.write().apply_updates(now, future_updates)?;
         Ok(())
     };
     err_collector.run(run_mfp);
