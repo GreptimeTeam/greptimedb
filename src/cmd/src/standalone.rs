@@ -67,7 +67,7 @@ use crate::error::{
     ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::GlobalOptions;
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-standalone";
@@ -79,11 +79,14 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
+    pub fn load_options(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -94,20 +97,23 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
+    fn load_options(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct StandaloneOptions {
     pub mode: Mode,
@@ -161,7 +167,7 @@ impl Default for StandaloneOptions {
     }
 }
 
-impl Configurable<'_> for StandaloneOptions {
+impl Configurable for StandaloneOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints"])
     }
@@ -291,23 +297,27 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
-        self.merge_with_cli_options(
-            global_options,
-            StandaloneOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
+    fn load_options(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+        let mut opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
         )
+        .context(LoadLayeredConfigSnafu)?;
+
+        self.merge_with_cli_options(global_options, &mut opts.component)?;
+
+        Ok(opts)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
     pub fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
-        mut opts: StandaloneOptions,
-    ) -> Result<StandaloneOptions> {
+        opts: &mut StandaloneOptions,
+    ) -> Result<()> {
         // Should always be standalone mode.
         opts.mode = Mode::Standalone;
 
@@ -369,20 +379,27 @@ impl StartCommand {
 
         opts.user_provider.clone_from(&self.user_provider);
 
-        Ok(opts)
+        Ok(())
     }
 
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
-        let guard =
-            common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+        common_runtime::init_global_runtimes(&opts.runtime);
+
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.component.logging,
+            &opts.component.tracing,
+            None,
+        );
         log_versions(version!(), short_version!());
 
         info!("Standalone start command: {:#?}", self);
-        info!("Building standalone instance with {opts:#?}");
+        info!("Standalone options: {opts:#?}");
 
+        let opts = opts.component;
         let mut fe_opts = opts.frontend_options();
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
@@ -664,7 +681,10 @@ mod tests {
             ..Default::default()
         };
 
-        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
+        let options = cmd
+            .load_options(&GlobalOptions::default())
+            .unwrap()
+            .component;
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
@@ -725,7 +745,8 @@ mod tests {
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .component;
 
         assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
@@ -787,7 +808,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command.load_options(&GlobalOptions::default()).unwrap();
+                let opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

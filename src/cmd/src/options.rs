@@ -13,6 +13,9 @@
 // limitations under the License.
 
 use clap::Parser;
+use common_config::Configurable;
+use common_runtime::global::RuntimeOptions;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Default, Debug, Clone)]
 pub struct GlobalOptions {
@@ -28,4 +31,23 @@ pub struct GlobalOptions {
     #[clap(long, value_name = "TOKIO_CONSOLE_ADDR")]
     #[arg(global = true)]
     pub tokio_console_addr: Option<String>,
+}
+
+// TODO(LFC): Move logging and tracing options into global options, like the runtime options.
+/// All the options of GreptimeDB.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GreptimeOptions<T> {
+    /// The runtime options.
+    pub runtime: RuntimeOptions,
+
+    /// The options of each component (like Datanode or Standalone) of GreptimeDB.
+    #[serde(flatten)]
+    pub component: T,
+}
+
+impl<T: Configurable> Configurable for GreptimeOptions<T> {
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        T::env_list_keys()
+    }
 }

@@ -2080,9 +2080,11 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "lazy_static",
+ "num_cpus",
  "once_cell",
  "paste",
  "prometheus",
+ "serde",
  "snafu 0.8.3",
  "tokio",
  "tokio-metrics",
@@ -11049,8 +11051,7 @@ dependencies = [
 [[package]]
 name = "tokio-metrics-collector"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767da47381602cc481653456823b3ebb600e83d5dd4e0293da9b5566c6c00f0"
+source = "git+https://github.com/MichaelScofield/tokio-metrics-collector.git?rev=89d692d5753d28564a7aac73c6ac5aba22243ba0#89d692d5753d28564a7aac73c6ac5aba22243ba0"
 dependencies = [
  "lazy_static",
  "parking_lot 0.12.3",

@@ -15,7 +15,7 @@
 //! Datanode configurations
 
 use common_base::readable_size::ReadableSize;
-use common_base::secrets::SecretString;
+use common_base::secrets::{ExposeSecret, SecretString};
 use common_config::Configurable;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
@@ -38,7 +38,7 @@ pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::mb(256);
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
 
 /// Object storage config
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
     File(FileConfig),
@@ -61,7 +61,7 @@ impl ObjectStoreConfig {
 }
 
 /// Storage engine config
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct StorageConfig {
     /// The working directory of database
@@ -85,7 +85,7 @@ impl Default for StorageConfig {
 #[serde(default)]
 pub struct FileConfig {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct ObjectStorageCacheConfig {
     /// The local file cache directory
@@ -109,6 +109,18 @@ pub struct S3Config {
     pub cache: ObjectStorageCacheConfig,
 }
 
+impl PartialEq for S3Config {
+    fn eq(&self, other: &Self) -> bool {
+        self.bucket == other.bucket
+            && self.root == other.root
+            && self.access_key_id.expose_secret() == other.access_key_id.expose_secret()
+            && self.secret_access_key.expose_secret() == other.secret_access_key.expose_secret()
+            && self.endpoint == other.endpoint
+            && self.region == other.region
+            && self.cache == other.cache
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OssConfig {
@@ -121,6 +133,17 @@ pub struct OssConfig {
     pub endpoint: String,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
+}
+
+impl PartialEq for OssConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.bucket == other.bucket
+            && self.root == other.root
+            && self.access_key_id.expose_secret() == other.access_key_id.expose_secret()
+            && self.access_key_secret.expose_secret() == other.access_key_secret.expose_secret()
+            && self.endpoint == other.endpoint
+            && self.cache == other.cache
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +161,18 @@ pub struct AzblobConfig {
     pub cache: ObjectStorageCacheConfig,
 }
 
+impl PartialEq for AzblobConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.container == other.container
+            && self.root == other.root
+            && self.account_name.expose_secret() == other.account_name.expose_secret()
+            && self.account_key.expose_secret() == other.account_key.expose_secret()
+            && self.endpoint == other.endpoint
+            && self.sas_token == other.sas_token
+            && self.cache == other.cache
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GcsConfig {
@@ -149,6 +184,17 @@ pub struct GcsConfig {
     pub endpoint: String,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
+}
+
+impl PartialEq for GcsConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.bucket == other.bucket
+            && self.scope == other.scope
+            && self.credential_path.expose_secret() == other.credential_path.expose_secret()
+            && self.endpoint == other.endpoint
+            && self.cache == other.cache
+    }
 }
 
 impl Default for S3Config {
@@ -211,7 +257,7 @@ impl Default for ObjectStoreConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatanodeOptions {
     pub mode: Mode,
@@ -267,7 +313,7 @@ impl Default for DatanodeOptions {
     }
 }
 
-impl Configurable<'_> for DatanodeOptions {
+impl Configurable for DatanodeOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client.metasrv_addrs", "wal.broker_endpoints"])
     }
