@@ -26,16 +26,130 @@ pub(crate) const PROCESSOR_DISSECT: &str = "dissect";
 const APPEND_SEPARATOR_NAME: &str = "append_separator";
 
 #[derive(Debug, PartialEq)]
+enum StartModifier {
+    Append(Option<u32>),
+    NamedSkip,
+    MapKey,
+    MapVal,
+}
+
+impl std::fmt::Display for StartModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            StartModifier::Append(o) => match o {
+                Some(v) => write!(f, "+/{v}"),
+                None => write!(f, "+"),
+            },
+            StartModifier::NamedSkip => write!(f, "?"),
+            StartModifier::MapKey => write!(f, "*"),
+            StartModifier::MapVal => write!(f, "&"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct EndModifier;
+
+impl std::fmt::Display for EndModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "->",)
+    }
+}
+
+#[derive(Debug, PartialEq, Default)]
+struct Name {
+    name: String,
+    start_modifier: Option<StartModifier>,
+    end_modifier: Option<EndModifier>,
+}
+
+impl Name {
+    fn is_name_empty(&self) -> bool {
+        self.name.is_empty()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.name.is_empty() && self.start_modifier.is_none() && self.end_modifier.is_none()
+    }
+
+    fn try_start_modifier(&mut self, modifier: StartModifier) -> Result<(), String> {
+        match &self.start_modifier {
+            Some(m) => Err(format!("'{m}' modifier already set, but found {modifier}",)),
+            None => {
+                self.start_modifier = Some(modifier);
+                Ok(())
+            }
+        }
+    }
+
+    fn try_append_order(&mut self, order: u32) -> Result<(), String> {
+        match &mut self.start_modifier {
+            Some(StartModifier::Append(o)) => match o {
+                Some(n) => Err(format!(
+                    "Append Order modifier is already set to '{n}', cannot be set to {order}"
+                )),
+                None => {
+                    *o = Some(order);
+                    Ok(())
+                }
+            },
+            Some(m) => Err(format!(
+                "Order can only be set to Append Modifier, current modifier is {m}"
+            )),
+            None => Err("Order can only be set to Append Modifier".to_string()),
+        }
+    }
+
+    fn try_end_modifier(&mut self) -> Result<(), String> {
+        match &self.end_modifier {
+            Some(m) => Err(format!("End modifier already set: '{m}'")),
+            None => {
+                self.end_modifier = Some(EndModifier);
+                Ok(())
+            }
+        }
+    }
+
+    fn is_append_modifier_set(&self) -> bool {
+        matches!(self.start_modifier, Some(StartModifier::Append(_)))
+    }
+
+    fn is_start_modifier_set(&self) -> bool {
+        self.start_modifier.is_some()
+    }
+
+    fn is_end_modifier_set(&self) -> bool {
+        self.end_modifier.is_some()
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl From<&str> for Name {
+    fn from(value: &str) -> Self {
+        Name {
+            name: value.to_string(),
+            start_modifier: None,
+            end_modifier: None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 enum Part {
     Split(String),
-    Key(String),
+    Name(Name),
 }
 
 impl Part {
     fn is_empty(&self) -> bool {
         match self {
             Part::Split(v) => v.is_empty(),
-            Part::Key(v) => v.is_empty(),
+            Part::Name(v) => v.is_empty(),
         }
     }
 
@@ -43,27 +157,14 @@ impl Part {
         Part::Split(String::new())
     }
 
-    fn empty_key() -> Self {
-        Part::Key(String::new())
+    fn empty_name() -> Self {
+        Part::Name(Name::default())
     }
-}
 
-impl std::ops::Deref for Part {
-    type Target = String;
-
-    fn deref(&self) -> &Self::Target {
+    fn push(&mut self, ch: char) {
         match self {
-            Part::Split(v) => v,
-            Part::Key(v) => v,
-        }
-    }
-}
-
-impl std::ops::DerefMut for Part {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Part::Split(v) => v,
-            Part::Key(v) => v,
+            Part::Split(v) => v.push(ch),
+            Part::Name(v) => v.name.push(ch),
         }
     }
 }
@@ -96,40 +197,102 @@ impl std::str::FromStr for Pattern {
         let mut cursor = Part::empty_split();
 
         let origin = s.to_string();
-        let mut last_ch = None;
         let chars: Vec<char> = origin.chars().collect();
 
-        for i in 0..chars.len() {
-            let ch = chars[i];
+        let mut pos = 0;
+        while pos < chars.len() {
+            let ch = chars[pos];
             match (ch, &mut cursor) {
-                // if cursor is Split part, and found %{, then ready to start a Key part
-                ('%', Part::Split(_)) if i + 1 < chars.len() && chars[i + 1] == '{' => {}
-                // if cursor is Split part, and found %{, then end the Split part, start the Key part
-                ('{', Part::Split(_)) if last_ch == Some('%') => {
+                // if cursor is Split part, and found %{, then ready to start a Name part
+                ('%', Part::Split(_)) if matches!(chars.get(pos + 1), Some('{')) => {
                     if !cursor.is_empty() {
                         parts.push(cursor);
                     }
 
-                    cursor = Part::empty_key();
+                    cursor = Part::empty_name();
+                    pos += 1; // skip '{'
                 }
                 // if cursor is Split part, and not found % or {, then continue the Split part
                 (_, Part::Split(_)) => {
                     cursor.push(ch);
                 }
-                // if cursor is Key part, and found }, then end the Key part, start the next Split part
-                ('}', Part::Key(_)) => {
+                // if cursor is Name part, and found }, then end the Name part, start the next Split part
+                ('}', Part::Name(_)) => {
                     parts.push(cursor);
                     cursor = Part::empty_split();
                 }
-                (_, Part::Key(_)) if !is_valid_char(ch) => {
-                    return Err(format!("Invalid character in key: '{ch}'"));
+                ('+', Part::Name(name)) if !name.is_start_modifier_set() => {
+                    name.try_start_modifier(StartModifier::Append(None))?;
                 }
-                (_, Part::Key(_)) => {
+                ('/', Part::Name(name)) if name.is_append_modifier_set() => {
+                    let mut order = 0;
+                    let mut j = pos + 1;
+                    while j < chars.len() {
+                        let digit = chars[j];
+                        if digit.is_ascii_digit() {
+                            order = order * 10 + digit.to_digit(10).unwrap();
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if j == pos + 1 {
+                        return Err(format!(
+                            "Invalid Pattern: '{s}'. Digit order must be set after '/'",
+                        ));
+                    }
+
+                    name.try_append_order(order)?;
+                    pos = j - 1; // this will change the position to the last digit of the order
+                }
+                ('?', Part::Name(name)) if !name.is_start_modifier_set() => {
+                    name.try_start_modifier(StartModifier::NamedSkip)?;
+                }
+                ('*', Part::Name(name)) if !name.is_start_modifier_set() => {
+                    name.try_start_modifier(StartModifier::MapKey)?;
+                }
+                ('&', Part::Name(name)) if !name.is_start_modifier_set() => {
+                    name.try_start_modifier(StartModifier::MapVal)?;
+                }
+                ('-', Part::Name(name)) if !name.is_end_modifier_set() => {
+                    if let Some('>') = chars.get(pos + 1) {
+                    } else {
+                        return Err(format!(
+                            "Invalid Pattern: '{s}'. expected '->' but only '-'",
+                        ));
+                    }
+
+                    if let Some('}') = chars.get(pos + 2) {
+                    } else {
+                        return Err(format!("Invalid Pattern: '{s}'. expected '}}' after '->'",));
+                    }
+
+                    name.try_end_modifier()?;
+                    pos += 1; // only skip '>', the next loop will skip '}'
+                }
+                (_, Part::Name(name)) if !is_valid_char(ch) => {
+                    let tail: String = if name.is_name_empty() {
+                        format!("Invalid '{ch}'")
+                    } else {
+                        format!("Invalid '{ch}' in '{name}'")
+                    };
+                    return Err(format!("Invalid Pattern: '{s}'. {tail}"));
+                }
+                (_, Part::Name(_)) => {
                     cursor.push(ch);
                 }
             }
 
-            last_ch = Some(ch);
+            pos += 1;
+        }
+
+        match cursor {
+            Part::Split(ref split) if !split.is_empty() => parts.push(cursor),
+            Part::Name(name) if !name.is_empty() => {
+                return Err(format!("Invalid Pattern: '{s}'. '{name}' is not closed"))
+            }
+            _ => {}
         }
 
         let pattern = Self { parts, origin };
@@ -144,21 +307,71 @@ impl Pattern {
             return Err("Empty pattern is not allowed".to_string());
         }
 
+        let mut map_items = std::collections::HashSet::new();
+
         for i in 0..self.len() {
             let this_part = &self[i];
             let next_part = self.get(i + 1);
             match (this_part, next_part) {
                 (Part::Split(split), _) if split.is_empty() => {
-                    return Err("Empty split is not allowed".to_string());
-                }
-                (Part::Key(key1), Some(Part::Key(key2))) => {
                     return Err(format!(
-                        "consecutive keys are not allowed: '{key1}' '{key2}'"
+                        "Invalid Pattern: '{}'. Empty split is not allowed",
+                        self.origin
                     ));
                 }
+                (Part::Name(name1), Some(Part::Name(name2))) => {
+                    return Err(format!(
+                        "Invalid Pattern: '{}'. consecutive names are not allowed: '{}' '{}'",
+                        self.origin, name1, name2
+                    ));
+                }
+                (Part::Name(name), _) if name.is_name_empty() => {
+                    if let Some(ref m) = name.start_modifier {
+                        return Err(format!(
+                            "Invalid Pattern: '{}'. only '{}' modifier is invalid",
+                            self.origin, m
+                        ));
+                    }
+                }
+                (Part::Name(name), _) => match name.start_modifier {
+                    Some(StartModifier::MapKey) => {
+                        if map_items.contains(&name.name) {
+                            return Err(format!(
+                                "Invalid Pattern: '{}'. Duplicate map key: '{}'",
+                                self.origin, name.name
+                            ));
+                        } else {
+                            map_items.insert(name.name.clone());
+                        }
+                    }
+                    Some(StartModifier::MapVal) => {
+                        if !map_items.contains(&name.name) {
+                            return Err(format!(
+                                "Invalid Pattern: '{}'. Map key not found: '{}'",
+                                self.origin, name.name
+                            ));
+                        } else {
+                            map_items.remove(&name.name);
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
+
+        if !map_items.is_empty() {
+            return Err(format!(
+                "Invalid Pattern: '{}'. Matched value not found for: '{}'",
+                self.origin,
+                map_items
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(",")
+            ));
+        }
+
         Ok(())
     }
 }
@@ -204,6 +417,7 @@ impl DissectProcessor {
             let this_part = &pattern[i];
             let next_part = pattern.get(i + 1);
             match (this_part, next_part) {
+                // if Split part, and exactly matches, then move pos split.len() forward
                 (Part::Split(split), _) => {
                     let split_chs = split.chars().collect::<Vec<char>>();
                     let split_len = split_chs.len();
@@ -220,12 +434,14 @@ impl DissectProcessor {
 
                     pos += split_len;
                 }
-                (Part::Key(key), None) => {
+                // if Name part is the last part, then the rest of the input is the value
+                (Part::Name(name), None) => {
                     let value = chs[pos..].iter().collect::<String>();
-                    map.insert(key.clone(), Value::String(value));
+                    map.insert(name.to_string(), Value::String(value));
                 }
 
-                (Part::Key(key), Some(Part::Split(split))) => match split.chars().next() {
+                // if Name part, and next part is Split, then find the matched value of the name
+                (Part::Name(name), Some(Part::Split(split))) => match split.chars().next() {
                     None => return Err("Empty split is not allowed".to_string()),
                     Some(stop) => {
                         let mut end = pos;
@@ -238,13 +454,13 @@ impl DissectProcessor {
                         }
 
                         let value = chs[pos..end].iter().collect::<String>();
-                        map.insert(key.clone(), Value::String(value));
+                        map.insert(name.to_string(), Value::String(value));
                         pos = end;
                     }
                 },
-                (Part::Key(key1), Some(Part::Key(key2))) => {
+                (Part::Name(name1), Some(Part::Name(name2))) => {
                     return Err(format!(
-                        "consecutive keys are not allowed: '{key1}' '{key2}'"
+                        "consecutive names are not allowed: '{name1}' '{name2}'"
                     ));
                 }
             }
@@ -336,31 +552,31 @@ fn is_valid_char(ch: char) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{DissectProcessor, Part, Pattern};
+    use super::{DissectProcessor, EndModifier, Part, Pattern};
     use crate::etl::value::{Map, Value};
 
     #[test]
-    fn test_pattern() {
+    fn test_dissect_simple_pattern() {
         let cases = [(
             "%{clientip} %{ident} %{auth} [%{timestamp}] \"%{verb} %{request} HTTP/%{httpversion}\" %{status} %{size}",
             vec![
-                Part::Key("clientip".chars().collect()),
-                Part::Split(" ".chars().collect()),
-                Part::Key("ident".chars().collect()),
-                Part::Split(" ".chars().collect()),
-                Part::Key("auth".chars().collect()),
-                Part::Split(" [".chars().collect()),
-                Part::Key("timestamp".chars().collect()),
-                Part::Split("] \"".chars().collect()),
-                Part::Key("verb".chars().collect()),
-                Part::Split(" ".chars().collect()),
-                Part::Key("request".chars().collect()),
-                Part::Split(" HTTP/".chars().collect()),
-                Part::Key("httpversion".chars().collect()),
-                Part::Split("\" ".chars().collect()),
-                Part::Key("status".chars().collect()),
-                Part::Split(" ".chars().collect()),
-                Part::Key("size".chars().collect()),
+                Part::Name("clientip".into()),
+                Part::Split(" ".into()),
+                Part::Name("ident".into()),
+                Part::Split(" ".into()),
+                Part::Name("auth".into()),
+                Part::Split(" [".into()),
+                Part::Name("timestamp".into()),
+                Part::Split("] \"".into()),
+                Part::Name("verb".into()),
+                Part::Split(" ".into()),
+                Part::Name("request".into()),
+                Part::Split(" HTTP/".into()),
+                Part::Name("httpversion".into()),
+                Part::Split("\" ".into()),
+                Part::Name("status".into()),
+                Part::Split(" ".into()),
+                Part::Name("size".into()),
             ],
         )];
 
@@ -371,7 +587,260 @@ mod tests {
     }
 
     #[test]
-    fn test_process() {
+    fn test_dissect_modifier_pattern() {
+        let cases = [
+            (
+                "%{ts->} %{level}",
+                vec![
+                    Part::Name(super::Name {
+                        name: "ts".into(),
+                        start_modifier: None,
+                        end_modifier: Some(EndModifier),
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name("level".into()),
+                ],
+            ),
+            (
+                "[%{ts}]%{->}[%{level}]",
+                vec![
+                    Part::Split("[".into()),
+                    Part::Name(super::Name {
+                        name: "ts".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    Part::Split("]".into()),
+                    Part::Name(super::Name {
+                        name: "".into(),
+                        start_modifier: None,
+                        end_modifier: Some(EndModifier),
+                    }),
+                    Part::Split("[".into()),
+                    Part::Name(super::Name {
+                        name: "level".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    Part::Split("]".into()),
+                ],
+            ),
+            (
+                "%{+name} %{+name} %{+name} %{+name}",
+                vec![
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(None)),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+            (
+                "%{+name/2} %{+name/4} %{+name/3} %{+name/1}",
+                vec![
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(Some(2))),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(Some(4))),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(Some(3))),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "name".into(),
+                        start_modifier: Some(super::StartModifier::Append(Some(1))),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+            (
+                "%{clientip} %{?ident} %{?auth} [%{timestamp}]",
+                vec![
+                    Part::Name(super::Name {
+                        name: "clientip".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "ident".into(),
+                        start_modifier: Some(super::StartModifier::NamedSkip),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "auth".into(),
+                        start_modifier: Some(super::StartModifier::NamedSkip),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" [".into()),
+                    Part::Name(super::Name {
+                        name: "timestamp".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    Part::Split("]".into()),
+                ],
+            ),
+            (
+                "[%{ts}] [%{level}] %{*p1}:%{&p1} %{*p2}:%{&p2}",
+                vec![
+                    Part::Split("[".into()),
+                    Part::Name(super::Name {
+                        name: "ts".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    Part::Split("] [".into()),
+                    Part::Name(super::Name {
+                        name: "level".into(),
+                        start_modifier: None,
+                        end_modifier: None,
+                    }),
+                    Part::Split("] ".into()),
+                    Part::Name(super::Name {
+                        name: "p1".into(),
+                        start_modifier: Some(super::StartModifier::MapKey),
+                        end_modifier: None,
+                    }),
+                    Part::Split(":".into()),
+                    Part::Name(super::Name {
+                        name: "p1".into(),
+                        start_modifier: Some(super::StartModifier::MapVal),
+                        end_modifier: None,
+                    }),
+                    Part::Split(" ".into()),
+                    Part::Name(super::Name {
+                        name: "p2".into(),
+                        start_modifier: Some(super::StartModifier::MapKey),
+                        end_modifier: None,
+                    }),
+                    Part::Split(":".into()),
+                    Part::Name(super::Name {
+                        name: "p2".into(),
+                        start_modifier: Some(super::StartModifier::MapVal),
+                        end_modifier: None,
+                    }),
+                ],
+            ),
+        ];
+
+        for (pattern, expected) in cases.into_iter() {
+            let p: Pattern = pattern.parse().unwrap();
+            assert_eq!(p.parts, expected);
+        }
+    }
+
+    #[test]
+    fn test_dissect_invalid_pattern() {
+        let cases = [
+            ("", "Empty pattern is not allowed"),
+            (
+                "%{name1}%{name2}",
+                "Invalid Pattern: '%{name1}%{name2}'. consecutive names are not allowed: 'name1' 'name2'"
+            ),
+            (
+                "%{} %{ident",
+                "Invalid Pattern: '%{} %{ident'. 'ident' is not closed",
+            ),
+            (
+                "%{->clientip} ",
+                "Invalid Pattern: '%{->clientip} '. expected '}' after '->'",
+            ),
+            (
+                "%{/clientip} ",
+                "Invalid Pattern: '%{/clientip} '. Invalid '/'",
+            ),
+            (
+                "%{+?clientip} ",
+                "Invalid Pattern: '%{+?clientip} '. Invalid '?'",
+            ),
+            (
+                "%{+clientip/} ",
+                "Invalid Pattern: '%{+clientip/} '. Digit order must be set after '/'",
+            ),
+            (
+                "%{+clientip/a} ",
+                "Invalid Pattern: '%{+clientip/a} '. Digit order must be set after '/'",
+            ),
+            (
+                "%{clientip/1} ",
+                "Invalid Pattern: '%{clientip/1} '. Invalid '/' in 'clientip'",
+            ),
+            (
+                "%{+clientip/1/2} ",
+                "Append Order modifier is already set to '1', cannot be set to 2",
+            ),
+            (
+                "%{+/1} ",
+                "Invalid Pattern: '%{+/1} '. only '+/1' modifier is invalid",
+            ),
+            (
+                "%{+} ",
+                "Invalid Pattern: '%{+} '. only '+' modifier is invalid",
+            ),
+            (
+                "%{?} ",
+                "Invalid Pattern: '%{?} '. only '?' modifier is invalid",
+            ),
+            (
+                "%{*} ",
+                "Invalid Pattern: '%{*} '. only '*' modifier is invalid",
+            ),
+            (
+                "%{&} ",
+                "Invalid Pattern: '%{&} '. only '&' modifier is invalid",
+            ),
+            (
+                "%{*ip}",
+                "Invalid Pattern: '%{*ip}'. Matched value not found for: 'ip'",
+            ),
+            (
+                "%{*ip} %{*ip}",
+                "Invalid Pattern: '%{*ip} %{*ip}'. Duplicate map key: 'ip'",
+            ),
+            (
+                "%{*ip} %{&ip2}",
+                "Invalid Pattern: '%{*ip} %{&ip2}'. Map key not found: 'ip2'",
+            ),
+        ];
+
+        for (pattern, expected) in cases.into_iter() {
+            let err = pattern.parse::<Pattern>().unwrap_err();
+            assert_eq!(err, expected);
+        }
+    }
+
+    #[test]
+    fn test_dissect_process() {
         let assert = |pattern_str: &str, input: &str, expected: HashMap<String, Value>| {
             let chs = input.chars().collect::<Vec<char>>();
             let pattern = pattern_str.parse().unwrap();
@@ -399,7 +868,7 @@ mod tests {
         .collect::<std::collections::HashMap<String, Value>>();
 
         {
-            // pattern start with Key
+            // pattern start with Name
             let pattern_str = "%{clientip} %{ident} %{auth} [%{timestamp}] \"%{verb} %{request} HTTP/%{httpversion}\" %{status} %{size}";
             let input = "1.2.3.4 - - [30/Apr/1998:22:00:52 +0000] \"GET /english/venues/cities/images/montpellier/18.gif HTTP/1.0\" 200 3171";
 
