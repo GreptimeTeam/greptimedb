@@ -35,7 +35,7 @@ impl DropTable {
         }
     }
 
-    pub fn table_names(&self) -> &Vec<ObjectName> {
+    pub fn table_names(&self) -> &[ObjectName] {
         &self.table_names
     }
 
@@ -50,14 +50,12 @@ impl Display for DropTable {
         if self.drop_if_exists() {
             f.write_str(" IF EXISTS")?;
         }
-        // let table_name = self.table_name();
-        // write!(f, r#" {table_name}"#)
         let table_names = self.table_names();
         for (i, table_name) in table_names.iter().enumerate() {
             if i > 0 {
                 f.write_str(",")?;
             }
-            f.write_str(format!(" {}", table_name).as_str())?;
+            write!(f, " {}", table_name)?;
         }
         Ok(())
     }

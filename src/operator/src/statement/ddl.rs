@@ -644,19 +644,19 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         // Reserved for grpc call
-        self.drop_tables(vec![table_name], drop_if_exists, query_context)
+        self.drop_tables(&[table_name], drop_if_exists, query_context)
             .await
     }
 
     #[tracing::instrument(skip_all)]
     pub async fn drop_tables(
         &self,
-        table_names: Vec<TableName>,
+        table_names: &[TableName],
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         let mut tables = Vec::with_capacity(table_names.len());
-        for table_name in &table_names {
+        for table_name in table_names {
             if let Some(table) = self
                 .catalog_manager
                 .table(
