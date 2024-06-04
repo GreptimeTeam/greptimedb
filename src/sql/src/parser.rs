@@ -61,11 +61,7 @@ impl<'a> ParserContext<'a> {
     ) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
 
-        let parser = Parser::new(dialect)
-            .with_options(ParserOptions::new().with_trailing_commas(true))
-            .try_with_sql(sql)
-            .context(SyntaxSnafu)?;
-        let mut parser_ctx = ParserContext { sql, parser };
+        let mut parser_ctx = ParserContext::new(dialect, sql)?;
 
         let mut expecting_statement_delimiter = false;
         loop {
