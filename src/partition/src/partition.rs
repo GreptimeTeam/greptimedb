@@ -187,7 +187,7 @@ mod tests {
                 PartitionBound::Value(1_i32.into()),
             ],
         };
-        assert_eq!("(a, b) VALUES LESS THAN (MAXVALUE, 1)", def.to_string());
+        assert_eq!("MAXVALUE, 1", def.to_string());
 
         let partition: MetaPartition = def.try_into().unwrap();
         assert_eq!(
