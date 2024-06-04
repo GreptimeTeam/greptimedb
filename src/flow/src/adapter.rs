@@ -64,8 +64,6 @@ mod table_source;
 
 use error::Error;
 
-pub const PER_REQ_MAX_ROW_CNT: usize = 8192;
-
 // TODO: replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
