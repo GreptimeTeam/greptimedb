@@ -30,20 +30,17 @@ const IGNORE_COLUMN_IDS_FOR_DATA_REGION: [ColumnId; 1] = [ReservedColumnId::tsid
 /// value and appropriately increasing the size of the index, it results in an improved indexing effect.
 const SEG_ROW_COUNT_FOR_DATA_REGION: u32 = 256;
 
-/// Set the index options for the data region.
-pub fn set_index_options_for_data_region(options: &mut HashMap<String, String>) {
+/// Sets data region specific options.
+pub fn set_data_region_options(options: &mut HashMap<String, String>) {
+    // Set the index options for the data region.
     options.insert(
         "index.inverted_index.ignore_column_ids".to_string(),
         IGNORE_COLUMN_IDS_FOR_DATA_REGION.iter().join(","),
     );
-
     options.insert(
         "index.inverted_index.segment_row_count".to_string(),
         SEG_ROW_COUNT_FOR_DATA_REGION.to_string(),
     );
-}
-
-/// Set memtable options for the data region.
-pub fn set_memtable_options_for_data_region(options: &mut HashMap<String, String>) {
+    // Set memtable options for the data region.
     options.insert("memtable.type".to_string(), "partition_tree".to_string());
 }
