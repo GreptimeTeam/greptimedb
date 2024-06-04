@@ -295,10 +295,6 @@ impl Arrangement {
         self.last_compaction_time
     }
 
-    pub fn set_compaction_time(&mut self, time: Timestamp) {
-        self.last_compaction_time = Some(time);
-    }
-
     /// Split spine off at `split_ts`, and return the spine that's before `split_ts` (including `split_ts`).
     fn split_spine_le(&mut self, split_ts: &Timestamp) -> Spine {
         self.split_batch_at(split_ts);

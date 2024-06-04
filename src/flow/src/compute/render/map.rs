@@ -113,15 +113,21 @@ fn mfp_subgraph(
     scheduler: &Scheduler,
     send: &PortCtx<SEND, Toff>,
 ) {
+    // all updates that should be send immediately
+    let mut output_now = vec![];
     let run_mfp = || {
-        let all_updates = eval_mfp_core(input, mfp_plan, now, err_collector);
-        // if run mfp in the same tick for multiple times, we need to set last_compaction_time to now-1
-        // so that current rows doesn't get compacted(into nothing) and get missed, that's because mfp's arrangement is future only
-        let mut arrange = arrange.write();
-        if arrange.last_compaction_time() >= Some(now - 1) {
-            arrange.set_compaction_time(now - 1)
-        }
-        arrange.apply_updates(now, all_updates)?;
+        let mut all_updates = eval_mfp_core(input, mfp_plan, now, err_collector);
+        all_updates.retain(|(kv, ts, d)| {
+            if *ts > now {
+                true
+            } else {
+                output_now.push((kv.clone(), *ts, *d));
+                false
+            }
+        });
+        let future_udpates = all_updates;
+
+        arrange.write().apply_updates(now, future_udpates)?;
         Ok(())
     };
     err_collector.run(run_mfp);
@@ -136,13 +142,19 @@ fn mfp_subgraph(
         std::ops::Bound::Excluded(from),
         std::ops::Bound::Included(now),
     );
+
+    // find all updates that need to be send from arrangement
     let output_kv = arrange.read().get_updates_in_range(range);
+
     // the output is expected to be key -> empty val
     let output = output_kv
         .into_iter()
+        .chain(output_now) // chain previous immediately send updates
         .map(|((key, _v), ts, diff)| (key, ts, diff))
         .collect_vec();
+    // send output
     send.give(output);
+
     let run_compaction = || {
         arrange.write().compact_to(now)?;
         Ok(())
