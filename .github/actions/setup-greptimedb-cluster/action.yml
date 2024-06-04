@@ -47,9 +47,9 @@ runs:
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
         --set image.tag=${{ inputs.image-tag }} \
-        --set base.podTemplate.main.resources.requests.cpu=2 \
+        --set base.podTemplate.main.resources.requests.cpu=50m \
         --set base.podTemplate.main.resources.requests.memory=256Mi \
-        --set base.podTemplate.main.resources.limits.cpu=4 \
+        --set base.podTemplate.main.resources.limits.cpu=1000m \
         --set base.podTemplate.main.resources.limits.memory=2Gi \
         --set frontend.replicas=${{ inputs.frontend-replicas }} \
         --set datanode.replicas=${{ inputs.datanode-replicas }} \
@@ -57,6 +57,7 @@ runs:
         greptime/greptimedb-cluster \
         --create-namespace \
         -n my-greptimedb \
+        --values ./.github/actions/setup-greptimedb-cluster/values.yaml
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB
