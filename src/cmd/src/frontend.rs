@@ -252,22 +252,22 @@ impl StartCommand {
     async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
-        let mut opts = opts.component;
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
-            &opts.logging,
-            &opts.tracing,
-            opts.node_id.clone(),
+            &opts.component.logging,
+            &opts.component.tracing,
+            opts.component.node_id.clone(),
         );
         log_versions(version!(), short_version!());
 
+        info!("Frontend start command: {:#?}", self);
+        info!("Frontend options: {:#?}", opts);
+
+        let mut opts = opts.component;
         #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut opts)
             .await
             .context(StartFrontendSnafu)?;
-
-        info!("Frontend start command: {:#?}", self);
-        info!("Frontend options: {:#?}", opts);
 
         set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 

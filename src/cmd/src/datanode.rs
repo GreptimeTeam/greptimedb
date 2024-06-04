@@ -237,21 +237,21 @@ impl StartCommand {
     async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
-        let mut opts = opts.component;
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
-            &opts.logging,
-            &opts.tracing,
-            opts.node_id.map(|x| x.to_string()),
+            &opts.component.logging,
+            &opts.component.tracing,
+            opts.component.node_id.map(|x| x.to_string()),
         );
         log_versions(version!(), short_version!());
 
+        info!("Datanode start command: {:#?}", self);
+        info!("Datanode options: {:#?}", opts);
+
+        let mut opts = opts.component;
         let plugins = plugins::setup_datanode_plugins(&mut opts)
             .await
             .context(StartDatanodeSnafu)?;
-
-        info!("Datanode start command: {:#?}", self);
-        info!("Datanode options: {:#?}", opts);
 
         let node_id = opts
             .node_id

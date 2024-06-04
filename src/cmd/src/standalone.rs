@@ -388,14 +388,18 @@ impl StartCommand {
     async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
-        let opts = opts.component;
-        let guard =
-            common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.component.logging,
+            &opts.component.tracing,
+            None,
+        );
         log_versions(version!(), short_version!());
 
         info!("Standalone start command: {:#?}", self);
-        info!("Building standalone instance with {opts:#?}");
+        info!("Standalone options: {opts:#?}");
 
+        let opts = opts.component;
         let mut fe_opts = opts.frontend_options();
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it

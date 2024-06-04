@@ -227,17 +227,21 @@ impl StartCommand {
     async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
-        let mut opts = opts.component;
-        let guard =
-            common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.component.logging,
+            &opts.component.tracing,
+            None,
+        );
         log_versions(version!(), short_version!());
-
-        let plugins = plugins::setup_metasrv_plugins(&mut opts)
-            .await
-            .context(StartMetaServerSnafu)?;
 
         info!("Metasrv start command: {:#?}", self);
         info!("Metasrv options: {:#?}", opts);
+
+        let mut opts = opts.component;
+        let plugins = plugins::setup_metasrv_plugins(&mut opts)
+            .await
+            .context(StartMetaServerSnafu)?;
 
         let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
             .await
