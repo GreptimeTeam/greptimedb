@@ -15,6 +15,7 @@
 pub mod cmcd;
 pub mod csv;
 pub mod date;
+pub mod dissect;
 pub mod epoch;
 pub mod letter;
 pub mod regex;
@@ -26,6 +27,7 @@ use cmcd::CMCDProcessor;
 use common_telemetry::warn;
 use csv::CsvProcessor;
 use date::DateProcessor;
+use dissect::DissectProcessor;
 use epoch::EpochProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
@@ -38,6 +40,7 @@ const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
 const IGNORE_MISSING_NAME: &str = "ignore_missing";
 const METHOD_NAME: &str = "method";
+const PATTERNS_NAME: &str = "patterns";
 
 // const IF_NAME: &str = "if";
 // const IGNORE_FAILURE_NAME: &str = "ignore_failure";
@@ -53,14 +56,14 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
         true
     }
 
-    fn exec_field(&self, _val: &Value, _field: &Field) -> Result<Map, String> {
-        Ok(Map::default())
+    /// default behavior does nothing and returns the input value
+    fn exec_field(&self, val: &Value, field: &Field) -> Result<Map, String> {
+        Ok(Map::one(field.get_field(), val.clone()))
     }
 
     fn exec_map(&self, mut map: Map) -> Result<Value, String> {
         for ff @ Field { field, .. } in self.fields().iter() {
-            let val = map.get(field);
-            match val {
+            match map.get(field) {
                 Some(v) => {
                     map.extend(self.exec_field(v, ff)?);
                 }
@@ -158,6 +161,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> 
         cmcd::PROCESSOR_CMCD => Arc::new(CMCDProcessor::try_from(value)?),
         csv::PROCESSOR_CSV => Arc::new(CsvProcessor::try_from(value)?),
         date::PROCESSOR_DATE => Arc::new(DateProcessor::try_from(value)?),
+        dissect::PROCESSOR_DISSECT => Arc::new(DissectProcessor::try_from(value)?),
         epoch::PROCESSOR_EPOCH => Arc::new(EpochProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => Arc::new(LetterProcessor::try_from(value)?),
         regex::PROCESSOR_REGEX => Arc::new(RegexProcessor::try_from(value)?),
@@ -188,11 +192,33 @@ pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool, String
     v.as_bool().ok_or(format!("'{field}' must be a boolean"))
 }
 
-pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
-    yaml_string(v, field)?.parse()
+pub(crate) fn yaml_parse_string<T>(v: &yaml_rust::Yaml, field: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: ToString,
+{
+    yaml_string(v, field)?
+        .parse::<T>()
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn yaml_parse_strings<T>(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: ToString,
+{
+    yaml_strings(v, field).and_then(|v| {
+        v.into_iter()
+            .map(|s| s.parse::<T>().map_err(|e| e.to_string()))
+            .collect()
+    })
 }
 
 pub(crate) fn yaml_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields, String> {
-    let ff = yaml_strings(v, field).and_then(|v| v.into_iter().map(|s| s.parse()).collect())?;
-    Fields::new(ff)
+    let v = yaml_parse_strings(v, field)?;
+    Fields::new(v)
+}
+
+pub(crate) fn yaml_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field, String> {
+    yaml_parse_string(v, field)
 }

@@ -37,6 +37,12 @@ impl Map {
     }
 }
 
+impl From<HashMap<String, Value>> for Map {
+    fn from(values: HashMap<String, Value>) -> Self {
+        Map { values }
+    }
+}
+
 impl std::ops::Deref for Map {
     type Target = HashMap<String, Value>;
 
