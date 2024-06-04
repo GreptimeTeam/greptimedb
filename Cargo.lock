@@ -5834,6 +5834,7 @@ dependencies = [
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
  "datatypes",
+ "dotenv",
  "futures",
  "humantime-serde",
  "index",
@@ -5851,6 +5852,9 @@ dependencies = [
  "puffin",
  "rand",
  "regex",
+ "rskafka",
+ "rstest",
+ "rstest_reuse",
  "serde",
  "serde_json",
  "serde_with",
@@ -8257,6 +8261,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "relative-path"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
 name = "rend"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8522,9 +8532,9 @@ dependencies = [
 
 [[package]]
 name = "rstest"
-version = "0.17.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de1bb486a691878cd320c2f0d319ba91eeaa2e894066d8b5f8f117c000e9d962"
+checksum = "9afd55a67069d6e434a95161415f5beeada95a01c7b815508a82dcb0e1593682"
 dependencies = [
  "futures",
  "futures-timer",
@@ -8534,28 +8544,31 @@ dependencies = [
 
 [[package]]
 name = "rstest_macros"
-version = "0.17.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290ca1a1c8ca7edb7c3283bd44dc35dd54fdec6253a3912e201ba1072018fca8"
+checksum = "4165dfae59a39dd41d8dec720d3cbfbc71f69744efb480a3920f5d4e0cc6798d"
 dependencies = [
  "cfg-if",
+ "glob",
+ "proc-macro-crate 3.1.0",
  "proc-macro2",
  "quote",
+ "regex",
+ "relative-path",
  "rustc_version",
- "syn 1.0.109",
+ "syn 2.0.66",
  "unicode-ident",
 ]
 
 [[package]]
 name = "rstest_reuse"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45f80dcc84beab3a327bbe161f77db25f336a1452428176787c8c79ac79d7073"
+checksum = "b3a8fb4672e840a587a66fc577a5491375df51ddb88f2a2c2a792598c326fe14"
 dependencies = [
  "quote",
  "rand",
- "rustc_version",
- "syn 1.0.109",
+ "syn 2.0.66",
 ]
 
 [[package]]

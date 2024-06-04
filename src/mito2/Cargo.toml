@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-test = ["common-test-util", "log-store"]
+test = ["common-test-util", "log-store", "rstest", "rstest_reuse", "rskafka"]
 
 [lints]
 workspace = true
@@ -37,6 +37,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
+dotenv.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
@@ -54,6 +55,9 @@ prost.workspace = true
 puffin.workspace = true
 rand.workspace = true
 regex = "1.5"
+rskafka = { workspace = true, optional = true }
+rstest = { workspace = true, optional = true }
+rstest_reuse = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
@@ -73,6 +77,9 @@ common-test-util.workspace = true
 criterion = "0.4"
 log-store.workspace = true
 object-store = { workspace = true, features = ["services-memory"] }
+rskafka.workspace = true
+rstest.workspace = true
+rstest_reuse.workspace = true
 toml.workspace = true
 
 [[bench]]
