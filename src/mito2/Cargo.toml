@@ -75,6 +75,7 @@ uuid.workspace = true
 common-procedure-test.workspace = true
 common-test-util.workspace = true
 criterion = "0.4"
+dotenv.workspace = true
 log-store.workspace = true
 object-store = { workspace = true, features = ["services-memory"] }
 rskafka.workspace = true
