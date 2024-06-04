@@ -1816,6 +1816,7 @@ version = "0.8.1"
 dependencies = [
  "snafu 0.8.3",
  "strum 0.25.0",
+ "tonic 0.11.0",
 ]
 
 [[package]]
@@ -6736,7 +6737,6 @@ dependencies = [
  "query",
  "regex",
  "serde_json",
- "servers",
  "session",
  "snafu 0.8.3",
  "sql",

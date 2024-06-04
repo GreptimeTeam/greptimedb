@@ -257,3 +257,7 @@ strip = true
 [profile.dev.package.sqlness-runner]
 debug = false
 strip = true
+
+[profile.dev.package.tests-fuzz]
+debug = false
+strip = true
