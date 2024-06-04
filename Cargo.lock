@@ -5834,6 +5834,7 @@ dependencies = [
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
  "datatypes",
+ "dotenv",
  "futures",
  "humantime-serde",
  "index",
