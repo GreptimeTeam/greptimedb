@@ -277,7 +277,7 @@ jobs:
           version: current
 
   distributed-fuzztest: 
-    name: Fuzz Test (Distributed, Disk)
+    name: Fuzz Test (Distributed, Minio)
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
     strategy:
@@ -289,6 +289,8 @@ jobs:
         uses: ./.github/actions/setup-kind
       - name: Setup Etcd cluser
         uses: ./.github/actions/setup-etcd-cluster
+      - name: Setup Minio
+        uses: ./.github/actions/setup-minio
       # Prepares for fuzz tests
       - uses: arduino/setup-protoc@v3
         with:
@@ -327,6 +329,13 @@ jobs:
             pod -l app.kubernetes.io/instance=etcd \
             --timeout=120s \
             -n etcd-cluster
+      - name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
       - name: Print etcd info
         shell: bash
         run: kubectl get all --show-labels -n etcd-cluster
@@ -373,7 +382,7 @@ jobs:
           docker system prune -f
 
   distributed-fuzztest-with-kafka: 
-    name: Fuzz Test with Kafka (Distributed, Disk)
+    name: Fuzz Test with Kafka (Distributed, Minio)
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
     strategy:
@@ -385,6 +394,8 @@ jobs:
         uses: ./.github/actions/setup-kind
       - name: Setup Etcd cluser
         uses: ./.github/actions/setup-etcd-cluster
+      - name: Setup Minio
+        uses: ./.github/actions/setup-minio
       - name: Setup Kafka cluser
         uses: ./.github/actions/setup-kafka-cluster
       # Prepares for fuzz tests
@@ -431,6 +442,13 @@ jobs:
             pod -l app.kubernetes.io/instance=kafka \
             --timeout=120s \
             -n kafka-cluster
+      - name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
       - name: Print etcd info
         shell: bash
         run: kubectl get all --show-labels -n etcd-cluster

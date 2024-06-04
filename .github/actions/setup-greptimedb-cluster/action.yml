@@ -57,6 +57,12 @@ runs:
         --set frontend.replicas=${{ inputs.frontend-replicas }} \
         --set datanode.replicas=${{ inputs.datanode-replicas }} \
         --set meta.replicas=${{ inputs.meta-replicas }} \
+        --set objectStorage.s3.bucket=default \
+        --set objectStorage.s3.region=us-west-2 \
+        --set objectStorage.s3.root=test-root \
+        --set objectStorage.s3.endpoint=http://minio.minio.svc.cluster.local \
+        --set objectStorage.credentials.accessKeyId=rootuser \
+        --set objectStorage.credentials.secretAccessKey=rootpass123 \
         greptime/greptimedb-cluster \
         --create-namespace \
         -n my-greptimedb \
