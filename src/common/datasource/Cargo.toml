@@ -20,6 +20,7 @@ async-compression = { version = "0.3", features = [
 ] }
 async-trait.workspace = true
 bytes.workspace = true
+common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true
@@ -33,6 +34,7 @@ object-store.workspace = true
 orc-rust = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "502217315726314c4008808fe169764529640599" }
 parquet.workspace = true
 paste = "1.0"
+rand.workspace = true
 regex = "1.7"
 serde.workspace = true
 snafu.workspace = true
@@ -42,4 +44,7 @@ tokio-util.workspace = true
 url = "2.3"
 
 [dev-dependencies]
+common-telemetry.workspace = true
 common-test-util.workspace = true
+dotenv.workspace = true
+uuid.workspace = true
