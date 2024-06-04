@@ -509,7 +509,7 @@ pub async fn setup_grpc_server_with(
     let greptime_request_handler = GreptimeRequestHandler::new(
         ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()),
         user_provider.clone(),
-        runtime.clone(),
+        Some(runtime.clone()),
     );
 
     let flight_handler = Arc::new(greptime_request_handler.clone());

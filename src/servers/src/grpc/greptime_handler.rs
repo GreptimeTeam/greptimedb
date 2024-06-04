@@ -42,14 +42,14 @@ use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
-    runtime: Arc<Runtime>,
+    runtime: Option<Arc<Runtime>>,
 }
 
 impl GreptimeRequestHandler {
     pub fn new(
         handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
-        runtime: Arc<Runtime>,
+        runtime: Option<Arc<Runtime>>,
     ) -> Self {
         Self {
             handler,
@@ -73,16 +73,9 @@ impl GreptimeRequestHandler {
         let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
-
-        // Executes requests in another runtime to
-        // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
-        //   - Refer to our blog for the rational behind it:
-        //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
-        //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
-        //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
-        // 2. avoid the handler blocks the gRPC runtime incidentally.
         let tracing_context = TracingContext::from_current_span();
-        let handle = self.runtime.spawn(async move {
+
+        let result_future = async move {
             handler
                 .do_query(query, query_ctx)
                 .trace(tracing_context.attach(tracing::info_span!(
@@ -98,12 +91,28 @@ impl GreptimeRequestHandler {
                     }
                     e
                 })
-        });
+        };
 
-        handle.await.context(JoinTaskSnafu).map_err(|e| {
-            timer.record(e.status_code());
-            e
-        })?
+        match &self.runtime {
+            Some(runtime) => {
+                // Executes requests in another runtime to
+                // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
+                //   - Refer to our blog for the rational behind it:
+                //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
+                //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
+                //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
+                // 2. avoid the handler blocks the gRPC runtime incidentally.
+                runtime
+                    .spawn(result_future)
+                    .await
+                    .context(JoinTaskSnafu)
+                    .map_err(|e| {
+                        timer.record(e.status_code());
+                        e
+                    })?
+            }
+            None => result_future.await,
+        }
     }
 }
 
