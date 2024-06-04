@@ -1757,16 +1757,19 @@ dependencies = [
  "common-macro",
  "common-recordbatch",
  "common-runtime",
+ "common-telemetry",
  "common-test-util",
  "datafusion 38.0.0",
  "datatypes",
  "derive_builder 0.12.0",
+ "dotenv",
  "futures",
  "lazy_static",
  "object-store",
  "orc-rust",
  "parquet",
  "paste",
+ "rand",
  "regex",
  "serde",
  "snafu 0.8.3",
@@ -1774,6 +1777,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "uuid",
 ]
 
 [[package]]
