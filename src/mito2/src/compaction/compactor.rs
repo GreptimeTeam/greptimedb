@@ -273,6 +273,10 @@ pub trait Compactor: Send + Sync + 'static {
             if let Some(picker_output) = picker_output {
                 picker_output
             } else {
+                info!(
+                    "No files to compact for region_id: {}",
+                    compaction_region.region_id
+                );
                 return Ok(());
             }
         };
