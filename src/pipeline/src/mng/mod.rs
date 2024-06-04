@@ -14,3 +14,4 @@
 
 pub mod error;
 pub mod table;
+pub mod pipeline_operator;

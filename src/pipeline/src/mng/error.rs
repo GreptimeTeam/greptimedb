@@ -39,23 +39,23 @@ pub enum Error {
     #[snafu(display("Failed to insert pipeline to pipelines table, name: {}", name))]
     InsertPipeline {
         name: String,
+        source: BoxedError,
         #[snafu(implicit)]
         location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Failed to parse pipeline"))]
     ParsePipeline {
+        source: BoxedError,
         #[snafu(implicit)]
         location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Pipeline not found, name: {}", name))]
     PipelineNotFound {
+        name: String,
         #[snafu(implicit)]
         location: Location,
-        name: String,
     },
 
     #[snafu(display("Failed to collect record batch"))]
@@ -86,6 +86,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("General catalog error"))]
+    Catalog {
+        source: catalog::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create table"))]
+    CreateTable {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,6 +116,8 @@ impl ErrorExt for Error {
             ParsePipeline { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
+            CreateTable { source, .. } => source.status_code(),
         }
     }
 

@@ -18,22 +18,17 @@ use std::sync::{Arc, RwLock};
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
-use common_catalog::format_full_table_name;
-use common_error::ext::{BoxedError, ErrorExt};
-use common_telemetry::{error, info};
+use common_telemetry::info;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use pipeline::table::{PipelineTable, PipelineTableRef};
-use pipeline::{GreptimeTransformer, Pipeline};
 use query::QueryEngineRef;
-use servers::error::Result as ServerResult;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
-use crate::error::{
-    CatalogSnafu, GetPipelineSnafu, InsertPipelineSnafu, Result, TableNotFoundSnafu,
-};
+use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
+use crate::table::{PipelineTable, PipelineTableRef};
+use crate::{GreptimeTransformer, Pipeline};
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
 
@@ -119,16 +114,15 @@ impl PipelineOperator {
                 None,
                 Arc::new(QueryContext::with(catalog, &schema)),
             )
-            .await?;
+            .await
+            .context(CreateTableSnafu)?;
 
         let table = self
             .catalog_manager
             .table(catalog, &schema, &table_name)
             .await
             .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(catalog, &schema, &table_name),
-            })?;
+            .context(PipelineTableNotFoundSnafu)?;
 
         if let Some(open_hook) = open_hook {
             (open_hook)(table.clone()).await.context(CatalogSnafu)?;
@@ -157,18 +151,9 @@ impl PipelineOperator {
         pipeline: &str,
     ) -> Result<Pipeline<GreptimeTransformer>> {
         self.get_pipeline_table_from_cache(catalog)
-            .with_context(|| TableNotFoundSnafu {
-                table_name: PIPELINE_TABLE_NAME,
-            })?
+            .context(PipelineTableNotFoundSnafu)?
             .insert_and_compile(schema, name, content_type, pipeline)
             .await
-            .map_err(|e| {
-                if e.status_code().should_log_error() {
-                    error!(e; "Failed to insert pipeline");
-                }
-                BoxedError::new(e)
-            })
-            .context(InsertPipelineSnafu { name })
     }
 }
 
@@ -196,13 +181,9 @@ impl PipelineOperator {
         self.create_pipeline_table_if_not_exists(query_ctx.current_catalog())
             .await?;
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
-            .context(TableNotFoundSnafu {
-                table_name: PIPELINE_TABLE_NAME,
-            })?
+            .context(PipelineTableNotFoundSnafu)?
             .get_pipeline(query_ctx.current_schema(), name)
             .await
-            .map_err(BoxedError::new)
-            .context(GetPipelineSnafu { name })
     }
 
     pub async fn insert_pipeline(
@@ -211,19 +192,9 @@ impl PipelineOperator {
         content_type: &str,
         pipeline: &str,
         query_ctx: QueryContextRef,
-    ) -> ServerResult<()> {
+    ) -> Result<()> {
         self.create_pipeline_table_if_not_exists(query_ctx.current_catalog())
-            .await
-            .map_err(|e| {
-                if e.status_code().should_log_error() {
-                    error!(e; "Failed to create pipeline table");
-                }
-
-                servers::error::InternalSnafu {
-                    err_msg: e.to_string(),
-                }
-                .build()
-            })?;
+            .await?;
 
         self.insert_and_compile(
             query_ctx.current_catalog(),
@@ -232,16 +203,7 @@ impl PipelineOperator {
             content_type,
             pipeline,
         )
-        .await
-        .map_err(|e| {
-            if e.status_code().should_log_error() {
-                error!(e; "Failed to insert pipeline");
-            }
-
-            BoxedError::new(e)
-        })
-        .context(servers::error::InsertPipelineSnafu { name })?;
-
+        .await?;
         Ok(())
     }
 }
