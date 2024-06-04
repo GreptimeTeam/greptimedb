@@ -192,7 +192,7 @@ impl Instance {
 
     pub fn build_servers(
         &mut self,
-        opts: impl Into<FrontendOptions> + for<'de> Configurable<'de>,
+        opts: impl Into<FrontendOptions> + Configurable,
         servers: ServerHandlers,
     ) -> Result<()> {
         let opts: FrontendOptions = opts.into();

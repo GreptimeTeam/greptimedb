@@ -63,7 +63,7 @@ impl Display for PartitionBound {
         match self {
             Self::Value(v) => write!(f, "{}", v),
             Self::MaxValue => write!(f, "MAXVALUE"),
-            Self::Expr(e) => write!(f, "{:?}", e),
+            Self::Expr(e) => write!(f, "{}", e),
         }
     }
 }
@@ -72,8 +72,7 @@ impl Display for PartitionDef {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "({}) VALUES LESS THAN ({})",
-            self.partition_columns.iter().join(", "),
+            "{}",
             self.partition_bounds
                 .iter()
                 .map(|b| format!("{b}"))
@@ -188,7 +187,7 @@ mod tests {
                 PartitionBound::Value(1_i32.into()),
             ],
         };
-        assert_eq!("(a, b) VALUES LESS THAN (MAXVALUE, 1)", def.to_string());
+        assert_eq!("MAXVALUE, 1", def.to_string());
 
         let partition: MetaPartition = def.try_into().unwrap();
         assert_eq!(

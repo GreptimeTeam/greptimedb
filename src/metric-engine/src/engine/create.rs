@@ -38,9 +38,7 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
-use crate::engine::options::{
-    set_index_options_for_data_region, set_memtable_options_for_data_region,
-};
+use crate::engine::options::set_data_region_options;
 use crate::engine::MetricEngineInner;
 use crate::error::{
     AddingFieldColumnSnafu, ColumnNotFoundSnafu, ColumnTypeMismatchSnafu,
@@ -478,11 +476,8 @@ impl MetricEngineInner {
         data_region_request.column_metadatas.push(tsid_col);
         data_region_request.primary_key = primary_key;
 
-        // set index options
-        set_index_options_for_data_region(&mut data_region_request.options);
-
-        // Set memtable options.
-        set_memtable_options_for_data_region(&mut data_region_request.options);
+        // set data region options
+        set_data_region_options(&mut data_region_request.options);
 
         data_region_request
     }

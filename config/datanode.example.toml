@@ -32,6 +32,15 @@ rpc_max_send_message_size = "512MB"
 ## Enable telemetry to collect anonymous usage data.
 enable_telemetry = true
 
+## The runtime options.
+[runtime]
+## The number of threads to execute the runtime for global read operations.
+read_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+write_rt_size = 8
+## The number of threads to execute the runtime for global background operations.
+bg_rt_size = 8
+
 ## The heartbeat options.
 [heartbeat]
 ## Interval for sending heartbeat messages to the metasrv.
