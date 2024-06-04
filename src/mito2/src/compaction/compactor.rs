@@ -29,7 +29,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::build_sst_reader;
-use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::picker::{new_picker, PickerOutput};
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -37,7 +37,6 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
-use crate::new_picker;
 use crate::read::Source;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
@@ -49,23 +48,24 @@ use crate::sst::file_purger::{FilePurgerRef, LocalFilePurger};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::parquet::WriteOptions;
 
-#[derive(Clone)]
 /// CompactionRegion represents a region that needs to be compacted.
 /// It's the subset of MitoRegion.
+#[derive(Clone)]
 pub struct CompactionRegion {
     pub region_id: RegionId,
     pub region_options: RegionOptions,
-    pub engine_config: Arc<MitoConfig>,
-    pub region_metadata: RegionMetadataRef,
-    pub cache_manager: CacheManagerRef,
-    pub access_layer: AccessLayerRef,
-    pub file_purger: FilePurgerRef,
 
+    pub(crate) engine_config: Arc<MitoConfig>,
+    pub(crate) region_metadata: RegionMetadataRef,
+    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) access_layer: AccessLayerRef,
+    pub(crate) file_purger: FilePurgerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) version_control: VersionControlRef,
 }
 
 /// CompactionRequest represents the request to compact a region.
+#[derive(Debug, Clone)]
 pub struct CompactionRequest {
     pub catalog: String,
     pub schema: String,
@@ -203,17 +203,9 @@ pub trait Compactor: Send + Sync + 'static {
     async fn merge_ssts(
         &self,
         compaction_region: CompactionRegion,
-        picker_output: Option<PickerOutput>,
+        picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
-        if let Some(picker_output) = picker_output {
-            do_merge_ssts(compaction_region, picker_output).await
-        } else {
-            Ok(MergeOutput {
-                files_to_add: None,
-                files_to_remove: None,
-                compaction_time_window: None,
-            })
-        }
+        do_merge_ssts(compaction_region, picker_output).await
     }
 
     /// Update the manifest after merging SST files.
@@ -266,10 +258,25 @@ pub trait Compactor: Send + Sync + 'static {
     }
 
     /// Execute compaction for a region.
-    async fn compact(&self, compaction_region: CompactionRegion) -> Result<()> {
-        let picker_output = self
-            .picker()
+    async fn compact(
+        &self,
+        compaction_region: CompactionRegion,
+        compact_request_options: compact_request::Options,
+    ) -> Result<()> {
+        let picker_output = {
+            let picker_output = new_picker(
+                compact_request_options,
+                &compaction_region.region_options.compaction,
+            )
             .pick(compaction_region.version_control.current().version);
+
+            if let Some(picker_output) = picker_output {
+                picker_output
+            } else {
+                return Ok(());
+            }
+        };
+
         let merge_output = self
             .merge_ssts(compaction_region.clone(), picker_output)
             .await?;
@@ -282,9 +289,6 @@ pub trait Compactor: Send + Sync + 'static {
         }
         self.update_manifest(compaction_region, merge_output).await
     }
-
-    /// Get the picker of the compactor.
-    fn picker(&self) -> Arc<dyn Picker>;
 }
 
 async fn do_merge_ssts(
@@ -414,28 +418,7 @@ async fn do_merge_ssts(
 }
 
 /// DefaultCompactor is the default implementation of Compactor.
-pub struct DefaultCompactor {
-    picker: Arc<dyn Picker>,
-}
+pub struct DefaultCompactor;
 
 #[async_trait::async_trait]
-impl Compactor for DefaultCompactor {
-    fn picker(&self) -> Arc<dyn Picker> {
-        self.picker.clone()
-    }
-}
-
-impl DefaultCompactor {
-    /// Create a new DefaultCompactor with a picker.
-    pub fn new_with_picker(picker: Arc<dyn Picker>) -> Self {
-        Self { picker }
-    }
-
-    /// Create a new DefaultCompactor from a compaction request.
-    pub fn new_from_request(req: &CompactionRequest) -> Result<Self> {
-        let region_options = RegionOptions::try_from(&req.options)?;
-        let compaction_options = region_options.compaction;
-        let picker = new_picker(req.compaction_options.clone(), &compaction_options);
-        Ok(Self { picker })
-    }
-}
+impl Compactor for DefaultCompactor {}

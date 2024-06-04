@@ -61,27 +61,24 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) version_control: VersionControlRef,
     /// Event listener.
     pub(crate) listener: WorkerListener,
-
+    /// Compactor to handle compaction.
     pub(crate) compactor: Arc<dyn Compactor>,
-    pub(crate) picker_output: Option<PickerOutput>,
+    /// Output of the picker.
+    pub(crate) picker_output: PickerOutput,
 }
 
 impl Debug for CompactionTaskImpl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(picker_output) = &self.picker_output {
-            f.debug_struct("TwcsCompactionTask")
-                .field("region_id", &self.region_id)
-                .field("outputs", &picker_output.outputs)
-                .field("expired_ssts", &picker_output.expired_ssts)
-                .field("compaction_time_window", &picker_output.time_window_size)
-                .field("append_mode", &self.append_mode)
-                .finish()
-        } else {
-            f.debug_struct("TwcsCompactionTask")
-                .field("region_id", &self.region_id)
-                .field("append_mode", &self.append_mode)
-                .finish()
-        }
+        f.debug_struct("TwcsCompactionTask")
+            .field("region_id", &self.region_id)
+            .field("outputs", &self.picker_output.outputs)
+            .field("expired_ssts", &self.picker_output.expired_ssts)
+            .field(
+                "compaction_time_window",
+                &self.picker_output.time_window_size,
+            )
+            .field("append_mode", &self.append_mode)
+            .finish()
     }
 }
 
@@ -93,33 +90,13 @@ impl Drop for CompactionTaskImpl {
 
 impl CompactionTaskImpl {
     fn mark_files_compacting(&self, compacting: bool) {
-        if let Some(picker_output) = &self.picker_output {
-            picker_output
-                .outputs
-                .iter()
-                .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
-        }
+        self.picker_output
+            .outputs
+            .iter()
+            .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
     }
 
     async fn handle_compaction(&mut self) -> error::Result<()> {
-        let pick_timer = COMPACTION_STAGE_ELAPSED
-            .with_label_values(&["pick"])
-            .start_timer();
-        let picker_output = self
-            .compactor
-            .picker()
-            .pick(self.version_control.current().version);
-        drop(pick_timer);
-
-        if picker_output.is_none() {
-            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
-            for waiter in self.waiters.drain(..) {
-                waiter.send(Ok(0));
-            }
-            return Ok(());
-        }
-        self.picker_output = picker_output;
-
         self.mark_files_compacting(true);
 
         let merge_timer = COMPACTION_STAGE_ELAPSED

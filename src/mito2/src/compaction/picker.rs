@@ -35,7 +35,7 @@ pub trait Picker: Debug + Send + Sync + 'static {
     fn pick(&self, current_version: VersionRef) -> Option<PickerOutput>;
 }
 
-#[derive(Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,

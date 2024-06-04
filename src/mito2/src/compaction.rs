@@ -48,6 +48,7 @@ use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
     TimeRangePredicateOverflowSnafu,
 };
+use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
@@ -521,23 +522,42 @@ fn build_compaction_task(
         picker, region_id
     );
 
+    let pick_timer = COMPACTION_STAGE_ELAPSED
+        .with_label_values(&["pick"])
+        .start_timer();
+    let picker_output = picker.pick(version_control.current().version);
+    drop(pick_timer);
+
+    let picker_output = {
+        if let Some(picker_output) = picker_output {
+            picker_output
+        } else {
+            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
+            for waiter in waiters {
+                waiter.send(Ok(0));
+            }
+            return None;
+        }
+    };
+
     let task = CompactionTaskImpl {
-        engine_config: engine_config.clone(),
         region_id,
-        metadata: current_version.metadata.clone().clone(),
-        sst_layer: access_layer.clone(),
         request_sender,
         waiters,
         file_purger,
         start_time,
         cache_manager,
-        append_mode: current_version.options.append_mode,
         manifest_ctx,
         version_control,
         listener,
-        compactor: Arc::new(DefaultCompactor::new_with_picker(picker)),
-        picker_output: None,
+        picker_output,
+        metadata: current_version.metadata.clone().clone(),
+        sst_layer: access_layer.clone(),
+        engine_config: engine_config.clone(),
+        append_mode: current_version.options.append_mode,
+        compactor: Arc::new(DefaultCompactor {}),
     };
+
     Some(Box::new(task))
 }
 
