@@ -279,7 +279,7 @@ impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<()> {
+    ) -> Result<Pipeline<GreptimeTransformer>> {
         let compiled_pipeline = Self::compile_pipeline(pipeline)?;
 
         self.insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
@@ -287,10 +287,10 @@ impl<E: ErrorExt + Send + Sync + 'static> PipelineTable<E> {
 
         self.pipelines.write().unwrap().insert(
             Self::generate_pipeline_cache_key(schema, name),
-            compiled_pipeline,
+            compiled_pipeline.clone(),
         );
 
-        Ok(())
+        Ok(compiled_pipeline)
     }
 
     async fn find_pipeline_by_name(&self, schema: &str, name: &str) -> Result<String> {

@@ -3,3 +3,4 @@ pub mod table;
 
 pub use pipeline::transform::GreptimeTransformer;
 pub use pipeline::Pipeline;
+pub use pipeline::value::Value;

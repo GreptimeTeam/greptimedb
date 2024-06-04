@@ -110,7 +110,7 @@ impl PipelineOperator {
         );
     }
 
-    pub async fn create_pipeline_table_if_not_exists(&self, catalog: &str) -> Result<()> {
+    async fn create_pipeline_table_if_not_exists(&self, catalog: &str) -> Result<()> {
         if self.get_pipeline_table_from_cache(catalog).is_some() {
             return Ok(());
         }
@@ -173,24 +173,21 @@ impl PipelineOperator {
     }
 
     pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef<Error>> {
-        // FIXME (qtang): we should impl this
         self.tables.read().unwrap().get(catalog).cloned()
     }
 
-    pub async fn insert_and_compile(
+    async fn insert_and_compile(
         &self,
         catalog: &str,
         schema: &str,
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<()> {
-        let _compiled_pipeline = PipelineTable::<Error>::compile_pipeline(pipeline)
-            .map_err(BoxedError::new)
-            .context(InsertPipelineSnafu { name })?;
+    ) -> Result<Pipeline<GreptimeTransformer>> {
         self.get_pipeline_table_from_cache(catalog)
-            // FIXME (qtang): we should add error handling here
-            .unwrap()
+            .with_context(|| TableNotFoundSnafu {
+                table_name: PIPELINE_TABLE_NAME,
+            })?
             .insert_and_compile(schema, name, content_type, pipeline)
             .await
             .map_err(|e| {
@@ -199,8 +196,7 @@ impl PipelineOperator {
                 }
                 BoxedError::new(e)
             })
-            .context(InsertPipelineSnafu { name })?;
-        Ok(())
+            .context(InsertPipelineSnafu { name })
     }
 }
 
@@ -275,5 +271,155 @@ impl PipelineOperator {
         .context(servers::error::InsertPipelineSnafu { name })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::greptime_request::Request;
+    use async_trait::async_trait;
+    use catalog::memory::MemoryCatalogManager;
+    use common_query::Output;
+    use common_recordbatch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{StringVector, VectorRef};
+    use pipeline::Value as PipelineValue;
+    use query::QueryEngineFactory;
+    use serde_json::Value;
+    use servers::query_handler::grpc::GrpcQueryHandler;
+    use session::context::{QueryContext, QueryContextRef};
+    use table::test_util::MemTable;
+
+    use crate::error::{Error, Result};
+    use crate::pipeline::PipelineOperator;
+
+    struct MockGrpcQueryHandler;
+
+    #[async_trait]
+    impl GrpcQueryHandler for MockGrpcQueryHandler {
+        type Error = Error;
+
+        async fn do_query(&self, _query: Request, _ctx: QueryContextRef) -> Result<Output> {
+            Ok(Output::new_with_affected_rows(1))
+        }
+    }
+
+    pub fn setup_pipeline_operator(schema: &str, name: &str, pipeline: &str) -> PipelineOperator {
+        let column_schemas = vec![
+            ColumnSchema::new("pipeline", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("schema", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+        ];
+
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(StringVector::from(vec![pipeline])),
+            Arc::new(StringVector::from(vec![schema])),
+            Arc::new(StringVector::from(vec![name])),
+        ];
+
+        let schema = Arc::new(Schema::new(column_schemas));
+        let recordbatch = RecordBatch::new(schema, columns).unwrap();
+
+        let table = MemTable::new_with_catalog(
+            "pipelines",
+            recordbatch,
+            1,
+            "greptime".to_string(),
+            "greptime_private".to_string(),
+            vec![],
+        );
+
+        let catalog_manager = MemoryCatalogManager::new_with_table(table.clone());
+
+        let factory = QueryEngineFactory::new(catalog_manager.clone(), None, None, None, false);
+        let query_engine = factory.query_engine();
+        let pipeline_operator = PipelineOperator {
+            grpc_handler: arc_swap::ArcSwap::new(Arc::new(Arc::new(MockGrpcQueryHandler) as _)),
+            catalog_manager,
+            query_engine,
+            tables: Default::default(),
+        };
+        pipeline_operator
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_table() {
+        let catalog = "greptime";
+        let schema = "schema";
+        let name = "test";
+        let pipeline_content = r#"
+---
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: int32
+  - fields:
+      - type
+      - log
+    type: string
+  - field: time
+    type: time
+    index: timestamp"#;
+        let pipeline_operator = setup_pipeline_operator(schema, name, pipeline_content);
+
+        let data = r#"{"time": "2024-05-25 20:16:37.308", "id1": "1852", "id2": "1852", "type": "E", "log": "SOAProxy WindowCtrlManager: enSunshadeOpe :4\n"}"#;
+        let data: Value = serde_json::from_str(data).unwrap();
+        let pipeline_data = PipelineValue::try_from(data).unwrap();
+        let pipeline_table = pipeline_operator.get_pipeline_table_from_cache(catalog);
+        assert!(pipeline_table.is_none());
+        let query_ctx = QueryContextRef::new(QueryContext::with(catalog, schema));
+        let pipeline = pipeline_operator
+            .get_pipeline(query_ctx.clone(), name)
+            .await
+            .unwrap();
+
+        let result = pipeline.exec(pipeline_data.clone()).unwrap();
+        assert_eq!(result.schema.len(), 5);
+        let name_v2 = "test2";
+        let pipeline_content_v2 = r#"
+---
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: string
+  - fields:
+      - type
+      - log
+    type: string
+  - field: time
+    type: time
+    index: timestamp"#;
+
+        let _ = pipeline_operator
+            .insert_and_compile(catalog, schema, name_v2, "yaml", pipeline_content_v2)
+            .await
+            .unwrap();
+
+        let pipeline = pipeline_operator
+            .get_pipeline(query_ctx, name_v2)
+            .await
+            .unwrap();
+        let result = pipeline.exec(pipeline_data).unwrap();
+        let scheam = result.schema;
+        assert_eq!(scheam.len(), 5);
     }
 }
