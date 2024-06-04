@@ -558,13 +558,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to conver to structed log"))]
-    ToStructedLog {
+    #[snafu(display("Failed to convert to structured log"))]
+    ToStructuredLog {
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Unsupport content type: {:?}", content_type))]
+    #[snafu(display("Unsupported content type: {:?}", content_type))]
     UnsupportedContentType {
         content_type: ContentType,
         #[snafu(implicit)]
@@ -685,7 +685,7 @@ impl ErrorExt for Error {
             | MysqlValueConversion { .. }
             | UnexpectedPhysicalTable { .. }
             | ParseJson { .. }
-            | ToStructedLog { .. }
+            | ToStructuredLog { .. }
             | UnsupportedContentType { .. }
             | InsertLog { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,

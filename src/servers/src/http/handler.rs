@@ -79,7 +79,7 @@ pub struct LogIngesterQueryParams {
 }
 
 fn parse_space_separated_log(payload: String) -> Result<Value, Error> {
-    // ToStructedLogSnafu
+    // ToStructuredLogSnafu
     let _log = payload.split_whitespace().collect::<Vec<&str>>();
     // TODO (qtang): implement this
     todo!()
