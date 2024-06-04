@@ -79,3 +79,7 @@ WITH(
 show create table phy;
 
 drop table phy;
+
+show create table numbers;
+
+show create table information_schema.columns;
