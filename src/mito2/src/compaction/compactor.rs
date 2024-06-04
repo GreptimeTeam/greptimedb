@@ -203,9 +203,129 @@ pub trait Compactor: Send + Sync + 'static {
     async fn merge_ssts(
         &self,
         compaction_region: CompactionRegion,
-        picker_output: PickerOutput,
+        mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
-        do_merge_ssts(compaction_region, picker_output).await
+        let current_version = compaction_region.version_control.current().version;
+        let mut futs = Vec::with_capacity(picker_output.outputs.len());
+        let mut compacted_inputs =
+            Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
+        for output in picker_output.outputs.drain(..) {
+            compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
+
+            info!(
+                "Compaction region {} output [{}]-> {}",
+                compaction_region.region_id,
+                output
+                    .inputs
+                    .iter()
+                    .map(|f| f.file_id().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                output.output_file_id
+            );
+
+            let write_opts = WriteOptions {
+                write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
+                ..Default::default()
+            };
+            let create_inverted_index = compaction_region
+                .engine_config
+                .inverted_index
+                .create_on_compaction
+                .auto();
+            let mem_threshold_index_create = compaction_region
+                .engine_config
+                .inverted_index
+                .mem_threshold_on_create
+                .map(|m| m.as_bytes() as _);
+            let index_write_buffer_size = Some(
+                compaction_region
+                    .engine_config
+                    .inverted_index
+                    .write_buffer_size
+                    .as_bytes() as usize,
+            );
+
+            let region_metadata = compaction_region.region_metadata.clone();
+            let sst_layer = compaction_region.access_layer.clone();
+            let region_id = compaction_region.region_id;
+            let file_id = output.output_file_id;
+            let cache_manager = compaction_region.cache_manager.clone();
+            let storage = compaction_region.region_options.storage.clone();
+            let index_options = current_version.options.index_options.clone();
+            let append_mode = current_version.options.append_mode;
+            futs.push(async move {
+                let reader = build_sst_reader(
+                    region_metadata.clone(),
+                    sst_layer.clone(),
+                    Some(cache_manager.clone()),
+                    &output.inputs,
+                    append_mode,
+                    output.filter_deleted,
+                    output.output_time_range,
+                )
+                .await?;
+                let file_meta_opt = sst_layer
+                    .write_sst(
+                        SstWriteRequest {
+                            file_id,
+                            metadata: region_metadata,
+                            source: Source::Reader(reader),
+                            cache_manager,
+                            storage,
+                            create_inverted_index,
+                            mem_threshold_index_create,
+                            index_write_buffer_size,
+                            index_options,
+                        },
+                        &write_opts,
+                    )
+                    .await?
+                    .map(|sst_info| FileMeta {
+                        region_id,
+                        file_id,
+                        time_range: sst_info.time_range,
+                        level: output.output_level,
+                        file_size: sst_info.file_size,
+                        available_indexes: sst_info
+                            .inverted_index_available
+                            .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
+                            .unwrap_or_default(),
+                        index_file_size: sst_info.index_file_size,
+                    });
+                Ok(file_meta_opt)
+            });
+        }
+        let mut output_files = Vec::with_capacity(futs.len());
+        while !futs.is_empty() {
+            let mut task_chunk =
+                Vec::with_capacity(crate::compaction::task::MAX_PARALLEL_COMPACTION);
+            for _ in 0..crate::compaction::task::MAX_PARALLEL_COMPACTION {
+                if let Some(task) = futs.pop() {
+                    task_chunk.push(common_runtime::spawn_bg(task));
+                }
+            }
+            let metas = futures::future::try_join_all(task_chunk)
+                .await
+                .context(JoinSnafu)?
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            output_files.extend(metas.into_iter().flatten());
+        }
+
+        let mut inputs: Vec<_> = compacted_inputs.into_iter().collect();
+        inputs.extend(
+            picker_output
+                .expired_ssts
+                .iter()
+                .map(|f| f.meta_ref().clone()),
+        );
+
+        Ok(MergeOutput {
+            files_to_add: Some(output_files),
+            files_to_remove: Some(inputs),
+            compaction_time_window: Some(picker_output.time_window_size),
+        })
     }
 
     /// Update the manifest after merging SST files.
@@ -293,132 +413,6 @@ pub trait Compactor: Send + Sync + 'static {
         }
         self.update_manifest(compaction_region, merge_output).await
     }
-}
-
-async fn do_merge_ssts(
-    compaction_region: CompactionRegion,
-    mut picker_output: PickerOutput,
-) -> Result<MergeOutput> {
-    let current_version = compaction_region.version_control.current().version;
-    let mut futs = Vec::with_capacity(picker_output.outputs.len());
-    let mut compacted_inputs =
-        Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
-    for output in picker_output.outputs.drain(..) {
-        compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
-
-        info!(
-            "Compaction region {} output [{}]-> {}",
-            compaction_region.region_id,
-            output
-                .inputs
-                .iter()
-                .map(|f| f.file_id().to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-            output.output_file_id
-        );
-
-        let write_opts = WriteOptions {
-            write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
-            ..Default::default()
-        };
-        let create_inverted_index = compaction_region
-            .engine_config
-            .inverted_index
-            .create_on_compaction
-            .auto();
-        let mem_threshold_index_create = compaction_region
-            .engine_config
-            .inverted_index
-            .mem_threshold_on_create
-            .map(|m| m.as_bytes() as _);
-        let index_write_buffer_size = Some(
-            compaction_region
-                .engine_config
-                .inverted_index
-                .write_buffer_size
-                .as_bytes() as usize,
-        );
-
-        let region_metadata = compaction_region.region_metadata.clone();
-        let sst_layer = compaction_region.access_layer.clone();
-        let region_id = compaction_region.region_id;
-        let file_id = output.output_file_id;
-        let cache_manager = compaction_region.cache_manager.clone();
-        let storage = compaction_region.region_options.storage.clone();
-        let index_options = current_version.options.index_options.clone();
-        let append_mode = current_version.options.append_mode;
-        futs.push(async move {
-            let reader = build_sst_reader(
-                region_metadata.clone(),
-                sst_layer.clone(),
-                Some(cache_manager.clone()),
-                &output.inputs,
-                append_mode,
-                output.filter_deleted,
-                output.output_time_range,
-            )
-            .await?;
-            let file_meta_opt = sst_layer
-                .write_sst(
-                    SstWriteRequest {
-                        file_id,
-                        metadata: region_metadata,
-                        source: Source::Reader(reader),
-                        cache_manager,
-                        storage,
-                        create_inverted_index,
-                        mem_threshold_index_create,
-                        index_write_buffer_size,
-                        index_options,
-                    },
-                    &write_opts,
-                )
-                .await?
-                .map(|sst_info| FileMeta {
-                    region_id,
-                    file_id,
-                    time_range: sst_info.time_range,
-                    level: output.output_level,
-                    file_size: sst_info.file_size,
-                    available_indexes: sst_info
-                        .inverted_index_available
-                        .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
-                        .unwrap_or_default(),
-                    index_file_size: sst_info.index_file_size,
-                });
-            Ok(file_meta_opt)
-        });
-    }
-    let mut output_files = Vec::with_capacity(futs.len());
-    while !futs.is_empty() {
-        let mut task_chunk = Vec::with_capacity(crate::compaction::task::MAX_PARALLEL_COMPACTION);
-        for _ in 0..crate::compaction::task::MAX_PARALLEL_COMPACTION {
-            if let Some(task) = futs.pop() {
-                task_chunk.push(common_runtime::spawn_bg(task));
-            }
-        }
-        let metas = futures::future::try_join_all(task_chunk)
-            .await
-            .context(JoinSnafu)?
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        output_files.extend(metas.into_iter().flatten());
-    }
-
-    let mut inputs: Vec<_> = compacted_inputs.into_iter().collect();
-    inputs.extend(
-        picker_output
-            .expired_ssts
-            .iter()
-            .map(|f| f.meta_ref().clone()),
-    );
-
-    Ok(MergeOutput {
-        files_to_add: Some(output_files),
-        files_to_remove: Some(inputs),
-        compaction_time_window: Some(picker_output.time_window_size),
-    })
 }
 
 /// DefaultCompactor is the default implementation of Compactor.
