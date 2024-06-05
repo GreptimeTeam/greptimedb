@@ -414,7 +414,7 @@ impl TypedPlan {
                 .filter(f)?
                 .project(p)?;
             Ok(TypedPlan {
-                typ: output_type.apply_mfp(&post_mfp)?,
+                typ: output_type.apply_mfp(&post_mfp.clone().into_safe())?,
                 plan: Plan::Mfp {
                     input: Box::new(input),
                     mfp: post_mfp,

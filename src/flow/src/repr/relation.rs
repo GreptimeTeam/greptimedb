@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 
 use crate::adapter::error::{InvalidQuerySnafu, Result, UnexpectedSnafu};
-use crate::expr::MapFilterProject;
+use crate::expr::{MapFilterProject, SafeMfpPlan};
 
 /// a set of column indices that are "keys" for the collection.
 #[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
@@ -111,7 +111,8 @@ impl RelationType {
     /// then new key=`[1]`, new time index=`[0]`
     ///
     /// note that this function will remove empty keys like key=`[]` will be removed
-    pub fn apply_mfp(&self, mfp: &MapFilterProject) -> Result<Self> {
+    pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
+        let mfp = &mfp.mfp;
         let mut all_types = self.column_types.clone();
         for expr in &mfp.expressions {
             let expr_typ = expr.typ(&self.column_types)?;
@@ -264,7 +265,7 @@ impl RelationType {
     }
 
     /// Return relation describe with column names
-    pub fn into_named(self, names: Vec<ColumnName>) -> RelationDesc {
+    pub fn into_named(self, names: Vec<Option<ColumnName>>) -> RelationDesc {
         RelationDesc { typ: self, names }
     }
 
@@ -339,7 +340,7 @@ fn return_true() -> bool {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct RelationDesc {
     pub typ: RelationType,
-    pub names: Vec<ColumnName>,
+    pub names: Vec<Option<ColumnName>>,
 }
 
 impl RelationDesc {
@@ -358,7 +359,7 @@ impl RelationDesc {
     pub fn try_new<I, N>(typ: RelationType, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         let names: Vec<_> = names.into_iter().map(|name| name.into()).collect();
         ensure!(
@@ -383,7 +384,7 @@ impl RelationDesc {
     pub fn new_unchecked<I, N>(typ: RelationType, names: I) -> Self
     where
         I: IntoIterator<Item = N>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         let names: Vec<_> = names.into_iter().map(|name| name.into()).collect();
         assert_eq!(typ.arity(), names.len());
@@ -394,7 +395,7 @@ impl RelationDesc {
     where
         I: IntoIterator<Item = (N, T)>,
         T: Into<ColumnType>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         let (names, types): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
         let types = types.into_iter().map(Into::into).collect();
@@ -420,7 +421,7 @@ impl RelationDesc {
     /// Appends a column with the specified name and type.
     pub fn with_column<N>(mut self, name: N, column_type: ColumnType) -> Self
     where
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         self.typ.column_types.push(column_type);
         self.names.push(name.into());
@@ -445,7 +446,7 @@ impl RelationDesc {
     pub fn try_with_names<I, N>(self, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         Self::try_new(self.typ, names)
     }
@@ -461,7 +462,7 @@ impl RelationDesc {
     }
 
     /// Returns an iterator over the columns in this relation.
-    pub fn iter(&self) -> impl Iterator<Item = (&ColumnName, &ColumnType)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Option<ColumnName>, &ColumnType)> {
         self.iter_names().zip(self.iter_types())
     }
 
@@ -471,7 +472,7 @@ impl RelationDesc {
     }
 
     /// Returns an iterator over the names of the columns in this relation.
-    pub fn iter_names(&self) -> impl Iterator<Item = &ColumnName> {
+    pub fn iter_names(&self) -> impl Iterator<Item = &Option<ColumnName>> {
         self.names.iter()
     }
 
@@ -482,7 +483,7 @@ impl RelationDesc {
     /// specified name, the leftmost column is returned.
     pub fn get_by_name(&self, name: &ColumnName) -> Option<(usize, &ColumnType)> {
         self.iter_names()
-            .position(|n| n == name)
+            .position(|n| n.as_ref() == Some(name))
             .map(|i| (i, &self.typ.column_types[i]))
     }
 
@@ -491,7 +492,7 @@ impl RelationDesc {
     /// # Panics
     ///
     /// Panics if `i` is not a valid column index.
-    pub fn get_name(&self, i: usize) -> &ColumnName {
+    pub fn get_name(&self, i: usize) -> &Option<ColumnName> {
         &self.names[i]
     }
 
@@ -500,7 +501,7 @@ impl RelationDesc {
     /// # Panics
     ///
     /// Panics if `i` is not a valid column index.
-    pub fn get_name_mut(&mut self, i: usize) -> &mut ColumnName {
+    pub fn get_name_mut(&mut self, i: usize) -> &mut Option<ColumnName> {
         &mut self.names[i]
     }
 
@@ -515,7 +516,7 @@ impl RelationDesc {
     pub fn get_unambiguous_name(&self, i: usize) -> Option<&ColumnName> {
         let name = &self.names[i];
         if self.iter_names().filter(|n| *n == name).count() == 1 {
-            Some(name)
+            name.as_ref()
         } else {
             None
         }

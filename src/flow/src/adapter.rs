@@ -345,6 +345,7 @@ impl FlownodeManager {
                             .names
                             .get(idx)
                             .cloned()
+                            .flatten()
                             .unwrap_or(format!("Col_{}", idx));
                         ColumnSchema::new(name, typ.scalar_type, typ.nullable)
                     })

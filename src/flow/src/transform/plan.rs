@@ -286,7 +286,7 @@ impl TypedPlan {
                         let input_arity = get_table.typ.column_types.len();
                         let mfp =
                             MapFilterProject::new(input_arity).project(column_indices.clone())?;
-                        get_table.mfp(mfp)
+                        get_table.mfp(mfp.into_safe())
                     } else {
                         Ok(get_table)
                     }

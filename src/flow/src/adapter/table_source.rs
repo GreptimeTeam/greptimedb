@@ -132,7 +132,7 @@ impl TableSource {
                         nullable: col.is_nullable(),
                         scalar_type: col.data_type,
                     },
-                    col.name,
+                    Some(col.name),
                 )
             })
             .unzip();

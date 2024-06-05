@@ -43,8 +43,9 @@ pub struct TypedPlan {
 
 impl TypedPlan {
     /// directly apply a mfp to the plan
-    pub fn mfp(self, mfp: MapFilterProject) -> Result<Self, Error> {
+    pub fn mfp(self, mfp: SafeMfpPlan) -> Result<Self, Error> {
         let new_type = self.typ.apply_mfp(&mfp)?;
+        let mfp = mfp.mfp;
         let plan = match self.plan {
             Plan::Mfp {
                 input,
@@ -74,8 +75,10 @@ impl TypedPlan {
             .unzip();
         let mfp = MapFilterProject::new(input_arity)
             .map(exprs)?
-            .project(input_arity..input_arity + output_arity)?;
+            .project(input_arity..input_arity + output_arity)?
+            .into_safe();
         let out_typ = self.typ.apply_mfp(&mfp)?;
+        let mfp = mfp.mfp;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
             Plan::Mfp {
