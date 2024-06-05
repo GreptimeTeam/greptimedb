@@ -388,7 +388,7 @@ pub trait Compactor: Send + Sync + 'static {
                 compact_request_options,
                 &compaction_region.region_options.compaction,
             )
-            .pick(compaction_region.version_control.current().version);
+            .pick(compaction_region.clone());
 
             if let Some(picker_output) = picker_output {
                 picker_output

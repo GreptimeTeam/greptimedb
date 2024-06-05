@@ -45,6 +45,7 @@ pub mod wal;
 mod worker;
 
 pub use compaction::compactor::*;
+pub use compaction::picker::{new_picker, Picker, PickerOutput};
 pub use compaction::CompactionOutput;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]

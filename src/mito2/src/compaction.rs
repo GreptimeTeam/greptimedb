@@ -61,6 +61,7 @@ use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
+use crate::CompactionRegion;
 
 /// Region compaction request.
 pub struct CompactionRequest {
@@ -522,10 +523,22 @@ fn build_compaction_task(
         picker, region_id
     );
 
+    let compaction_region = CompactionRegion {
+        region_id,
+        region_options: current_version.options.clone(),
+        engine_config: engine_config.clone(),
+        region_metadata: current_version.metadata.clone(),
+        cache_manager: cache_manager.clone(),
+        access_layer: access_layer.clone(),
+        file_purger: file_purger.clone(),
+        manifest_ctx: manifest_ctx.clone(),
+        version_control: version_control.clone(),
+    };
+
     let pick_timer = COMPACTION_STAGE_ELAPSED
         .with_label_values(&["pick"])
         .start_timer();
-    let picker_output = picker.pick(version_control.current().version);
+    let picker_output = picker.pick(compaction_region.clone());
     drop(pick_timer);
 
     let picker_output = {
@@ -541,20 +554,12 @@ fn build_compaction_task(
     };
 
     let task = CompactionTaskImpl {
-        region_id,
         request_sender,
         waiters,
-        file_purger,
         start_time,
-        cache_manager,
-        manifest_ctx,
-        version_control,
         listener,
         picker_output,
-        metadata: current_version.metadata.clone().clone(),
-        sst_layer: access_layer.clone(),
-        engine_config: engine_config.clone(),
-        append_mode: current_version.options.append_mode,
+        compaction_region,
         compactor: Arc::new(DefaultCompactor {}),
     };
 

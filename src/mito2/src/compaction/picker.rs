@@ -21,8 +21,8 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::CompactionOutput;
 use crate::region::options::CompactionOptions;
-use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
+use crate::CompactionRegion;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
@@ -32,7 +32,7 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
 /// Picker picks input SST files for compaction.
 /// Different compaction strategy may implement different pickers.
 pub trait Picker: Debug + Send + Sync + 'static {
-    fn pick(&self, current_version: VersionRef) -> Option<PickerOutput>;
+    fn pick(&self, compaction_region: CompactionRegion) -> Option<PickerOutput>;
 }
 
 #[derive(Default, Clone, Debug)]
@@ -42,7 +42,7 @@ pub struct PickerOutput {
     pub time_window_size: i64,
 }
 
-pub(crate) fn new_picker(
+pub fn new_picker(
     compact_request_options: compact_request::Options,
     compaction_options: &CompactionOptions,
 ) -> Arc<dyn Picker> {
