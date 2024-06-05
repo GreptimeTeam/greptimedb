@@ -71,6 +71,7 @@ pub struct MemtableStats {
 
 impl MemtableStats {
     /// Attaches the time range to the stats.
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> Self {
         self.time_range = time_range;
         self
