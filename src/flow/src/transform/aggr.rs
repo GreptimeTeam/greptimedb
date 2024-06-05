@@ -306,11 +306,11 @@ impl TypedPlan {
             let group_exprs = TypedExpr::from_substrait_agg_grouping(
                 ctx,
                 &agg.groupings,
-                &input.typ,
+                &input.schema,
                 extensions,
             )?;
 
-            TypedExpr::expand_multi_value(&input.typ, &group_exprs)?
+            TypedExpr::expand_multi_value(&input.schema, &group_exprs)?
         };
 
         let time_index = group_exprs.iter().position(|expr| {
@@ -323,13 +323,17 @@ impl TypedPlan {
             )
         });
 
-        let (mut aggr_exprs, post_mfp) =
-            AggregateExpr::from_substrait_agg_measures(ctx, &agg.measures, &input.typ, extensions)?;
+        let (mut aggr_exprs, post_mfp) = AggregateExpr::from_substrait_agg_measures(
+            ctx,
+            &agg.measures,
+            &input.schema,
+            extensions,
+        )?;
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(
             &mut aggr_exprs,
             &group_exprs,
-            input.typ.column_types.len(),
+            input.schema.column_types.len(),
         )?;
 
         // output type is group_exprs + aggr_exprs
@@ -390,13 +394,13 @@ impl TypedPlan {
         // FIX(discord9): deal with key first
         if post_mfp.is_identity() {
             Ok(TypedPlan {
-                typ: output_type,
+                schema: output_type,
                 plan,
             })
         } else {
             // make post_mfp map identical mapping of keys
             let input = TypedPlan {
-                typ: output_type.clone(),
+                schema: output_type.clone(),
                 plan,
             };
             let key_arity = group_exprs.len();
@@ -414,7 +418,7 @@ impl TypedPlan {
                 .filter(f)?
                 .project(p)?;
             Ok(TypedPlan {
-                typ: output_type.apply_mfp(&post_mfp.clone().into_safe())?,
+                schema: output_type.apply_mfp(&post_mfp.clone().into_safe())?,
                 plan: Plan::Mfp {
                     input: Box::new(input),
                     mfp: post_mfp,
@@ -555,7 +559,7 @@ mod test {
                     .project(vec![6, 7, 8, 9])
                     .unwrap(),
             },
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint32_datatype(), false), // number
                 ColumnType::new(CDT::uint64_datatype(), true),  // avg(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
@@ -580,7 +584,7 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
@@ -680,7 +684,7 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
@@ -798,7 +802,7 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number) -> u64
                 ColumnType::new(CDT::uint32_datatype(), false), // number
             ]),
@@ -892,7 +896,7 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -960,7 +964,7 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1015,7 +1019,7 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // col sum(number)
                 ColumnType::new(CDT::uint32_datatype(), false), // col number
             ]),
@@ -1086,7 +1090,7 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {

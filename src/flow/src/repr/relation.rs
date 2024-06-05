@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
 
 use crate::adapter::error::{InvalidQuerySnafu, Result, UnexpectedSnafu};
-use crate::expr::{MapFilterProject, SafeMfpPlan};
+use crate::expr::{MapFilterProject, SafeMfpPlan, ScalarExpr};
 
 /// a set of column indices that are "keys" for the collection.
 #[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
@@ -341,6 +341,32 @@ fn return_true() -> bool {
 pub struct RelationDesc {
     pub typ: RelationType,
     pub names: Vec<Option<ColumnName>>,
+}
+
+impl RelationDesc {
+    /// apply mfp, and also project col names for the projected columns
+    pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
+        // TODO: find a way to deduce name at best effect
+        let names = {
+            let mfp = &mfp.mfp;
+            let mut names = self.names.clone();
+            for expr in &mfp.expressions {
+                if let ScalarExpr::Column(i) = expr {
+                    names.push(self.names[*i].clone());
+                } else {
+                    names.push(None);
+                }
+            }
+            mfp.projection
+                .iter()
+                .map(|i| names.get(*i).cloned().flatten())
+                .collect_vec()
+        };
+        Ok(Self {
+            typ: self.typ.apply_mfp(mfp)?,
+            names,
+        })
+    }
 }
 
 impl RelationDesc {

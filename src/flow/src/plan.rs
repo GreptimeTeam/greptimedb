@@ -36,7 +36,7 @@ use crate::repr::{ColumnType, DiffRow, RelationType};
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct TypedPlan {
     /// output type of the relation
-    pub typ: RelationType,
+    pub schema: RelationType,
     /// The untyped plan.
     pub plan: Plan,
 }
@@ -44,7 +44,7 @@ pub struct TypedPlan {
 impl TypedPlan {
     /// directly apply a mfp to the plan
     pub fn mfp(self, mfp: SafeMfpPlan) -> Result<Self, Error> {
-        let new_type = self.typ.apply_mfp(&mfp)?;
+        let new_type = self.schema.apply_mfp(&mfp)?;
         let mfp = mfp.mfp;
         let plan = match self.plan {
             Plan::Mfp {
@@ -60,14 +60,14 @@ impl TypedPlan {
             },
         };
         Ok(TypedPlan {
-            typ: new_type,
+            schema: new_type,
             plan,
         })
     }
 
     /// project the plan to the given expressions
     pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
-        let input_arity = self.typ.column_types.len();
+        let input_arity = self.schema.column_types.len();
         let output_arity = exprs.len();
         let (exprs, _expr_typs): (Vec<_>, Vec<_>) = exprs
             .into_iter()
@@ -77,7 +77,7 @@ impl TypedPlan {
             .map(exprs)?
             .project(input_arity..input_arity + output_arity)?
             .into_safe();
-        let out_typ = self.typ.apply_mfp(&mfp)?;
+        let out_typ = self.schema.apply_mfp(&mfp)?;
         let mfp = mfp.mfp;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
@@ -93,12 +93,15 @@ impl TypedPlan {
                 mfp,
             },
         };
-        Ok(TypedPlan { typ: out_typ, plan })
+        Ok(TypedPlan {
+            schema: out_typ,
+            plan,
+        })
     }
 
     /// Add a new filter to the plan, will filter out the records that do not satisfy the filter
     pub fn filter(self, filter: TypedExpr) -> Result<Self, Error> {
-        let typ = self.typ.clone();
+        let typ = self.schema.clone();
         let plan = match self.plan {
             Plan::Mfp {
                 input,
@@ -112,7 +115,7 @@ impl TypedPlan {
                 mfp: MapFilterProject::new(typ.column_types.len()).filter(vec![filter.expr])?,
             },
         };
-        Ok(TypedPlan { typ, plan })
+        Ok(TypedPlan { schema: typ, plan })
     }
 }
 
@@ -231,6 +234,9 @@ impl Plan {
 
 impl Plan {
     pub fn with_types(self, typ: RelationType) -> TypedPlan {
-        TypedPlan { typ, plan: self }
+        TypedPlan {
+            schema: typ,
+            plan: self,
+        }
     }
 }

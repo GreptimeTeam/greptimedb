@@ -813,7 +813,7 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
@@ -977,7 +977,7 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {

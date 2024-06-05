@@ -363,7 +363,7 @@ mod test {
             ],
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
@@ -397,7 +397,7 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)]),
             plan: Plan::Constant {
                 rows: vec![(
                     repr::Row::new(vec![Value::from(true)]),
@@ -421,7 +421,7 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
@@ -455,7 +455,7 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
@@ -490,7 +490,7 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {

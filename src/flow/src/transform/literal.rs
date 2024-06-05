@@ -175,7 +175,7 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
             plan: Plan::Constant {
                 rows: vec![(
                     repr::Row::new(vec![Value::Int64(1)]),

@@ -644,7 +644,7 @@ impl FlownodeManager {
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-        node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
+        node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
 
         let _ = comment;
         let _ = flow_options;
