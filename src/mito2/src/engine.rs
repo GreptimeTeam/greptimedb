@@ -300,42 +300,36 @@ impl EngineInner {
         topic: String,
         region_requests: Vec<(RegionId, RegionOpenRequest)>,
     ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
-        let mut responses = Vec::with_capacity(region_requests.len());
         let region_ids = region_requests
             .iter()
             .map(|(region_id, _)| *region_id)
-            .collect();
+            .collect::<Vec<_>>();
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider,
             self.wal_raw_entry_reader.clone(),
-            region_ids,
+            &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
 
+        let mut responses = Vec::with_capacity(region_requests.len());
         for ((region_id, request), entry_receiver) in
             region_requests.into_iter().zip(entry_receivers)
         {
             let (request, receiver) =
                 WorkerRequest::new_open_region_request(region_id, request, Some(entry_receiver));
             self.workers.submit_to_worker(region_id, request).await?;
-            responses.push((region_id, async move { receiver.await.context(RecvSnafu)? }));
+            responses.push(async move { receiver.await.context(RecvSnafu)? });
         }
 
         // Waits for entries distribution.
         let distribution =
             common_runtime::spawn_read(async move { distributor.distribute().await });
-
         // Waits for worker returns.
-        let responses = join_all(
-            responses
-                .into_iter()
-                .map(|(region_id, rows)| async move { (region_id, rows.await) }),
-        )
-        .await;
+        let responses = join_all(responses).await;
 
         distribution.await.context(JoinSnafu)??;
-        Ok(responses)
+        Ok(region_ids.into_iter().zip(responses).collect())
     }
 
     async fn handle_batch_open_requests(
@@ -365,9 +359,11 @@ impl EngineInner {
 
         if !remaining_region_requests.is_empty() {
             let mut tasks = Vec::with_capacity(remaining_region_requests.len());
+            let mut region_ids = Vec::with_capacity(remaining_region_requests.len());
             for (region_id, request) in remaining_region_requests {
                 let semaphore_moved = semaphore.clone();
-                tasks.push((region_id, async move {
+                region_ids.push(region_id);
+                tasks.push(async move {
                     // Safety: semaphore must exist
                     let _permit = semaphore_moved.acquire().await.unwrap();
                     let (request, receiver) =
@@ -376,17 +372,11 @@ impl EngineInner {
                     self.workers.submit_to_worker(region_id, request).await?;
 
                     receiver.await.context(RecvSnafu)?
-                }))
+                })
             }
 
-            let r = join_all(
-                tasks
-                    .into_iter()
-                    .map(|(region_id, rows)| async move { (region_id, rows.await) }),
-            )
-            .await;
-
-            responses.extend(r);
+            let results = join_all(tasks).await;
+            responses.extend(region_ids.into_iter().zip(results));
         }
 
         Ok(responses)

@@ -192,14 +192,14 @@ pub const DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE: usize = 2048;
 pub fn build_wal_entry_distributor_and_receivers(
     provider: Provider,
     raw_wal_reader: Arc<dyn RawEntryReader>,
-    region_ids: Vec<RegionId>,
+    region_ids: &[RegionId],
     buffer_size: usize,
 ) -> (WalEntryDistributor, Vec<WalEntryReceiver>) {
     let mut senders = HashMap::with_capacity(region_ids.len());
     let mut readers = Vec::with_capacity(region_ids.len());
     let mut arg_receivers = Vec::with_capacity(region_ids.len());
 
-    for region_id in region_ids {
+    for &region_id in region_ids {
         let (entry_sender, entry_receiver) = mpsc::channel(buffer_size);
         let (arg_sender, arg_receiver) = oneshot::channel();
 
@@ -263,7 +263,7 @@ mod tests {
         let (distributor, receivers) = build_wal_entry_distributor_and_receivers(
             provider,
             reader,
-            vec![RegionId::new(1024, 1), RegionId::new(1025, 1)],
+            &[RegionId::new(1024, 1), RegionId::new(1025, 1)],
             128,
         );
 
@@ -323,7 +323,7 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             reader,
-            vec![
+            &[
                 RegionId::new(1024, 1),
                 RegionId::new(1024, 2),
                 RegionId::new(1024, 3),
@@ -433,7 +433,7 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             Arc::new(corrupted_stream),
-            vec![region1, region2, region3],
+            &[region1, region2, region3],
             128,
         );
         assert_eq!(receivers.len(), 3);
@@ -516,7 +516,7 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             Arc::new(corrupted_stream),
-            vec![region1, region2],
+            &[region1, region2],
             128,
         );
         assert_eq!(receivers.len(), 2);
@@ -608,7 +608,7 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             reader,
-            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+            &[RegionId::new(1024, 1), RegionId::new(1024, 2)],
             128,
         );
         assert_eq!(receivers.len(), 2);
