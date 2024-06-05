@@ -71,8 +71,8 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
                 let rows = Rows {
                     schema: column_schemas.clone(),
                     rows: build_rows(
-                        (id as usize) * 100 + i as usize,
-                        (id as usize) * 100 + i as usize + 1,
+                        (id as usize) * 120 + i as usize,
+                        (id as usize) * 120 + i as usize + 1,
                     ),
                 };
                 put_rows(&engine, region_id, rows).await;
@@ -82,65 +82,27 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
     join_all(tasks).await;
 
     let assert_result = |engine: MitoEngine| async move {
-        let region_id = RegionId::new(1, 1);
-        let request = ScanRequest::default();
-        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
-        let batches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 100   | 100.0   | 1970-01-01T00:01:40 |
-| 101   | 101.0   | 1970-01-01T00:01:41 |
-| 102   | 102.0   | 1970-01-01T00:01:42 |
-| 103   | 103.0   | 1970-01-01T00:01:43 |
-| 104   | 104.0   | 1970-01-01T00:01:44 |
-| 105   | 105.0   | 1970-01-01T00:01:45 |
-| 106   | 106.0   | 1970-01-01T00:01:46 |
-| 107   | 107.0   | 1970-01-01T00:01:47 |
-| 108   | 108.0   | 1970-01-01T00:01:48 |
-| 109   | 109.0   | 1970-01-01T00:01:49 |
-+-------+---------+---------------------+";
-        assert_eq!(expected, batches.pretty_print().unwrap());
-
-        let region_id = RegionId::new(1, 2);
-        let request = ScanRequest::default();
-        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
-        let batches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 200   | 200.0   | 1970-01-01T00:03:20 |
-| 201   | 201.0   | 1970-01-01T00:03:21 |
-| 202   | 202.0   | 1970-01-01T00:03:22 |
-| 203   | 203.0   | 1970-01-01T00:03:23 |
-| 204   | 204.0   | 1970-01-01T00:03:24 |
-| 205   | 205.0   | 1970-01-01T00:03:25 |
-| 206   | 206.0   | 1970-01-01T00:03:26 |
-| 207   | 207.0   | 1970-01-01T00:03:27 |
-| 208   | 208.0   | 1970-01-01T00:03:28 |
-| 209   | 209.0   | 1970-01-01T00:03:29 |
-+-------+---------+---------------------+";
-        assert_eq!(expected, batches.pretty_print().unwrap());
-
-        let region_id = RegionId::new(1, 3);
-        let request = ScanRequest::default();
-        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
-        let batches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 300   | 300.0   | 1970-01-01T00:05:00 |
-| 301   | 301.0   | 1970-01-01T00:05:01 |
-| 302   | 302.0   | 1970-01-01T00:05:02 |
-| 303   | 303.0   | 1970-01-01T00:05:03 |
-| 304   | 304.0   | 1970-01-01T00:05:04 |
-| 305   | 305.0   | 1970-01-01T00:05:05 |
-| 306   | 306.0   | 1970-01-01T00:05:06 |
-| 307   | 307.0   | 1970-01-01T00:05:07 |
-| 308   | 308.0   | 1970-01-01T00:05:08 |
-| 309   | 309.0   | 1970-01-01T00:05:09 |
-+-------+---------+---------------------+";
-        assert_eq!(expected, batches.pretty_print().unwrap());
+        for i in 1..num_regions {
+            let region_id = RegionId::new(1, i);
+            let request = ScanRequest::default();
+            let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            let mut expected = String::new();
+            expected.push_str(
+                "+-------+---------+---------------------+\n| tag_0 | field_0 | ts                  |\n+-------+---------+---------------------+\n",
+            );
+            for row in 0..10 {
+                expected.push_str(&format!(
+                    "| {}   | {}.0   | 1970-01-01T00:{:02}:{:02} |\n",
+                    i * 120 + row,
+                    i * 120 + row,
+                    2 * i,
+                    row
+                ));
+            }
+            expected.push_str("+-------+---------+---------------------+");
+            assert_eq!(expected, batches.pretty_print().unwrap());
+        }
     };
     assert_result(engine.clone()).await;
 
