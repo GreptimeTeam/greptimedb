@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -19,7 +20,6 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::JoinError;
 use rand::distributions::WeightedError;
-use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;

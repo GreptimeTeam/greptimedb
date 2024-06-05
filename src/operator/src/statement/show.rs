@@ -25,6 +25,7 @@ use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
 use sqlparser::ast::ObjectName;
+use table::metadata::TableType;
 use table::table_name::TableName;
 use table::TableRef;
 
@@ -83,6 +84,15 @@ impl StatementExecutor {
         table: TableRef,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let table_info = table.table_info();
+        if table_info.table_type != TableType::Base {
+            return error::ShowCreateTableBaseOnlySnafu {
+                table_name: table_name.to_string(),
+                table_type: table_info.table_type,
+            }
+            .fail();
+        }
+
         let partitions = self
             .partition_manager
             .find_table_partitions(table.table_info().table_id())

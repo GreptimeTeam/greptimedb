@@ -192,3 +192,11 @@ drop table phy;
 
 Affected Rows: 0
 
+show create table numbers;
+
+Error: 1001(Unsupported), Show create table only for base table. greptime.public.numbers is TEMPORARY
+
+show create table information_schema.columns;
+
+Error: 1001(Unsupported), Show create table only for base table. greptime.information_schema.columns is TEMPORARY
+

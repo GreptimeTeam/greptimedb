@@ -355,6 +355,20 @@ pub fn droppable_columns(columns: &[Column]) -> Vec<&Column> {
         .collect::<Vec<_>>()
 }
 
+/// Returns columns that can use the alter table modify command
+pub fn modifiable_columns(columns: &[Column]) -> Vec<&Column> {
+    columns
+        .iter()
+        .filter(|column| {
+            !column.options.iter().any(|option| {
+                option == &ColumnOption::PrimaryKey
+                    || option == &ColumnOption::TimeIndex
+                    || option == &ColumnOption::NotNull
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
 /// Generates [ColumnOption] for [Column].
 pub fn column_options_generator<R: Rng>(
     rng: &mut R,

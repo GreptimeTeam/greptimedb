@@ -155,12 +155,13 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
+          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz
+          cargo +nightly install cargo-fuzz cargo-gc-bin
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -173,6 +174,12 @@ jobs:
       - name: Run GreptimeDB
         run: |
           ./bins/greptime standalone start&
+      - name: Build Fuzz Test
+        shell: bash
+        run: |
+          cd tests-fuzz && \
+          cargo gc && \
+          cd ..
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
@@ -202,11 +209,12 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
+          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt update && sudo apt install -y libfuzzer-14-dev
-          cargo install cargo-fuzz
+          cargo install cargo-fuzz cargo-gc-bin
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -219,9 +227,8 @@ jobs:
       - name: Build Fuzz Test
         shell: bash
         run: |
-          cd tests-fuzz &
-          cargo install cargo-gc-bin &
-          cargo gc &
+          cd tests-fuzz && \
+          cargo gc && \
           cd ..
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
@@ -267,7 +274,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo build --bin greptime --profile ci
+        run: cargo gc --profile ci -- --bin greptime 
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -306,12 +313,13 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
+          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz
+          cargo +nightly install cargo-fuzz cargo-gc-bin
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -342,6 +350,12 @@ jobs:
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - name: Build Fuzz Test
+        shell: bash
+        run: |
+          cd tests-fuzz && \
+          cargo gc && \
+          cd ..
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
@@ -377,12 +391,19 @@ jobs:
           docker system prune -f
 
   sqlness:
-    name: Sqlness Test
+    name: Sqlness Test (${{ matrix.mode.name }})
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-20.04 ]
+        mode:
+          - name: "Basic"
+            opts: ""
+            kafka: false
+          - name: "Remote WAL"
+            opts: "-w kafka -k 127.0.0.1:9092"
+            kafka: true
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -393,43 +414,17 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
-      - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins --preserve-state
-      - name: Upload sqlness logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqlness-logs
-          path: /tmp/sqlness*
-          retention-days: 3
-
-  sqlness-kafka-wal:
-    name: Sqlness Test with Kafka Wal
-    needs: build
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-20.04 ]
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download pre-built binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: bins
-          path: .
-      - name: Unzip binaries
-        run: tar -xvf ./bins.tar.gz
-      - name: Setup kafka server
+      - if: matrix.mode.kafka
+        name: Setup kafka server
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins --preserve-state
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: sqlness-logs-with-kafka-wal
+          name: sqlness-logs-${{ matrix.mode.name }}
           path: /tmp/sqlness*
           retention-days: 3
 
@@ -518,6 +513,9 @@ jobs:
       - name: Setup kafka server
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Setup minio
+        working-directory: tests-integration/fixtures/minio
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
         env:
@@ -528,6 +526,11 @@ jobs:
           GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
           GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           UNITTEST_LOG_DIR: "__unittest_logs"
