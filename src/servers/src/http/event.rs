@@ -18,7 +18,7 @@ use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::extract::{Json, Query, State, TypedHeader};
 use axum::headers::ContentType;
 use axum::Extension;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,9 @@ pub async fn log_ingester(
     TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
+    // TODO(shuiyisong): remove debug log
+    info!("[log_input]: {}", payload);
+
     let value;
     // TODO (qtang): we should decide json or jsonl
     if content_type == ContentType::json() {
