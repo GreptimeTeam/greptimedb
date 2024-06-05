@@ -13,20 +13,17 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
-use futures::future::join_all;
 use rstest::rstest;
 use rstest_reuse::apply;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::Barrier;
 
 use super::MitoEngine;
 use crate::config::MitoConfig;
@@ -48,38 +45,38 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
     let topic = prepare_test_for_kafka_log_store(&factory).await;
 
     let num_regions = 3u32;
-    let barrier = Arc::new(Barrier::new(num_regions as usize));
     let region_dir = |region_id| format!("test/{region_id}");
-    let mut tasks = vec![];
+    let mut region_schema = HashMap::new();
+
     for id in 1..=num_regions {
-        let barrier = barrier.clone();
         let engine = engine.clone();
         let topic = topic.clone();
-        tasks.push(async move {
-            let region_id = RegionId::new(1, id);
-            let request = CreateRequestBuilder::new()
-                .region_dir(&region_dir(region_id))
-                .kafka_topic(topic.clone())
-                .build();
-            let column_schemas = rows_schema(&request);
-            engine
-                .handle_request(region_id, RegionRequest::Create(request))
-                .await
-                .unwrap();
-            barrier.wait().await;
-            for i in 0..10 {
-                let rows = Rows {
-                    schema: column_schemas.clone(),
-                    rows: build_rows(
-                        (id as usize) * 120 + i as usize,
-                        (id as usize) * 120 + i as usize + 1,
-                    ),
-                };
-                put_rows(&engine, region_id, rows).await;
-            }
-        });
+        let region_id = RegionId::new(1, id);
+        let request = CreateRequestBuilder::new()
+            .region_dir(&region_dir(region_id))
+            .kafka_topic(topic.clone())
+            .build();
+        let column_schemas = rows_schema(&request);
+        region_schema.insert(region_id, column_schemas);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
     }
-    join_all(tasks).await;
+
+    for i in 0..10 {
+        for region_number in 1..=num_regions {
+            let region_id = RegionId::new(1, region_number);
+            let rows = Rows {
+                schema: region_schema[&region_id].clone(),
+                rows: build_rows(
+                    (region_number as usize) * 120 + i as usize,
+                    (region_number as usize) * 120 + i as usize + 1,
+                ),
+            };
+            put_rows(&engine, region_id, rows).await;
+        }
+    }
 
     let assert_result = |engine: MitoEngine| async move {
         for i in 1..num_regions {
