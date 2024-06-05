@@ -155,12 +155,13 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
+          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz
+          cargo +nightly install cargo-fuzz cargo-gc-bin
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -173,6 +174,12 @@ jobs:
       - name: Run GreptimeDB
         run: |
           ./bins/greptime standalone start&
+      - name: Build Fuzz Test
+        shell: bash
+        run: |
+          cd tests-fuzz && \
+          cargo gc && \
+          cd ..
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
@@ -202,11 +209,12 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
+          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt update && sudo apt install -y libfuzzer-14-dev
-          cargo install cargo-fuzz
+          cargo install cargo-fuzz cargo-gc-bin
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -219,9 +227,8 @@ jobs:
       - name: Build Fuzz Test
         shell: bash
         run: |
-          cd tests-fuzz &
-          cargo install cargo-gc-bin &
-          cargo gc &
+          cd tests-fuzz && \
+          cargo gc && \
           cd ..
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
@@ -267,7 +274,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo build --bin greptime --profile ci
+        run: cargo gc --profile ci -- --bin greptime 
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -306,12 +313,13 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
+          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz
+          cargo +nightly install cargo-fuzz cargo-gc-bin
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -342,6 +350,12 @@ jobs:
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - name: Build Fuzz Test
+        shell: bash
+        run: |
+          cd tests-fuzz && \
+          cargo gc && \
+          cd ..
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
