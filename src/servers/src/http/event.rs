@@ -17,10 +17,8 @@ use std::collections::HashMap;
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::extract::{Json, Query, State};
 use axum::headers::ContentType;
-use axum::Extension;
-use common_telemetry::{error, info};
-use headers::HeaderMapExt;
-use http::HeaderMap;
+use axum::{Extension, TypedHeader};
+use common_telemetry::error;
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, ExecPipelineSnafu};
 use pipeline::Value as PipelineValue;
@@ -75,17 +73,9 @@ pub async fn log_ingester(
     State(handler): State<LogHandlerRef>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContextRef>,
-    // TypedHeader(content_type): TypedHeader<ContentType>,
-    headers: HeaderMap,
+    TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
-    // TODO(shuiyisong): remove debug log
-    info!("[log_header]: {:?}", headers);
-    info!("[log_payload]: {:?}", payload);
-    let content_type = headers
-        .typed_get::<ContentType>()
-        .unwrap_or(ContentType::text());
-
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
@@ -97,21 +87,11 @@ pub async fn log_ingester(
     let value = match m.subtype() {
         // TODO (qtang): we should decide json or jsonl
         mime::JSON => serde_json::from_str(&payload).context(ParseJsonSnafu)?,
-        // TODO (qtang): we should decide which content type to support
-        // form_url_cncoded type is only placeholder
-        mime::WWW_FORM_URLENCODED => parse_space_separated_log(payload)?,
         // add more content type support
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     };
 
     log_ingester_inner(handler, pipeline_name, table_name, value, query_ctx).await
-}
-
-fn parse_space_separated_log(payload: String) -> Result<Value> {
-    // ToStructuredLogSnafu
-    let _log = payload.split_whitespace().collect::<Vec<&str>>();
-    // TODO (qtang): implement this
-    todo!()
 }
 
 async fn log_ingester_inner(

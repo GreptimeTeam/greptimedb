@@ -350,24 +350,26 @@ impl PipelineTable {
             .context(CollectRecordsSnafu)?;
 
         ensure!(!records.is_empty(), PipelineNotFoundSnafu { name });
+        // assume schema + name is unique for now
+        ensure!(
+            records.len() == 1 && records[0].num_columns() == 1,
+            PipelineNotFoundSnafu { name }
+        );
 
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].num_columns(), 1);
-
-        let script_column = records[0].column(0);
-        let script_column = script_column
+        let pipeline_column = records[0].column(0);
+        let pipeline_column = pipeline_column
             .as_any()
             .downcast_ref::<StringVector>()
             .with_context(|| CastTypeSnafu {
                 msg: format!(
                     "can't downcast {:?} array into string vector",
-                    script_column.data_type()
+                    pipeline_column.data_type()
                 ),
             })?;
 
-        assert_eq!(script_column.len(), 1);
+        ensure!(pipeline_column.len() == 1, PipelineNotFoundSnafu { name });
 
         // Safety: asserted above
-        Ok(script_column.get_data(0).unwrap().to_string())
+        Ok(pipeline_column.get_data(0).unwrap().to_string())
     }
 }
