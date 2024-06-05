@@ -87,7 +87,7 @@ impl PipelineOperator {
 
         let RegisterSystemTableRequest {
             create_table_expr: mut expr,
-            open_hook,
+            open_hook: _,
         } = self.create_table_request(catalog);
 
         if let Some(table) = self
@@ -96,12 +96,7 @@ impl PipelineOperator {
             .await
             .context(CatalogSnafu)?
         {
-            if let Some(open_hook) = open_hook {
-                (open_hook)(table.clone()).await.context(CatalogSnafu)?;
-            }
-
             self.add_pipeline_table_to_cache(catalog, table);
-
             return Ok(());
         }
 
@@ -123,10 +118,6 @@ impl PipelineOperator {
             .await
             .context(CatalogSnafu)?
             .context(PipelineTableNotFoundSnafu)?;
-
-        if let Some(open_hook) = open_hook {
-            (open_hook)(table.clone()).await.context(CatalogSnafu)?;
-        }
 
         info!(
             "Created scripts table {}.",
