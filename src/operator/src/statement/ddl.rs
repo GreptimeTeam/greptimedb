@@ -67,13 +67,12 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    CreateLogicalTablesSnafu, CreateTableInfoSnafu, DdlWithMultiCatalogsSnafu,
-    DdlWithMultiSchemasSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidPartitionColumnsSnafu, InvalidPartitionRuleSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
-    SchemaInUseSnafu, SchemaNotFoundSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
+    ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionColumnsSnafu,
+    InvalidPartitionRuleSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu,
+    ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -157,8 +156,15 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
+            let catalog_name = &create_table.catalog_name;
+            let schema_name = &create_table.schema_name;
             return self
-                .create_logical_tables(&[create_table.clone()], query_ctx)
+                .create_logical_tables(
+                    catalog_name,
+                    schema_name,
+                    &[create_table.clone()],
+                    query_ctx,
+                )
                 .await?
                 .into_iter()
                 .next()
@@ -260,6 +266,8 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn create_logical_tables(
         &self,
+        catalog_name: &str,
+        schema_name: &str,
         create_table_exprs: &[CreateTableExpr],
         query_context: QueryContextRef,
     ) -> Result<Vec<TableRef>> {
@@ -267,35 +275,16 @@ impl StatementExecutor {
         ensure!(
             !create_table_exprs.is_empty(),
             EmptyDdlExprSnafu {
-                name: "create table"
+                name: "create logic tables"
             }
         );
-        ensure!(
-            create_table_exprs
-                .windows(2)
-                .all(|expr| expr[0].catalog_name == expr[1].catalog_name),
-            DdlWithMultiCatalogsSnafu {
-                ddl_name: "create tables"
-            }
-        );
-        let catalog_name = create_table_exprs[0].catalog_name.to_string();
-
-        ensure!(
-            create_table_exprs
-                .windows(2)
-                .all(|expr| expr[0].schema_name == expr[1].schema_name),
-            DdlWithMultiSchemasSnafu {
-                ddl_name: "create tables"
-            }
-        );
-        let schema_name = create_table_exprs[0].schema_name.to_string();
 
         // Check table names
         for create_table in create_table_exprs {
             ensure!(
                 NAME_PATTERN_REG.is_match(&create_table.table_name),
                 InvalidTableNameSnafu {
-                    table_name: create_table.table_name.clone(),
+                    table_name: &create_table.table_name,
                 }
             );
         }
@@ -303,11 +292,11 @@ impl StatementExecutor {
         let schema = self
             .table_metadata_manager
             .schema_manager()
-            .get(SchemaNameKey::new(&catalog_name, &schema_name))
+            .get(SchemaNameKey::new(catalog_name, schema_name))
             .await
             .context(TableMetadataManagerSnafu)?
             .context(SchemaNotFoundSnafu {
-                schema_info: &schema_name,
+                schema_info: schema_name,
             })?;
 
         let mut raw_tables_info = create_table_exprs
@@ -626,7 +615,7 @@ impl StatementExecutor {
         ensure!(
             !alter_table_exprs.is_empty(),
             EmptyDdlExprSnafu {
-                name: "alter table"
+                name: "alter logical tables"
             }
         );
 
