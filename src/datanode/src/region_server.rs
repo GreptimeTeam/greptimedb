@@ -30,7 +30,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
@@ -49,15 +49,17 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
+use store_api::region_request::{
+    AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+};
 use store_api::storage::RegionId;
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
     self, BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
-    FindLogicalRegionsSnafu, HandleRegionRequestSnafu, NewPlanDecoderSnafu,
-    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu,
-    UnsupportedOutputSnafu,
+    FindLogicalRegionsSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
+    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result,
+    StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -114,6 +116,17 @@ impl RegionServer {
                 CurrentEngine::Engine(engine) => Some(engine),
                 CurrentEngine::EarlyReturn(_) => None,
             })
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn handle_batch_open_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<Vec<RegionId>> {
+        self.inner
+            .handle_batch_open_requests(parallelism, requests)
+            .await
     }
 
     #[tracing::instrument(skip_all, fields(request_type = request.request_type()))]
@@ -454,6 +467,95 @@ impl RegionServerInner {
         Ok(CurrentEngine::Engine(engine))
     }
 
+    async fn handle_batch_open_requests_inner(
+        &self,
+        engine: RegionEngineRef,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<Vec<RegionId>> {
+        let region_changes = requests
+            .iter()
+            .map(|(region_id, open)| {
+                let attribute = parse_region_attribute(&open.engine, &open.options)?;
+                Ok((*region_id, RegionChange::Register(attribute)))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        for (&region_id, region_change) in &region_changes {
+            self.set_region_status_not_ready(region_id, &engine, region_change)
+        }
+
+        let mut open_regions = Vec::with_capacity(requests.len());
+        match engine
+            .handle_batch_open_requests(parallelism, requests)
+            .await
+            .with_context(|_| HandleBatchOpenRequestSnafu)
+        {
+            Ok(results) => {
+                for (region_id, result) in results {
+                    let region_change = &region_changes[&region_id];
+                    match result {
+                        Ok(_) => {
+                            let _ = self
+                                .set_region_status_ready(region_id, engine.clone(), *region_change)
+                                .await;
+                            open_regions.push(region_id)
+                        }
+                        Err(err) => {
+                            self.unset_region_status(region_id, *region_change);
+                            error!("Failed to open region: {}, error: {err}", region_id);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                for (&region_id, region_change) in &region_changes {
+                    self.unset_region_status(region_id, *region_change);
+                }
+                error!(e; "Failed to open batch regions");
+            }
+        }
+
+        Ok(open_regions)
+    }
+
+    pub async fn handle_batch_open_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<Vec<RegionId>> {
+        let mut engine_grouped_requests: HashMap<String, Vec<_>> =
+            HashMap::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            engine_grouped_requests
+                .entry(request.engine.to_string())
+                .or_default()
+                .push((region_id, request));
+        }
+
+        let mut results = Vec::with_capacity(engine_grouped_requests.keys().len());
+        for (engine, requests) in engine_grouped_requests {
+            let engine = self
+                .engines
+                .read()
+                .unwrap()
+                .get(&engine)
+                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
+                .clone();
+            results.push(
+                self.handle_batch_open_requests_inner(engine, parallelism, requests)
+                    .await,
+            )
+        }
+
+        Ok(results
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>())
+    }
+
     pub async fn handle_request(
         &self,
         region_id: RegionId,
@@ -715,6 +817,7 @@ impl RegionServerInner {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 enum RegionChange {
     None,
     Register(RegionAttribute),
@@ -740,6 +843,7 @@ fn parse_region_attribute(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 enum RegionAttribute {
     Mito,
     Metric { physical: bool },

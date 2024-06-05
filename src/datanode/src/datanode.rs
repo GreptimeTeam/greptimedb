@@ -31,7 +31,6 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
-use futures_util::future::try_join_all;
 use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -45,17 +44,17 @@ use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
-use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 use tokio::fs;
 use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
+    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
     MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
     ShutdownServerSnafu, StartServerSnafu,
 };
@@ -468,39 +467,46 @@ async fn open_all_regions(
         }
     }
     info!("going to open {} region(s)", regions.len());
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
-    let mut tasks = vec![];
 
-    let region_server_ref = &region_server;
+    let mut region_requests = Vec::with_capacity(regions.len());
+    let mut region_ids = Vec::with_capacity(regions.len());
     for (region_id, engine, store_path, options) in regions {
         let region_dir = region_dir(&store_path, region_id);
-        let semaphore_moved = semaphore.clone();
-
-        tasks.push(async move {
-            let _permit = semaphore_moved.acquire().await;
-            region_server_ref
-                .handle_request(
-                    region_id,
-                    RegionRequest::Open(RegionOpenRequest {
-                        engine: engine.clone(),
-                        region_dir,
-                        options,
-                        skip_wal_replay: false,
-                    }),
-                )
-                .await?;
-            if open_with_writable {
-                if let Err(e) = region_server_ref.set_writable(region_id, true) {
-                    error!(
-                        e; "failed to set writable for region {region_id}"
-                    );
-                }
-            }
-            Ok(())
-        });
+        region_ids.push(region_id);
+        region_requests.push((
+            region_id,
+            RegionOpenRequest {
+                engine,
+                region_dir,
+                options,
+                skip_wal_replay: false,
+            },
+        ));
     }
-    let _ = try_join_all(tasks).await?;
 
+    let open_regions = region_server
+        .handle_batch_open_requests(OPEN_REGION_PARALLELISM, region_requests)
+        .await?;
+    ensure!(
+        open_regions.len() == region_ids.len(),
+        error::UnexpectedSnafu {
+            violated: format!(
+                "Expected to open {} of regions, only {} of regions has opened",
+                region_ids.len(),
+                open_regions.len()
+            )
+        }
+    );
+
+    for region_id in region_ids {
+        if open_with_writable {
+            if let Err(e) = region_server.set_writable(region_id, true) {
+                error!(
+                    e; "failed to set writable for region {region_id}"
+                );
+            }
+        }
+    }
     info!("all regions are opened");
 
     Ok(())
