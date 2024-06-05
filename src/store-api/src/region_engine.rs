@@ -26,12 +26,14 @@ use common_query::error::ExecuteRepeatedlySnafu;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::RegionRequest;
+use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
@@ -177,10 +179,37 @@ pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
 
 pub type RegionScannerRef = Arc<dyn RegionScanner>;
 
+pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
+
+    /// Handles batch open region requests.
+    async fn handle_batch_open_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+        let mut tasks = Vec::with_capacity(requests.len());
+
+        for (region_id, request) in requests {
+            let semaphore_moved = semaphore.clone();
+
+            tasks.push(async move {
+                // Safety: semaphore must exist
+                let _permit = semaphore_moved.acquire().await.unwrap();
+                let result = self
+                    .handle_request(region_id, RegionRequest::Open(request))
+                    .await;
+                (region_id, result)
+            });
+        }
+
+        Ok(join_all(tasks).await)
+    }
 
     /// Handles non-query request to the region. Returns the count of affected rows.
     async fn handle_request(

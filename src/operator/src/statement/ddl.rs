@@ -643,18 +643,44 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        if let Some(table) = self
-            .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-            )
+        // Reserved for grpc call
+        self.drop_tables(&[table_name], drop_if_exists, query_context)
             .await
-            .context(CatalogSnafu)?
-        {
-            let table_id = table.table_info().table_id();
-            self.drop_table_procedure(&table_name, table_id, drop_if_exists, query_context)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn drop_tables(
+        &self,
+        table_names: &[TableName],
+        drop_if_exists: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        let mut tables = Vec::with_capacity(table_names.len());
+        for table_name in table_names {
+            if let Some(table) = self
+                .catalog_manager
+                .table(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                )
+                .await
+                .context(CatalogSnafu)?
+            {
+                tables.push(table.table_info().table_id());
+            } else if drop_if_exists {
+                // DROP TABLE IF EXISTS meets table not found - ignored
+                continue;
+            } else {
+                return TableNotFoundSnafu {
+                    table_name: table_name.to_string(),
+                }
+                .fail();
+            }
+        }
+
+        for (table_name, table_id) in table_names.iter().zip(tables.into_iter()) {
+            self.drop_table_procedure(table_name, table_id, drop_if_exists, query_context.clone())
                 .await?;
 
             // Invalidates local cache ASAP.
@@ -668,17 +694,8 @@ impl StatementExecutor {
                 )
                 .await
                 .context(error::InvalidateTableCacheSnafu)?;
-
-            Ok(Output::new_with_affected_rows(0))
-        } else if drop_if_exists {
-            // DROP TABLE IF EXISTS meets table not found - ignored
-            Ok(Output::new_with_affected_rows(0))
-        } else {
-            TableNotFoundSnafu {
-                table_name: table_name.to_string(),
-            }
-            .fail()
         }
+        Ok(Output::new_with_affected_rows(0))
     }
 
     #[tracing::instrument(skip_all)]
