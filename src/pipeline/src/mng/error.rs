@@ -120,11 +120,10 @@ impl ErrorExt for Error {
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. } => StatusCode::InvalidArguments,
             ParsePipeline { .. } => StatusCode::InvalidArguments,
-            BuildDfLogicalPlan { .. } 
-            // should we put it internal?
+            // should we put `ExecPipeline` in internal?
             // since pipeline is already compiled
             // it's most likely an user input error
-            | ExecPipeline { .. } => StatusCode::Internal,
+            BuildDfLogicalPlan { .. } | ExecPipeline { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),
             CreateTable { source, .. } => source.status_code(),
