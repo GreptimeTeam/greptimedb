@@ -21,6 +21,8 @@ use axum::Extension;
 use common_telemetry::{error, info};
 use headers::HeaderMapExt;
 use http::HeaderMap;
+use mime_guess::mime;
+use pipeline::error::{CastTypeSnafu, ExecPipelineSnafu};
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,7 +31,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    InsertLogSnafu, InvalidParameterSnafu, ParseJsonSnafu, Result, UnsupportedContentTypeSnafu,
+    InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
@@ -70,7 +72,7 @@ pub async fn add_pipeline(
 
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
-    State(state): State<LogHandlerRef>,
+    State(handler): State<LogHandlerRef>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContextRef>,
     // TypedHeader(content_type): TypedHeader<ContentType>,
@@ -80,25 +82,29 @@ pub async fn log_ingester(
     // TODO(shuiyisong): remove debug log
     info!("[log_header]: {:?}", headers);
     info!("[log_payload]: {:?}", payload);
-
     let content_type = headers
         .typed_get::<ContentType>()
         .unwrap_or(ContentType::text());
 
-    let value;
-    // TODO (qtang): we should decide json or jsonl
-    if content_type == ContentType::json() {
-        value = serde_json::from_str(&payload).context(ParseJsonSnafu)?;
-    // TODO (qtang): we should decide which content type to support
-    // form_url_cncoded type is only placeholder
-    } else if content_type == ContentType::form_url_encoded() {
-        value = parse_space_separated_log(payload)?;
-    } else {
-        return UnsupportedContentTypeSnafu { content_type }.fail();
-    }
-    log_ingester_inner(state, query_params, query_ctx, value)
-        .await
-        .or_else(|e| InsertLogSnafu { msg: e }.fail())
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+    let table_name = query_params.table_name.context(InvalidParameterSnafu {
+        reason: "table_name is required",
+    })?;
+
+    let m: mime::Mime = content_type.clone().into();
+    let value = match m.subtype() {
+        // TODO (qtang): we should decide json or jsonl
+        mime::JSON => serde_json::from_str(&payload).context(ParseJsonSnafu)?,
+        // TODO (qtang): we should decide which content type to support
+        // form_url_cncoded type is only placeholder
+        mime::WWW_FORM_URLENCODED => parse_space_separated_log(payload)?,
+        // add more content type support
+        _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
+    };
+
+    log_ingester_inner(handler, pipeline_name, table_name, value, query_ctx).await
 }
 
 fn parse_space_separated_log(payload: String) -> Result<Value> {
@@ -110,25 +116,22 @@ fn parse_space_separated_log(payload: String) -> Result<Value> {
 
 async fn log_ingester_inner(
     state: LogHandlerRef,
-    query_params: LogIngesterQueryParams,
-    query_ctx: QueryContextRef,
+    pipeline_name: String,
+    table_name: String,
     payload: Value,
-) -> std::result::Result<HttpResponse, String> {
-    let pipeline_id = query_params
-        .pipeline_name
-        .ok_or("pipeline_name is required".to_string())?;
-
-    let pipeline_data = PipelineValue::try_from(payload)?;
+    query_ctx: QueryContextRef,
+) -> Result<HttpResponse> {
+    let pipeline_data = PipelineValue::try_from(payload)
+        .map_err(|reason| CastTypeSnafu { msg: reason }.build())
+        .context(PipelineSnafu)?;
 
     let pipeline = state
-        .get_pipeline(&pipeline_id, query_ctx.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let transformed_data: Rows = pipeline.exec(pipeline_data)?;
-
-    let table_name = query_params
-        .table_name
-        .ok_or("table_name is required".to_string())?;
+        .get_pipeline(&pipeline_name, query_ctx.clone())
+        .await?;
+    let transformed_data: Rows = pipeline
+        .exec(pipeline_data)
+        .map_err(|reason| ExecPipelineSnafu { reason }.build())
+        .context(PipelineSnafu)?;
 
     let insert_request = RowInsertRequest {
         rows: Some(transformed_data),
@@ -137,15 +140,11 @@ async fn log_ingester_inner(
     let insert_requests = RowInsertRequests {
         inserts: vec![insert_request],
     };
-    state
-        .insert_log(insert_requests, query_ctx)
-        .await
-        .map(|_| {
-            HttpResponse::GreptimedbV1(GreptimedbV1Response {
-                output: vec![],
-                execution_time_ms: 0,
-                resp_metrics: HashMap::new(),
-            })
+    state.insert_log(insert_requests, query_ctx).await.map(|_| {
+        HttpResponse::GreptimedbV1(GreptimedbV1Response {
+            output: vec![],
+            execution_time_ms: 0,
+            resp_metrics: HashMap::new(),
         })
-        .map_err(|e| e.to_string())
+    })
 }

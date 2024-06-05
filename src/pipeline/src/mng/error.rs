@@ -99,6 +99,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to execute pipeline, reason: {}", reason))]
+    ExecPipeline {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -113,7 +120,10 @@ impl ErrorExt for Error {
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. } => StatusCode::InvalidArguments,
             ParsePipeline { .. } => StatusCode::InvalidArguments,
-            BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            // should we put `ExecPipeline` in internal?
+            // since pipeline is already compiled
+            // it's most likely an user input error
+            BuildDfLogicalPlan { .. } | ExecPipeline { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),
             CreateTable { source, .. } => source.status_code(),

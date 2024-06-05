@@ -22,7 +22,7 @@ use common_telemetry::info;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::QueryEngineRef;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
@@ -80,7 +80,11 @@ impl PipelineOperator {
         );
     }
 
-    async fn create_pipeline_table_if_not_exists(&self, catalog: &str) -> Result<()> {
+    async fn create_pipeline_table_if_not_exists(&self, ctx: QueryContextRef) -> Result<()> {
+        let catalog_str = ctx.current_catalog().to_owned();
+        let catalog = catalog_str.as_str();
+
+        // exist in cache
         if self.get_pipeline_table_from_cache(catalog).is_some() {
             return Ok(());
         }
@@ -90,6 +94,7 @@ impl PipelineOperator {
             open_hook: _,
         } = self.create_table_request(catalog);
 
+        // exist in catalog, just open
         if let Some(table) = self
             .catalog_manager
             .table(&expr.catalog_name, &expr.schema_name, &expr.table_name)
@@ -103,15 +108,13 @@ impl PipelineOperator {
         let schema = expr.schema_name.clone();
         let table_name = expr.table_name.clone();
 
+        // create table
         self.statement_executor
-            .create_table_inner(
-                &mut expr,
-                None,
-                Arc::new(QueryContext::with(catalog, &schema)),
-            )
+            .create_table_inner(&mut expr, None, ctx)
             .await
             .context(CreateTableSnafu)?;
 
+        // get from catalog
         let table = self
             .catalog_manager
             .table(catalog, &schema, &table_name)
@@ -124,6 +127,7 @@ impl PipelineOperator {
             table.table_info().full_table_name()
         );
 
+        // put to cache
         self.add_pipeline_table_to_cache(catalog, table);
 
         Ok(())
@@ -135,15 +139,14 @@ impl PipelineOperator {
 
     async fn insert_and_compile(
         &self,
-        catalog: &str,
-        schema: &str,
+        ctx: QueryContextRef,
         name: &str,
         content_type: &str,
         pipeline: &str,
     ) -> Result<Pipeline<GreptimeTransformer>> {
-        self.get_pipeline_table_from_cache(catalog)
+        self.get_pipeline_table_from_cache(ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .insert_and_compile(schema, name, content_type, pipeline)
+            .insert_and_compile(ctx.current_schema(), name, content_type, pipeline)
             .await
     }
 }
@@ -169,7 +172,7 @@ impl PipelineOperator {
         query_ctx: QueryContextRef,
         name: &str,
     ) -> Result<Pipeline<GreptimeTransformer>> {
-        self.create_pipeline_table_if_not_exists(query_ctx.current_catalog())
+        self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
@@ -184,17 +187,11 @@ impl PipelineOperator {
         pipeline: &str,
         query_ctx: QueryContextRef,
     ) -> Result<()> {
-        self.create_pipeline_table_if_not_exists(query_ctx.current_catalog())
+        self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 
-        self.insert_and_compile(
-            query_ctx.current_catalog(),
-            query_ctx.current_schema(),
-            name,
-            content_type,
-            pipeline,
-        )
-        .await
-        .map(|_| ())
+        self.insert_and_compile(query_ctx, name, content_type, pipeline)
+            .await
+            .map(|_| ())
     }
 }
