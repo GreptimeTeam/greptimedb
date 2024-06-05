@@ -18,13 +18,13 @@ use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::extract::{Json, Query, State};
 use axum::headers::ContentType;
 use axum::{Extension, TypedHeader};
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, ExecPipelineSnafu};
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Deserializer, Value};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
@@ -37,9 +37,10 @@ use crate::query_handler::LogHandlerRef;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct LogIngesterQueryParams {
-    pub table_name: Option<String>,
+    pub table: Option<String>,
     pub db: Option<String>,
     pub pipeline_name: Option<String>,
+    pub ignore_errors: Option<bool>,
 }
 
 #[axum_macros::debug_handler]
@@ -68,6 +69,44 @@ pub async fn add_pipeline(
     })
 }
 
+/// Transform NDJSON array into a single array
+fn transform_ndjson_array_factory(
+    ignore_error: bool,
+) -> impl FnMut(Result<Value>, std::result::Result<Value, serde_json::Error>) -> Result<Value> {
+    move |acc, item| {
+        acc.and_then(|acc| match acc {
+            Value::Array(mut acc_array) => {
+                if let Ok(item_value) = item {
+                    match item_value {
+                        Value::Array(item_array) => {
+                            acc_array.extend(item_array);
+                        }
+                        Value::Object(_) => {
+                            acc_array.push(item_value);
+                        }
+                        _ => {
+                            if !ignore_error {
+                                warn!("invalid item in array: {:?}", item_value);
+                                return Err(InvalidParameterSnafu {
+                                    reason: format!("invalid item:{} in array", item_value),
+                                }
+                                .build());
+                            }
+                        }
+                    }
+                    Ok(Value::Array(acc_array))
+                } else if !ignore_error {
+                    item.context(ParseJsonSnafu)
+                } else {
+                    warn!("invalid item in array: {:?}", item);
+                    Ok(Value::Array(acc_array))
+                }
+            }
+            _ => unreachable!("invalid acc: {:?}", acc),
+        })
+    }
+}
+
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
     State(handler): State<LogHandlerRef>,
@@ -79,14 +118,18 @@ pub async fn log_ingester(
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
-    let table_name = query_params.table_name.context(InvalidParameterSnafu {
-        reason: "table_name is required",
+    let table_name = query_params.table.context(InvalidParameterSnafu {
+        reason: "table is required",
     })?;
+
+    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
     let m: mime::Mime = content_type.clone().into();
     let value = match m.subtype() {
-        // TODO (qtang): we should decide json or jsonl
-        mime::JSON => serde_json::from_str(&payload).context(ParseJsonSnafu)?,
+        mime::JSON => Deserializer::from_str(&payload).into_iter::<Value>().fold(
+            Ok(Value::Array(Vec::with_capacity(100))),
+            transform_ndjson_array_factory(ignore_errors),
+        )?,
         // add more content type support
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     };
