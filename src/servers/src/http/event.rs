@@ -15,10 +15,12 @@
 use std::collections::HashMap;
 
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
-use axum::extract::{Json, Query, State, TypedHeader};
+use axum::extract::{Json, Query, State};
 use axum::headers::ContentType;
 use axum::Extension;
 use common_telemetry::{error, info};
+use headers::HeaderMapExt;
+use http::HeaderMap;
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -71,11 +73,17 @@ pub async fn log_ingester(
     State(state): State<LogHandlerRef>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContextRef>,
-    TypedHeader(content_type): TypedHeader<ContentType>,
+    // TypedHeader(content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> Result<HttpResponse> {
     // TODO(shuiyisong): remove debug log
-    info!("[log_input]: {}", payload);
+    info!("[log_header]: {:?}", headers);
+    info!("[log_payload]: {:?}", payload);
+
+    let content_type = headers
+        .typed_get::<ContentType>()
+        .unwrap_or(ContentType::text());
 
     let value;
     // TODO (qtang): we should decide json or jsonl
