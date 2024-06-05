@@ -28,6 +28,7 @@ use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_runtime::Runtime;
+use common_test_util::find_workspace_path;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{
@@ -732,10 +733,7 @@ async fn to_batch(output: Output) -> String {
 }
 
 pub async fn test_grpc_tls_config(store_type: StorageType) {
-    let comm_dir = std::path::PathBuf::from_iter([
-        std::env!("CARGO_RUSTC_CURRENT_DIR"),
-        "src/common/grpc/tests/tls",
-    ]);
+    let comm_dir = find_workspace_path("/src/common/grpc/tests/tls");
     let ca_path = comm_dir.join("ca.pem").to_str().unwrap().to_string();
     let server_cert_path = comm_dir.join("server.pem").to_str().unwrap().to_string();
     let server_key_path = comm_dir.join("server.key").to_str().unwrap().to_string();

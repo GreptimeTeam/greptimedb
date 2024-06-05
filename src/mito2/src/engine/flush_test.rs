@@ -21,6 +21,9 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
+use common_wal::options::WAL_OPTIONS_KEY;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -28,8 +31,10 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, put_rows, reopen_region, rows_schema,
-    CreateRequestBuilder, MockWriteBufferManager, TestEnv,
+    build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
+    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
+    raft_engine_log_store_factory, reopen_region, rows_schema, CreateRequestBuilder,
+    LogStoreFactory, MockWriteBufferManager, TestEnv,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
@@ -231,13 +236,25 @@ async fn test_flush_empty() {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
-#[tokio::test]
-async fn test_flush_reopen_region() {
-    let mut env = TestEnv::new();
+#[apply(multiple_log_store_factories)]
+async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
+    use std::collections::HashMap;
+
+    use common_wal::options::{KafkaWalOptions, WalOptions};
+
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -263,7 +280,17 @@ async fn test_flush_reopen_region() {
     };
     check_region();
 
-    reopen_region(&engine, region_id, region_dir, true, Default::default()).await;
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
+    reopen_region(&engine, region_id, region_dir, true, options).await;
     check_region();
 
     // Puts again.
