@@ -80,7 +80,7 @@ impl TypedPlan {
 
                 let mut exprs: Vec<TypedExpr> = vec![];
                 for e in &p.expressions {
-                    let expr = TypedExpr::from_substrait_rex(e, &input.schema, extensions)?;
+                    let expr = TypedExpr::from_substrait_rex(e, &input.schema.typ, extensions)?;
                     exprs.push(expr);
                 }
                 let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
@@ -98,7 +98,10 @@ impl TypedPlan {
                     let plan = Plan::Constant {
                         rows: vec![(row, repr::Timestamp::MIN, 1)],
                     };
-                    Ok(TypedPlan { schema: typ, plan })
+                    Ok(TypedPlan {
+                        schema: typ.into_unnamed(),
+                        plan,
+                    })
                 } else {
                     /// if reduce_plan contains the special function like tumble floor/ceiling, add them to the proj_exprs
                     fn rewrite_projection_after_reduce(
@@ -200,7 +203,7 @@ impl TypedPlan {
                             rewrite_projection_after_reduce(
                                 key_val_plan,
                                 reduce_plan,
-                                &input.schema,
+                                &input.schema.typ,
                                 &mut exprs,
                             )?;
                         }
@@ -214,7 +217,7 @@ impl TypedPlan {
                                 rewrite_projection_after_reduce(
                                     key_val_plan,
                                     reduce_plan,
-                                    &input.schema,
+                                    &input.schema.typ,
                                     &mut exprs,
                                 )?;
                             }
@@ -232,7 +235,7 @@ impl TypedPlan {
                 };
 
                 let expr = if let Some(condition) = filter.condition.as_ref() {
-                    TypedExpr::from_substrait_rex(condition, &input.schema, extensions)?
+                    TypedExpr::from_substrait_rex(condition, &input.schema.typ, extensions)?
                 } else {
                     return not_impl_err!("Filter without an condition is not valid");
                 };
@@ -269,7 +272,7 @@ impl TypedPlan {
                         id: crate::expr::Id::Global(table.0),
                     };
                     let get_table = TypedPlan {
-                        schema: table.1.typ().clone(),
+                        schema: table.1,
                         plan: get_table,
                     };
 
@@ -283,7 +286,7 @@ impl TypedPlan {
                             .iter()
                             .map(|item| item.field as usize)
                             .collect();
-                        let input_arity = get_table.schema.column_types.len();
+                        let input_arity = get_table.schema.typ().column_types.len();
                         let mfp =
                             MapFilterProject::new(input_arity).project(column_indices.clone())?;
                         get_table.mfp(mfp.into_safe())
@@ -323,16 +326,20 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
                         id: crate::expr::Id::Global(GlobalId::User(0)),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        ConcreteDataType::uint32_datatype(),
-                        false,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_unnamed(),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)])

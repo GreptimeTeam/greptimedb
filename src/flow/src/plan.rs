@@ -30,13 +30,13 @@ use crate::expr::{
 };
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
-use crate::repr::{ColumnType, DiffRow, RelationType};
+use crate::repr::{ColumnType, DiffRow, RelationDesc, RelationType};
 
 /// A plan for a dataflow component. But with type to indicate the output type of the relation.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct TypedPlan {
     /// output type of the relation
-    pub schema: RelationType,
+    pub schema: RelationDesc,
     /// The untyped plan.
     pub plan: Plan,
 }
@@ -67,7 +67,7 @@ impl TypedPlan {
 
     /// project the plan to the given expressions
     pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
-        let input_arity = self.schema.column_types.len();
+        let input_arity = self.schema.typ.column_types.len();
         let output_arity = exprs.len();
         let (exprs, _expr_typs): (Vec<_>, Vec<_>) = exprs
             .into_iter()
@@ -112,7 +112,7 @@ impl TypedPlan {
             },
             _ => Plan::Mfp {
                 input: Box::new(self),
-                mfp: MapFilterProject::new(typ.column_types.len()).filter(vec![filter.expr])?,
+                mfp: MapFilterProject::new(typ.typ.column_types.len()).filter(vec![filter.expr])?,
             },
         };
         Ok(TypedPlan { schema: typ, plan })
@@ -233,10 +233,7 @@ impl Plan {
 }
 
 impl Plan {
-    pub fn with_types(self, typ: RelationType) -> TypedPlan {
-        TypedPlan {
-            schema: typ,
-            plan: self,
-        }
+    pub fn with_types(self, schema: RelationDesc) -> TypedPlan {
+        TypedPlan { schema, plan: self }
     }
 }

@@ -272,8 +272,8 @@ impl RelationType {
     /// Return relation describe without column names
     pub fn into_unnamed(self) -> RelationDesc {
         RelationDesc {
+            names: vec![None; self.column_types.len()],
             typ: self,
-            names: vec![],
         }
     }
 }
@@ -337,7 +337,7 @@ fn return_true() -> bool {
 ///
 /// It bundles a [`RelationType`] with the name of each column in the relation.
 /// Individual column names are optional.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct RelationDesc {
     pub typ: RelationType,
     pub names: Vec<Option<ColumnName>>,
@@ -352,7 +352,7 @@ impl RelationDesc {
             let mut names = self.names.clone();
             for expr in &mfp.expressions {
                 if let ScalarExpr::Column(i) = expr {
-                    names.push(self.names[*i].clone());
+                    names.push(self.names.get(*i).cloned().flatten());
                 } else {
                     names.push(None);
                 }

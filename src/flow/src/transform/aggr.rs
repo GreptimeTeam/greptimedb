@@ -306,11 +306,11 @@ impl TypedPlan {
             let group_exprs = TypedExpr::from_substrait_agg_grouping(
                 ctx,
                 &agg.groupings,
-                &input.schema,
+                &input.schema.typ,
                 extensions,
             )?;
 
-            TypedExpr::expand_multi_value(&input.schema, &group_exprs)?
+            TypedExpr::expand_multi_value(&input.schema.typ, &group_exprs)?
         };
 
         let time_index = group_exprs.iter().position(|expr| {
@@ -326,14 +326,14 @@ impl TypedPlan {
         let (mut aggr_exprs, post_mfp) = AggregateExpr::from_substrait_agg_measures(
             ctx,
             &agg.measures,
-            &input.schema,
+            &input.schema.typ,
             extensions,
         )?;
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(
             &mut aggr_exprs,
             &group_exprs,
-            input.schema.column_types.len(),
+            input.schema.typ.column_types.len(),
         )?;
 
         // output type is group_exprs + aggr_exprs
@@ -394,13 +394,13 @@ impl TypedPlan {
         // FIX(discord9): deal with key first
         if post_mfp.is_identity() {
             Ok(TypedPlan {
-                schema: output_type,
+                schema: output_type.into_unnamed(),
                 plan,
             })
         } else {
             // make post_mfp map identical mapping of keys
             let input = TypedPlan {
-                schema: output_type.clone(),
+                schema: output_type.clone().into_unnamed(),
                 plan,
             };
             let key_arity = group_exprs.len();
@@ -418,7 +418,9 @@ impl TypedPlan {
                 .filter(f)?
                 .project(p)?;
             Ok(TypedPlan {
-                schema: output_type.apply_mfp(&post_mfp.clone().into_safe())?,
+                schema: output_type
+                    .apply_mfp(&post_mfp.clone().into_safe())?
+                    .into_unnamed(),
                 plan: Plan::Mfp {
                     input: Box::new(input),
                     mfp: post_mfp,
@@ -485,10 +487,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -544,7 +549,8 @@ mod test {
                             ColumnType::new(CDT::int64_datatype(), true),  // avg.count(number)
                         ])
                         .with_key(vec![1, 2])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .into_unnamed(),
                     ),
                 ),
                 mfp: MapFilterProject::new(5)
@@ -564,7 +570,8 @@ mod test {
                 ColumnType::new(CDT::uint64_datatype(), true),  // avg(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
-            ]),
+            ])
+            .into_unnamed(),
         };
         assert_eq!(flow_plan, expected);
     }
@@ -588,7 +595,8 @@ mod test {
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
-            ]),
+            ])
+            .into_unnamed(),
             // TODO(discord9): mfp indirectly ref to key columns
             /*
             .with_key(vec![1])
@@ -600,10 +608,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -651,7 +662,8 @@ mod test {
                             ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
                         ])
                         .with_key(vec![1])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .into_unnamed(),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -688,7 +700,8 @@ mod test {
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
-            ]),
+            ])
+            .into_unnamed(),
             // TODO(discord9): mfp indirectly ref to key columns
             /*
             .with_key(vec![1])
@@ -700,10 +713,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -751,7 +767,8 @@ mod test {
                             ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
                         ])
                         .with_key(vec![1])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .into_unnamed(),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -805,7 +822,8 @@ mod test {
             schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number) -> u64
                 ColumnType::new(CDT::uint32_datatype(), false), // number
-            ]),
+            ])
+            .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -813,9 +831,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -844,7 +866,8 @@ mod test {
                             ColumnType::new(ConcreteDataType::uint64_datatype(), true),  // sum
                             ColumnType::new(ConcreteDataType::int64_datatype(), true),   // count
                         ])
-                        .with_key(vec![0]),
+                        .with_key(vec![0])
+                        .into_unnamed(),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -896,7 +919,8 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -904,9 +928,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -927,10 +955,13 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(RelationType::new(vec![
-                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
-                        ColumnType::new(ConcreteDataType::int64_datatype(), true),
-                    ])),
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                            ColumnType::new(ConcreteDataType::int64_datatype(), true),
+                        ])
+                        .into_unnamed(),
+                    ),
                 ),
                 mfp: MapFilterProject::new(2)
                     .map(vec![
@@ -964,7 +995,8 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -972,9 +1004,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -992,7 +1028,7 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(typ),
+                    .with_types(typ.into_unnamed()),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0), ScalarExpr::Column(1)])
@@ -1022,7 +1058,8 @@ mod test {
             schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // col sum(number)
                 ColumnType::new(CDT::uint32_datatype(), false), // col number
-            ]),
+            ])
+            .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1030,9 +1067,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -1057,7 +1098,8 @@ mod test {
                             ColumnType::new(CDT::uint32_datatype(), false), // col number
                             ColumnType::new(CDT::uint64_datatype(), true),  // col sum(number)
                         ])
-                        .with_key(vec![0]),
+                        .with_key(vec![0])
+                        .into_unnamed(),
                     ),
                 ),
                 mfp: MapFilterProject::new(2)
@@ -1090,7 +1132,8 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1098,9 +1141,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -1121,10 +1168,10 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        CDT::uint64_datatype(),
-                        true,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                            .into_unnamed(),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0), ScalarExpr::Column(1)])

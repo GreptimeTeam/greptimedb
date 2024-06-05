@@ -514,7 +514,7 @@ mod test {
                 plan: Plan::Get {
                     id: Id::Global(GlobalId::User(1)),
                 },
-                schema: RelationType::new(vec![]),
+                schema: RelationType::new(vec![]).into_unnamed(),
             },
         );
         let create_reqs = Request::Create {

@@ -27,7 +27,7 @@ use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::repr::{DiffRow, RelationDesc, RelationType, BROADCAST_CAP};
+use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -307,14 +307,14 @@ impl FlownodeContext {
     pub fn assign_table_schema(
         &mut self,
         table_name: &TableName,
-        schema: RelationType,
+        schema: RelationDesc,
     ) -> Result<(), Error> {
         let gid = self
             .table_repr
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
             .unwrap();
-        self.schema.insert(gid, schema.into_unnamed());
+        self.schema.insert(gid, schema);
         Ok(())
     }
 
