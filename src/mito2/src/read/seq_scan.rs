@@ -55,8 +55,9 @@ pub struct SeqScan {
 impl SeqScan {
     /// Creates a new [SeqScan].
     pub(crate) fn new(input: ScanInput) -> Self {
-        let properties =
-            ScannerProperties::new(ScannerPartitioning::Unknown(input.parallelism.parallelism));
+        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(
+            input.parallelism.parallelism.max(1),
+        ));
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
@@ -315,6 +316,10 @@ impl FileRangeCollector for SeqDistributor {
 }
 
 impl SeqDistributor {
+    /// Groups file ranges and memtables by time ranges.
+    /// The output number of parts may be `<= parallelism`. If `parallelism` is 0, it will be set to 1.
+    ///
+    /// Output parts have non-overlapping time ranges.
     fn build_parts(mut self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
         // Creates a part for each memtable.
         for mem in memtables {
@@ -327,9 +332,12 @@ impl SeqDistributor {
             self.parts.push(part);
         }
 
+        let parallelism = parallelism.max(1);
         let parts = group_parts_by_range(self.parts);
+        let parts = maybe_merge_parts(parts, parallelism);
+        // TODO(yingwen): Split parts.
 
-        maybe_merge_parts(parts, parallelism)
+        parts
     }
 }
 
@@ -376,7 +384,6 @@ fn group_parts_by_range(mut parts: Vec<ScanPart>) -> Vec<ScanPart> {
 /// It merges parts if the number of parts is greater than `parallelism`.
 fn maybe_merge_parts(mut parts: Vec<ScanPart>, parallelism: usize) -> Vec<ScanPart> {
     assert!(parallelism > 0);
-
     if parts.len() <= parallelism {
         // No need to merge parts.
         return parts;

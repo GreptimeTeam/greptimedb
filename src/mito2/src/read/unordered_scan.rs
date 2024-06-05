@@ -56,8 +56,9 @@ pub struct UnorderedScan {
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
     pub(crate) fn new(input: ScanInput) -> Self {
-        let properties =
-            ScannerProperties::new(ScannerPartitioning::Unknown(input.parallelism.parallelism));
+        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(
+            input.parallelism.parallelism.max(1),
+        ));
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
