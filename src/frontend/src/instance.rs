@@ -49,6 +49,7 @@ use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
+use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -89,7 +90,6 @@ use crate::error::{
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
-use crate::pipeline::PipelineOperator;
 use crate::script::ScriptExecutor;
 
 #[async_trait]

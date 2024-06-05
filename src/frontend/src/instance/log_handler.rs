@@ -18,7 +18,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
 use pipeline::{GreptimeTransformer, Pipeline};
-use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, Result as ServerResult};
+use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -49,8 +49,7 @@ impl LogHandler for Instance {
         self.pipeline_operator
             .get_pipeline(query_ctx, name)
             .await
-            .map_err(BoxedError::new)
-            .context(servers::error::GetPipelineSnafu { name })
+            .context(PipelineSnafu)
     }
 
     async fn insert_pipeline(
@@ -63,6 +62,7 @@ impl LogHandler for Instance {
         self.pipeline_operator
             .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await
+            .context(PipelineSnafu)
     }
 
     async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {

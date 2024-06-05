@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -36,26 +36,25 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to insert pipeline to pipelines table, name: {}", name))]
+    #[snafu(display("Failed to insert pipeline to pipelines table"))]
     InsertPipeline {
-        name: String,
+        source: operator::error::Error,
         #[snafu(implicit)]
         location: Location,
-        source: BoxedError,
     },
 
-    #[snafu(display("Failed to parse pipeline"))]
+    #[snafu(display("Failed to parse pipeline: {}", reason))]
     ParsePipeline {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Pipeline not found, name: {}", name))]
     PipelineNotFound {
+        name: String,
         #[snafu(implicit)]
         location: Location,
-        name: String,
     },
 
     #[snafu(display("Failed to collect record batch"))]
@@ -86,6 +85,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("General catalog error"))]
+    Catalog {
+        source: catalog::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create table"))]
+    CreateTable {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,6 +115,8 @@ impl ErrorExt for Error {
             ParsePipeline { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
+            CreateTable { source, .. } => source.status_code(),
         }
     }
 

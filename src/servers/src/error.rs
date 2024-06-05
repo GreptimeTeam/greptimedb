@@ -149,20 +149,11 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to insert pipeline with name: {}", name))]
-    InsertPipeline {
-        name: String,
+    #[snafu(display("Pipeline management api error"))]
+    Pipeline {
+        source: pipeline::error::Error,
         #[snafu(implicit)]
         location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to parse pipeline with name: {}", name))]
-    GetPipeline {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Failed to execute script by name: {}", name))]
@@ -652,14 +643,14 @@ impl ErrorExt for Error {
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
             InsertScript { source, .. }
-            | InsertPipeline { source, .. }
-            | GetPipeline { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | ExecuteGrpcRequest { source, .. }
             | CheckDatabaseValidity { source, .. } => source.status_code(),
+
+            Pipeline { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidParameter { .. }

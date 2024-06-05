@@ -30,6 +30,7 @@ use operator::request::Requester;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
+use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use servers::server::ServerHandlers;
 use snafu::OptionExt;
@@ -38,7 +39,6 @@ use crate::error::{self, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
-use crate::pipeline::PipelineOperator;
 use crate::script::ScriptExecutor;
 
 /// The frontend [`Instance`] builder.

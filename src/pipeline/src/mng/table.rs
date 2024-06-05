@@ -20,8 +20,6 @@ use api::v1::{
     ColumnDataType, ColumnDef, ColumnSchema as PbColumnSchema, Row, RowInsertRequest,
     RowInsertRequests, Rows, SemanticType,
 };
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
@@ -202,8 +200,7 @@ impl PipelineTable {
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
         let yaml_content = Content::Yaml(pipeline.into());
         parse::<GreptimeTransformer>(&yaml_content)
-            .map_err(|e| BoxedError::new(PlainError::new(e, StatusCode::InvalidArguments)))
-            .context(ParsePipelineSnafu)
+            .map_err(|e| ParsePipelineSnafu { reason: e }.build())
     }
 
     fn generate_pipeline_cache_key(schema: &str, name: &str) -> String {
@@ -262,8 +259,7 @@ impl PipelineTable {
                 &self.statement_executor,
             )
             .await
-            .map_err(BoxedError::new)
-            .context(InsertPipelineSnafu { name })?;
+            .context(InsertPipelineSnafu)?;
 
         info!(
             "Inserted pipeline: {} into {} table: {}, output: {:?}.",
