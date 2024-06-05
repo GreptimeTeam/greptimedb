@@ -627,6 +627,12 @@ impl ScanPart {
         let end = current_range.1.max(part_range.1);
         self.time_range = Some((start, end));
     }
+
+    /// Returns true if the we can split the part into multiple parts
+    /// and preserving order.
+    pub(crate) fn can_split_preserve_order(&self) -> bool {
+        self.memtables.is_empty() && self.file_ranges.len() == 1 && self.file_ranges[0].len() > 1
+    }
 }
 
 /// A trait to collect file ranges to scan.
