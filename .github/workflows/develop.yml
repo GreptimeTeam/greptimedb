@@ -377,12 +377,19 @@ jobs:
           docker system prune -f
 
   sqlness:
-    name: Sqlness Test
+    name: Sqlness Test (${{ matrix.mode.name }})
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-20.04 ]
+        mode:
+          - name: "Basic"
+            opts: ""
+            kafka: false
+          - name: "Remote WAL"
+            opts: "-w kafka -k 127.0.0.1:9092"
+            kafka: true
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -393,43 +400,17 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
-      - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -c ./tests/cases --bins-dir ./bins --preserve-state
-      - name: Upload sqlness logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqlness-logs
-          path: /tmp/sqlness*
-          retention-days: 3
-
-  sqlness-kafka-wal:
-    name: Sqlness Test with Kafka Wal
-    needs: build
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-20.04 ]
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download pre-built binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: bins
-          path: .
-      - name: Unzip binaries
-        run: tar -xvf ./bins.tar.gz
-      - name: Setup kafka server
+      - if: matrix.mode.kafka
+        name: Setup kafka server
         working-directory: tests-integration/fixtures/kafka
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run sqlness
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner -w kafka -k 127.0.0.1:9092 -c ./tests/cases --bins-dir ./bins --preserve-state
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: sqlness-logs-with-kafka-wal
+          name: sqlness-logs-${{ matrix.mode.name }}
           path: /tmp/sqlness*
           retention-days: 3
 
