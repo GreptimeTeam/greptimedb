@@ -48,7 +48,7 @@ impl PipelineOperator {
             catalog_name: catalog.to_string(),
             schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
             table_name: PIPELINE_TABLE_NAME.to_string(),
-            desc: "GreptimeDB scripts table for Python".to_string(),
+            desc: "GreptimeDB pipeline table for Log".to_string(),
             column_defs,
             time_index,
             primary_keys,

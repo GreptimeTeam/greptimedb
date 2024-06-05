@@ -66,6 +66,7 @@ impl LogHandler for Instance {
     }
 
     async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {
+        // todo(qtang): impl delete
         todo!("delete_pipeline")
     }
 }

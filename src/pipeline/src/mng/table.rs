@@ -80,7 +80,6 @@ impl PipelineTable {
         let content_type = "content_type";
         let pipeline_content = "pipeline";
         let created_at = "created_at";
-        let updated_at = "updated_at";
 
         (
             created_at.to_string(),
@@ -135,15 +134,6 @@ impl PipelineTable {
                     comment: "".to_string(),
                     datatype_extension: None,
                 },
-                ColumnDef {
-                    name: updated_at.to_string(),
-                    data_type: ColumnDataType::TimestampMillisecond as i32,
-                    is_nullable: false,
-                    default_constraint: vec![],
-                    semantic_type: SemanticType::Field as i32,
-                    comment: "".to_string(),
-                    datatype_extension: None,
-                },
             ],
         )
     }
@@ -178,12 +168,6 @@ impl PipelineTable {
                 column_name: "created_at".to_string(),
                 datatype: ColumnDataType::TimestampMillisecond.into(),
                 semantic_type: SemanticType::Timestamp.into(),
-                ..Default::default()
-            },
-            PbColumnSchema {
-                column_name: "updated_at".to_string(),
-                datatype: ColumnDataType::TimestampMillisecond.into(),
-                semantic_type: SemanticType::Field.into(),
                 ..Default::default()
             },
         ]
@@ -240,7 +224,6 @@ impl PipelineTable {
                         ValueData::StringValue(schema.to_string()).into(),
                         ValueData::StringValue(content_type.to_string()).into(),
                         ValueData::StringValue(pipeline.to_string()).into(),
-                        ValueData::TimestampMillisecondValue(now).into(),
                         ValueData::TimestampMillisecondValue(now).into(),
                     ],
                 }],
@@ -350,24 +333,26 @@ impl PipelineTable {
             .context(CollectRecordsSnafu)?;
 
         ensure!(!records.is_empty(), PipelineNotFoundSnafu { name });
+        // assume schema + name is unique for now
+        ensure!(
+            records.len() == 1 && records[0].num_columns() == 1,
+            PipelineNotFoundSnafu { name }
+        );
 
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].num_columns(), 1);
-
-        let script_column = records[0].column(0);
-        let script_column = script_column
+        let pipeline_column = records[0].column(0);
+        let pipeline_column = pipeline_column
             .as_any()
             .downcast_ref::<StringVector>()
             .with_context(|| CastTypeSnafu {
                 msg: format!(
                     "can't downcast {:?} array into string vector",
-                    script_column.data_type()
+                    pipeline_column.data_type()
                 ),
             })?;
 
-        assert_eq!(script_column.len(), 1);
+        ensure!(pipeline_column.len() == 1, PipelineNotFoundSnafu { name });
 
         // Safety: asserted above
-        Ok(script_column.get_data(0).unwrap().to_string())
+        Ok(pipeline_column.get_data(0).unwrap().to_string())
     }
 }
