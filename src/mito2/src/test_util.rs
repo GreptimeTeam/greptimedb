@@ -107,7 +107,7 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
 #[rstest]
 #[case::with_raft_engine(raft_engine_log_store_factory())]
 #[case::with_kafka(kafka_log_store_factory())]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFactory>) {}
 
 #[derive(Clone)]

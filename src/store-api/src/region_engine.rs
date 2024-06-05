@@ -193,7 +193,7 @@ pub trait RegionEngine: Send + Sync {
         requests: Vec<(RegionId, RegionOpenRequest)>,
     ) -> Result<BatchResponses, BoxedError> {
         let semaphore = Arc::new(Semaphore::new(parallelism));
-        let mut tasks = Vec::with_capacity(parallelism);
+        let mut tasks = Vec::with_capacity(requests.len());
 
         for (region_id, request) in requests {
             let semaphore_moved = semaphore.clone();

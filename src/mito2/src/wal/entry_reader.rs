@@ -38,6 +38,8 @@ pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> 
 }
 
 /// [WalEntryReader] provides the ability to read and decode entries from the underlying store.
+///
+/// Notes: It will consume the inner stream and only allow invoking the `read` at once.
 pub(crate) trait WalEntryReader: Send + Sync {
     fn read(&mut self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>>;
 }

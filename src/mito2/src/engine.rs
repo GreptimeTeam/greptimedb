@@ -84,7 +84,9 @@ use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
-use crate::wal::entry_distributor::build_wal_entry_distributor_and_receivers;
+use crate::wal::entry_distributor::{
+    build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
+};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RawEntryReader};
 use crate::worker::WorkerGroup;
 
@@ -229,11 +231,7 @@ struct EngineInner {
 
 type TopicGroupedRegionOpenRequests = HashMap<String, Vec<(RegionId, RegionOpenRequest)>>;
 
-/// **For Kafka Remote Wal:**
-/// Group requests by topic.
-///
-/// **For RaftEngine Wal:**
-/// Do nothing
+/// Returns requests([TopicGroupedRegionOpenRequests]) grouped by topic and remaining requests.
 fn prepare_batch_open_requests(
     requests: Vec<(RegionId, RegionOpenRequest)>,
 ) -> Result<(
@@ -312,23 +310,18 @@ impl EngineInner {
             provider,
             self.wal_raw_entry_reader.clone(),
             region_ids,
-            2048,
+            DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
 
-        for (region_id, request, receiver) in region_requests.into_iter().zip(entry_receivers).map(
-            |((region_id, request), entry_receiver)| {
-                let (request, receiver) = WorkerRequest::new_open_region_request(
-                    region_id,
-                    request,
-                    Some(entry_receiver),
-                );
-
-                (region_id, request, receiver)
-            },
-        ) {
+        for ((region_id, request), entry_receiver) in
+            region_requests.into_iter().zip(entry_receivers)
+        {
+            let (request, receiver) =
+                WorkerRequest::new_open_region_request(region_id, request, Some(entry_receiver));
             self.workers.submit_to_worker(region_id, request).await?;
             responses.push((region_id, async move { receiver.await.context(RecvSnafu)? }));
         }
+
         // Waits for entries distribution.
         let distribution =
             common_runtime::spawn_read(async move { distributor.distribute().await });
@@ -341,7 +334,7 @@ impl EngineInner {
         )
         .await;
 
-        let _ = distribution.await.context(JoinSnafu)?;
+        distribution.await.context(JoinSnafu)??;
         Ok(responses)
     }
 
@@ -359,12 +352,11 @@ impl EngineInner {
         if !topic_to_region_requests.is_empty() {
             let mut tasks = Vec::with_capacity(topic_to_region_requests.len());
             for (topic, region_requests) in topic_to_region_requests {
-                let self_ref = self;
                 let semaphore_moved = semaphore.clone();
                 tasks.push(async move {
                     // Safety: semaphore must exist
                     let _permit = semaphore_moved.acquire().await.unwrap();
-                    self_ref.open_topic_regions(topic, region_requests).await
+                    self.open_topic_regions(topic, region_requests).await
                 })
             }
             let r = try_join_all(tasks).await?;
@@ -374,7 +366,10 @@ impl EngineInner {
         if !remaining_region_requests.is_empty() {
             let mut tasks = Vec::with_capacity(remaining_region_requests.len());
             for (region_id, request) in remaining_region_requests {
+                let semaphore_moved = semaphore.clone();
                 tasks.push((region_id, async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
                     let (request, receiver) =
                         WorkerRequest::new_open_region_request(region_id, request, None);
 

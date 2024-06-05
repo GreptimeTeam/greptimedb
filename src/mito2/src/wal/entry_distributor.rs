@@ -122,12 +122,12 @@ impl WalEntryReceiver {
 
 impl WalEntryReader for WalEntryReceiver {
     fn read(&mut self, provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
-        let mut arg_sender = self
-            .arg_sender
-            .take()
-            .context(error::InvalidWalReadRequestSnafu {
-                reason: format!("Call WalEntryReceiver multiple time, start_id: {start_id}"),
-            })?;
+        let mut arg_sender =
+            self.arg_sender
+                .take()
+                .with_context(|| error::InvalidWalReadRequestSnafu {
+                    reason: format!("Call WalEntryReceiver multiple time, start_id: {start_id}"),
+                })?;
         // Safety: check via arg_sender
         let mut entry_receiver = self.entry_receiver.take().unwrap();
 
@@ -169,6 +169,9 @@ struct EntryReceiver {
     start_id: EntryId,
     sender: Sender<Entry>,
 }
+
+/// The default buffer size of the [Entry] receiver.
+pub const DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE: usize = 2048;
 
 /// Returns [WalEntryDistributor] and batch [WalEntryReceiver]s.
 ///

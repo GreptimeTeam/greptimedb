@@ -87,7 +87,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Try to open region {}", region_id);
 
         // Open region from specific region dir.
-        let mut opener = match RegionOpener::new(
+        let opener = match RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder_provider.clone(),
@@ -97,6 +97,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
+        .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
         .parse_options(request.options)
         {
             Ok(opener) => opener,
@@ -104,9 +105,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 sender.send(Err(err));
                 return;
             }
-        };
-        if let Some(wal_entry_receiver) = wal_entry_receiver {
-            opener = opener.wal_entry_reader(Box::new(wal_entry_receiver));
         };
 
         let regions = self.regions.clone();

@@ -110,8 +110,11 @@ impl RegionOpener {
 
     /// If a [WalEntryReader] is set, the [RegionOpener] will use [WalEntryReader] instead of
     /// constructing a new one from scratch.
-    pub(crate) fn wal_entry_reader(mut self, wal_entry_reader: Box<dyn WalEntryReader>) -> Self {
-        self.wal_entry_reader = Some(wal_entry_reader);
+    pub(crate) fn wal_entry_reader(
+        mut self,
+        wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+    ) -> Self {
+        self.wal_entry_reader = wal_entry_reader;
         self
     }
 
