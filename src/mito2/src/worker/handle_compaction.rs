@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
@@ -39,7 +39,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             req.options,
             &region.version_control,
             &region.access_layer,
-            &region.file_purger,
             sender,
             &region.manifest_ctx,
         ) {

@@ -43,7 +43,6 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta, IndexType};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -201,7 +200,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) file_purger: FilePurgerRef,
     pub(crate) listener: WorkerListener,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
@@ -243,20 +241,14 @@ impl RegionFlushTask {
         // Get a version of this region before creating a job to get current
         // wal entry id, sequence and immutable memtables.
         let version_data = version_control.current();
-        // This is used to update the version.
-        let version_control = version_control.clone();
 
         Box::pin(async move {
-            self.do_flush(version_data, &version_control).await;
+            self.do_flush(version_data).await;
         })
     }
 
     /// Runs the flush task.
-    async fn do_flush(
-        &mut self,
-        version_data: VersionControlData,
-        version_control: &VersionControlRef,
-    ) {
+    async fn do_flush(&mut self, version_data: VersionControlData) {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
 
@@ -797,7 +789,6 @@ mod tests {
             senders: Vec::new(),
             request_sender: tx,
             access_layer: env.access_layer.clone(),
-            file_purger: builder.file_purger(),
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,

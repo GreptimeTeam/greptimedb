@@ -34,13 +34,11 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
-use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionState};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
 use crate::sst::file::{FileHandle, FileMeta, IndexType};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -54,7 +52,6 @@ pub(crate) struct CompactionTaskImpl {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
     pub compaction_time_window: Option<i64>,
-    pub file_purger: FilePurgerRef,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Senders that are used to notify waiters waiting for pending compaction tasks.
@@ -70,8 +67,6 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) append_mode: bool,
     /// Manifest context.
     pub(crate) manifest_ctx: ManifestContextRef,
-    /// Version control to update.
-    pub(crate) version_control: VersionControlRef,
     /// Event listener.
     pub(crate) listener: WorkerListener,
 }

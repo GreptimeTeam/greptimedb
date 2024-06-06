@@ -173,7 +173,6 @@ impl<S> RegionWorkerLoop<S> {
             senders: Vec::new(),
             request_sender: self.sender.clone(),
             access_layer: region.access_layer.clone(),
-            file_purger: region.file_purger.clone(),
             listener: self.listener.clone(),
             engine_config,
             row_group_size,
@@ -248,7 +247,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             compact_request::Options::Regular(Default::default()),
             &region.version_control,
             &region.access_layer,
-            &region.file_purger,
             OptionOutputTx::none(),
             &region.manifest_ctx,
         ) {
