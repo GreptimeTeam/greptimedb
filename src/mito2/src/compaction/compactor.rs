@@ -232,6 +232,7 @@ impl Compactor for DefaultCompactor {
         let mut futs = Vec::with_capacity(picker_output.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
+
         for output in picker_output.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
 
@@ -383,6 +384,7 @@ impl Compactor for DefaultCompactor {
                 );
             })
             .await?;
+
         Ok(())
     }
 

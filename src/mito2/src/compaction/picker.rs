@@ -32,6 +32,7 @@ pub(crate) trait CompactionTask: Debug + Send + Sync + 'static {
 /// Picker picks input SST files for compaction.
 /// Different compaction strategy may implement different pickers.
 pub trait Picker: Debug + Send + Sync + 'static {
+    /// Picks input SST files for compaction.
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput>;
 }
 

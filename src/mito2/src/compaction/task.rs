@@ -30,6 +30,7 @@ use crate::request::{
 };
 use crate::worker::WorkerListener;
 
+/// Maximum number of compaction tasks in parallel.
 pub const MAX_PARALLEL_COMPACTION: usize = 8;
 
 pub(crate) struct CompactionTaskImpl {
@@ -52,12 +53,7 @@ impl Debug for CompactionTaskImpl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsCompactionTask")
             .field("region_id", &self.compaction_region.region_id)
-            .field("outputs", &self.picker_output.outputs)
-            .field("expired_ssts", &self.picker_output.expired_ssts)
-            .field(
-                "compaction_time_window",
-                &self.picker_output.time_window_size,
-            )
+            .field("picker_output", &self.picker_output)
             .field(
                 "append_mode",
                 &self.compaction_region.region_options.append_mode,
