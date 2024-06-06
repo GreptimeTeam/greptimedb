@@ -20,26 +20,28 @@ use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::datasource::physical_plan::{FileMeta, ParquetFileReaderFactory};
 use datafusion::error::Result as DatafusionResult;
+use datafusion::parquet::arrow::{ArrowWriter, parquet_to_arrow_schema};
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
-use datafusion::parquet::arrow::{parquet_to_arrow_schema, ArrowWriter};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use futures::{StreamExt,};
 use futures::future::BoxFuture;
-use futures::StreamExt;
-use object_store::{FuturesAsyncReader, ObjectStore};
+use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
+use object_store::{FuturesAsyncReader, ObjectStore};
+
 use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder, LazyBufferedWriter};
-use crate::error::{self, Result};
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
+use crate::error::{self, Result, WriteObjectSnafu, WriteParquetSnafu};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
@@ -250,29 +252,36 @@ pub async fn stream_to_parquet(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
     path: &str,
-    threshold: usize,
     concurrency: usize,
 ) -> Result<usize> {
     let write_props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .build();
     let schema = stream.schema();
-    let mut buffered_writer = BufferedWriter::try_new(
-        path.to_string(),
-        store,
-        schema,
-        Some(write_props),
-        threshold,
-        concurrency,
-    )
-    .await?;
+    let inner_writer = store
+        .writer_with(path)
+        .concurrent(concurrency)
+        .await
+        .map(|w| w.into_futures_async_write().compat_write())
+        .context(WriteObjectSnafu{
+            path,
+        })?;
+
+    let mut writer = AsyncArrowWriter::try_new(inner_writer, schema, Some(write_props)).context(WriteParquetSnafu{
+        path,
+    })?;
     let mut rows_written = 0;
+
     while let Some(batch) = stream.next().await {
         let batch = batch.context(error::ReadRecordBatchSnafu)?;
-        buffered_writer.write(&batch).await?;
+        writer.write(&batch).await.context(WriteParquetSnafu{
+            path
+        })?;
         rows_written += batch.num_rows();
     }
-    buffered_writer.close().await?;
+    writer.close().await.context(WriteParquetSnafu{
+        path
+    })?;
     Ok(rows_written)
 }
 
@@ -281,17 +290,19 @@ mod tests {
     use std::env;
     use std::sync::Arc;
 
+    use rand::{Rng, thread_rng};
+
     use common_telemetry::warn;
     use common_test_util::find_workspace_path;
     use datatypes::arrow::array::{ArrayRef, Int64Array, RecordBatch};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
-    use object_store::services::S3;
     use object_store::ObjectStore;
-    use rand::{thread_rng, Rng};
+    use object_store::services::S3;
 
-    use super::*;
     use crate::file_format::parquet::BufferedWriter;
     use crate::test_util::{format_schema, test_store};
+
+    use super::*;
 
     fn test_data_root() -> String {
         find_workspace_path("/src/common/datasource/tests/parquet")

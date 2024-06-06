@@ -79,7 +79,6 @@ impl StatementExecutor {
                 Box::pin(DfRecordBatchStreamAdapter::new(stream)),
                 object_store,
                 path,
-                threshold,
                 WRITE_CONCURRENCY,
             )
             .await
