@@ -45,6 +45,8 @@ pub struct LogIngesterQueryParams {
     pub db: Option<String>,
     pub pipeline_name: Option<String>,
     pub ignore_errors: Option<bool>,
+    // we can't resolve the version correctly now.
+    // pub version: Option<String>,
 }
 
 pub struct PipelineContent(String);
@@ -177,6 +179,8 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
+    let version = None;
+
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
     let m: mime::Mime = content_type.clone().into();
@@ -189,12 +193,21 @@ pub async fn log_ingester(
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     };
 
-    ingest_logs_inner(handler, pipeline_name, table_name, value, query_ctx).await
+    ingest_logs_inner(
+        handler,
+        pipeline_name,
+        version,
+        table_name,
+        value,
+        query_ctx,
+    )
+    .await
 }
 
 async fn ingest_logs_inner(
     state: LogHandlerRef,
     pipeline_name: String,
+    version: Option<String>,
     table_name: String,
     payload: Value,
     query_ctx: QueryContextRef,
@@ -205,7 +218,7 @@ async fn ingest_logs_inner(
         .context(PipelineSnafu)?;
 
     let pipeline = state
-        .get_pipeline(&pipeline_name, query_ctx.clone())
+        .get_pipeline(&pipeline_name, version, query_ctx.clone())
         .await?;
     let transformed_data: Rows = pipeline
         .exec(pipeline_data)

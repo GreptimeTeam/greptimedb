@@ -182,12 +182,13 @@ impl PipelineOperator {
         &self,
         query_ctx: QueryContextRef,
         name: &str,
+        version: Option<String>,
     ) -> Result<Pipeline<GreptimeTransformer>> {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .get_pipeline(query_ctx.current_schema(), name)
+            .get_pipeline(query_ctx.current_schema(), name, version)
             .await
     }
 
