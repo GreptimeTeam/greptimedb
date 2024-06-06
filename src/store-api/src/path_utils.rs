@@ -45,6 +45,10 @@ pub fn region_dir(path: &str, region_id: RegionId) -> String {
     )
 }
 
+pub fn manifest_dir(path: &str, region_id: RegionId) -> String {
+    format!("{}manifest/", region_dir(path, region_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +59,15 @@ mod tests {
         assert_eq!(
             region_dir("my_catalog/my_schema", region_id),
             "data/my_catalog/my_schema/42/42_0000000001/"
+        );
+    }
+
+    #[test]
+    fn test_manifest_dir() {
+        let region_id = RegionId::new(42, 1);
+        assert_eq!(
+            manifest_dir("my_catalog/my_schema", region_id),
+            "data/my_catalog/my_schema/42/42_0000000001/manifest/"
         );
     }
 }

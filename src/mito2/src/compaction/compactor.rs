@@ -19,11 +19,10 @@ use std::time::Duration;
 use api::v1::region::compact_request;
 use common_telemetry::info;
 use object_store::manager::ObjectStoreManager;
-use object_store::util::join_dir;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::path_utils::region_dir;
+use store_api::path_utils::{manifest_dir, region_dir};
 use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
@@ -114,7 +113,7 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            manifest_dir: join_dir(&region_dir, "manifest"),
+            manifest_dir: manifest_dir(region_dir.as_str(), req.region_id),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
