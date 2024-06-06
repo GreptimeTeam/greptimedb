@@ -23,6 +23,7 @@ use futures::AsyncWriteExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use crate::access_layer::{new_fs_object_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
@@ -128,9 +129,15 @@ impl WriteCache {
 
         // Write to FileCache.
         let mut writer = ParquetWriter::new(
-            self.file_cache.cache_file_path(parquet_key),
+            ||async {
+                Ok(self.file_cache.local_store().writer_with(&self.file_cache.cache_file_path(parquet_key))
+                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                    .await
+                    .map(|v| v.into_futures_async_write().compat_write())
+                    .unwrap())
+            },
             write_request.metadata,
-            self.file_cache.local_store(),
+
             indexer,
         );
 

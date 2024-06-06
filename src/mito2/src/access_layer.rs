@@ -18,6 +18,7 @@ use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio_util::compat::FuturesAsyncWriteCompatExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::cache::write_cache::SstUploadRequest;
@@ -28,7 +29,7 @@ use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
-use crate::sst::location;
+use crate::sst::{DEFAULT_WRITE_CONCURRENCY, location};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -147,9 +148,16 @@ impl AccessLayer {
             }
             .build();
             let mut writer = ParquetWriter::new(
-                file_path,
+                ||async{
+                    Ok(self.object_store
+                        .writer_with(&file_path)
+                        .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                        .await
+                        .map(|v| v.into_futures_async_write().compat_write())
+                        .unwrap())
+                },
                 request.metadata,
-                self.object_store.clone(),
+
                 indexer,
             );
             writer.write_all(request.source, write_opts).await?
