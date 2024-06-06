@@ -180,15 +180,16 @@ pub async fn open_compaction_region(
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.
+#[derive(Default, Clone, Debug)]
 pub struct MergeOutput {
-    pub files_to_add: Option<Vec<FileMeta>>,
-    pub files_to_remove: Option<Vec<FileMeta>>,
+    pub files_to_add: Vec<FileMeta>,
+    pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
 }
 
 impl MergeOutput {
     pub fn is_empty(&self) -> bool {
-        self.files_to_add.is_none() && self.files_to_remove.is_none()
+        self.files_to_add.is_empty() && self.files_to_remove.is_empty()
     }
 }
 
@@ -344,8 +345,8 @@ impl Compactor for DefaultCompactor {
         );
 
         Ok(MergeOutput {
-            files_to_add: Some(output_files),
-            files_to_remove: Some(inputs),
+            files_to_add: output_files,
+            files_to_remove: inputs,
             compaction_time_window: Some(picker_output.time_window_size),
         })
     }
@@ -355,26 +356,14 @@ impl Compactor for DefaultCompactor {
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<()> {
-        let files_to_add = {
-            if let Some(files) = merge_output.files_to_add {
-                files
-            } else {
-                return Ok(());
-            }
-        };
-
-        let files_to_remove = {
-            if let Some(files) = merge_output.files_to_remove {
-                files
-            } else {
-                return Ok(());
-            }
-        };
+        if merge_output.files_to_add.is_empty() || merge_output.files_to_remove.is_empty() {
+            return Ok(());
+        }
 
         // Write region edit to manifest.
         let edit = RegionEdit {
-            files_to_add,
-            files_to_remove,
+            files_to_add: merge_output.files_to_add,
+            files_to_remove: merge_output.files_to_remove,
             compaction_time_window: merge_output
                 .compaction_time_window
                 .map(|seconds| Duration::from_secs(seconds as u64)),
