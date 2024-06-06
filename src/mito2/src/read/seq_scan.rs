@@ -109,6 +109,7 @@ impl SeqScan {
                 // Safety: We checked whether it is empty before.
                 let file_id = ranges[0].file_handle().file_id();
                 let region_id = ranges[0].file_handle().region_id();
+                let range_num = ranges.len();
                 for range in ranges {
                     let mut reader = range.reader().await?;
                     let compat_batch = range.compat_batch();
@@ -123,8 +124,8 @@ impl SeqScan {
                     reader_metrics.merge_from(reader.metrics());
                 }
                 debug!(
-                    "Seq scan region {} file {} ranges finished, metrics: {:?}",
-                    region_id, file_id, reader_metrics
+                    "Seq scan region {}, file {}, {} ranges finished, metrics: {:?}",
+                    region_id, file_id, range_num, reader_metrics
                 );
             };
             let stream = Box::pin(stream);
@@ -218,8 +219,8 @@ impl SeqScan {
             metrics.observe_metrics_on_finish();
 
             debug!(
-                "Seq scan finished, region_id: {:?}, metrics: {:?}",
-                stream_ctx.input.mapper.metadata().region_id, metrics,
+                "Seq scan finished, region_id: {:?}, partition: {:?}, metrics: {:?}",
+                stream_ctx.input.mapper.metadata().region_id, partition, metrics,
             );
         };
 
