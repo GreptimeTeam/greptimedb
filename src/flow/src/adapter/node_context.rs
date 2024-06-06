@@ -27,7 +27,6 @@ use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::plan::TypedPlan;
 use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
