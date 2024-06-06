@@ -290,10 +290,6 @@ jobs:
             minio: true
             kafka: false
             values: "with-minio.yaml"
-          - name: "Minio with Cache"
-            minio: true
-            kafka: false
-            values: "with-minio-and-cache.yaml"
           - name: "Remote WAL"
             minio: true
             kafka: true
