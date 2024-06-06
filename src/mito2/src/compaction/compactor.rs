@@ -22,7 +22,6 @@ use object_store::manager::ObjectStoreManager;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::path_utils::region_dir;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
@@ -67,9 +66,8 @@ pub struct CompactionRegion {
 /// CompactionRequest represents the request to compact a region.
 #[derive(Debug, Clone)]
 pub struct CompactionRequest {
-    pub catalog: String,
-    pub schema: String,
     pub region_id: RegionId,
+    pub region_dir: String,
     pub options: HashMap<String, String>,
     pub compaction_options: compact_request::Options,
 }
@@ -82,11 +80,6 @@ pub async fn open_compaction_region(
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
     let region_options = RegionOptions::try_from(&req.options)?;
-    let region_dir = region_dir(
-        format!("{}/{}", &req.catalog, &req.schema).as_str(),
-        req.region_id,
-    );
-
     let object_store = {
         let name = &region_options.storage;
         if let Some(name) = name {
@@ -106,7 +99,7 @@ pub async fn open_compaction_region(
                 .await?;
 
         Arc::new(AccessLayer::new(
-            region_dir.to_string(),
+            req.region_dir.as_str(),
             object_store.clone(),
             intermediate_manager,
         ))
@@ -114,7 +107,7 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(region_dir.as_str()),
+            manifest_dir: new_manifest_dir(req.region_dir.as_str()),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
@@ -124,7 +117,7 @@ pub async fn open_compaction_region(
             .await?
             .context(EmptyRegionDirSnafu {
                 region_id: req.region_id,
-                region_dir,
+                region_dir: req.region_dir.as_str(),
             })?
     };
 
