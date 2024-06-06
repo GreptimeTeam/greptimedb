@@ -394,11 +394,10 @@ impl Inserter {
                 Some(table) => {
                     let table_info = table.table_info();
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
-
-                    // TODO(jeremy): alter in batch? (from `handle_metric_row_inserts`)
                     validate_request_with_table(req, &table)?;
-                    let alter_expr = self.get_alter_table_expr_on_demand(req, table, ctx)?;
-                    if let Some(alter_expr) = alter_expr {
+                    if let Some(alter_expr) =
+                        self.get_alter_table_expr_on_demand(req, table, ctx)?
+                    {
                         alter_tables.push(alter_expr);
                     }
                 }
@@ -592,15 +591,12 @@ impl Inserter {
         physical_table: &str,
         statement_executor: &StatementExecutor,
     ) -> Result<Vec<TableRef>> {
+        let catalog_name = ctx.current_catalog();
+        let schema_name = ctx.current_schema();
         let create_table_exprs = create_tables
             .iter()
             .map(|req| {
-                let table_ref = TableReference::full(
-                    ctx.current_catalog(),
-                    ctx.current_schema(),
-                    &req.table_name,
-                );
-
+                let table_ref = TableReference::full(catalog_name, schema_name, &req.table_name);
                 let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
                 let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;
 
@@ -615,7 +611,7 @@ impl Inserter {
             .collect::<Result<Vec<_>>>()?;
 
         let res = statement_executor
-            .create_logical_tables(&create_table_exprs, ctx.clone())
+            .create_logical_tables(catalog_name, schema_name, &create_table_exprs, ctx.clone())
             .await;
 
         match res {
