@@ -171,6 +171,14 @@ impl SeqScan {
             }
         }
 
+        if sources.len() > 1 && stream_ctx.input.parallelism.parallelism > 1 {
+            // We have more sources to read and parallel scan is allowed.
+            // Read sources in parallel.
+            // Now we might spawn tasks more than `parallelism` because each partition
+            // has separated semaphore.
+            sources = stream_ctx.input.create_parallel_sources(sources)?;
+        }
+
         let dedup = !stream_ctx.input.append_mode;
         let mut builder =
             MergeReaderBuilder::from_sources(sources, dedup, stream_ctx.input.filter_deleted);
