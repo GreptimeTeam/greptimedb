@@ -141,7 +141,7 @@ pub struct ShowCreateFlow {
 impl Display for ShowCreateFlow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let flow_name = &self.flow_name;
-        write!(f, r#"SHOW CREATE FLOW {flow_name}"#)
+        write!(f, "SHOW CREATE FLOW {flow_name}")
     }
 }
 
