@@ -27,7 +27,8 @@ use smallvec::SmallVec;
 use store_api::region_engine::RegionScannerRef;
 use store_api::storage::ScanRequest;
 use table::predicate::{build_time_range_predicate, Predicate};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
@@ -35,10 +36,11 @@ use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::{self, CompatBatch};
+use crate::read::compat::{self, CompatBatch, CompatReader};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
+use crate::read::{Batch, Source};
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
@@ -352,6 +354,15 @@ impl ScanRegion {
 pub(crate) struct ScanParallism {
     /// Number of tasks expect to spawn to read data.
     pub(crate) parallelism: usize,
+    /// Channel size to send batches. Only takes effect when the parallelism > 1.
+    pub(crate) channel_size: usize,
+}
+
+impl ScanParallism {
+    /// Returns true if we allow parallel scan.
+    pub(crate) fn allow_parallel_scan(&self) -> bool {
+        self.parallelism > 1
+    }
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -492,6 +503,73 @@ impl ScanInput {
         self
     }
 
+    /// Builds and returns sources to read.
+    pub(crate) async fn build_sources(&self) -> Result<Vec<Source>> {
+        let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
+        for mem in &self.memtables {
+            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone())?;
+            sources.push(Source::Iter(iter));
+        }
+        for file in &self.files {
+            let maybe_reader = self
+                .access_layer
+                .read_sst(file.clone())
+                .predicate(self.predicate.clone())
+                .time_range(self.time_range)
+                .projection(Some(self.mapper.column_ids().to_vec()))
+                .cache(self.cache_manager.clone())
+                .index_applier(self.index_applier.clone())
+                .expected_metadata(Some(self.mapper.metadata().clone()))
+                .build()
+                .await;
+            let reader = match maybe_reader {
+                Ok(reader) => reader,
+                Err(e) => {
+                    if e.is_object_not_found() && self.ignore_file_not_found {
+                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
+                sources.push(Source::Reader(Box::new(reader)));
+            } else {
+                // They have different schema. We need to adapt the batch first so the
+                // mapper can convert it.
+                let compat_reader =
+                    CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
+                sources.push(Source::Reader(Box::new(compat_reader)));
+            }
+        }
+
+        READ_SST_COUNT.observe(self.files.len() as f64);
+
+        Ok(sources)
+    }
+
+    /// Scans sources in parallel.
+    ///
+    /// # Panics if the input doesn't allow parallel scan.
+    pub(crate) async fn build_parallel_sources(&self) -> Result<Vec<Source>> {
+        assert!(self.parallelism.allow_parallel_scan());
+        // Scall all memtables and SSTs.
+        let sources = self.build_sources().await?;
+        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+                self.spawn_scan_task(source, semaphore.clone(), sender);
+                let stream = Box::pin(ReceiverStream::new(receiver));
+                Source::Stream(stream)
+            })
+            .collect();
+        Ok(sources)
+    }
+
     /// Prunes file ranges to scan and adds them to the `collector`.
     pub(crate) async fn prune_file_ranges(
         &self,
@@ -545,6 +623,36 @@ impl ScanInput {
         READ_SST_COUNT.observe(self.files.len() as f64);
 
         Ok(())
+    }
+
+    /// Scans the input source in another task and sends batches to the sender.
+    pub(crate) fn spawn_scan_task(
+        &self,
+        mut input: Source,
+        semaphore: Arc<Semaphore>,
+        sender: mpsc::Sender<Result<Batch>>,
+    ) {
+        common_runtime::spawn_read(async move {
+            loop {
+                // We release the permit before sending result to avoid the task waiting on
+                // the channel with the permit holded
+                let maybe_batch = {
+                    // Safety: We never close the semaphore.
+                    let _permit = semaphore.acquire().await.unwrap();
+                    input.next_batch().await
+                };
+                match maybe_batch {
+                    Ok(Some(batch)) => {
+                        let _ = sender.send(Ok(batch)).await;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
     }
 }
 
