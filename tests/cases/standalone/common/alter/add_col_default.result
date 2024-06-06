@@ -10,7 +10,6 @@ ALTER TABLE test ADD COLUMN k INTEGER DEFAULT 3;
 
 Affected Rows: 0
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +---+-------------------------+---+

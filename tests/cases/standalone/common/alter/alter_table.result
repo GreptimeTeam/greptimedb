@@ -33,7 +33,6 @@ DESC TABLE test_alt_table;
 | k      | String               | PRI | YES  |         | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_table;
 
 +---+---+-------------------------+---+

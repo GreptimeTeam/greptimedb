@@ -19,7 +19,6 @@ ALTER TABLE test ADD COLUMN k INTEGER;
 
 Affected Rows: 0
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +---+-------------------------+---+
@@ -43,7 +42,6 @@ ALTER TABLE test ADD COLUMN host STRING PRIMARY KEY;
 
 Affected Rows: 0
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +---+-------------------------+---+------+
@@ -68,7 +66,6 @@ ALTER TABLE test ADD COLUMN idc STRING default 'idc' PRIMARY KEY;
 
 Affected Rows: 0
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +---+-------------------------+---+------+-----+

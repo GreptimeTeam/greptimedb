@@ -10,7 +10,6 @@ ALTER TABLE test_alt_table ADD COLUMN k STRING PRIMARY KEY;
 
 DESC TABLE test_alt_table;
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_table;
 
 SELECT * FROM test_alt_table WHERE i = 1;

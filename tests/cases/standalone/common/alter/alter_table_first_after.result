@@ -55,7 +55,6 @@ INSERT INTO t VALUES (1, 2, 3, 4);
 
 Affected Rows: 1
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM t;
 
 +---+-------------------------+---+---+
@@ -80,7 +79,6 @@ DESC TABLE t;
 | m      | Int32                |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM t;
 
 +---+---+-------------------------+---+---+

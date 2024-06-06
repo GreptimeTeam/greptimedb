@@ -6,7 +6,6 @@ INSERT INTO test VALUES (1, 1), (2, 2);
 
 Affected Rows: 2
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +-------------------------+---+
@@ -20,7 +19,6 @@ ALTER TABLE test MODIFY j STRING;
 
 Error: 1004(InvalidArguments), Invalid alter table(test) request: column 'j' must be nullable to ensure safe conversion.
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +-------------------------+---+

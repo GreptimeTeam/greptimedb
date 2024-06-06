@@ -7,7 +7,6 @@ INSERT INTO test1 values (1, 1), (2, 2);
 
 Affected Rows: 2
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test1;
 
 +---+-------------------------+

@@ -26,7 +26,6 @@ ALTER TABLE test MODIFY I STRING;
 
 Affected Rows: 0
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +----+---+-------------------------+-------+

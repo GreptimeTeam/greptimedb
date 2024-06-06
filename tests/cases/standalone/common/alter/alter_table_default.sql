@@ -4,7 +4,6 @@ CREATE TABLE test1 (i INTEGER, j TIMESTAMP time index, PRIMARY KEY(i));
 
 INSERT INTO test1 values (1, 1), (2, 2);
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test1;
 
 --- add ts1 column ---

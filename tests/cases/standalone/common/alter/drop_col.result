@@ -14,7 +14,6 @@ ALTER TABLE test DROP COLUMN I;
 
 Affected Rows: 0
 
--- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +-------------------------+
