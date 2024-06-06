@@ -123,8 +123,6 @@ impl<S> RegionWorkerLoop<S> {
 
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
-        let version_control = region.version_control.clone();
-        let memtable_builder = region.memtable_builder.clone();
 
         // Updates manifest in background.
         common_runtime::spawn_bg(async move {
@@ -133,14 +131,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionState::Truncating, action_list, || {
-                    // Applies the truncate action to the region.
-                    version_control.truncate(
-                        truncate.truncated_entry_id,
-                        truncate.truncated_sequence,
-                        &memtable_builder,
-                    );
-                })
+                .update_manifest(RegionState::Truncating, action_list, || {})
                 .await;
 
             // Sends the result back to the request sender.
