@@ -9,6 +9,11 @@ meta:
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
     num_topics = 3
+
+        
+    [datanode]
+    [datanode.client]
+    timeout = "60s"
 datanode:
   config: |-
     [runtime]
@@ -26,6 +31,9 @@ frontend:
     read_rt_size = 8
     write_rt_size = 8
     bg_rt_size = 8
+
+    [meta_client]
+    ddl_timeout = "60s"
 objectStorage:
   s3:
     bucket: default
