@@ -22,7 +22,7 @@ use object_store::manager::ObjectStoreManager;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::path_utils::{manifest_dir, region_dir};
+use store_api::path_utils::region_dir;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
@@ -37,6 +37,7 @@ use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
 use crate::read::Source;
+use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::ManifestContext;
@@ -113,7 +114,7 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            manifest_dir: manifest_dir(region_dir.as_str(), req.region_id),
+            manifest_dir: new_manifest_dir(region_dir.as_str()),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
