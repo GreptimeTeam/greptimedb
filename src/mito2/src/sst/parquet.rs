@@ -79,13 +79,13 @@ pub struct SstInfo {
 mod tests {
     use std::sync::Arc;
 
-    use common_datasource::file_format::parquet::BufferedWriter;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Expr, Operator};
     use datatypes::arrow;
     use datatypes::arrow::array::RecordBatch;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
@@ -490,15 +490,16 @@ mod tests {
             &DataType::LargeBinary,
             arrow_schema.field_with_name("field_0").unwrap().data_type()
         );
-        let mut buffered_writer = BufferedWriter::try_new(
-            file_path.clone(),
-            object_store.clone(),
+        let mut writer = AsyncArrowWriter::try_new(
+            object_store
+                .writer_with(&file_path)
+                .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                .await
+                .map(|w| w.into_futures_async_write().compat_write())
+                .unwrap(),
             arrow_schema.clone(),
             Some(writer_props),
-            write_opts.write_buffer_size.as_bytes() as usize,
-            DEFAULT_WRITE_CONCURRENCY,
         )
-        .await
         .unwrap();
 
         let batch = new_batch_with_binary(&["a"], 0, 60);
@@ -517,8 +518,8 @@ mod tests {
             .collect();
         let result = RecordBatch::try_new(arrow_schema, arrays).unwrap();
 
-        buffered_writer.write(&result).await.unwrap();
-        buffered_writer.close().await.unwrap();
+        writer.write(&result).await.unwrap();
+        writer.close().await.unwrap();
 
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
