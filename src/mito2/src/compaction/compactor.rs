@@ -357,7 +357,7 @@ impl Compactor for DefaultCompactor {
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<()> {
-        if merge_output.files_to_add.is_empty() || merge_output.files_to_remove.is_empty() {
+        if merge_output.is_empty() {
             return Ok(());
         }
 
