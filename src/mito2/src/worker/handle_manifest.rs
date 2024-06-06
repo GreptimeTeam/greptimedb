@@ -199,7 +199,7 @@ impl<S> RegionWorkerLoop<S> {
         let region = match self.regions.get_region(change_result.region_id) {
             Some(region) => region,
             None => {
-                let _ = change_result.sender.send(
+                change_result.sender.send(
                     RegionNotFoundSnafu {
                         region_id: change_result.region_id,
                     }
