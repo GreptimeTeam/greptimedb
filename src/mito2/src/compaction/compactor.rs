@@ -68,7 +68,7 @@ pub struct CompactionRegion {
 pub struct CompactionRequest {
     pub region_id: RegionId,
     pub region_dir: String,
-    pub options: HashMap<String, String>,
+    pub region_options: HashMap<String, String>,
     pub compaction_options: compact_request::Options,
 }
 
@@ -79,7 +79,7 @@ pub async fn open_compaction_region(
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
-    let region_options = RegionOptions::try_from(&req.options)?;
+    let region_options = RegionOptions::try_from(&req.region_options)?;
     let object_store = {
         let name = &region_options.storage;
         if let Some(name) = name {
