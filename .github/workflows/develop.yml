@@ -155,7 +155,6 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
-          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -203,7 +202,6 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
-          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -324,7 +322,6 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
-          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
