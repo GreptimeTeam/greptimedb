@@ -527,10 +527,12 @@ impl RegionServerInner {
         let mut engine_grouped_requests: HashMap<String, Vec<_>> =
             HashMap::with_capacity(requests.len());
         for (region_id, request) in requests {
-            engine_grouped_requests
-                .entry(request.engine.to_string())
-                .or_default()
-                .push((region_id, request));
+            if let Some(requests) = engine_grouped_requests.get_mut(&request.engine) {
+                requests.push((region_id, request));
+            } else {
+                engine_grouped_requests
+                    .insert(request.engine.to_string(), vec![(region_id, request)]);
+            }
         }
 
         let mut results = Vec::with_capacity(engine_grouped_requests.keys().len());
