@@ -133,6 +133,7 @@ impl WriteCache {
                 self.file_cache
                     .local_store()
                     .writer_with(&self.file_cache.cache_file_path(parquet_key))
+                    .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
                     .concurrent(DEFAULT_WRITE_CONCURRENCY)
                     .await
                     .map(|v| v.into_futures_async_write().compat_write())

@@ -32,7 +32,7 @@ use crate::sst::index::IndexerBuilder;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::{location, DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
@@ -151,6 +151,7 @@ impl AccessLayer {
                 || async {
                     self.object_store
                         .writer_with(&file_path)
+                        .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
                         .concurrent(DEFAULT_WRITE_CONCURRENCY)
                         .await
                         .map(|v| v.into_futures_async_write().compat_write())
