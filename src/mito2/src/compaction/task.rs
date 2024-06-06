@@ -255,7 +255,7 @@ impl CompactionTaskImpl {
         // We might leak files if we fail to update manifest. We can add a cleanup task to
         // remove them later.
         self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list, || {})
+            .update_manifest(RegionState::Writable, action_list)
             .await?;
 
         Ok(edit)

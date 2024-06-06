@@ -398,7 +398,7 @@ impl RegionFlushTask {
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
         self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list, || {})
+            .update_manifest(RegionState::Writable, action_list)
             .await?;
 
         Ok(edit)

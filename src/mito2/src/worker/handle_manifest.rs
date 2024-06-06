@@ -131,7 +131,7 @@ impl<S> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
             let result = manifest_ctx
-                .update_manifest(RegionState::Truncating, action_list, || {})
+                .update_manifest(RegionState::Truncating, action_list)
                 .await;
 
             // Sends the result back to the request sender.
@@ -173,7 +173,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionState::Altering, action_list, || {})
+                .update_manifest(RegionState::Altering, action_list)
                 .await;
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,
@@ -251,6 +251,6 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region
         .manifest_ctx
-        .update_manifest(RegionState::Editing, action_list, || {})
+        .update_manifest(RegionState::Editing, action_list)
         .await
 }
