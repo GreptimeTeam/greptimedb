@@ -580,7 +580,7 @@ impl ScanInput {
         common_runtime::spawn_read(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
-                // the channel with the permit holded
+                // the channel with the permit held.
                 let maybe_batch = {
                     // Safety: We never close the semaphore.
                     let _permit = semaphore.acquire().await.unwrap();
