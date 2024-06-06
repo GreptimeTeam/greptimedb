@@ -17,8 +17,9 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
+use crate::error::RegionNotFoundSnafu;
 use crate::metrics::COMPACTION_REQUEST_COUNT;
-use crate::request::{CompactionFailed, CompactionFinished, OptionOutputTx};
+use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -57,13 +58,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: CompactionFinished,
     ) {
-        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
-            warn!(
-                "Unable to finish the compaction task for a read only region {}",
-                region_id
-            );
-            return;
+        let region = match self.regions.get_region(region_id) {
+            Some(region) => region,
+            None => {
+                request.on_failure(RegionNotFoundSnafu { region_id }.build());
+                return;
+            }
         };
+
+        region
+            .version_control
+            .apply_edit(request.edit.clone(), &[], region.file_purger.clone());
 
         // compaction finished.
         request.on_success();

@@ -23,7 +23,7 @@ use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::Result;
+use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
@@ -195,13 +195,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // wake up other workers as we have released some memory by flush.
         self.notify_group();
 
-        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
-            warn!(
-                "Unable to finish the flush task for a read only region {}",
-                region_id
-            );
-            return;
+        let region = match self.regions.get_region(region_id) {
+            Some(region) => region,
+            None => {
+                request.on_failure(RegionNotFoundSnafu { region_id }.build());
+                return;
+            }
         };
+
+        region.version_control.apply_edit(
+            request.edit.clone(),
+            &request.memtables_to_remove,
+            region.file_purger.clone(),
+        );
 
         region.update_flush_millis();
 

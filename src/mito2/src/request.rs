@@ -15,7 +15,6 @@
 //! Worker requests.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +27,7 @@ use common_telemetry::info;
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
+use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::SetReadonlyResponse;
@@ -44,6 +44,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
 use crate::manifest::action::RegionEdit;
+use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::wal::EntryId;
@@ -653,6 +654,10 @@ pub(crate) struct FlushFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// Flush timer.
     pub(crate) _timer: HistogramTimer,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
+    /// Memtables to remove.
+    pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
 }
 
 impl FlushFinished {
@@ -691,6 +696,8 @@ pub(crate) struct CompactionFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
 }
 
 impl CompactionFinished {

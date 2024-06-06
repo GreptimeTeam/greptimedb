@@ -216,7 +216,7 @@ impl CompactionTaskImpl {
         Ok((output_files, inputs))
     }
 
-    async fn handle_compaction(&mut self) -> error::Result<()> {
+    async fn handle_compaction(&mut self) -> error::Result<RegionEdit> {
         self.mark_files_compacting(true);
         let merge_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["merge"])
@@ -260,11 +260,10 @@ impl CompactionTaskImpl {
         // We might leak files if we fail to update manifest. We can add a cleanup task to
         // remove them later.
         self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list, || {
-                self.version_control
-                    .apply_edit(edit, &[], self.file_purger.clone());
-            })
-            .await
+            .update_manifest(RegionState::Writable, action_list, || {})
+            .await?;
+
+        Ok(edit)
     }
 
     /// Handles compaction failure, notifies all waiters.
@@ -292,10 +291,11 @@ impl CompactionTaskImpl {
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
         let notify = match self.handle_compaction().await {
-            Ok(()) => BackgroundNotify::CompactionFinished(CompactionFinished {
+            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                 region_id: self.region_id,
                 senders: std::mem::take(&mut self.waiters),
                 start_time: self.start_time,
+                edit,
             }),
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.region_id);

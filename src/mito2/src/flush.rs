@@ -260,14 +260,23 @@ impl RegionFlushTask {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
 
-        let worker_request = match self.flush_memtables(&version_data, version_control).await {
-            Ok(()) => {
+        let worker_request = match self.flush_memtables(&version_data).await {
+            Ok(edit) => {
+                let memtables_to_remove = version_data
+                    .version
+                    .memtables
+                    .immutables()
+                    .iter()
+                    .map(|m| m.id())
+                    .collect();
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     senders: std::mem::take(&mut self.senders),
                     _timer: timer,
+                    edit,
+                    memtables_to_remove,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -291,11 +300,10 @@ impl RegionFlushTask {
     }
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
-    async fn flush_memtables(
-        &self,
-        version_data: &VersionControlData,
-        version_control: &VersionControlRef,
-    ) -> Result<()> {
+    /// Returns the [RegionEdit] to apply.
+    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
+        // We must use the immutable memtables list and entry ids from the `version_data`
+        // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
@@ -384,13 +392,6 @@ impl RegionFlushTask {
             timer.stop_and_record(),
         );
 
-        let memtables_to_remove: SmallVec<[_; 2]> = version_data
-            .version
-            .memtables
-            .immutables()
-            .iter()
-            .map(|m| m.id())
-            .collect();
         let edit = RegionEdit {
             files_to_add: file_metas,
             files_to_remove: Vec::new(),
@@ -405,10 +406,10 @@ impl RegionFlushTask {
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
         self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list, || {
-                version_control.apply_edit(edit, &memtables_to_remove, self.file_purger.clone());
-            })
-            .await
+            .update_manifest(RegionState::Writable, action_list, || {})
+            .await?;
+
+        Ok(edit)
     }
 
     /// Notify flush job status.
