@@ -41,7 +41,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
-    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, CompilePipeline,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, CompilePipelineSnafu,
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, PipelineNotFoundSnafu, Result,
 };
 use crate::etl::transform::GreptimeTransformer;
@@ -56,6 +56,9 @@ pub const PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME: &str = "schema";
 pub const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type";
 pub const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
 pub const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
+
+/// PipelineTable is a table that stores the pipeline schema and content.
+/// Every catalog has its own pipeline table.
 pub struct PipelineTable {
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
@@ -65,6 +68,7 @@ pub struct PipelineTable {
 }
 
 impl PipelineTable {
+    /// Create a new PipelineTable.
     pub fn new(
         inserter: InserterRef,
         statement_executor: StatementExecutorRef,
@@ -80,6 +84,7 @@ impl PipelineTable {
         }
     }
 
+    /// Build the schema for the pipeline table.
     pub fn build_pipeline_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
         (
             PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
@@ -138,6 +143,7 @@ impl PipelineTable {
         )
     }
 
+    /// Build the column schemas for inserting a row into the pipeline table.
     fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
         vec![
             PbColumnSchema {
@@ -181,10 +187,11 @@ impl PipelineTable {
             .into()
     }
 
+    /// Compile a pipeline from a string.
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
         let yaml_content = Content::Yaml(pipeline.into());
         parse::<GreptimeTransformer>(&yaml_content)
-            .map_err(|e| CompilePipeline { reason: e }.build())
+            .map_err(|e| CompilePipelineSnafu { reason: e }.build())
     }
 
     fn generate_pipeline_cache_key(schema: &str, name: &str) -> String {
@@ -203,6 +210,7 @@ impl PipelineTable {
             .cloned()
     }
 
+    /// Insert a pipeline into the pipeline table.
     async fn insert_pipeline_to_pipeline_table(
         &self,
         schema: &str,
@@ -255,6 +263,8 @@ impl PipelineTable {
         Ok(())
     }
 
+    /// Get a pipeline by name.
+    /// If the pipeline is not in the cache, it will be get from table and compiled and inserted into the cache.
     pub async fn get_pipeline(
         &self,
         schema: &str,
@@ -273,6 +283,8 @@ impl PipelineTable {
         Ok(compiled_pipeline)
     }
 
+    /// Insert a pipeline into the pipeline table and compile it.
+    /// The compiled pipeline will be inserted into the cache.
     pub async fn insert_and_compile(
         &self,
         schema: &str,

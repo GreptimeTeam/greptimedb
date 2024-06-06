@@ -32,6 +32,14 @@ use crate::{GreptimeTransformer, Pipeline};
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
 
+/// PipelineOperator is responsible for managing pipelines.
+/// It provides the ability to:
+/// - Create a pipeline table if it does not exist
+/// - Get a pipeline from the pipeline table
+/// - Insert a pipeline into the pipeline table
+/// - Compile a pipeline
+/// - Add a pipeline table to the cache
+/// - Get a pipeline table from the cache
 pub struct PipelineOperator {
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
@@ -41,6 +49,7 @@ pub struct PipelineOperator {
 }
 
 impl PipelineOperator {
+    /// Create a table request for the pipeline table.
     pub fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
         let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
@@ -81,8 +90,7 @@ impl PipelineOperator {
     }
 
     async fn create_pipeline_table_if_not_exists(&self, ctx: QueryContextRef) -> Result<()> {
-        let catalog_str = ctx.current_catalog().to_owned();
-        let catalog = catalog_str.as_str();
+        let catalog = ctx.current_catalog();
 
         // exist in cache
         if self.get_pipeline_table_from_cache(catalog).is_some() {
@@ -105,19 +113,19 @@ impl PipelineOperator {
             return Ok(());
         }
 
-        let schema = expr.schema_name.clone();
-        let table_name = expr.table_name.clone();
-
         // create table
         self.statement_executor
-            .create_table_inner(&mut expr, None, ctx)
+            .create_table_inner(&mut expr, None, ctx.clone())
             .await
             .context(CreateTableSnafu)?;
+
+        let schema = &expr.schema_name;
+        let table_name = &expr.table_name;
 
         // get from catalog
         let table = self
             .catalog_manager
-            .table(catalog, &schema, &table_name)
+            .table(catalog, schema, table_name)
             .await
             .context(CatalogSnafu)?
             .context(PipelineTableNotFoundSnafu)?;
@@ -133,6 +141,7 @@ impl PipelineOperator {
         Ok(())
     }
 
+    /// Get a pipeline table from the cache.
     pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef> {
         self.tables.read().unwrap().get(catalog).cloned()
     }
@@ -152,6 +161,7 @@ impl PipelineOperator {
 }
 
 impl PipelineOperator {
+    /// Create a new PipelineOperator.
     pub fn new(
         inserter: InserterRef,
         statement_executor: StatementExecutorRef,
@@ -167,6 +177,7 @@ impl PipelineOperator {
         }
     }
 
+    /// Get a pipeline from the pipeline table.
     pub async fn get_pipeline(
         &self,
         query_ctx: QueryContextRef,
@@ -180,6 +191,7 @@ impl PipelineOperator {
             .await
     }
 
+    /// Insert a pipeline into the pipeline table.
     pub async fn insert_pipeline(
         &self,
         name: &str,
