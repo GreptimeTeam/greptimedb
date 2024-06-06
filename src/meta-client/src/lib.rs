@@ -22,6 +22,7 @@ pub mod error;
 // Options for meta client in datanode instance.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetaClientOptions {
+    #[serde(default = "default_metasrc_addrs")]
     pub metasrv_addrs: Vec<String>,
     #[serde(default = "default_timeout")]
     #[serde(with = "humantime_serde")]
@@ -35,6 +36,7 @@ pub struct MetaClientOptions {
     #[serde(default = "default_connect_timeout")]
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
+    #[serde(default = "default_tcp_nodelay")]
     pub tcp_nodelay: bool,
     #[serde(default = "default_metadata_cache_max_capacity")]
     pub metadata_cache_max_capacity: u64,
@@ -74,15 +76,23 @@ fn default_metadata_cache_tti() -> Duration {
     Duration::from_secs(300u64)
 }
 
+fn default_tcp_nodelay() -> bool {
+    true
+}
+
+fn default_metasrc_addrs() -> Vec<String> {
+    vec!["127.0.0.1:3002".to_string()]
+}
+
 impl Default for MetaClientOptions {
     fn default() -> Self {
         Self {
-            metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
+            metasrv_addrs: default_metasrc_addrs(),
             timeout: default_timeout(),
             heartbeat_timeout: default_heartbeat_timeout(),
             ddl_timeout: default_ddl_timeout(),
             connect_timeout: default_connect_timeout(),
-            tcp_nodelay: true,
+            tcp_nodelay: default_tcp_nodelay(),
             metadata_cache_max_capacity: default_metadata_cache_max_capacity(),
             metadata_cache_ttl: default_metadata_cache_ttl(),
             metadata_cache_tti: default_metadata_cache_tti(),
