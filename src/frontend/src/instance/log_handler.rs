@@ -18,7 +18,10 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
 use pipeline::{GreptimeTransformer, Pipeline};
-use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult};
+use servers::error::{
+    AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
+    UnsupportedDeletePipelineSnafu,
+};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -67,7 +70,7 @@ impl LogHandler for Instance {
 
     async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {
         // TODO(qtang): impl delete
-        todo!("delete_pipeline")
+        Err(UnsupportedDeletePipelineSnafu {}.build())
     }
 }
 

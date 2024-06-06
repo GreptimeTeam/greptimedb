@@ -72,6 +72,16 @@ enum AutoCreateTableType {
     Log,
 }
 
+impl AutoCreateTableType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AutoCreateTableType::Logical(_) => "logical",
+            AutoCreateTableType::Physical => "physical",
+            AutoCreateTableType::Log => "log",
+        }
+    }
+}
+
 impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
@@ -144,7 +154,12 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         let table_name_to_ids = self
-            .create_or_alter_tables_on_demand(&requests, &ctx, AutoCreateTableType::Log, statement_executor)
+            .create_or_alter_tables_on_demand(
+                &requests,
+                &ctx,
+                AutoCreateTableType::Log,
+                statement_executor,
+            )
             .await?;
         let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
             .convert(requests)
@@ -422,6 +437,9 @@ impl Inserter {
         let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
         let mut create_tables = vec![];
         let mut alter_tables = vec![];
+        let _timer = crate::metrics::CREATE_OR_ALTER_TABLES
+            .with_label_values(&[auto_create_table_type.as_str()])
+            .start_timer();
         for req in &requests.inserts {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
@@ -647,7 +665,9 @@ impl Inserter {
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 
-        info!("Table `{table_ref}` does not exist, try creating table");
+        info!("Table `{table_ref}` does not exist, try creating the log table");
+        // Set append_mode to true for log table.
+        // because log table does not need to esure the ts and tags unique.
         create_table_expr
             .table_options
             .insert("append_mode".to_string(), "true".to_string());
@@ -658,14 +678,14 @@ impl Inserter {
         match res {
             Ok(table) => {
                 info!(
-                    "Successfully created table {}.{}.{}",
+                    "Successfully created a log table {}.{}.{}",
                     table_ref.catalog, table_ref.schema, table_ref.table,
                 );
                 Ok(table)
             }
             Err(err) => {
                 error!(
-                    "Failed to create table {}.{}.{}: {}",
+                    "Failed to create a log table {}.{}.{}: {}",
                     table_ref.catalog, table_ref.schema, table_ref.table, err
                 );
                 Err(err)

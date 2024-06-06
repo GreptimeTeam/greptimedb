@@ -51,4 +51,10 @@ lazy_static! {
         "DDL operator create view"
     )
     .unwrap();
+    pub static ref CREATE_OR_ALTER_TABLES: HistogramVec = register_histogram_vec!(
+        "greptime_grpc_region_request",
+        "grpc region request",
+        &["table_type"]
+    )
+    .unwrap();
 }
