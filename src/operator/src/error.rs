@@ -15,13 +15,14 @@
 use std::any::Any;
 
 use common_datasource::file_format::Format;
+use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
-use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use table::metadata::TableType;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -641,20 +642,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
-    DdlWithMultiCatalogs {
-        ddl_name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Do not support {} in multiple schemas", ddl_name))]
-    DdlWithMultiSchemas {
-        ddl_name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Empty {} expr", name))]
     EmptyDdlExpr {
         name: String,
@@ -697,6 +684,18 @@ pub enum Error {
         location: Location,
         source: substrait::error::Error,
     },
+
+    #[snafu(display(
+        "Show create table only for base table. {} is {}",
+        table_name,
+        table_type
+    ))]
+    ShowCreateTableBaseOnly {
+        table_name: String,
+        table_type: TableType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -734,7 +733,9 @@ impl ErrorExt for Error {
                 StatusCode::TableAlreadyExists
             }
 
-            Error::NotSupported { .. } => StatusCode::Unsupported,
+            Error::NotSupported { .. } | Error::ShowCreateTableBaseOnly { .. } => {
+                StatusCode::Unsupported
+            }
 
             Error::TableMetadataManager { source, .. } => source.status_code(),
 
@@ -820,9 +821,7 @@ impl ErrorExt for Error {
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
-            Error::DdlWithMultiCatalogs { .. }
-            | Error::DdlWithMultiSchemas { .. }
-            | Error::EmptyDdlExpr { .. }
+            Error::EmptyDdlExpr { .. }
             | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,

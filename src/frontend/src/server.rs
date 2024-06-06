@@ -39,7 +39,7 @@ use crate::service_config::GrpcOptions;
 
 pub struct Services<T, U>
 where
-    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     opts: T,
@@ -51,7 +51,7 @@ where
 
 impl<T, U> Services<T, U>
 where
-    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     pub fn new(opts: T, instance: Arc<U>, plugins: Plugins) -> Self {

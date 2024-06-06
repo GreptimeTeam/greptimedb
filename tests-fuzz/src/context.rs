@@ -129,6 +129,12 @@ impl TableContext {
                 self.name = new_table_name;
                 Ok(self)
             }
+            AlterTableOperation::ModifyDataType { column } => {
+                if let Some(idx) = self.columns.iter().position(|col| col.name == column.name) {
+                    self.columns[idx].column_type = column.column_type;
+                }
+                Ok(self)
+            }
         }
     }
 
