@@ -56,14 +56,13 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
     self, BuildRegionRequestsSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, HandleRegionRequestSnafu,
-    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu, Result,
-    StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu,
+    Result, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -164,15 +163,16 @@ impl RegionServer {
             .as_ref()
             .map(|h| Arc::new(h.into()))
             .unwrap_or_else(|| Arc::new(QueryContextBuilder::default().build()));
-        let state = self
+
+        let decoder = self
             .inner
             .query_engine
             .engine_context(query_ctx)
-            .state()
-            .clone();
+            .new_plan_decoder()
+            .context(NewPlanDecoderSnafu)?;
 
-        let plan = DFLogicalSubstraitConvertor
-            .decode(Bytes::from(request.plan), catalog_list, state)
+        let plan = decoder
+            .decode(Bytes::from(request.plan), catalog_list, false)
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
