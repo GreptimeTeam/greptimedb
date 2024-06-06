@@ -23,11 +23,11 @@ use common_time::Timestamp;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
+use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::region::version::VersionRef;
 use crate::sst::file::{FileHandle, FileId};
-use crate::CompactionRegion;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
 /// the data segments intersects with those windows of files together so that the output files
@@ -101,7 +101,7 @@ impl WindowedCompactionPicker {
 }
 
 impl Picker for WindowedCompactionPicker {
-    fn pick(&self, compaction_region: CompactionRegion) -> Option<PickerOutput> {
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
         let current_version = compaction_region.version_control.current().version;
         let (outputs, expired_ssts, time_window) = self.pick_inner(
             current_version.metadata.region_id,

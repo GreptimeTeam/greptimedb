@@ -40,7 +40,7 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::compaction::compactor::DefaultCompactor;
+use crate::compaction::compactor::{CompactionRegion, DefaultCompactor};
 use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
@@ -61,7 +61,6 @@ use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
-use crate::CompactionRegion;
 
 /// Region compaction request.
 pub struct CompactionRequest {
@@ -538,7 +537,7 @@ fn build_compaction_task(
     let pick_timer = COMPACTION_STAGE_ELAPSED
         .with_label_values(&["pick"])
         .start_timer();
-    let picker_output = picker.pick(compaction_region.clone());
+    let picker_output = picker.pick(&compaction_region);
     drop(pick_timer);
 
     let picker_output = {

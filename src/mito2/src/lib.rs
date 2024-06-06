@@ -25,7 +25,7 @@ pub mod test_util;
 
 mod access_layer;
 mod cache;
-mod compaction;
+pub mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -43,10 +43,6 @@ pub mod sst;
 mod time_provider;
 pub mod wal;
 mod worker;
-
-pub use compaction::compactor::*;
-pub use compaction::picker::{new_picker, Picker, PickerOutput};
-pub use compaction::CompactionOutput;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document

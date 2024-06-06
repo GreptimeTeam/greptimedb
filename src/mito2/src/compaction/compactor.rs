@@ -202,7 +202,7 @@ pub trait Compactor: Send + Sync + 'static {
     /// Merge SST files for a region.
     async fn merge_ssts(
         &self,
-        compaction_region: CompactionRegion,
+        compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
         let current_version = compaction_region.version_control.current().version;
@@ -331,7 +331,7 @@ pub trait Compactor: Send + Sync + 'static {
     /// Update the manifest after merging SST files.
     async fn update_manifest(
         &self,
-        compaction_region: CompactionRegion,
+        compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<()> {
         let files_to_add = {
@@ -380,7 +380,7 @@ pub trait Compactor: Send + Sync + 'static {
     /// Execute compaction for a region.
     async fn compact(
         &self,
-        compaction_region: CompactionRegion,
+        compaction_region: &CompactionRegion,
         compact_request_options: compact_request::Options,
     ) -> Result<()> {
         let picker_output = {
@@ -388,7 +388,7 @@ pub trait Compactor: Send + Sync + 'static {
                 compact_request_options,
                 &compaction_region.region_options.compaction,
             )
-            .pick(compaction_region.clone());
+            .pick(&compaction_region);
 
             if let Some(picker_output) = picker_output {
                 picker_output
@@ -401,9 +401,7 @@ pub trait Compactor: Send + Sync + 'static {
             }
         };
 
-        let merge_output = self
-            .merge_ssts(compaction_region.clone(), picker_output)
-            .await?;
+        let merge_output = self.merge_ssts(&compaction_region, picker_output).await?;
         if merge_output.is_empty() {
             info!(
                 "No files to compact for region_id: {}",

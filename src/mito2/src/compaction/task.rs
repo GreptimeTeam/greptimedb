@@ -89,7 +89,7 @@ impl CompactionTaskImpl {
 
         let compaction_result = match self
             .compactor
-            .merge_ssts(self.compaction_region.clone(), self.picker_output.clone())
+            .merge_ssts(&self.compaction_region, self.picker_output.clone())
             .await
         {
             Ok(v) => v,
@@ -128,7 +128,7 @@ impl CompactionTaskImpl {
             .with_label_values(&["write_manifest"])
             .start_timer();
         self.compactor
-            .update_manifest(self.compaction_region.clone(), compaction_result)
+            .update_manifest(&self.compaction_region, compaction_result)
             .await?;
         Ok(())
     }

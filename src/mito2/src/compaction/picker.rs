@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use api::v1::region::compact_request;
 
+use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::twcs::TwcsPicker;
 use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::CompactionOutput;
 use crate::region::options::CompactionOptions;
 use crate::sst::file::FileHandle;
-use crate::CompactionRegion;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
@@ -32,7 +32,7 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
 /// Picker picks input SST files for compaction.
 /// Different compaction strategy may implement different pickers.
 pub trait Picker: Debug + Send + Sync + 'static {
-    fn pick(&self, compaction_region: CompactionRegion) -> Option<PickerOutput>;
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput>;
 }
 
 #[derive(Default, Clone, Debug)]

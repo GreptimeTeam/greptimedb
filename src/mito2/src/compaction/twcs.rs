@@ -22,11 +22,11 @@ use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 
 use crate::compaction::buckets::infer_time_bucket;
+use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::version::LevelMeta;
-use crate::CompactionRegion;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
@@ -110,7 +110,7 @@ impl TwcsPicker {
 }
 
 impl Picker for TwcsPicker {
-    fn pick(&self, compaction_region: CompactionRegion) -> Option<PickerOutput> {
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
         let current_version = compaction_region.version_control.current().version;
         let region_metadata = current_version.metadata.clone();
         let region_id = region_metadata.region_id;
