@@ -78,7 +78,7 @@ pub struct CompactionRequest {
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
     req: &CompactionRequest,
-    data_home: &str,
+    mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
     let region_options = RegionOptions::try_from(&req.options)?;
@@ -99,9 +99,6 @@ pub async fn open_compaction_region(
             object_store_manager.default_object_store()
         }
     };
-
-    let mut mito_config = MitoConfig::default();
-    mito_config.sanitize(data_home)?;
 
     let access_layer = {
         let intermediate_manager =
@@ -183,7 +180,7 @@ pub async fn open_compaction_region(
     })
 }
 
-/// MergeOutput represents the output of merging SST files.
+/// `[MergeOutput]` represents the output of merging SST files.
 pub struct MergeOutput {
     pub files_to_add: Option<Vec<FileMeta>>,
     pub files_to_remove: Option<Vec<FileMeta>>,
@@ -362,8 +359,7 @@ pub trait Compactor: Send + Sync + 'static {
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        // We might leak files if we fail to update manifest. We can add a cleanup task to
-        // remove them later.
+        // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
             .update_manifest(Writable, action_list, || {

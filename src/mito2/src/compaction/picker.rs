@@ -25,7 +25,7 @@ use crate::region::options::CompactionOptions;
 use crate::sst::file::FileHandle;
 
 #[async_trait::async_trait]
-pub trait CompactionTask: Debug + Send + Sync + 'static {
+pub(crate) trait CompactionTask: Debug + Send + Sync + 'static {
     async fn run(&mut self);
 }
 
@@ -35,6 +35,8 @@ pub trait Picker: Debug + Send + Sync + 'static {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput>;
 }
 
+/// PickerOutput is the output of a [`Picker`].
+/// It contains the outputs of the compaction and the expired SST files.
 #[derive(Default, Clone, Debug)]
 pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
@@ -42,6 +44,7 @@ pub struct PickerOutput {
     pub time_window_size: i64,
 }
 
+/// Create a new picker based on the compaction request options and compaction options.
 pub fn new_picker(
     compact_request_options: compact_request::Options,
     compaction_options: &CompactionOptions,
