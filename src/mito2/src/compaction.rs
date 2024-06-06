@@ -296,11 +296,12 @@ impl CompactionScheduler {
             version_control: version_control.clone(),
         };
 
-        let pick_timer = COMPACTION_STAGE_ELAPSED
-            .with_label_values(&["pick"])
-            .start_timer();
-        let picker_output = picker.pick(&compaction_region);
-        drop(pick_timer);
+        let picker_output = {
+            let _pick_timer = COMPACTION_STAGE_ELAPSED
+                .with_label_values(&["pick"])
+                .start_timer();
+            picker.pick(&compaction_region)
+        };
 
         let picker_output = if let Some(picker_output) = picker_output {
             picker_output

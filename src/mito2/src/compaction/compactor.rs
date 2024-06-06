@@ -398,7 +398,7 @@ impl Compactor for DefaultCompactor {
                 compact_request_options,
                 &compaction_region.region_options.compaction,
             )
-            .pick(&compaction_region);
+            .pick(compaction_region);
 
             if let Some(picker_output) = picker_output {
                 picker_output
@@ -411,7 +411,7 @@ impl Compactor for DefaultCompactor {
             }
         };
 
-        let merge_output = self.merge_ssts(&compaction_region, picker_output).await?;
+        let merge_output = self.merge_ssts(compaction_region, picker_output).await?;
         if merge_output.is_empty() {
             info!(
                 "No files to compact for region_id: {}",
