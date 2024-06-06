@@ -23,6 +23,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use datafusion::physical_plan::DisplayFormatType;
 use smallvec::SmallVec;
 use store_api::region_engine::RegionScannerRef;
 use store_api::storage::ScanRequest;
@@ -732,6 +733,25 @@ impl ScanPartList {
         let parts = self.0.as_ref().unwrap();
         parts.get(index)
     }
+
+    /// Returns the number of parts.
+    pub(crate) fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| parts.len())
+    }
+
+    /// Returns the number of memtables.
+    pub(crate) fn num_memtables(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.memtables.len()).sum()
+        })
+    }
+
+    /// Returns the number of file ranges.
+    pub(crate) fn num_file_ranges(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.file_ranges.len()).sum()
+        })
+    }
 }
 
 /// Context shared by different streams from a scanner.
@@ -767,9 +787,18 @@ impl StreamContext {
     }
 
     /// Format parts for explain.
-    pub(crate) fn format_parts(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    pub(crate) fn format_parts(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         match self.parts.try_lock() {
-            Ok(inner) => write!(f, "{:?}", &&*inner),
+            Ok(inner) => match t {
+                DisplayFormatType::Default => write!(
+                    f,
+                    "partition_count={} ({} memtables, {} file ranges)",
+                    inner.len(),
+                    inner.num_memtables(),
+                    inner.num_file_ranges()
+                ),
+                DisplayFormatType::Verbose => write!(f, "{:?}", &&*inner),
+            },
             Err(_) => write!(f, "<locked>"),
         }
     }
