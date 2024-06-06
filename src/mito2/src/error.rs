@@ -809,7 +809,7 @@ impl ErrorExt for Error {
             | BuildEntry { .. } => StatusCode::Internal,
             OpenRegion { source, .. } => source.status_code(),
 
-            WriteParquet {..}=>StatusCode::Internal,
+            WriteParquet { .. } => StatusCode::Internal,
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
             SerializeField { .. } => StatusCode::Internal,

@@ -19,25 +19,24 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use common_time::Timestamp;
+use datatypes::arrow::datatypes::SchemaRef;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
-use tokio::io::AsyncWrite;
-
-use common_time::Timestamp;
-use datatypes::arrow::datatypes::SchemaRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+use tokio::io::AsyncWrite;
 
 use crate::error::{InvalidMetadataSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::index::Indexer;
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
+use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 
 /// Parquet SST writer.
 pub struct ParquetWriter<W, F> {
@@ -99,7 +98,7 @@ impl<W: AsyncWrite + Send + Unpin, Fut: Future<Output = Result<W>>, F: FnMut() -
             return Ok(None);
         }
 
-        let Some(mut arrow_writer) = self.writer.take()else {
+        let Some(mut arrow_writer) = self.writer.take() else {
             // No batch actually written.
             return Ok(None);
         };
@@ -170,7 +169,7 @@ impl<W: AsyncWrite + Send + Unpin, Fut: Future<Output = Result<W>>, F: FnMut() -
         opts: &WriteOptions,
     ) -> Result<&mut AsyncArrowWriter<SizeAwareWriter<W>>> {
         if let Some(ref mut w) = self.writer {
-            return Ok(w);
+            Ok(w)
         } else {
             let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
             let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
@@ -188,7 +187,8 @@ impl<W: AsyncWrite + Send + Unpin, Fut: Future<Output = Result<W>>, F: FnMut() -
             let writer =
                 SizeAwareWriter::new((self.writer_factory)().await?, self.bytes_written.clone());
             let arrow_writer =
-                AsyncArrowWriter::try_new(writer, schema.clone(), Some(writer_props)).context(WriteParquetSnafu)?;
+                AsyncArrowWriter::try_new(writer, schema.clone(), Some(writer_props))
+                    .context(WriteParquetSnafu)?;
             self.writer = Some(arrow_writer);
             // safety: self.writer is assigned above
             Ok(self.writer.as_mut().unwrap())
@@ -255,7 +255,7 @@ where
         match Pin::new(&mut this.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(bytes_written)) => {
                 let mut size = this.size.lock().unwrap();
-                *size = *size + bytes_written;
+                *size += bytes_written;
                 Poll::Ready(Ok(bytes_written))
             }
             other => other,

@@ -27,7 +27,7 @@ use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use crate::access_layer::{new_fs_object_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
-use crate::error::{self, Result};
+use crate::error::{self, OpenDalSnafu, Result};
 use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
@@ -129,15 +129,16 @@ impl WriteCache {
 
         // Write to FileCache.
         let mut writer = ParquetWriter::new(
-            ||async {
-                Ok(self.file_cache.local_store().writer_with(&self.file_cache.cache_file_path(parquet_key))
+            || async {
+                self.file_cache
+                    .local_store()
+                    .writer_with(&self.file_cache.cache_file_path(parquet_key))
                     .concurrent(DEFAULT_WRITE_CONCURRENCY)
                     .await
                     .map(|v| v.into_futures_async_write().compat_write())
-                    .unwrap())
+                    .context(OpenDalSnafu)
             },
             write_request.metadata,
-
             indexer,
         );
 
@@ -253,7 +254,6 @@ pub struct SstUploadRequest {
 
 #[cfg(test)]
 mod tests {
-
     use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
