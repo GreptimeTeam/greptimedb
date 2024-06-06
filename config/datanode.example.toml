@@ -354,6 +354,9 @@ sst_write_buffer_size = "8MB"
 ## - `n`: scan in parallelism n.
 scan_parallelism = 0
 
+## Capacity of the channel to send data from parallel scan tasks to the main task.
+parallel_scan_channel_size = 32
+
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
