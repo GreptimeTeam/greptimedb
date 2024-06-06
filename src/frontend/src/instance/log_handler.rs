@@ -27,7 +27,7 @@ use super::Instance;
 
 #[async_trait]
 impl LogHandler for Instance {
-    async fn insert_log(
+    async fn insert_logs(
         &self,
         log: RowInsertRequests,
         ctx: QueryContextRef,
@@ -66,7 +66,7 @@ impl LogHandler for Instance {
     }
 
     async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {
-        // todo(qtang): impl delete
+        // TODO(qtang): impl delete
         todo!("delete_pipeline")
     }
 }

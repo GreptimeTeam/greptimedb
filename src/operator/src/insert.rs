@@ -66,7 +66,7 @@ pub struct Inserter {
 
 pub type InserterRef = Arc<Inserter>;
 
-enum TableType {
+enum AutoCreateTableType {
     Logical(String),
     Physical,
     Log,
@@ -117,7 +117,7 @@ impl Inserter {
             .create_or_alter_tables_on_demand(
                 &requests,
                 &ctx,
-                TableType::Physical,
+                AutoCreateTableType::Physical,
                 statement_executor,
             )
             .await?;
@@ -144,7 +144,7 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         let table_name_to_ids = self
-            .create_or_alter_tables_on_demand(&requests, &ctx, TableType::Log, statement_executor)
+            .create_or_alter_tables_on_demand(&requests, &ctx, AutoCreateTableType::Log, statement_executor)
             .await?;
         let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
             .convert(requests)
@@ -179,7 +179,7 @@ impl Inserter {
             .create_or_alter_tables_on_demand(
                 &requests,
                 &ctx,
-                TableType::Logical(physical_table.to_string()),
+                AutoCreateTableType::Logical(physical_table.to_string()),
                 statement_executor,
             )
             .await?;
@@ -416,7 +416,7 @@ impl Inserter {
         &self,
         requests: &RowInsertRequests,
         ctx: &QueryContextRef,
-        table_type: TableType,
+        auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
     ) -> Result<HashMap<String, TableId>> {
         let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
@@ -444,8 +444,8 @@ impl Inserter {
             }
         }
 
-        match table_type {
-            TableType::Logical(on_physical_table) => {
+        match auto_create_table_type {
+            AutoCreateTableType::Logical(on_physical_table) => {
                 if !create_tables.is_empty() {
                     // Creates logical tables in batch.
                     let tables = self
@@ -469,7 +469,7 @@ impl Inserter {
                         .await?;
                 }
             }
-            TableType::Physical => {
+            AutoCreateTableType::Physical => {
                 for req in create_tables {
                     let table = self.create_table(req, ctx, statement_executor).await?;
                     let table_info = table.table_info();
@@ -481,7 +481,7 @@ impl Inserter {
                         .await?;
                 }
             }
-            TableType::Log => {
+            AutoCreateTableType::Log => {
                 for req in create_tables {
                     let table = self.create_log_table(req, ctx, statement_executor).await?;
                     let table_info = table.table_info();
@@ -643,7 +643,7 @@ impl Inserter {
     ) -> Result<TableRef> {
         let table_ref =
             TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
-
+        // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_log_inserts`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 

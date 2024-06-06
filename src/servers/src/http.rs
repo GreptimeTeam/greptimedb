@@ -591,7 +591,7 @@ impl HttpServerBuilder {
     pub fn with_log_ingest_handler(self, handler: LogHandlerRef) -> Self {
         Self {
             router: self.router.nest(
-                &format!("/{HTTP_API_VERSION}/event"),
+                &format!("/{HTTP_API_VERSION}/events"),
                 HttpServer::route_log(handler),
             ),
             ..self

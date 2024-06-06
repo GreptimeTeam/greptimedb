@@ -44,7 +44,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to parse pipeline: {}", reason))]
-    ParsePipeline {
+    CompilePipeline {
         reason: String,
         #[snafu(implicit)]
         location: Location,
@@ -101,7 +101,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to execute pipeline, reason: {}", reason))]
-    ExecPipeline {
+    PipelineTransform {
         reason: String,
         #[snafu(implicit)]
         location: Location,
@@ -118,12 +118,10 @@ impl ErrorExt for Error {
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
-            PipelineNotFound { .. } => StatusCode::InvalidArguments,
-            ParsePipeline { .. } => StatusCode::InvalidArguments,
-            // should we put `ExecPipeline` in internal?
-            // since pipeline is already compiled
-            // it's most likely an user input error
-            BuildDfLogicalPlan { .. } | ExecPipeline { .. } => StatusCode::Internal,
+            PipelineNotFound { .. } | CompilePipeline { .. } | PipelineTransform { .. } => {
+                StatusCode::InvalidArguments
+            }
+            BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),
             CreateTable { source, .. } => source.status_code(),

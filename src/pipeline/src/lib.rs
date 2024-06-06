@@ -13,9 +13,9 @@
 // limitations under the License.
 
 mod etl;
-mod mng;
+mod manager;
 
 pub use etl::transform::GreptimeTransformer;
 pub use etl::value::Value;
 pub use etl::{parse, Content, Pipeline};
-pub use mng::{error, pipeline_operator, table};
+pub use manager::{error, pipeline_operator, table};

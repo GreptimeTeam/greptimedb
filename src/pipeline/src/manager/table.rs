@@ -41,8 +41,8 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
-    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
-    InsertPipelineSnafu, ParsePipelineSnafu, PipelineNotFoundSnafu, Result,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, CompilePipeline,
+    ExecuteInternalStatementSnafu, InsertPipelineSnafu, PipelineNotFoundSnafu, Result,
 };
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
@@ -50,6 +50,12 @@ use crate::etl::{parse, Content, Pipeline};
 pub type PipelineTableRef = Arc<PipelineTable>;
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
+
+pub const PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME: &str = "name";
+pub const PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME: &str = "schema";
+pub const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type";
+pub const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
+pub const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
 pub struct PipelineTable {
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
@@ -75,22 +81,16 @@ impl PipelineTable {
     }
 
     pub fn build_pipeline_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
-        let pipeline_name = "name";
-        let schema_name = "schema";
-        let content_type = "content_type";
-        let pipeline_content = "pipeline";
-        let created_at = "created_at";
-
         (
-            created_at.to_string(),
+            PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
             vec![
-                schema_name.to_string(),
-                pipeline_name.to_string(),
-                content_type.to_string(),
+                PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME.to_string(),
+                PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME.to_string(),
+                PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME.to_string(),
             ],
             vec![
                 ColumnDef {
-                    name: pipeline_name.to_string(),
+                    name: PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME.to_string(),
                     data_type: ColumnDataType::String as i32,
                     is_nullable: false,
                     default_constraint: vec![],
@@ -99,7 +99,7 @@ impl PipelineTable {
                     datatype_extension: None,
                 },
                 ColumnDef {
-                    name: schema_name.to_string(),
+                    name: PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME.to_string(),
                     data_type: ColumnDataType::String as i32,
                     is_nullable: false,
                     default_constraint: vec![],
@@ -108,7 +108,7 @@ impl PipelineTable {
                     datatype_extension: None,
                 },
                 ColumnDef {
-                    name: content_type.to_string(),
+                    name: PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME.to_string(),
                     data_type: ColumnDataType::String as i32,
                     is_nullable: false,
                     default_constraint: vec![],
@@ -117,7 +117,7 @@ impl PipelineTable {
                     datatype_extension: None,
                 },
                 ColumnDef {
-                    name: pipeline_content.to_string(),
+                    name: PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME.to_string(),
                     data_type: ColumnDataType::String as i32,
                     is_nullable: false,
                     default_constraint: vec![],
@@ -126,7 +126,7 @@ impl PipelineTable {
                     datatype_extension: None,
                 },
                 ColumnDef {
-                    name: created_at.to_string(),
+                    name: PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
                     data_type: ColumnDataType::TimestampMillisecond as i32,
                     is_nullable: false,
                     default_constraint: vec![],
@@ -141,31 +141,31 @@ impl PipelineTable {
     fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
         vec![
             PbColumnSchema {
-                column_name: "name".to_string(),
+                column_name: PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String.into(),
                 semantic_type: SemanticType::Tag.into(),
                 ..Default::default()
             },
             PbColumnSchema {
-                column_name: "schema".to_string(),
+                column_name: PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String.into(),
                 semantic_type: SemanticType::Tag.into(),
                 ..Default::default()
             },
             PbColumnSchema {
-                column_name: "content_type".to_string(),
+                column_name: PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String.into(),
                 semantic_type: SemanticType::Tag.into(),
                 ..Default::default()
             },
             PbColumnSchema {
-                column_name: "pipeline".to_string(),
+                column_name: PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String.into(),
                 semantic_type: SemanticType::Field.into(),
                 ..Default::default()
             },
             PbColumnSchema {
-                column_name: "created_at".to_string(),
+                column_name: PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::TimestampMillisecond.into(),
                 semantic_type: SemanticType::Timestamp.into(),
                 ..Default::default()
@@ -184,7 +184,7 @@ impl PipelineTable {
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
         let yaml_content = Content::Yaml(pipeline.into());
         parse::<GreptimeTransformer>(&yaml_content)
-            .map_err(|e| ParsePipelineSnafu { reason: e }.build())
+            .map_err(|e| CompilePipeline { reason: e }.build())
     }
 
     fn generate_pipeline_cache_key(schema: &str, name: &str) -> String {
@@ -308,11 +308,16 @@ impl PipelineTable {
         let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
             .context(BuildDfLogicalPlanSnafu)?
             .filter(and(
-                col("schema").eq(lit(schema)),
-                col("name").eq(lit(name)),
+                col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
+                col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name)),
             ))
             .context(BuildDfLogicalPlanSnafu)?
-            .project(vec![col("pipeline")])
+            .project(vec![col(PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME)])
+            .context(BuildDfLogicalPlanSnafu)?
+            .sort(vec![
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME),
+                lit("DESC"),
+            ])
             .context(BuildDfLogicalPlanSnafu)?
             .build()
             .context(BuildDfLogicalPlanSnafu)?;

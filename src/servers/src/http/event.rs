@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::result::Result as StdResult;
 
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
@@ -25,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
 use mime_guess::mime;
-use pipeline::error::{CastTypeSnafu, ExecPipelineSnafu};
+use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -190,16 +189,17 @@ pub async fn log_ingester(
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     };
 
-    log_ingester_inner(handler, pipeline_name, table_name, value, query_ctx).await
+    ingest_logs_inner(handler, pipeline_name, table_name, value, query_ctx).await
 }
 
-async fn log_ingester_inner(
+async fn ingest_logs_inner(
     state: LogHandlerRef,
     pipeline_name: String,
     table_name: String,
     payload: Value,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
+    let start = std::time::Instant::now();
     let pipeline_data = PipelineValue::try_from(payload)
         .map_err(|reason| CastTypeSnafu { msg: reason }.build())
         .context(PipelineSnafu)?;
@@ -209,7 +209,7 @@ async fn log_ingester_inner(
         .await?;
     let transformed_data: Rows = pipeline
         .exec(pipeline_data)
-        .map_err(|reason| ExecPipelineSnafu { reason }.build())
+        .map_err(|reason| PipelineTransformSnafu { reason }.build())
         .context(PipelineSnafu)?;
 
     let insert_request = RowInsertRequest {
@@ -219,11 +219,10 @@ async fn log_ingester_inner(
     let insert_requests = RowInsertRequests {
         inserts: vec![insert_request],
     };
-    state.insert_log(insert_requests, query_ctx).await.map(|_| {
-        HttpResponse::GreptimedbV1(GreptimedbV1Response {
-            output: vec![],
-            execution_time_ms: 0,
-            resp_metrics: HashMap::new(),
-        })
-    })
+    let output = state.insert_logs(insert_requests, query_ctx).await;
+
+    let response = GreptimedbV1Response::from_output(vec![output])
+        .await
+        .with_execution_time(start.elapsed().as_millis() as u64);
+    Ok(response)
 }

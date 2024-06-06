@@ -121,9 +121,13 @@ pub trait OpenTelemetryProtocolHandler {
     ) -> Result<Output>;
 }
 
+/// LogHandler is responsible for handling log related requests.
+/// It should be able to insert logs and manage pipelines.
+/// The pipeline is a series of transformations that can be applied to logs.
+/// The pipeline is stored in the database and can be retrieved by name.
 #[async_trait]
 pub trait LogHandler {
-    async fn insert_log(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+    async fn insert_logs(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 
     async fn get_pipeline(
         &self,

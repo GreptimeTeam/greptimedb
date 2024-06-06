@@ -123,7 +123,7 @@ impl PipelineOperator {
             .context(PipelineTableNotFoundSnafu)?;
 
         info!(
-            "Created scripts table {}.",
+            "Created pipelines table {}.",
             table.table_info().full_table_name()
         );
 

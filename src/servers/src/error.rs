@@ -562,13 +562,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to insert log. msg: {}", msg))]
-    InsertLog {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to decode url"))]
     UrlDecode {
         #[snafu(source)]
@@ -678,7 +671,6 @@ impl ErrorExt for Error {
             | ParseJson { .. }
             | ToStructuredLog { .. }
             | UnsupportedContentType { .. }
-            | InsertLog { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
             RowWriter { source, .. }
