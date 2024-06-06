@@ -308,6 +308,7 @@ impl TypedPlan {
 #[cfg(test)]
 mod test {
     use datatypes::prelude::ConcreteDataType;
+    use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::expr::{GlobalId, ScalarExpr};
@@ -327,7 +328,7 @@ mod test {
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
-                .into_unnamed(),
+                .into_named(vec![Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
@@ -338,7 +339,7 @@ mod test {
                             ConcreteDataType::uint32_datatype(),
                             false,
                         )])
-                        .into_unnamed(),
+                        .into_named(vec![Some("number".to_string())]),
                     ),
                 ),
                 mfp: MapFilterProject::new(1)

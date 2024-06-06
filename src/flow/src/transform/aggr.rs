@@ -339,15 +339,32 @@ impl TypedPlan {
         // output type is group_exprs + aggr_exprs
         let output_type = {
             let mut output_types = Vec::new();
+            // give best effort to get column name
+            let mut output_names = Vec::new();
             // first append group_expr as key, then aggr_expr as value
             for expr in &group_exprs {
                 output_types.push(expr.typ.clone());
+                let col_name = match &expr.expr {
+                    ScalarExpr::CallUnary {
+                        func: UnaryFunc::TumbleWindowFloor { .. },
+                        ..
+                    } => Some("window_start".to_string()),
+                    ScalarExpr::CallUnary {
+                        func: UnaryFunc::TumbleWindowCeiling { .. },
+                        ..
+                    } => Some("window_end".to_string()),
+                    ScalarExpr::Column(col) => input.schema.get_name(*col).clone(),
+                    _ => None,
+                };
+                output_names.push(col_name)
             }
 
             for aggr in &aggr_exprs {
                 output_types.push(ColumnType::new_nullable(
                     aggr.func.signature().output.clone(),
                 ));
+                // TODO(discord9): find a clever way to name them?
+                output_names.push(None);
             }
             // TODO(discord9): try best to get time
             if group_exprs.is_empty() {
@@ -355,8 +372,9 @@ impl TypedPlan {
             } else {
                 RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
             }
-        }
-        .with_time_index(time_index);
+            .with_time_index(time_index)
+            .into_named(output_names)
+        };
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
@@ -394,13 +412,13 @@ impl TypedPlan {
         // FIX(discord9): deal with key first
         if post_mfp.is_identity() {
             Ok(TypedPlan {
-                schema: output_type.into_unnamed(),
+                schema: output_type,
                 plan,
             })
         } else {
             // make post_mfp map identical mapping of keys
             let input = TypedPlan {
-                schema: output_type.clone().into_unnamed(),
+                schema: output_type.clone(),
                 plan,
             };
             let key_arity = group_exprs.len();
@@ -418,9 +436,7 @@ impl TypedPlan {
                 .filter(f)?
                 .project(p)?;
             Ok(TypedPlan {
-                schema: output_type
-                    .apply_mfp(&post_mfp.clone().into_safe())?
-                    .into_unnamed(),
+                schema: output_type.apply_mfp(&post_mfp.clone().into_safe())?,
                 plan: Plan::Mfp {
                     input: Box::new(input),
                     mfp: post_mfp,
@@ -476,10 +492,6 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            // TODO(discord9): mfp indirectly ref to key columns
-            /*
-            .with_key(vec![1])
-            .with_time_index(Some(0)),*/
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -492,7 +504,10 @@ mod test {
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
                                     ColumnType::new(ConcreteDataType::datetime_datatype(), false),
                                 ])
-                                .into_unnamed(),
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -550,7 +565,13 @@ mod test {
                         ])
                         .with_key(vec![1, 2])
                         .with_time_index(Some(0))
-                        .into_unnamed(),
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            Some("number".to_string()),
+                            None,
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(5)
@@ -571,7 +592,14 @@ mod test {
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
             ])
-            .into_unnamed(),
+            .with_key(vec![0, 3])
+            .with_time_index(Some(2))
+            .into_named(vec![
+                Some("number".to_string()),
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
         };
         assert_eq!(flow_plan, expected);
     }
@@ -596,7 +624,13 @@ mod test {
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
             ])
-            .into_unnamed(),
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
             // TODO(discord9): mfp indirectly ref to key columns
             /*
             .with_key(vec![1])
@@ -613,7 +647,10 @@ mod test {
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
                                     ColumnType::new(ConcreteDataType::datetime_datatype(), false),
                                 ])
-                                .into_unnamed(),
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -663,7 +700,11 @@ mod test {
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))
-                        .into_unnamed(),
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -701,11 +742,13 @@ mod test {
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
             ])
-            .into_unnamed(),
-            // TODO(discord9): mfp indirectly ref to key columns
-            /*
-            .with_key(vec![1])
-            .with_time_index(Some(0)),*/
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -718,7 +761,10 @@ mod test {
                                     ColumnType::new(ConcreteDataType::uint32_datatype(), false),
                                     ColumnType::new(ConcreteDataType::datetime_datatype(), false),
                                 ])
-                                .into_unnamed(),
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -768,7 +814,11 @@ mod test {
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))
-                        .into_unnamed(),
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -823,7 +873,8 @@ mod test {
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number) -> u64
                 ColumnType::new(CDT::uint32_datatype(), false), // number
             ])
-            .into_unnamed(),
+            .with_key(vec![1])
+            .into_named(vec![None, Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -836,7 +887,7 @@ mod test {
                                     ConcreteDataType::uint32_datatype(),
                                     false,
                                 )])
-                                .into_unnamed(),
+                                .into_named(vec![Some("number".to_string())]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -867,7 +918,11 @@ mod test {
                             ColumnType::new(ConcreteDataType::int64_datatype(), true),   // count
                         ])
                         .with_key(vec![0])
-                        .into_unnamed(),
+                        .into_named(vec![
+                            Some("number".to_string()),
+                            None,
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -920,7 +975,7 @@ mod test {
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
-                .into_unnamed(),
+                .into_named(vec![None]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -933,7 +988,7 @@ mod test {
                                     ConcreteDataType::uint32_datatype(),
                                     false,
                                 )])
-                                .into_unnamed(),
+                                .into_named(vec![Some("number".to_string())]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -957,10 +1012,10 @@ mod test {
                     }
                     .with_types(
                         RelationType::new(vec![
-                            ColumnType::new(ConcreteDataType::uint64_datatype(), true),
-                            ColumnType::new(ConcreteDataType::int64_datatype(), true),
+                            ColumnType::new(ConcreteDataType::uint64_datatype(), true), // sum
+                            ColumnType::new(ConcreteDataType::int64_datatype(), true),  // count
                         ])
-                        .into_unnamed(),
+                        .into_named(vec![None, None]),
                     ),
                 ),
                 mfp: MapFilterProject::new(2)
@@ -1009,7 +1064,7 @@ mod test {
                                     ConcreteDataType::uint32_datatype(),
                                     false,
                                 )])
-                                .into_unnamed(),
+                                .into_named(vec![Some("number".to_string())]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -1059,7 +1114,8 @@ mod test {
                 ColumnType::new(CDT::uint64_datatype(), true), // col sum(number)
                 ColumnType::new(CDT::uint32_datatype(), false), // col number
             ])
-            .into_unnamed(),
+            .with_key(vec![1])
+            .into_named(vec![None, Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1072,7 +1128,7 @@ mod test {
                                     ConcreteDataType::uint32_datatype(),
                                     false,
                                 )])
-                                .into_unnamed(),
+                                .into_named(vec![Some("number".to_string())]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
@@ -1099,7 +1155,7 @@ mod test {
                             ColumnType::new(CDT::uint64_datatype(), true),  // col sum(number)
                         ])
                         .with_key(vec![0])
-                        .into_unnamed(),
+                        .into_named(vec![Some("number".to_string()), None]),
                     ),
                 ),
                 mfp: MapFilterProject::new(2)
@@ -1146,7 +1202,7 @@ mod test {
                                     ConcreteDataType::uint32_datatype(),
                                     false,
                                 )])
-                                .into_unnamed(),
+                                .into_named(vec![Some("number".to_string())]),
                             ),
                         ),
                         key_val_plan: KeyValPlan {
