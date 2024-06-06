@@ -38,6 +38,9 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
             AlterTableOperation::RenameTable { new_table_name } => {
                 Self::format_rename(&input.table_name, new_table_name)
             }
+            AlterTableOperation::ModifyDataType { column } => {
+                Self::format_modify_data_type(&input.table_name, column)
+            }
         })
     }
 }
@@ -69,6 +72,13 @@ impl AlterTableExprTranslator {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
+        )
+    }
+
+    fn format_modify_data_type(name: impl Display, column: &Column) -> String {
+        format!(
+            "ALTER TABLE {name} MODIFY COLUMN {};",
+            Self::format_column(column)
         )
     }
 
@@ -155,5 +165,19 @@ mod tests {
 
         let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
         assert_eq!("ALTER TABLE test DROP COLUMN foo;", output);
+
+        let alter_expr = AlterTableExpr {
+            table_name: "test".into(),
+            alter_options: AlterTableOperation::ModifyDataType {
+                column: Column {
+                    name: "host".into(),
+                    column_type: ConcreteDataType::string_datatype(),
+                    options: vec![],
+                },
+            },
+        };
+
+        let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
+        assert_eq!("ALTER TABLE test MODIFY COLUMN host STRING;", output);
     }
 }

@@ -53,8 +53,8 @@ object-store.workspace = true
 operator.workspace = true
 prost.workspace = true
 query.workspace = true
-rstest = "0.17"
-rstest_reuse = "0.5"
+rstest.workspace = true
+rstest_reuse.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true

@@ -153,6 +153,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "multipart",
 ] }
 rskafka = "0.5"
+rstest = "0.21"
+rstest_reuse = "0.7"
 rust_decimal = "1.33"
 schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
@@ -250,9 +252,12 @@ incremental = false
 
 [profile.ci]
 inherits = "dev"
-debug = false
 strip = true
 
 [profile.dev.package.sqlness-runner]
+debug = false
+strip = true
+
+[profile.dev.package.tests-fuzz]
 debug = false
 strip = true

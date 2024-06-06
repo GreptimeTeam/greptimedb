@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, Mode};
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
@@ -38,7 +38,7 @@ use crate::instance::FrontendInstance;
 
 pub struct Services<T, U>
 where
-    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     opts: T,
@@ -50,7 +50,7 @@ where
 
 impl<T, U> Services<T, U>
 where
-    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     pub fn new(opts: T, instance: Arc<U>, plugins: Plugins) -> Self {
@@ -139,11 +139,15 @@ where
         };
 
         let user_provider = self.plugins.get::<UserProviderRef>();
+        let runtime = match opts.mode {
+            Mode::Standalone => Some(builder.runtime().clone()),
+            _ => None,
+        };
 
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
-            builder.runtime().clone(),
+            runtime,
         );
 
         let grpc_server = builder

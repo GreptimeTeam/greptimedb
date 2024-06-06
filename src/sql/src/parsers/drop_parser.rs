@@ -68,22 +68,29 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.next_token();
 
         let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
-        let raw_table_ident =
-            self.parse_object_name()
-                .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
-        let table_ident = Self::canonicalize_object_name(raw_table_ident);
-        ensure!(
-            !table_ident.0.is_empty(),
-            InvalidTableNameSnafu {
-                name: table_ident.to_string()
+        let mut table_names = Vec::with_capacity(1);
+        loop {
+            let raw_table_ident =
+                self.parse_object_name()
+                    .with_context(|_| error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: "a table name",
+                        actual: self.peek_token_as_string(),
+                    })?;
+            let table_ident = Self::canonicalize_object_name(raw_table_ident);
+            ensure!(
+                !table_ident.0.is_empty(),
+                InvalidTableNameSnafu {
+                    name: table_ident.to_string()
+                }
+            );
+            table_names.push(table_ident);
+            if !self.parser.consume_token(&Token::Comma) {
+                break;
             }
-        );
+        }
 
-        Ok(Statement::DropTable(DropTable::new(table_ident, if_exists)))
+        Ok(Statement::DropTable(DropTable::new(table_names, if_exists)))
     }
 
     fn parse_drop_database(&mut self) -> Result<Statement> {
@@ -122,7 +129,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(ObjectName(vec![Ident::new("foo")]), false))
+            Statement::DropTable(DropTable::new(
+                vec![ObjectName(vec![Ident::new("foo")])],
+                false
+            ))
         );
 
         let sql = "DROP TABLE IF EXISTS foo";
@@ -131,7 +141,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(ObjectName(vec![Ident::new("foo")]), true))
+            Statement::DropTable(DropTable::new(
+                vec![ObjectName(vec![Ident::new("foo")])],
+                true
+            ))
         );
 
         let sql = "DROP TABLE my_schema.foo";
@@ -141,7 +154,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                vec![ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")])],
                 false
             ))
         );
@@ -153,11 +166,11 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                ObjectName(vec![
+                vec![ObjectName(vec![
                     Ident::new("my_catalog"),
                     Ident::new("my_schema"),
                     Ident::new("foo")
-                ]),
+                ])],
                 false
             ))
         )

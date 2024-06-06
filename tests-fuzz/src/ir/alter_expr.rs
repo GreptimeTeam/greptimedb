@@ -35,4 +35,6 @@ pub enum AlterTableOperation {
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
     RenameTable { new_table_name: Ident },
+    /// `MODIFY COLUMN <column_name> <column_type>`
+    ModifyDataType { column: Column },
 }

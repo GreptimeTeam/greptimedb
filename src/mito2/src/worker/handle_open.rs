@@ -29,6 +29,7 @@ use crate::error::{
 use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
+use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
@@ -66,6 +67,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionOpenRequest,
+        wal_entry_receiver: Option<WalEntryReceiver>,
         sender: OptionOutputTx,
     ) {
         if self.regions.is_region_exists(region_id) {
@@ -95,6 +97,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
+        .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
         .parse_options(request.options)
         {
             Ok(opener) => opener,

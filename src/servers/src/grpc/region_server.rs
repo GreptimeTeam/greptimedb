@@ -21,12 +21,12 @@ use common_error::ext::ErrorExt;
 use common_runtime::Runtime;
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, warn};
 use snafu::{OptionExt, ResultExt};
-use tonic::{Request, Response};
+use tonic::{Request, Response, Status};
 
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result};
-use crate::grpc::TonicResult;
+use crate::grpc::{cancellation, TonicResult};
 
 #[async_trait]
 pub trait RegionServerHandler: Send + Sync {
@@ -94,8 +94,21 @@ impl RegionServer for RegionServerRequestHandler {
         &self,
         request: Request<RegionRequest>,
     ) -> TonicResult<Response<RegionResponse>> {
-        let request = request.into_inner();
-        let response = self.handle(request).await?;
-        Ok(Response::new(response))
+        let remote_addr = request.remote_addr();
+        let self_cloned = self.clone();
+        let request_future = async move {
+            let request = request.into_inner();
+            let response = self_cloned.handle(request).await?;
+
+            Ok(Response::new(response))
+        };
+
+        let cancellation_future = async move {
+            warn!("Region request from {:?} cancelled by client", remote_addr);
+            // If this future is executed it means the request future was dropped,
+            // so it doesn't actually matter what is returned here
+            Err(Status::cancelled("Region request cancelled by client"))
+        };
+        cancellation::with_cancellation_handler(request_future, cancellation_future).await
     }
 }

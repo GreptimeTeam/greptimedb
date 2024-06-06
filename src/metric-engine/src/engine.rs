@@ -145,19 +145,7 @@ impl RegionEngine for MetricEngine {
                     .alter_region(region_id, alter, &mut extension_return_value)
                     .await
             }
-            RegionRequest::Flush(_) => {
-                if self.inner.is_physical_region(region_id) {
-                    self.inner
-                        .mito
-                        .handle_request(region_id, request)
-                        .await
-                        .context(error::MitoFlushOperationSnafu)
-                        .map(|response| response.affected_rows)
-                } else {
-                    UnsupportedRegionRequestSnafu { request }.fail()
-                }
-            }
-            RegionRequest::Compact(_) => {
+            RegionRequest::Flush(_) | RegionRequest::Compact(_) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito

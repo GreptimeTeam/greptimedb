@@ -26,8 +26,3 @@ pub mod test_util;
 pub mod standalone;
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-// allowed because https://docs.rs/rstest_reuse/0.5.0/rstest_reuse/#use-rstest_reuse-at-the-top-of-your-crate
-#[allow(clippy::single_component_path_imports)]
-use rstest_reuse;

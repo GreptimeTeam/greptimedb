@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Display, Formatter};
+
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
 use sql::statements::value_to_sql_value;
@@ -33,6 +35,16 @@ pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
+}
+
+impl Display for Operand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Column(v) => write!(f, "{v}"),
+            Self::Value(v) => write!(f, "{v}"),
+            Self::Expr(v) => write!(f, "{v}"),
+        }
+    }
 }
 
 /// A restricted set of [Operator](datafusion_expr::Operator) that can be used in
@@ -80,6 +92,20 @@ impl RestrictedOp {
         }
     }
 }
+impl Display for RestrictedOp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Eq => write!(f, "="),
+            Self::NotEq => write!(f, "<>"),
+            Self::Lt => write!(f, "<"),
+            Self::LtEq => write!(f, "<="),
+            Self::Gt => write!(f, ">"),
+            Self::GtEq => write!(f, ">="),
+            Self::And => write!(f, "AND"),
+            Self::Or => write!(f, "OR"),
+        }
+    }
+}
 
 impl PartitionExpr {
     pub fn new(lhs: Operand, op: RestrictedOp, rhs: Operand) -> Self {
@@ -112,6 +138,86 @@ impl PartitionExpr {
             left: Box::new(lhs),
             op: self.op.to_parser_op(),
             right: Box::new(rhs),
+        }
+    }
+}
+
+impl Display for PartitionExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {} {}", self.lhs, self.op, self.rhs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_partition_expr() {
+        let cases = [
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::UInt32(10)),
+                "a = 10",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::NotEq,
+                Operand::Value(Value::UInt32(10)),
+                "a <> 10",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::Lt,
+                Operand::Value(Value::UInt32(10)),
+                "a < 10",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::LtEq,
+                Operand::Value(Value::UInt32(10)),
+                "a <= 10",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::Gt,
+                Operand::Value(Value::UInt32(10)),
+                "a > 10",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::GtEq,
+                Operand::Value(Value::UInt32(10)),
+                "a >= 10",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::And,
+                Operand::Column("b".to_string()),
+                "a AND b",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::Or,
+                Operand::Column("b".to_string()),
+                "a OR b",
+            ),
+            (
+                Operand::Column("a".to_string()),
+                RestrictedOp::Or,
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("c".to_string()),
+                    RestrictedOp::And,
+                    Operand::Column("d".to_string()),
+                )),
+                "a OR c AND d",
+            ),
+        ];
+
+        for case in cases {
+            let expr = PartitionExpr::new(case.0, case.1.clone(), case.2);
+            assert_eq!(case.3, expr.to_string());
         }
     }
 }

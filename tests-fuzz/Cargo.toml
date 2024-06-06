@@ -45,6 +45,7 @@ sqlx = { version = "0.6", features = [
     "postgres",
     "chrono",
 ] }
+strum.workspace = true
 tinytemplate = "1.2"
 tokio = { workspace = true }
 
