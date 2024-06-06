@@ -713,7 +713,11 @@ impl HttpServer {
     fn route_log<S>(log_handler: LogHandlerRef) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
-            .route("/pipelines/:pipeline_name", routing::post(event::add_pipeline))
+            .route(
+                "/pipelines/:pipeline_name",
+                routing::post(event::add_pipeline),
+            )
+            .route("/pipelines/delete", routing::post(event::delete_pipeline))
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))

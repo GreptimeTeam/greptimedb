@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -24,10 +23,11 @@ use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
 use common_time::util;
+use dashmap::DashMap;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
-use datafusion_common::TableReference;
-use datafusion_expr::LogicalPlanBuilder;
+use datafusion_common::{TableReference, ToDFSchema};
+use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlanBuilder};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{StringVector, Vector};
 use operator::insert::InserterRef;
@@ -64,7 +64,7 @@ pub struct PipelineTable {
     statement_executor: StatementExecutorRef,
     table: TableRef,
     query_engine: QueryEngineRef,
-    pipelines: RwLock<HashMap<String, Pipeline<GreptimeTransformer>>>,
+    pipelines: DashMap<String, Arc<Pipeline<GreptimeTransformer>>>,
 }
 
 impl PipelineTable {
@@ -80,7 +80,7 @@ impl PipelineTable {
             statement_executor,
             table,
             query_engine,
-            pipelines: RwLock::new(HashMap::default()),
+            pipelines: DashMap::new(),
         }
     }
 
@@ -194,20 +194,20 @@ impl PipelineTable {
             .map_err(|e| CompilePipelineSnafu { reason: e }.build())
     }
 
+    #[inline]
     fn generate_pipeline_cache_key(schema: &str, name: &str) -> String {
         format!("{}.{}", schema, name)
     }
 
+    #[inline]
     fn get_compiled_pipeline_from_cache(
         &self,
         schema: &str,
         name: &str,
-    ) -> Option<Pipeline<GreptimeTransformer>> {
+    ) -> Option<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipelines
-            .read()
-            .unwrap()
             .get(&Self::generate_pipeline_cache_key(schema, name))
-            .cloned()
+            .map(|x| x.value().clone())
     }
 
     /// Insert a pipeline into the pipeline table.
@@ -269,14 +269,19 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         if let Some(pipeline) = self.get_compiled_pipeline_from_cache(schema, name) {
             return Ok(pipeline);
         }
 
-        let pipeline = self.find_pipeline_by_name(schema, name).await?;
+        let pipeline = self
+            .find_pipeline_by_name(schema, name)
+            .await?
+            .context(PipelineNotFoundSnafu { name })?;
         let compiled_pipeline = Self::compile_pipeline(&pipeline)?;
-        self.pipelines.write().unwrap().insert(
+        let compiled_pipeline = Arc::new(compiled_pipeline);
+
+        self.pipelines.insert(
             Self::generate_pipeline_cache_key(schema, name),
             compiled_pipeline.clone(),
         );
@@ -291,21 +296,85 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         let compiled_pipeline = Self::compile_pipeline(pipeline)?;
+        let compiled_pipeline = Arc::new(compiled_pipeline);
 
         self.insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
             .await?;
 
-        self.pipelines.write().unwrap().insert(
+        self.pipelines.insert(
             Self::generate_pipeline_cache_key(schema, name),
             compiled_pipeline.clone(),
         );
-
         Ok(compiled_pipeline)
     }
 
-    async fn find_pipeline_by_name(&self, schema: &str, name: &str) -> Result<String> {
+    pub async fn delete_pipeline_by_name(&self, schema: &str, name: &str) -> Result<()> {
+        let pipeline_key = Self::generate_pipeline_cache_key(schema, name);
+
+        // 1. check pipeline exist in catalog
+        let pipeline = self.find_pipeline_by_name(schema, name).await?;
+        if pipeline.is_none() {
+            self.pipelines.remove(&pipeline_key);
+            return Ok(());
+        }
+
+        // 2. do delete
+        let table_info = self.table.table_info();
+        let table_name = TableReference::full(
+            table_info.catalog_name.clone(),
+            table_info.schema_name.clone(),
+            table_info.name.clone(),
+        );
+        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        let df_schema = Arc::new(
+            table_info
+                .meta
+                .schema
+                .arrow_schema()
+                .clone()
+                .to_dfschema()
+                .context(BuildDfLogicalPlanSnafu)?,
+        );
+
+        // create scan plan
+        let logical_plan = LogicalPlanBuilder::scan(table_name.clone(), table_source, None)
+            .context(BuildDfLogicalPlanSnafu)?
+            .filter(and(
+                col("schema").eq(lit(schema)),
+                col("name").eq(lit(name)),
+            ))
+            .context(BuildDfLogicalPlanSnafu)?
+            .build()
+            .context(BuildDfLogicalPlanSnafu)?;
+
+        // create dml stmt
+        let stmt = DmlStatement::new(
+            table_name,
+            df_schema,
+            datafusion_expr::WriteOp::Delete,
+            Arc::new(logical_plan),
+        );
+
+        let plan = LogicalPlan::DfPlan(DfLogicalPlan::Dml(stmt));
+
+        let output = self
+            .query_engine
+            .execute(plan, Self::query_ctx(&table_info))
+            .await
+            .context(ExecuteInternalStatementSnafu)?;
+
+        // cloud be deleting multiple rows
+        info!("delete pipeline: {:?}, output: {:?}", name, output);
+        self.pipelines.remove(&pipeline_key);
+
+        Ok(())
+    }
+
+    async fn find_pipeline_by_name(&self, schema: &str, name: &str) -> Result<Option<String>> {
         let table_info = self.table.table_info();
 
         let table_name = TableReference::full(
@@ -327,9 +396,10 @@ impl PipelineTable {
             .project(vec![col(PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME)])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME),
-                lit("DESC"),
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, false)
             ])
+            .context(BuildDfLogicalPlanSnafu)?
+            .limit(0, Some(1))
             .context(BuildDfLogicalPlanSnafu)?
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
@@ -349,8 +419,11 @@ impl PipelineTable {
             .await
             .context(CollectRecordsSnafu)?;
 
-        ensure!(!records.is_empty(), PipelineNotFoundSnafu { name });
-        // assume schema + name is unique for now
+        if records.is_empty() {
+            return Ok(None);
+        }
+
+        // limit 1
         ensure!(
             records.len() == 1 && records[0].num_columns() == 1,
             PipelineNotFoundSnafu { name }
@@ -370,6 +443,6 @@ impl PipelineTable {
         ensure!(pipeline_column.len() == 1, PipelineNotFoundSnafu { name });
 
         // Safety: asserted above
-        Ok(pipeline_column.get_data(0).unwrap().to_string())
+        Ok(Some(pipeline_column.get_data(0).unwrap().to_string()))
     }
 }

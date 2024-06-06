@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -45,7 +47,7 @@ impl LogHandler for Instance {
         &self,
         name: &str,
         query_ctx: QueryContextRef,
-    ) -> ServerResult<Pipeline<GreptimeTransformer>> {
+    ) -> ServerResult<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipeline_operator
             .get_pipeline(query_ctx, name)
             .await
@@ -65,9 +67,11 @@ impl LogHandler for Instance {
             .context(PipelineSnafu)
     }
 
-    async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {
-        // TODO(qtang): impl delete
-        todo!("delete_pipeline")
+    async fn delete_pipeline(&self, name: &str, ctx: QueryContextRef) -> ServerResult<()> {
+        self.pipeline_operator
+            .delete_pipeline(name, ctx)
+            .await
+            .context(PipelineSnafu)
     }
 }
 

@@ -152,10 +152,17 @@ impl PipelineOperator {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         self.get_pipeline_table_from_cache(ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
             .insert_and_compile(ctx.current_schema(), name, content_type, pipeline)
+            .await
+    }
+
+    async fn delete_pipeline_by_name(&self, name: &str, ctx: QueryContextRef) -> Result<()> {
+        self.get_pipeline_table_from_cache(ctx.current_catalog())
+            .context(PipelineTableNotFoundSnafu)?
+            .delete_pipeline_by_name(ctx.current_schema(), name)
             .await
     }
 }
@@ -182,7 +189,7 @@ impl PipelineOperator {
         &self,
         query_ctx: QueryContextRef,
         name: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
@@ -205,5 +212,14 @@ impl PipelineOperator {
         self.insert_and_compile(query_ctx, name, content_type, pipeline)
             .await
             .map(|_| ())
+    }
+
+    /// Delete a pipeline by name from pipeline table.
+    pub async fn delete_pipeline(&self, name: &str, query_ctx: QueryContextRef) -> Result<()> {
+        // trigger load table
+        self.create_pipeline_table_if_not_exists(query_ctx.clone())
+            .await?;
+
+        self.delete_pipeline_by_name(name, query_ctx).await
     }
 }

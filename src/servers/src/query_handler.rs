@@ -133,7 +133,7 @@ pub trait LogHandler {
         &self,
         name: &str,
         query_ctx: QueryContextRef,
-    ) -> Result<Pipeline<GreptimeTransformer>>;
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>>;
 
     async fn insert_pipeline(
         &self,

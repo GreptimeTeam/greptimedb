@@ -124,6 +124,26 @@ pub async fn add_pipeline(
     })
 }
 
+#[axum_macros::debug_handler]
+pub async fn delete_pipeline(
+    State(handler): State<LogHandlerRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+) -> Result<String> {
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+
+    handler
+        .delete_pipeline(&pipeline_name, query_ctx)
+        .await
+        .map(|_| "ok".to_string())
+        .map_err(|e| {
+            error!(e; "failed to delete pipeline");
+            e
+        })
+}
+
 /// Transform NDJSON array into a single array
 fn transform_ndjson_array_factory(
     ignore_error: bool,
