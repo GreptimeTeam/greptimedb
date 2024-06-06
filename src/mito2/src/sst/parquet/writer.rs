@@ -16,7 +16,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_time::Timestamp;
@@ -45,11 +46,14 @@ pub struct ParquetWriter<W, F> {
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
     indexer: Indexer,
-    bytes_written: Arc<Mutex<usize>>,
+    bytes_written: Arc<AtomicUsize>,
 }
 
-impl<W: AsyncWrite + Send + Unpin, Fut: Future<Output = Result<W>>, F: FnMut() -> Fut>
-    ParquetWriter<W, F>
+impl<W, Fut, F> ParquetWriter<W, F>
+where
+    W: AsyncWrite + Send + Unpin,
+    Fut: Future<Output = Result<W>>,
+    F: FnMut() -> Fut,
 {
     /// Creates a new parquet SST writer.
     pub fn new(factory: F, metadata: RegionMetadataRef, indexer: Indexer) -> ParquetWriter<W, F> {
@@ -58,7 +62,7 @@ impl<W: AsyncWrite + Send + Unpin, Fut: Future<Output = Result<W>>, F: FnMut() -
             writer_factory: factory,
             metadata,
             indexer,
-            bytes_written: Arc::new(Mutex::new(0)),
+            bytes_written: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -106,7 +110,7 @@ impl<W: AsyncWrite + Send + Unpin, Fut: Future<Output = Result<W>>, F: FnMut() -
         arrow_writer.flush().await.context(WriteParquetSnafu)?;
 
         let file_meta = arrow_writer.close().await.context(WriteParquetSnafu)?;
-        let file_size = *self.bytes_written.lock().unwrap() as u64;
+        let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
 
         // Safety: num rows > 0 so we must have min/max.
         let time_range = stats.time_range.unwrap();
@@ -229,11 +233,11 @@ impl SourceStats {
 /// get total bytes written after close.
 struct SizeAwareWriter<W> {
     inner: W,
-    size: Arc<Mutex<usize>>,
+    size: Arc<AtomicUsize>,
 }
 
 impl<W> SizeAwareWriter<W> {
-    fn new(inner: W, size: Arc<Mutex<usize>>) -> Self {
+    fn new(inner: W, size: Arc<AtomicUsize>) -> Self {
         Self {
             inner,
             size: size.clone(),
@@ -254,8 +258,7 @@ where
 
         match Pin::new(&mut this.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(bytes_written)) => {
-                let mut size = this.size.lock().unwrap();
-                *size += bytes_written;
+                this.size.fetch_add(bytes_written, Ordering::Relaxed);
                 Poll::Ready(Ok(bytes_written))
             }
             other => other,
