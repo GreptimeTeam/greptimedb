@@ -30,6 +30,7 @@ use snafu::ResultExt;
 use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
+use tokio::sync::Semaphore;
 
 use crate::error::Result;
 use crate::memtable::MemtableRef;
@@ -50,19 +51,22 @@ pub struct SeqScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Semaphore to control scan parallelism of files.
+    /// Streams created by the scanner share the same semaphore.
+    semaphore: Arc<Semaphore>,
 }
 
 impl SeqScan {
     /// Creates a new [SeqScan].
     pub(crate) fn new(input: ScanInput) -> Self {
-        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(
-            input.parallelism.parallelism.max(1),
-        ));
+        let parallelism = input.parallelism.parallelism.max(1);
+        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(parallelism));
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
             properties,
             stream_ctx,
+            semaphore: Arc::new(Semaphore::new(parallelism)),
         }
     }
 
@@ -77,7 +81,9 @@ impl SeqScan {
             prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
             ..Default::default()
         };
-        let maybe_reader = Self::build_merge_reader(&self.stream_ctx, None, &mut metrics).await?;
+        let maybe_reader =
+            Self::build_merge_reader(&self.stream_ctx, None, self.semaphore.clone(), &mut metrics)
+                .await?;
         // Safety: `build_merge_reader()` always returns a reader if partition is None.
         let reader = maybe_reader.unwrap();
         Ok(Box::new(reader))
@@ -141,10 +147,11 @@ impl SeqScan {
     async fn build_merge_reader(
         stream_ctx: &StreamContext,
         partition: Option<usize>,
+        semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
     ) -> Result<Option<MergeReader>> {
         let mut parts = stream_ctx.parts.lock().await;
-        maybe_init_parts(&mut parts, &stream_ctx.input, metrics).await?;
+        maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
 
         let input = &stream_ctx.input;
         let mut sources = Vec::new();
@@ -175,7 +182,9 @@ impl SeqScan {
             // We have more sources to read and we allow parallel scan.
             // Read sources in parallel. Now we might spawn tasks more than `parallelism` because
             // each partition has separated semaphore.
-            sources = stream_ctx.input.create_parallel_sources(sources)?;
+            sources = stream_ctx
+                .input
+                .create_parallel_sources(sources, semaphore.clone())?;
         }
 
         let dedup = !stream_ctx.input.append_mode;
@@ -194,8 +203,9 @@ impl SeqScan {
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
+        let semaphore = self.semaphore.clone();
         let stream = try_stream! {
-            let maybe_reader = Self::build_merge_reader(&stream_ctx, partition, &mut metrics)
+            let maybe_reader = Self::build_merge_reader(&stream_ctx, partition, semaphore, &mut metrics)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
@@ -280,8 +290,8 @@ impl SeqScan {
 
 /// Initializes parts if they are not built yet.
 async fn maybe_init_parts(
-    part_list: &mut ScanPartList,
     input: &ScanInput,
+    part_list: &mut ScanPartList,
     metrics: &mut ScannerMetrics,
 ) -> Result<()> {
     if part_list.is_none() {

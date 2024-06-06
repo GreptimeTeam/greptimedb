@@ -499,9 +499,12 @@ impl ScanInput {
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
-    pub(crate) fn create_parallel_sources(&self, sources: Vec<Source>) -> Result<Vec<Source>> {
+    pub(crate) fn create_parallel_sources(
+        &self,
+        sources: Vec<Source>,
+        semaphore: Arc<Semaphore>,
+    ) -> Result<Vec<Source>> {
         debug_assert!(self.parallelism.parallelism > 1);
-        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
         // Spawn a task for each source.
         let sources = sources
             .into_iter()
