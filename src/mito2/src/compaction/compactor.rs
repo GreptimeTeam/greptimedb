@@ -199,6 +199,32 @@ pub trait Compactor: Send + Sync + 'static {
     async fn merge_ssts(
         &self,
         compaction_region: &CompactionRegion,
+        picker_output: PickerOutput,
+    ) -> Result<MergeOutput>;
+
+    /// Update the manifest after merging SST files.
+    async fn update_manifest(
+        &self,
+        compaction_region: &CompactionRegion,
+        merge_output: MergeOutput,
+    ) -> Result<()>;
+
+    /// Execute compaction for a region.
+    async fn compact(
+        &self,
+        compaction_region: &CompactionRegion,
+        compact_request_options: compact_request::Options,
+    ) -> Result<()>;
+}
+
+/// DefaultCompactor is the default implementation of Compactor.
+pub struct DefaultCompactor;
+
+#[async_trait::async_trait]
+impl Compactor for DefaultCompactor {
+    async fn merge_ssts(
+        &self,
+        compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
         let current_version = compaction_region.version_control.current().version;
@@ -324,7 +350,6 @@ pub trait Compactor: Send + Sync + 'static {
         })
     }
 
-    /// Update the manifest after merging SST files.
     async fn update_manifest(
         &self,
         compaction_region: &CompactionRegion,
@@ -372,7 +397,6 @@ pub trait Compactor: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Execute compaction for a region.
     async fn compact(
         &self,
         compaction_region: &CompactionRegion,
@@ -407,9 +431,3 @@ pub trait Compactor: Send + Sync + 'static {
         self.update_manifest(compaction_region, merge_output).await
     }
 }
-
-/// DefaultCompactor is the default implementation of Compactor.
-pub struct DefaultCompactor;
-
-#[async_trait::async_trait]
-impl Compactor for DefaultCompactor {}
