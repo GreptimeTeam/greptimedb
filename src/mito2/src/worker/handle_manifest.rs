@@ -68,9 +68,10 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                 }),
             };
+            // We don't set state back as the worker loop is already exited.
             if let Err(res) = request_sender.send(notify).await {
                 warn!(
-                    "Failed to send result back to the worker, region_id: {}, res: {:?}",
+                    "Failed to send region edit result back to the worker, region_id: {}, res: {:?}",
                     region_id, res
                 );
             }
@@ -78,13 +79,13 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Handles region edit result.
-    pub(crate) fn handle_region_edit_result(&self, request: RegionEditResult) {
-        let region = match self.regions.get_region(request.region_id) {
+    pub(crate) fn handle_region_edit_result(&self, edit_result: RegionEditResult) {
+        let region = match self.regions.get_region(edit_result.region_id) {
             Some(region) => region,
             None => {
-                let _ = request.sender.send(
+                let _ = edit_result.sender.send(
                     RegionNotFoundSnafu {
-                        region_id: request.region_id,
+                        region_id: edit_result.region_id,
                     }
                     .fail(),
                 );
@@ -92,22 +93,17 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
-        if request.result.is_ok() {
+        if edit_result.result.is_ok() {
             // Applies the edit to the region.
             region
                 .version_control
-                .apply_edit(request.edit, &[], region.file_purger.clone());
+                .apply_edit(edit_result.edit, &[], region.file_purger.clone());
         }
 
         // Sets the region as writable.
         region.switch_state_to_writable(RegionState::Editing);
 
-        if request.sender.send(request.result).is_err() {
-            warn!(
-                "Failed to send ok back to the worker, region_id: {}",
-                request.region_id
-            );
-        }
+        let _ = edit_result.sender.send(edit_result.result);
     }
 
     /// Writes truncate action to the manifest and then applies it to the region in background.
@@ -178,6 +174,7 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
+        let request_sender = self.sender.clone();
         // Now the region is in altering state.
         common_runtime::spawn_bg(async move {
             let new_meta = change.metadata.clone();
@@ -185,27 +182,59 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = region
                 .manifest_ctx
-                .update_manifest(RegionState::Altering, action_list, || {
-                    // Apply the metadata to region's version.
-                    region
-                        .version_control
-                        .alter_schema(new_meta, &region.memtable_builder);
-                })
+                .update_manifest(RegionState::Altering, action_list, || {})
                 .await;
+            let notify = WorkerRequest::Background {
+                region_id: region.region_id,
+                notify: BackgroundNotify::RegionChange(RegionChangeResult {
+                    region_id: region.region_id,
+                    sender,
+                    result,
+                    new_meta,
+                }),
+            };
 
-            // Sets the region as writable.
-            region.switch_state_to_writable(RegionState::Altering);
-
-            if result.is_ok() {
-                info!(
-                    "Region {} is altered, schema version is {}",
-                    region.region_id,
-                    region.metadata().schema_version
+            if let Err(res) = request_sender.send(notify).await {
+                warn!(
+                    "Failed to send region change result back to the worker, region_id: {}, res: {:?}",
+                    region.region_id, res
                 );
             }
-
-            sender.send(result.map(|_| 0));
         });
+    }
+
+    /// Handles region change result.
+    pub(crate) fn handle_manifest_region_change_result(&self, change_result: RegionChangeResult) {
+        let region = match self.regions.get_region(change_result.region_id) {
+            Some(region) => region,
+            None => {
+                let _ = change_result.sender.send(
+                    RegionNotFoundSnafu {
+                        region_id: change_result.region_id,
+                    }
+                    .fail(),
+                );
+                return;
+            }
+        };
+
+        if change_result.result.is_ok() {
+            // Apply the metadata to region's version.
+            region
+                .version_control
+                .alter_schema(change_result.new_meta, &region.memtable_builder);
+
+            info!(
+                "Region {} is altered, schema version is {}",
+                region.region_id,
+                region.metadata().schema_version
+            );
+        }
+
+        // Sets the region as writable.
+        region.switch_state_to_writable(RegionState::Altering);
+
+        change_result.sender.send(change_result.result.map(|_| 0));
     }
 }
 
