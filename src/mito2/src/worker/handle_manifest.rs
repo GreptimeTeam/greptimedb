@@ -21,12 +21,15 @@ use snafu::ensure;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot::Sender;
 
-use crate::error::{InvalidRequestSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
 use crate::region::{MitoRegionRef, RegionState};
-use crate::request::{BackgroundNotify, OptionOutputTx, TruncateResult, WorkerRequest};
+use crate::request::{
+    BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditResult, TruncateResult,
+    WorkerRequest,
+};
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -51,22 +54,60 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
+        let request_sender = self.sender.clone();
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_bg(async move {
-            let result = edit_region(&region, edit).await;
-
-            if let Err(res) = sender.send(result) {
+            let result = edit_region(&region, edit.clone()).await;
+            let notify = WorkerRequest::Background {
+                region_id,
+                notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                    region_id,
+                    sender,
+                    edit,
+                    result,
+                }),
+            };
+            if let Err(res) = request_sender.send(notify).await {
                 warn!(
                     "Failed to send result back to the worker, region_id: {}, res: {:?}",
                     region_id, res
                 );
             }
-
-            // Sets the region as writable. For simplicity, we don't send the result
-            // back to the worker.
-            region.switch_state_to_writable(RegionState::Editing);
         });
+    }
+
+    /// Handles region edit result.
+    pub(crate) fn handle_region_edit_result(&self, request: RegionEditResult) {
+        let region = match self.regions.get_region(request.region_id) {
+            Some(region) => region,
+            None => {
+                let _ = request.sender.send(
+                    RegionNotFoundSnafu {
+                        region_id: request.region_id,
+                    }
+                    .fail(),
+                );
+                return;
+            }
+        };
+
+        if request.result.is_ok() {
+            // Applies the edit to the region.
+            region
+                .version_control
+                .apply_edit(request.edit, &[], region.file_purger.clone());
+        }
+
+        // Sets the region as writable.
+        region.switch_state_to_writable(RegionState::Editing);
+
+        if request.sender.send(request.result).is_err() {
+            warn!(
+                "Failed to send ok back to the worker, region_id: {}",
+                request.region_id
+            );
+        }
     }
 
     /// Writes truncate action to the manifest and then applies it to the region in background.
@@ -187,14 +228,9 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
 
     info!("Applying {edit:?} to region {}", region_id);
 
-    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     region
         .manifest_ctx
-        .update_manifest(RegionState::Editing, action_list, || {
-            // Applies the edit to the region.
-            region
-                .version_control
-                .apply_edit(edit, &[], region.file_purger.clone());
-        })
+        .update_manifest(RegionState::Editing, action_list, || {})
         .await
 }

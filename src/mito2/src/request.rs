@@ -15,6 +15,7 @@
 //! Worker requests.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,7 +29,7 @@ use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
     AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
@@ -635,6 +636,10 @@ pub(crate) enum BackgroundNotify {
     CompactionFailed(CompactionFailed),
     /// Truncate result.
     Truncate(TruncateResult),
+    /// Region change result.
+    RegionChange(RegionChangeResult),
+    /// Region edit result.
+    RegionEdit(RegionEditResult),
 }
 
 /// Notifies a flush job is finished.
@@ -733,6 +738,32 @@ pub(crate) struct TruncateResult {
     pub(crate) truncated_entry_id: EntryId,
     /// Truncated sequence.
     pub(crate) truncated_sequence: SequenceNumber,
+}
+
+/// Notifies the region the result of writing region change action.
+#[derive(Debug)]
+pub(crate) struct RegionChangeResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// The new region metadata to apply.
+    pub(crate) new_meta: RegionMetadataRef,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Result from the manifest manager.
+    pub(crate) result: Result<()>,
+}
+
+/// Notifies the regin the result of editing region.
+#[derive(Debug)]
+pub(crate) struct RegionEditResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: Sender<Result<()>>,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
+    /// Result from the manifest manager.
+    pub(crate) result: Result<()>,
 }
 
 #[cfg(test)]
