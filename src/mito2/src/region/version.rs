@@ -81,7 +81,6 @@ impl VersionControl {
     pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
 
-        // Safety: Immutable memtable is None.
         let Some(new_memtables) = version.memtables.freeze_mutable(&version.metadata)? else {
             return Ok(());
         };
