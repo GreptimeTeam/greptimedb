@@ -239,6 +239,44 @@ impl StatementExecutor {
                 self.show_create_table(table_name, table_ref, query_ctx)
                     .await
             }
+            Statement::ShowCreateFlow(show) => {
+                let obj_name = &show.flow_name;
+                let (catalog_name, flow_name) = match &obj_name.0[..] {
+                    [table] => (query_ctx.current_catalog().to_string(), table.value.clone()),
+                    [catalog, table] => (catalog.value.clone(), table.value.clone()),
+                    _ => {
+                        return InvalidSqlSnafu {
+                            err_msg: format!(
+                "expect flow name to be <catalog>.<flow_name> or <flow_name>, actual: {obj_name}",
+            ),
+                        }
+                        .fail()
+                    }
+                };
+
+                let flow_name_val = self
+                    .flow_metadata_manager
+                    .flow_name_manager()
+                    .get(&catalog_name, &flow_name)
+                    .await
+                    .context(error::TableMetadataManagerSnafu)?
+                    .context(error::FlowNotFoundSnafu {
+                        flow_name: &flow_name,
+                    })?;
+
+                let flow_val = self
+                    .flow_metadata_manager
+                    .flow_info_manager()
+                    .get(flow_name_val.flow_id())
+                    .await
+                    .context(error::TableMetadataManagerSnafu)?
+                    .context(error::FlowNotFoundSnafu {
+                        flow_name: &flow_name,
+                    })?;
+
+                self.show_create_flow(obj_name.clone(), flow_val, query_ctx)
+                    .await
+            }
             Statement::SetVariables(set_var) => {
                 let var_name = set_var.variable.to_string().to_uppercase();
                 match var_name.as_str() {

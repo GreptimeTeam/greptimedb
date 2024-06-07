@@ -141,6 +141,26 @@ impl FlowInfoValue {
     pub fn source_table_ids(&self) -> &[TableId] {
         &self.source_table_ids
     }
+
+    pub fn flow_name(&self) -> &String {
+        &self.flow_name
+    }
+
+    pub fn sink_table_name(&self) -> &TableName {
+        &self.sink_table_name
+    }
+
+    pub fn raw_sql(&self) -> &String {
+        &self.raw_sql
+    }
+
+    pub fn expire_after(&self) -> Option<i64> {
+        self.expire_after
+    }
+
+    pub fn comment(&self) -> &String {
+        &self.comment
+    }
 }
 
 pub type FlowInfoManagerRef = Arc<FlowInfoManager>;
