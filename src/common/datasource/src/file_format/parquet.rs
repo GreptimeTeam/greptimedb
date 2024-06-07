@@ -20,8 +20,8 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 use datafusion::datasource::physical_plan::{FileMeta, ParquetFileReaderFactory};
 use datafusion::error::Result as DatafusionResult;
-use datafusion::parquet::arrow::{ArrowWriter, parquet_to_arrow_schema};
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
+use datafusion::parquet::arrow::{parquet_to_arrow_schema, ArrowWriter};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
@@ -29,19 +29,18 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::future::BoxFuture;
 use futures::StreamExt;
+use object_store::{FuturesAsyncReader, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
-use object_store::{FuturesAsyncReader, ObjectStore};
-
 use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder};
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{self, Result, WriteObjectSnafu, WriteParquetSnafu};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}
@@ -217,9 +216,8 @@ pub async fn stream_to_parquet(
 mod tests {
     use common_test_util::find_workspace_path;
 
-    use crate::test_util::{format_schema, test_store};
-
     use super::*;
+    use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
         find_workspace_path("/src/common/datasource/tests/parquet")
