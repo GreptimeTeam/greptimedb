@@ -70,6 +70,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+log = "0.4.21"
 
 [dev-dependencies]
 common-procedure-test.workspace = true

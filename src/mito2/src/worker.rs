@@ -740,7 +740,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Compact(req) => {
-                    self.handle_compaction_request(ddl.region_id, req, ddl.sender);
+                    self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::Truncate(_) => {

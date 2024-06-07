@@ -15,18 +15,17 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
-use crate::compaction::compactor::CompactionRequest;
+use crate::compaction::compactor::CompactorRequest;
 use crate::error::Result;
 
-pub type RemoteJobSchedulerRef = Arc<RwLock<dyn RemoteJobScheduler>>;
+pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 
 /// RemoteJobScheduler is a trait that defines the API to schedule remote jobs.
 #[async_trait::async_trait]
 pub trait RemoteJobScheduler: Send + Sync + 'static {
     /// Sends a job to the scheduler and returns a unique identifier for the job.
-    async fn schedule(&self, job: &RemoteJob) -> Result<JobId>;
+    async fn schedule(&self, job: RemoteJob) -> Result<JobId>;
 }
 
 /// JobId is a unique identifier for a remote job and allocated by the scheduler.
@@ -42,14 +41,16 @@ impl JobId {
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RemoteJob {
     CompactionJob(CompactionJob),
 }
 
 /// CompactionJob is a remote job that compacts a set of files in a compaction service.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CompactionJob {
-    pub request: CompactionRequest,
+    pub request: CompactorRequest,
 }
 
 /// RemoteJobSchedulerOption is an option to create a RemoteJobScheduler.
