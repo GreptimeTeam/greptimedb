@@ -306,6 +306,7 @@
 | `node_id` | Integer | `None` | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
+| `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `rpc_addr` | String | `127.0.0.1:3001` | The gRPC address of the datanode. |
 | `rpc_hostname` | String | `None` | The hostname of the datanode. |
 | `rpc_runtime_size` | Integer | `8` | The number of gRPC server worker threads. |
