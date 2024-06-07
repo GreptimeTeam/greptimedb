@@ -22,7 +22,7 @@ pub mod error;
 // Options for meta client in datanode instance.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetaClientOptions {
-    #[serde(default = "default_metasrc_addrs")]
+    #[serde(default = "default_metasrv_addrs")]
     pub metasrv_addrs: Vec<String>,
     #[serde(default = "default_timeout")]
     #[serde(with = "humantime_serde")]
@@ -80,14 +80,14 @@ fn default_tcp_nodelay() -> bool {
     true
 }
 
-fn default_metasrc_addrs() -> Vec<String> {
+fn default_metasrv_addrs() -> Vec<String> {
     vec!["127.0.0.1:3002".to_string()]
 }
 
 impl Default for MetaClientOptions {
     fn default() -> Self {
         Self {
-            metasrv_addrs: default_metasrc_addrs(),
+            metasrv_addrs: default_metasrv_addrs(),
             timeout: default_timeout(),
             heartbeat_timeout: default_heartbeat_timeout(),
             ddl_timeout: default_ddl_timeout(),
