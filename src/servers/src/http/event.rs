@@ -45,8 +45,8 @@ pub struct LogIngesterQueryParams {
     pub db: Option<String>,
     pub pipeline_name: Option<String>,
     pub ignore_errors: Option<bool>,
-    // we can't resolve the version correctly now.
-    // pub version: Option<String>,
+
+    pub version: Option<String>,
 }
 
 pub struct PipelineContent(String);
@@ -179,7 +179,7 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let version = None;
+    let version = query_params.version;
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 

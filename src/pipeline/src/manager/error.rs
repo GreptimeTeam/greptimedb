@@ -50,9 +50,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Pipeline not found, name: {}", name))]
+    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.clone().unwrap_or("latest".to_string())))]
     PipelineNotFound {
         name: String,
+        version: Option<String>,
         #[snafu(implicit)]
         location: Location,
     },

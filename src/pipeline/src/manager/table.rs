@@ -23,14 +23,14 @@ use api::v1::{
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
-use common_time::util;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
 use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
-use datatypes::timestamp::TimestampMillisecond;
-use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector};
+use datatypes::timestamp::TimestampNanosecond;
+use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::plan::LogicalPlan;
@@ -133,7 +133,7 @@ impl PipelineTable {
                 },
                 ColumnDef {
                     name: PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
-                    data_type: ColumnDataType::TimestampMillisecond as i32,
+                    data_type: ColumnDataType::TimestampNanosecond as i32,
                     is_nullable: false,
                     default_constraint: vec![],
                     semantic_type: SemanticType::Timestamp as i32,
@@ -173,7 +173,7 @@ impl PipelineTable {
             },
             PbColumnSchema {
                 column_name: PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::TimestampMillisecond.into(),
+                datatype: ColumnDataType::TimestampNanosecond.into(),
                 semantic_type: SemanticType::Timestamp.into(),
                 ..Default::default()
             },
@@ -195,8 +195,8 @@ impl PipelineTable {
             .map_err(|e| CompilePipelineSnafu { reason: e }.build())
     }
 
-    fn generate_pipeline_cache_key(schema: &str, name: &str, _version: Option<&str>) -> String {
-        format!("{}-{}", schema, name)
+    fn generate_pipeline_cache_key(schema: &str, name: &str, version: Option<&str>) -> String {
+        format!("{}-{}-{}", schema, name, version.unwrap_or("latest"))
     }
 
     fn get_compiled_pipeline_from_cache(
@@ -219,8 +219,8 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<i64> {
-        let now = util::current_time_millis();
+    ) -> Result<Timestamp> {
+        let now = Timestamp::current_time(TimeUnit::Nanosecond);
 
         let table_info = self.table.table_info();
 
@@ -234,7 +234,7 @@ impl PipelineTable {
                         ValueData::StringValue(schema.to_string()).into(),
                         ValueData::StringValue(content_type.to_string()).into(),
                         ValueData::StringValue(pipeline.to_string()).into(),
-                        ValueData::TimestampMillisecondValue(now).into(),
+                        ValueData::TimestampNanosecondValue(now.value()).into(),
                     ],
                 }],
             }),
@@ -273,16 +273,20 @@ impl PipelineTable {
         name: &str,
         version: Option<String>,
     ) -> Result<Pipeline<GreptimeTransformer>> {
+        info!("pipeline version: {:?}", version);
         if let Some(pipeline) =
             self.get_compiled_pipeline_from_cache(schema, name, version.as_deref())
         {
             return Ok(pipeline);
         }
 
-        let pipeline = self.find_pipeline_by_name(schema, name, version).await?;
+        let pipeline = self
+            .find_pipeline_by_name(schema, name, version.as_ref())
+            .await?;
         let compiled_pipeline = Self::compile_pipeline(&pipeline.0)?;
+
         self.pipelines.write().unwrap().insert(
-            Self::generate_pipeline_cache_key(schema, name, None),
+            Self::generate_pipeline_cache_key(schema, name, version.as_deref()),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
@@ -299,14 +303,21 @@ impl PipelineTable {
     ) -> Result<Pipeline<GreptimeTransformer>> {
         let compiled_pipeline = Self::compile_pipeline(pipeline)?;
         // we will use the version in the future
-        let _version = self
+        let version = self
             .insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
             .await?;
 
-        self.pipelines.write().unwrap().insert(
-            Self::generate_pipeline_cache_key(schema, name, None),
-            compiled_pipeline.clone(),
-        );
+        {
+            let mut g = self.pipelines.write().unwrap();
+            g.insert(
+                Self::generate_pipeline_cache_key(schema, name, None),
+                compiled_pipeline.clone(),
+            );
+            g.insert(
+                Self::generate_pipeline_cache_key(schema, name, Some(&version.to_iso8601_string())),
+                compiled_pipeline.clone(),
+            );
+        }
 
         Ok(compiled_pipeline)
     }
@@ -315,8 +326,8 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: Option<String>,
-    ) -> Result<(String, TimestampMillisecond)> {
+        version: Option<&String>,
+    ) -> Result<(String, TimestampNanosecond)> {
         let table_info = self.table.table_info();
 
         let table_name = TableReference::full(
@@ -334,7 +345,7 @@ impl PipelineTable {
         let filter = if let Some(v) = version {
             and(
                 schema_and_name_filter,
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).lt_eq(lit(v)),
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v)),
             )
         } else {
             schema_and_name_filter
@@ -358,6 +369,8 @@ impl PipelineTable {
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
 
+        info!("find_pipeline_by_name: plan: {:?}", plan);
+
         let output = self
             .query_engine
             .execute(LogicalPlan::DfPlan(plan), Self::query_ctx(&table_info))
@@ -373,11 +386,20 @@ impl PipelineTable {
             .await
             .context(CollectRecordsSnafu)?;
 
-        ensure!(!records.is_empty(), PipelineNotFoundSnafu { name });
+        ensure!(
+            !records.is_empty(),
+            PipelineNotFoundSnafu {
+                name,
+                version: version.cloned()
+            }
+        );
 
         ensure!(
             records.len() == 1 && records[0].num_columns() == 2,
-            PipelineNotFoundSnafu { name }
+            PipelineNotFoundSnafu {
+                name,
+                version: version.cloned()
+            }
         );
 
         let pipeline_content_column = records[0].column(0);
@@ -394,7 +416,7 @@ impl PipelineTable {
         let pipeline_created_at_column = records[0].column(1);
         let pipeline_created_at = pipeline_created_at_column
             .as_any()
-            .downcast_ref::<TimestampMillisecondVector>()
+            .downcast_ref::<TimestampNanosecondVector>()
             .with_context(|| CastTypeSnafu {
                 msg: format!(
                     "can't downcast {:?} array into scalar vector",
@@ -402,7 +424,18 @@ impl PipelineTable {
                 ),
             })?;
 
-        ensure!(pipeline_content.len() == 1, PipelineNotFoundSnafu { name });
+        info!(
+            "find_pipeline_by_name: pipeline_content: {:?}, pipeline_created_at: {:?}",
+            pipeline_content, pipeline_created_at
+        );
+
+        ensure!(
+            pipeline_content.len() == 1,
+            PipelineNotFoundSnafu {
+                name,
+                version: version.cloned()
+            }
+        );
 
         // Safety: asserted above
         Ok((
