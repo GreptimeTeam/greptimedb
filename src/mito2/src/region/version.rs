@@ -80,14 +80,12 @@ impl VersionControl {
     /// Freezes the mutable memtable if it is not empty.
     pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
-        if version.memtables.mutable.is_empty() {
-            return Ok(());
-        }
+
         // Safety: Immutable memtable is None.
-        let new_memtables = version
-            .memtables
-            .freeze_mutable(&version.metadata)?
-            .unwrap();
+        let Some(new_memtables) = version.memtables.freeze_mutable(&version.metadata)? else {
+            return Ok(());
+        };
+
         // Create a new version with memtable switched.
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
