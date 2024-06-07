@@ -1,26 +1,26 @@
 on:
   merge_group:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [ opened, synchronize, reopened, ready_for_review ]
     paths-ignore:
-      - "docs/**"
-      - "config/**"
-      - "**.md"
-      - ".dockerignore"
-      - "docker/**"
-      - ".gitignore"
-      - "grafana/**"
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
   push:
     branches:
       - main
     paths-ignore:
-      - "docs/**"
-      - "config/**"
-      - "**.md"
-      - ".dockerignore"
-      - "docker/**"
-      - ".gitignore"
-      - "grafana/**"
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
   workflow_dispatch:
 
 name: CI
@@ -52,55 +52,55 @@ jobs:
       - uses: actions/checkout@v4
       - uses: korandoru/hawkeye@v5
 
-  # check:
-  #   name: Check
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     matrix:
-  #       os: [ windows-2022, ubuntu-20.04 ]
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         # Shares with `Clippy` job
-  #         shared-key: "check-lint"
-  #     - name: Run cargo check
-  #       run: cargo check --locked --workspace --all-targets
+  check:
+    name: Check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows-2022, ubuntu-20.04 ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Clippy` job
+          shared-key: "check-lint"
+      - name: Run cargo check
+        run: cargo check --locked --workspace --all-targets
 
-  # toml:
-  #   name: Toml Check
-  #   runs-on: ubuntu-20.04
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: stable
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         shared-key: "check-toml"
-  #     - name: Install taplo
-  #       run: cargo +stable install taplo-cli --version ^0.9 --locked
-  #     - name: Run taplo
-  #       run: taplo format --check
+  toml:
+    name: Toml Check
+    runs-on: ubuntu-20.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "check-toml"
+      - name: Install taplo
+        run: cargo +stable install taplo-cli --version ^0.9 --locked
+      - name: Run taplo
+        run: taplo format --check
 
   build:
     name: Build GreptimeDB binaries
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-20.04]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -141,16 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target:
-          [
-            "fuzz_create_table",
-            "fuzz_alter_table",
-            "fuzz_create_database",
-            "fuzz_create_logical_table",
-            "fuzz_alter_logical_table",
-            "fuzz_insert",
-            "fuzz_insert_logical_table",
-          ]
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
@@ -176,7 +167,7 @@ jobs:
           name: bins
           path: .
       - name: Unzip binaries
-        run: |
+        run: | 
           tar -xvf ./bins.tar.gz
           rm ./bins.tar.gz
       - name: Run GreptimeDB
@@ -191,381 +182,381 @@ jobs:
           target: ${{ matrix.target }}
           max-total-time: 120
 
-  # unstable-fuzztest:
-  #   name: Unstable Fuzz Test
-  #   needs: build-greptime-ci
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     matrix:
-  #       target: [ "unstable_fuzz_create_table_standalone" ]
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         shared-key: "fuzz-test-targets"
-  #     - name: Set Rust Fuzz
-  #       shell: bash
-  #       run: |
-  #         sudo apt update && sudo apt install -y libfuzzer-14-dev
-  #         cargo install cargo-fuzz cargo-gc-bin
-  #     - name: Download pre-built binariy
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: bin
-  #         path: .
-  #     - name: Unzip bianry
-  #       run: |
-  #         tar -xvf ./bin.tar.gz
-  #         rm ./bin.tar.gz
-  #     - name: Run Fuzz Test
-  #       uses: ./.github/actions/fuzz-test
-  #       env:
-  #         CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
-  #         GT_MYSQL_ADDR: 127.0.0.1:4002
-  #         GT_FUZZ_BINARY_PATH: ./bin/greptime
-  #         GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/unstable-greptime/
-  #       with:
-  #         target: ${{ matrix.target }}
-  #         max-total-time: 120
-  #         unstable: 'true'
-  #     - name: Upload unstable fuzz test logs
-  #       if: failure()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: unstable-fuzz-logs
-  #         path: /tmp/unstable-greptime/
-  #         retention-days: 3
+  unstable-fuzztest:
+    name: Unstable Fuzz Test
+    needs: build-greptime-ci
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ "unstable_fuzz_create_table_standalone" ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "fuzz-test-targets"
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt update && sudo apt install -y libfuzzer-14-dev
+          cargo install cargo-fuzz cargo-gc-bin
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip bianry
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Run Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+          GT_FUZZ_BINARY_PATH: ./bin/greptime
+          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/unstable-greptime/
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+          unstable: 'true'
+      - name: Upload unstable fuzz test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unstable-fuzz-logs
+          path: /tmp/unstable-greptime/
+          retention-days: 3
 
-  # build-greptime-ci:
-  #   name: Build GreptimeDB binary (profile-CI)
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     matrix:
-  #       os: [ ubuntu-20.04 ]
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         shared-key: "build-greptime-ci"
-  #     - name: Install cargo-gc-bin
-  #       shell: bash
-  #       run: cargo install cargo-gc-bin
-  #     - name: Build greptime bianry
-  #       shell: bash
-  #       # `cargo gc` will invoke `cargo build` with specified args
-  #       run: cargo gc --profile ci -- --bin greptime
-  #     - name: Pack greptime binary
-  #       shell: bash
-  #       run: |
-  #         mkdir bin && \
-  #         mv ./target/ci/greptime bin
-  #     - name: Print greptime binaries info
-  #       run: ls -lh bin
-  #     - name: Upload artifacts
-  #       uses: ./.github/actions/upload-artifacts
-  #       with:
-  #         artifacts-dir: bin
-  #         version: current
+  build-greptime-ci:
+    name: Build GreptimeDB binary (profile-CI)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04 ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-greptime-ci"
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin
+      - name: Build greptime bianry
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: cargo gc --profile ci -- --bin greptime 
+      - name: Pack greptime binary
+        shell: bash
+        run: |
+          mkdir bin && \
+          mv ./target/ci/greptime bin
+      - name: Print greptime binaries info
+        run: ls -lh bin
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bin
+          version: current
 
-  # distributed-fuzztest:
-  #   name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
-  #   runs-on: ubuntu-latest
-  #   needs:  build-greptime-ci
-  #   strategy:
-  #     matrix:
-  #       target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
-  #       mode:
-  #         - name: "Disk"
-  #           minio: false
-  #           kafka: false
-  #           values: "with-disk.yaml"
-  #         - name: "Minio"
-  #           minio: true
-  #           kafka: false
-  #           values: "with-minio.yaml"
-  #         - name: "Remote WAL"
-  #           minio: true
-  #           kafka: true
-  #           values: "with-remote-wal.yaml"
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Setup Kind
-  #       uses: ./.github/actions/setup-kind
-  #     - if: matrix.mode.minio
-  #       name: Setup Minio
-  #       uses: ./.github/actions/setup-minio
-  #     - if: matrix.mode.kafka
-  #       name: Setup Kafka cluser
-  #       uses: ./.github/actions/setup-kafka-cluster
-  #     - name: Setup Etcd cluser
-  #       uses: ./.github/actions/setup-etcd-cluster
-  #     # Prepares for fuzz tests
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         shared-key: "fuzz-test-targets"
-  #     - name: Set Rust Fuzz
-  #       shell: bash
-  #       run: |
-  #         sudo apt-get install -y libfuzzer-14-dev
-  #         rustup install nightly
-  #         cargo +nightly install cargo-fuzz cargo-gc-bin
-  #     # Downloads ci image
-  #     - name: Download pre-built binariy
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: bin
-  #         path: .
-  #     - name: Unzip binary
-  #       run: |
-  #         tar -xvf ./bin.tar.gz
-  #         rm ./bin.tar.gz
-  #     - name: Build and push GreptimeDB image
-  #       uses: ./.github/actions/build-and-push-ci-image
-  #     - name: Wait for etcd
-  #       run: |
-  #         kubectl wait \
-  #           --for=condition=Ready \
-  #           pod -l app.kubernetes.io/instance=etcd \
-  #           --timeout=120s \
-  #           -n etcd-cluster
-  #     - if: matrix.mode.minio
-  #       name: Wait for minio
-  #       run: |
-  #         kubectl wait \
-  #           --for=condition=Ready \
-  #           pod -l app=minio \
-  #           --timeout=120s \
-  #           -n minio
-  #     - if: matrix.mode.kafka
-  #       name: Wait for kafka
-  #       run: |
-  #         kubectl wait \
-  #           --for=condition=Ready \
-  #           pod -l app.kubernetes.io/instance=kafka \
-  #           --timeout=120s \
-  #           -n kafka-cluster
-  #     - name: Print etcd info
-  #       shell: bash
-  #       run: kubectl get all --show-labels -n etcd-cluster
-  #     # Setup cluster for test
-  #     - name: Setup GreptimeDB cluster
-  #       uses: ./.github/actions/setup-greptimedb-cluster
-  #       with:
-  #         image-registry: localhost:5001
-  #         values-filename: ${{ matrix.mode.values }}
-  #     - name: Port forward (mysql)
-  #       run: |
-  #         kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
-  #     - name: Fuzz Test
-  #       uses: ./.github/actions/fuzz-test
-  #       env:
-  #         CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
-  #         GT_MYSQL_ADDR: 127.0.0.1:4002
-  #       with:
-  #         target: ${{ matrix.target }}
-  #         max-total-time: 120
-  #     - name: Describe Nodes
-  #       if: failure()
-  #       shell: bash
-  #       run: |
-  #         kubectl describe nodes
-  #     - name: Export kind logs
-  #       if: failure()
-  #       shell: bash
-  #       run: |
-  #         kind export logs /tmp/kind
-  #     - name: Upload logs
-  #       if: failure()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
-  #         path: /tmp/kind
-  #         retention-days: 3
-  #     - name: Delete cluster
-  #       if: success()
-  #       shell: bash
-  #       run: |
-  #         kind delete cluster
-  #         docker stop $(docker ps -a -q)
-  #         docker rm $(docker ps -a -q)
-  #         docker system prune -f
+  distributed-fuzztest: 
+    name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs:  build-greptime-ci
+    strategy:
+      matrix:
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+        mode: 
+          - name: "Disk"
+            minio: false
+            kafka: false
+            values: "with-disk.yaml"
+          - name: "Minio"
+            minio: true
+            kafka: false
+            values: "with-minio.yaml"
+          - name: "Remote WAL"
+            minio: true
+            kafka: true
+            values: "with-remote-wal.yaml"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - if: matrix.mode.minio
+        name: Setup Minio
+        uses: ./.github/actions/setup-minio
+      - if: matrix.mode.kafka
+        name: Setup Kafka cluser
+        uses: ./.github/actions/setup-kafka-cluster
+      - name: Setup Etcd cluser
+        uses: ./.github/actions/setup-etcd-cluster
+      # Prepares for fuzz tests
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "fuzz-test-targets"
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz cargo-gc-bin
+      # Downloads ci image
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - if: matrix.mode.minio
+        name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
+      - if: matrix.mode.kafka
+        name: Wait for kafka
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=kafka \
+            --timeout=120s \
+            -n kafka-cluster
+      - name: Print etcd info
+        shell: bash
+        run: kubectl get all --show-labels -n etcd-cluster
+      # Setup cluster for test
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
+          values-filename: ${{ matrix.mode.values }}
+      - name: Port forward (mysql)
+        run: |
+          kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+      - name: Describe Nodes
+        if: failure()
+        shell: bash
+        run: | 
+          kubectl describe nodes      
+      - name: Export kind logs
+        if: failure()
+        shell: bash
+        run: | 
+          kind export logs /tmp/kind
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/kind
+          retention-days: 3
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: | 
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f
 
-  # sqlness:
-  #   name: Sqlness Test (${{ matrix.mode.name }})
-  #   needs: build
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     matrix:
-  #       os: [ ubuntu-20.04 ]
-  #       mode:
-  #         - name: "Basic"
-  #           opts: ""
-  #           kafka: false
-  #         - name: "Remote WAL"
-  #           opts: "-w kafka -k 127.0.0.1:9092"
-  #           kafka: true
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Download pre-built binaries
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: bins
-  #         path: .
-  #     - name: Unzip binaries
-  #       run: tar -xvf ./bins.tar.gz
-  #     - if: matrix.mode.kafka
-  #       name: Setup kafka server
-  #       working-directory: tests-integration/fixtures/kafka
-  #       run: docker compose -f docker-compose-standalone.yml up -d --wait
-  #     - name: Run sqlness
-  #       run: RUST_BACKTRACE=1 ./bins/sqlness-runner ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
-  #     - name: Upload sqlness logs
-  #       if: failure()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: sqlness-logs-${{ matrix.mode.name }}
-  #         path: /tmp/sqlness*
-  #         retention-days: 3
+  sqlness:
+    name: Sqlness Test (${{ matrix.mode.name }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04 ]
+        mode:
+          - name: "Basic"
+            opts: ""
+            kafka: false
+          - name: "Remote WAL"
+            opts: "-w kafka -k 127.0.0.1:9092"
+            kafka: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - if: matrix.mode.kafka
+        name: Setup kafka server
+        working-directory: tests-integration/fixtures/kafka
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Run sqlness
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-${{ matrix.mode.name }}
+          path: /tmp/sqlness*
+          retention-days: 3
 
-  # fmt:
-  #   name: Rustfmt
-  #   runs-on: ubuntu-20.04
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #         components: rustfmt
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         shared-key: "check-rust-fmt"
-  #     - name: Run cargo fmt
-  #       run: cargo fmt --all -- --check
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-20.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "check-rust-fmt"
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
 
-  # clippy:
-  #   name: Clippy
-  #   runs-on: ubuntu-20.04
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #         components: clippy
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares across multiple jobs
-  #         # Shares with `Check` job
-  #         shared-key: "check-lint"
-  #     - name: Run cargo clippy
-  #       run: make clippy
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-20.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Check` job
+          shared-key: "check-lint"
+      - name: Run cargo clippy
+        run: make clippy
 
-  # coverage:
-  #   if: github.event.pull_request.draft == false
-  #   runs-on: ubuntu-20.04-8-cores
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: arduino/setup-protoc@v3
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: KyleMayes/install-llvm-action@v1
-  #       with:
-  #         version: "14.0"
-  #     - name: Install toolchain
-  #       uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #         components: llvm-tools-preview
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         # Shares cross multiple jobs
-  #         shared-key: "coverage-test"
-  #     - name: Docker Cache
-  #       uses: ScribeMD/docker-cache@0.3.7
-  #       with:
-  #         key: docker-${{ runner.os }}-coverage
-  #     - name: Install latest nextest release
-  #       uses: taiki-e/install-action@nextest
-  #     - name: Install cargo-llvm-cov
-  #       uses: taiki-e/install-action@cargo-llvm-cov
-  #     - name: Install Python
-  #       uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.10'
-  #     - name: Install PyArrow Package
-  #       run: pip install pyarrow
-  #     - name: Setup etcd server
-  #       working-directory: tests-integration/fixtures/etcd
-  #       run: docker compose -f docker-compose-standalone.yml up -d --wait
-  #     - name: Setup kafka server
-  #       working-directory: tests-integration/fixtures/kafka
-  #       run: docker compose -f docker-compose-standalone.yml up -d --wait
-  #     - name: Setup minio
-  #       working-directory: tests-integration/fixtures/minio
-  #       run: docker compose -f docker-compose-standalone.yml up -d --wait
-  #     - name: Run nextest cases
-  #       run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
-  #       env:
-  #         CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
-  #         RUST_BACKTRACE: 1
-  #         CARGO_INCREMENTAL: 0
-  #         GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
-  #         GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-  #         GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-  #         GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-  #         GT_MINIO_BUCKET: greptime
-  #         GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
-  #         GT_MINIO_ACCESS_KEY: superpower_password
-  #         GT_MINIO_REGION: us-west-2
-  #         GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
-  #         GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
-  #         GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
-  #         UNITTEST_LOG_DIR: "__unittest_logs"
-  #     - name: Codecov upload
-  #       uses: codecov/codecov-action@v4
-  #       with:
-  #         token: ${{ secrets.CODECOV_TOKEN }}
-  #         files: ./lcov.info
-  #         flags: rust
-  #         fail_ci_if_error: false
-  #         verbose: true
+  coverage:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-20.04-8-cores
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+      - name: Docker Cache
+        uses: ScribeMD/docker-cache@0.3.7
+        with:
+          key: docker-${{ runner.os }}-coverage
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install PyArrow Package
+        run: pip install pyarrow
+      - name: Setup etcd server
+        working-directory: tests-integration/fixtures/etcd
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Setup kafka server
+        working-directory: tests-integration/fixtures/kafka
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Setup minio
+        working-directory: tests-integration/fixtures/minio
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Run nextest cases
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          UNITTEST_LOG_DIR: "__unittest_logs"
+      - name: Codecov upload
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./lcov.info
+          flags: rust
+          fail_ci_if_error: false
+          verbose: true
 
   # compat:
   #   name: Compatibility Test
