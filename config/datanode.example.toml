@@ -13,6 +13,9 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
+## Parallelism of initializing regions.
+init_regions_parallelism = 16
+
 ## The gRPC address of the datanode.
 rpc_addr = "127.0.0.1:3001"
 

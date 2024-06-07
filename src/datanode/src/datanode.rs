@@ -67,8 +67,6 @@ use crate::heartbeat::HeartbeatTask;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store;
 
-const OPEN_REGION_PARALLELISM: usize = 16;
-
 /// Datanode service.
 pub struct Datanode {
     services: ServerHandlers,
@@ -218,8 +216,12 @@ impl DatanodeBuilder {
             .await
             .context(GetMetadataSnafu)?;
 
-        let open_all_regions =
-            open_all_regions(region_server.clone(), table_values, !controlled_by_metasrv);
+        let open_all_regions = open_all_regions(
+            region_server.clone(),
+            table_values,
+            !controlled_by_metasrv,
+            self.opts.init_regions_parallelism,
+        );
 
         if self.opts.init_regions_in_background {
             // Opens regions in background.
@@ -285,7 +287,13 @@ impl DatanodeBuilder {
             .await
             .context(GetMetadataSnafu)?;
 
-        open_all_regions(region_server.clone(), table_values, open_with_writable).await
+        open_all_regions(
+            region_server.clone(),
+            table_values,
+            open_with_writable,
+            self.opts.init_regions_parallelism,
+        )
+        .await
     }
 
     async fn new_region_server(
@@ -446,6 +454,7 @@ async fn open_all_regions(
     region_server: RegionServer,
     table_values: Vec<DatanodeTableValue>,
     open_with_writable: bool,
+    init_regions_parallelism: usize,
 ) -> Result<()> {
     let mut regions = vec![];
     for table_value in table_values {
@@ -466,13 +475,12 @@ async fn open_all_regions(
             ));
         }
     }
-    info!("going to open {} region(s)", regions.len());
+    let num_regions = regions.len();
+    info!("going to open {} region(s)", num_regions);
 
     let mut region_requests = Vec::with_capacity(regions.len());
-    let mut region_ids = Vec::with_capacity(regions.len());
     for (region_id, engine, store_path, options) in regions {
         let region_dir = region_dir(&store_path, region_id);
-        region_ids.push(region_id);
         region_requests.push((
             region_id,
             RegionOpenRequest {
@@ -485,20 +493,20 @@ async fn open_all_regions(
     }
 
     let open_regions = region_server
-        .handle_batch_open_requests(OPEN_REGION_PARALLELISM, region_requests)
+        .handle_batch_open_requests(init_regions_parallelism, region_requests)
         .await?;
     ensure!(
-        open_regions.len() == region_ids.len(),
+        open_regions.len() == num_regions,
         error::UnexpectedSnafu {
             violated: format!(
                 "Expected to open {} of regions, only {} of regions has opened",
-                region_ids.len(),
+                num_regions,
                 open_regions.len()
             )
         }
     );
 
-    for region_id in region_ids {
+    for region_id in open_regions {
         if open_with_writable {
             if let Err(e) = region_server.set_writable(region_id, true) {
                 error!(

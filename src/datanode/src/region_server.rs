@@ -486,6 +486,7 @@ impl RegionServerInner {
         }
 
         let mut open_regions = Vec::with_capacity(requests.len());
+        let mut errors = vec![];
         match engine
             .handle_batch_open_requests(parallelism, requests)
             .await
@@ -496,14 +497,20 @@ impl RegionServerInner {
                     let region_change = &region_changes[&region_id];
                     match result {
                         Ok(_) => {
-                            let _ = self
+                            if let Err(e) = self
                                 .set_region_status_ready(region_id, engine.clone(), *region_change)
-                                .await;
-                            open_regions.push(region_id)
+                                .await
+                            {
+                                error!(e; "Failed to set region to ready: {}", region_id);
+                                errors.push(BoxedError::new(e));
+                            } else {
+                                open_regions.push(region_id)
+                            }
                         }
-                        Err(err) => {
+                        Err(e) => {
                             self.unset_region_status(region_id, *region_change);
-                            error!("Failed to open region: {}, error: {err}", region_id);
+                            error!(e; "Failed to open region: {}", region_id);
+                            errors.push(e);
                         }
                     }
                 }
@@ -513,7 +520,15 @@ impl RegionServerInner {
                     self.unset_region_status(region_id, *region_change);
                 }
                 error!(e; "Failed to open batch regions");
+                errors.push(BoxedError::new(e));
             }
+        }
+
+        if !errors.is_empty() {
+            return error::UnexpectedSnafu {
+                violated: format!("Failed to open batch regions: {:?}", errors),
+            }
+            .fail();
         }
 
         Ok(open_regions)
