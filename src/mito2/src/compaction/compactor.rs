@@ -69,6 +69,7 @@ pub struct CompactorRequest {
     pub region_dir: String,
     pub region_options: HashMap<String, String>,
     pub compaction_options: compact_request::Options,
+    pub picker_output: PickerOutput,
 }
 
 /// Open a compaction region from a compaction request.
