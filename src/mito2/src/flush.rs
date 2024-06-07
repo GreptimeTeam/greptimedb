@@ -523,11 +523,26 @@ impl FlushScheduler {
 
         let pending_requests = if flush_status.pending_task.is_none() {
             // The region doesn't have any pending flush task.
-            // Safety: The flush status exists.
+            // Safety: The flush status must exist.
             let flush_status = self.region_status.remove(&region_id).unwrap();
             Some((flush_status.pending_ddls, flush_status.pending_writes))
         } else {
-            None
+            let version_data = flush_status.version_control.current();
+            if version_data.version.memtables.is_empty() {
+                // The region has nothing to flush, we also need to remove it from the status.
+                // Safety: The pending task is not None.
+                let task = flush_status.pending_task.take().unwrap();
+                // The region has nothing to flush. We can notify pending task.
+                task.on_success();
+                // `schedule_next_flush()` may pick up the same region to flush, so we must remove
+                // it from the status to avoid leaking pending requests.
+                // Safety: The flush status must exist.
+                let flush_status = self.region_status.remove(&region_id).unwrap();
+                Some((flush_status.pending_ddls, flush_status.pending_writes))
+            } else {
+                // We can flush the region again, keep it in the region status.
+                None
+            }
         };
 
         // Schedule next flush job.
