@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -22,11 +22,11 @@ use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Plan as SubPlan, Rel};
 
 use crate::adapter::error::{
-    Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
+    Error, InternalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
 };
 use crate::expr::{MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc};
 use crate::plan::{KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, RelationType};
+use crate::repr::{self, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedPlan {
@@ -103,121 +103,19 @@ impl TypedPlan {
                         plan,
                     })
                 } else {
-                    /// if reduce_plan contains the special function like tumble floor/ceiling, add them to the proj_exprs
-                    fn rewrite_projection_after_reduce(
-                        key_val_plan: KeyValPlan,
-                        _reduce_plan: ReducePlan,
-                        reduce_output_type: &RelationType,
-                        proj_exprs: &mut Vec<TypedExpr>,
-                    ) -> Result<(), Error> {
-                        // TODO: get keys correctly
-                        let key_exprs = key_val_plan
-                            .key_plan
-                            .projection
-                            .clone()
-                            .into_iter()
-                            .map(|i| {
-                                if i < key_val_plan.key_plan.input_arity {
-                                    ScalarExpr::Column(i)
-                                } else {
-                                    key_val_plan.key_plan.expressions
-                                        [i - key_val_plan.key_plan.input_arity]
-                                        .clone()
-                                }
-                            })
-                            .collect_vec();
-                        let mut shift_offset = 0;
-                        let special_keys = key_exprs
-                            .into_iter()
-                            .enumerate()
-                            .filter(|(_idx, p)| {
-                                if matches!(
-                                    p,
-                                    ScalarExpr::CallUnary {
-                                        func: UnaryFunc::TumbleWindowFloor { .. },
-                                        ..
-                                    } | ScalarExpr::CallUnary {
-                                        func: UnaryFunc::TumbleWindowCeiling { .. },
-                                        ..
-                                    }
-                                ) {
-                                    if matches!(
-                                        p,
-                                        ScalarExpr::CallUnary {
-                                            func: UnaryFunc::TumbleWindowFloor { .. },
-                                            ..
-                                        }
-                                    ) {
-                                        shift_offset += 1;
-                                    }
-                                    true
-                                } else {
-                                    false
-                                }
-                            })
-                            .collect_vec();
-                        let spec_key_arity = special_keys.len();
-                        if spec_key_arity == 0 {
-                            return Ok(());
-                        }
-
-                        {
-                            // shift proj_exprs to the right by spec_key_arity
-                            let max_used_col_in_proj = proj_exprs
-                                .iter()
-                                .map(|expr| {
-                                    expr.expr
-                                        .get_all_ref_columns()
-                                        .into_iter()
-                                        .max()
-                                        .unwrap_or_default()
-                                })
-                                .max()
-                                .unwrap_or_default();
-
-                            let shuffle = (0..=max_used_col_in_proj)
-                                .map(|col| (col, col + shift_offset))
-                                .collect::<BTreeMap<_, _>>();
-                            for proj_expr in proj_exprs.iter_mut() {
-                                proj_expr.expr.permute_map(&shuffle)?;
-                            } // add key to the end
-                            for (key_idx, _key_expr) in special_keys {
-                                // here we assume the output type of reduce operator is just first keys columns, then append value columns
-                                proj_exprs.push(
-                                    ScalarExpr::Column(key_idx).with_type(
-                                        reduce_output_type.column_types[key_idx].clone(),
-                                    ),
-                                );
-                            }
-                        }
-
-                        Ok(())
-                    }
-
                     match input.plan.clone() {
-                        Plan::Reduce {
-                            key_val_plan,
-                            reduce_plan,
-                            ..
-                        } => {
+                        Plan::Reduce { key_val_plan, .. } => {
                             rewrite_projection_after_reduce(
                                 key_val_plan,
-                                reduce_plan,
-                                &input.schema.typ,
+                                &input.schema,
                                 &mut exprs,
                             )?;
                         }
                         Plan::Mfp { input, mfp: _ } => {
-                            if let Plan::Reduce {
-                                key_val_plan,
-                                reduce_plan,
-                                ..
-                            } = input.plan
-                            {
+                            if let Plan::Reduce { key_val_plan, .. } = input.plan {
                                 rewrite_projection_after_reduce(
                                     key_val_plan,
-                                    reduce_plan,
-                                    &input.schema.typ,
+                                    &input.schema,
                                     &mut exprs,
                                 )?;
                             }
@@ -303,6 +201,102 @@ impl TypedPlan {
             _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
         }
     }
+}
+
+/// if reduce_plan contains the special function like tumble floor/ceiling, add them to the proj_exprs
+/// so the effect is the window_start, window_end column are auto added to output rows
+fn rewrite_projection_after_reduce(
+    key_val_plan: KeyValPlan,
+    reduce_output_type: &RelationDesc,
+    proj_exprs: &mut Vec<TypedExpr>,
+) -> Result<(), Error> {
+    // TODO: get keys correctly
+    let key_exprs = key_val_plan
+        .key_plan
+        .projection
+        .clone()
+        .into_iter()
+        .map(|i| {
+            if i < key_val_plan.key_plan.input_arity {
+                ScalarExpr::Column(i)
+            } else {
+                key_val_plan.key_plan.expressions[i - key_val_plan.key_plan.input_arity].clone()
+            }
+        })
+        .collect_vec();
+    let mut shift_offset = 0;
+    let mut shuffle: BTreeMap<usize, usize> = BTreeMap::new();
+    let special_keys = key_exprs
+        .clone()
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, p)| {
+            shuffle.insert(*idx, *idx + shift_offset);
+            if matches!(
+                p,
+                ScalarExpr::CallUnary {
+                    func: UnaryFunc::TumbleWindowFloor { .. },
+                    ..
+                } | ScalarExpr::CallUnary {
+                    func: UnaryFunc::TumbleWindowCeiling { .. },
+                    ..
+                }
+            ) {
+                if matches!(
+                    p,
+                    ScalarExpr::CallUnary {
+                        func: UnaryFunc::TumbleWindowFloor { .. },
+                        ..
+                    }
+                ) {
+                    shift_offset += 1;
+                }
+                true
+            } else {
+                false
+            }
+        })
+        .collect_vec();
+    let spec_key_arity = special_keys.len();
+    if spec_key_arity == 0 {
+        return Ok(());
+    }
+
+    // shift proj_exprs to the right by spec_key_arity
+    // because substrait use offset before we add those two keys
+    for proj_expr in proj_exprs.iter_mut() {
+        proj_expr.expr.permute_map(&shuffle)?;
+    } // add key to the end
+    for (key_idx, _key_expr) in special_keys {
+        // here we assume the output type of reduce operator is just first keys columns, then append value columns
+        proj_exprs.push(
+            ScalarExpr::Column(key_idx)
+                .with_type(reduce_output_type.typ().column_types[key_idx].clone()),
+        );
+    }
+
+    // check if normal expr in group exprs are all in proj_exprs
+    let all_cols_ref_in_proj: BTreeSet<usize> = proj_exprs
+        .iter()
+        .filter_map(|e| {
+            if let ScalarExpr::Column(i) = &e.expr {
+                Some(*i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (key_idx, key_expr) in key_exprs.iter().enumerate() {
+        if let ScalarExpr::Column(_) = key_expr {
+            if !all_cols_ref_in_proj.contains(&key_idx) {
+                return InvalidQuerySnafu{
+                    reason: format!("Expect normal column in group by also appear in projection, but column {}(name is '{}') is missing", key_idx, reduce_output_type.get_name(key_idx).clone().unwrap_or("unknown".to_string()))
+                }.fail();
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
