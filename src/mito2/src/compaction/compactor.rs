@@ -38,12 +38,12 @@ use crate::memtable::MemtableBuilderProvider;
 use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
-use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
+use crate::region::version::{VersionBuilder, VersionControl, VersionRef};
 use crate::region::ManifestContext;
 use crate::region::RegionState::Writable;
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::file::{FileMeta, IndexType};
-use crate::sst::file_purger::{FilePurgerRef, LocalFilePurger};
+use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::parquet::WriteOptions;
 
@@ -58,9 +58,8 @@ pub struct CompactionRegion {
     pub(crate) region_metadata: RegionMetadataRef,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) file_purger: FilePurgerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
-    pub(crate) version_control: VersionControlRef,
+    pub(crate) current_version: VersionRef,
 }
 
 /// CompactionRequest represents the request to compact a region.
@@ -134,7 +133,7 @@ pub async fn open_compaction_region(
         ))
     };
 
-    let version_control = {
+    let current_version = {
         let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
             .builder_for_options(
                 region_options.memtable.as_ref(),
@@ -157,19 +156,19 @@ pub async fn open_compaction_region(
             .compaction_time_window(manifest.compaction_time_window)
             .options(region_options.clone())
             .build();
-        Arc::new(VersionControl::new(version))
+        let version_control = Arc::new(VersionControl::new(version));
+        version_control.current().version
     };
 
     Ok(CompactionRegion {
         region_options: region_options.clone(),
         manifest_ctx,
         access_layer,
-        version_control,
+        current_version,
         region_id: req.region_id,
         cache_manager: Arc::new(CacheManager::default()),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
-        file_purger: file_purger.clone(),
     })
 }
 
@@ -202,7 +201,7 @@ pub trait Compactor: Send + Sync + 'static {
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<()>;
+    ) -> Result<RegionEdit>;
 
     /// Execute compaction for a region.
     async fn compact(
@@ -222,7 +221,7 @@ impl Compactor for DefaultCompactor {
         compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
-        let current_version = compaction_region.version_control.current().version;
+        let current_version = compaction_region.current_version.clone();
         let mut futs = Vec::with_capacity(picker_output.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
@@ -350,11 +349,7 @@ impl Compactor for DefaultCompactor {
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<()> {
-        if merge_output.is_empty() {
-            return Ok(());
-        }
-
+    ) -> Result<RegionEdit> {
         // Write region edit to manifest.
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
@@ -370,16 +365,10 @@ impl Compactor for DefaultCompactor {
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
         compaction_region
             .manifest_ctx
-            .update_manifest(Writable, action_list, || {
-                compaction_region.version_control.apply_edit(
-                    edit,
-                    &[],
-                    compaction_region.file_purger.clone(),
-                );
-            })
+            .update_manifest(Writable, action_list)
             .await?;
 
-        Ok(())
+        Ok(edit)
     }
 
     async fn compact(
@@ -413,6 +402,9 @@ impl Compactor for DefaultCompactor {
             );
             return Ok(());
         }
-        self.update_manifest(compaction_region, merge_output).await
+        self.update_manifest(compaction_region, merge_output)
+            .await?;
+
+        Ok(())
     }
 }

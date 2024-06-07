@@ -58,7 +58,6 @@ use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileId, Level};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
@@ -71,12 +70,10 @@ pub struct CompactionRequest {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
     pub(crate) waiters: Vec<OutputTx>,
-    pub(crate) file_purger: FilePurgerRef,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
-    pub(crate) version_control: VersionControlRef,
     pub(crate) listener: WorkerListener,
 }
 
@@ -131,7 +128,6 @@ impl CompactionScheduler {
         compact_options: compact_request::Options,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
-        file_purger: &FilePurgerRef,
         waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
     ) -> Result<()> {
@@ -142,12 +138,8 @@ impl CompactionScheduler {
         }
 
         // The region can compact directly.
-        let mut status = CompactionStatus::new(
-            region_id,
-            version_control.clone(),
-            access_layer.clone(),
-            file_purger.clone(),
-        );
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             waiter,
@@ -272,11 +264,9 @@ impl CompactionScheduler {
             access_layer,
             request_sender,
             waiters,
-            file_purger,
             start_time,
             cache_manager,
             manifest_ctx,
-            version_control,
             listener,
         } = req;
         debug!(
@@ -286,14 +276,13 @@ impl CompactionScheduler {
 
         let compaction_region = CompactionRegion {
             region_id,
+            current_version: current_version.clone(),
             region_options: current_version.options.clone(),
             engine_config: engine_config.clone(),
             region_metadata: current_version.metadata.clone(),
             cache_manager: cache_manager.clone(),
             access_layer: access_layer.clone(),
-            file_purger: file_purger.clone(),
             manifest_ctx: manifest_ctx.clone(),
-            version_control: version_control.clone(),
         };
 
         let picker_output = {
@@ -365,8 +354,6 @@ struct CompactionStatus {
     version_control: VersionControlRef,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
-    /// File purger of the region.
-    file_purger: FilePurgerRef,
     /// Compaction pending to schedule.
     ///
     /// For simplicity, we merge all pending compaction requests into one.
@@ -379,13 +366,11 @@ impl CompactionStatus {
         region_id: RegionId,
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
-        file_purger: FilePurgerRef,
     ) -> CompactionStatus {
         CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            file_purger,
             pending_compaction: None,
         }
     }
@@ -427,11 +412,9 @@ impl CompactionStatus {
             access_layer: self.access_layer.clone(),
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
-            file_purger: self.file_purger.clone(),
             start_time,
             cache_manager,
             manifest_ctx: manifest_ctx.clone(),
-            version_control: self.version_control.clone(),
             listener,
         };
 
@@ -582,7 +565,6 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
-        let purger = builder.file_purger();
 
         // Nothing to compact.
         let version_control = Arc::new(builder.build());
@@ -597,7 +579,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 waiter,
                 &manifest_ctx,
             )
@@ -616,7 +597,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 waiter,
                 &manifest_ctx,
             )
@@ -679,7 +659,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
@@ -708,7 +687,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
@@ -740,7 +718,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )

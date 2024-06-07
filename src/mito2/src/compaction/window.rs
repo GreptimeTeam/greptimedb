@@ -102,7 +102,7 @@ impl WindowedCompactionPicker {
 
 impl Picker for WindowedCompactionPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
-        let current_version = compaction_region.version_control.current().version;
+        let current_version = compaction_region.current_version.clone();
         let (outputs, expired_ssts, time_window) = self.pick_inner(
             current_version.metadata.region_id,
             &current_version,

@@ -111,7 +111,7 @@ impl TwcsPicker {
 
 impl Picker for TwcsPicker {
     fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
-        let current_version = compaction_region.version_control.current().version;
+        let current_version = compaction_region.current_version.clone();
         let region_metadata = current_version.metadata.clone();
         let region_id = region_metadata.region_id;
 

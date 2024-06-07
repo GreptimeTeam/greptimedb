@@ -24,6 +24,7 @@ use crate::compaction::compactor::{CompactionRegion, Compactor};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
 use crate::error;
 use crate::error::CompactRegionSnafu;
+use crate::manifest::action::RegionEdit;
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
@@ -76,7 +77,7 @@ impl CompactionTaskImpl {
             .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
     }
 
-    async fn handle_compaction(&mut self) -> error::Result<()> {
+    async fn handle_compaction(&mut self) -> error::Result<RegionEdit> {
         self.mark_files_compacting(true);
 
         let merge_timer = COMPACTION_STAGE_ELAPSED
@@ -95,16 +96,7 @@ impl CompactionTaskImpl {
                 return Err(e);
             }
         };
-
         let merge_time = merge_timer.stop_and_record();
-
-        if compaction_result.is_empty() {
-            info!(
-                "No files to compact, region_id: {}, window: {:?}",
-                self.compaction_region.region_id, compaction_result.compaction_time_window
-            );
-            return Ok(());
-        }
 
         info!(
             "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
@@ -123,10 +115,10 @@ impl CompactionTaskImpl {
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
+
         self.compactor
             .update_manifest(&self.compaction_region, compaction_result)
-            .await?;
-        Ok(())
+            .await
     }
 
     /// Handles compaction failure, notifies all waiters.
@@ -154,10 +146,11 @@ impl CompactionTaskImpl {
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
         let notify = match self.handle_compaction().await {
-            Ok(()) => BackgroundNotify::CompactionFinished(CompactionFinished {
+            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                 region_id: self.compaction_region.region_id,
                 senders: std::mem::take(&mut self.waiters),
                 start_time: self.start_time,
+                edit,
             }),
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
