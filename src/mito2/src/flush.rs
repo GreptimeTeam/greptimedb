@@ -462,6 +462,7 @@ impl FlushScheduler {
 
         let version = version_control.current().version;
         if version.memtables.is_empty() {
+            debug_assert!(!self.region_status.contains_key(&region_id));
             // The region has nothing to flush.
             task.on_success();
             return Ok(());
