@@ -62,9 +62,9 @@ pub struct CompactionRegion {
     pub(crate) current_version: VersionRef,
 }
 
-/// CompactionRequest represents the request to compact a region.
+/// CompactorRequest represents the request to compact a region.
 #[derive(Debug, Clone)]
-pub struct CompactionRequest {
+pub struct CompactorRequest {
     pub region_id: RegionId,
     pub region_dir: String,
     pub region_options: HashMap<String, String>,
@@ -74,7 +74,7 @@ pub struct CompactionRequest {
 /// Open a compaction region from a compaction request.
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
-    req: &CompactionRequest,
+    req: &CompactorRequest,
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
