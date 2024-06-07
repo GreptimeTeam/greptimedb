@@ -374,6 +374,8 @@ impl Compactor for DefaultCompactor {
         Ok(edit)
     }
 
+    // The default implementation of compact combines the merge_ssts and update_manifest functions.
+    // Note: It's local compaction and only used for testing purpose.
     async fn compact(
         &self,
         compaction_region: &CompactionRegion,
