@@ -867,7 +867,7 @@ mod tests {
         // Check the new version.
         let version_data = version_control.current();
         assert_eq!(0, version_data.version.memtables.immutables()[0].id());
-        // Schedule remaning tasks.
+        // Schedule remaining tasks.
         let output_rxs: Vec<_> = tasks
             .into_iter()
             .map(|mut task| {
