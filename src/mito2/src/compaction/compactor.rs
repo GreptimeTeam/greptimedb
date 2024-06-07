@@ -221,7 +221,6 @@ impl Compactor for DefaultCompactor {
         compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
-        let current_version = compaction_region.current_version.clone();
         let mut futs = Vec::with_capacity(picker_output.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
@@ -269,8 +268,12 @@ impl Compactor for DefaultCompactor {
             let file_id = output.output_file_id;
             let cache_manager = compaction_region.cache_manager.clone();
             let storage = compaction_region.region_options.storage.clone();
-            let index_options = current_version.options.index_options.clone();
-            let append_mode = current_version.options.append_mode;
+            let index_options = compaction_region
+                .current_version
+                .options
+                .index_options
+                .clone();
+            let append_mode = compaction_region.current_version.options.append_mode;
             futs.push(async move {
                 let reader = build_sst_reader(
                     region_metadata.clone(),
