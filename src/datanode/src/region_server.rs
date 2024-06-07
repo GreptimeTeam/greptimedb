@@ -526,7 +526,8 @@ impl RegionServerInner {
 
         if !errors.is_empty() {
             return error::UnexpectedSnafu {
-                violated: format!("Failed to open batch regions: {:?}", errors),
+                // Returns the first error.
+                violated: format!("Failed to open batch regions: {:?}", errors[0]),
             }
             .fail();
         }
