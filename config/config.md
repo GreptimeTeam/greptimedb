@@ -1,7 +1,8 @@
 # Configurations
 
-- [Standalone Mode](#standalone-mode)
-- [Distributed Mode](#distributed-mode)
+- [Configurations](#configurations)
+  - [Standalone Mode](#standalone-mode)
+  - [Distributed Mode](#distributed-mode)
     - [Frontend](#frontend)
     - [Metasrv](#metasrv)
     - [Datanode](#datanode)

@@ -43,7 +43,6 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta, IndexType};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -201,7 +200,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) file_purger: FilePurgerRef,
     pub(crate) listener: WorkerListener,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
@@ -243,31 +241,34 @@ impl RegionFlushTask {
         // Get a version of this region before creating a job to get current
         // wal entry id, sequence and immutable memtables.
         let version_data = version_control.current();
-        // This is used to update the version.
-        let version_control = version_control.clone();
 
         Box::pin(async move {
-            self.do_flush(version_data, &version_control).await;
+            self.do_flush(version_data).await;
         })
     }
 
     /// Runs the flush task.
-    async fn do_flush(
-        &mut self,
-        version_data: VersionControlData,
-        version_control: &VersionControlRef,
-    ) {
+    async fn do_flush(&mut self, version_data: VersionControlData) {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
 
-        let worker_request = match self.flush_memtables(&version_data, version_control).await {
-            Ok(()) => {
+        let worker_request = match self.flush_memtables(&version_data).await {
+            Ok(edit) => {
+                let memtables_to_remove = version_data
+                    .version
+                    .memtables
+                    .immutables()
+                    .iter()
+                    .map(|m| m.id())
+                    .collect();
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     senders: std::mem::take(&mut self.senders),
                     _timer: timer,
+                    edit,
+                    memtables_to_remove,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -291,11 +292,10 @@ impl RegionFlushTask {
     }
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
-    async fn flush_memtables(
-        &self,
-        version_data: &VersionControlData,
-        version_control: &VersionControlRef,
-    ) -> Result<()> {
+    /// Returns the [RegionEdit] to apply.
+    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
+        // We must use the immutable memtables list and entry ids from the `version_data`
+        // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
@@ -384,13 +384,6 @@ impl RegionFlushTask {
             timer.stop_and_record(),
         );
 
-        let memtables_to_remove: SmallVec<[_; 2]> = version_data
-            .version
-            .memtables
-            .immutables()
-            .iter()
-            .map(|m| m.id())
-            .collect();
         let edit = RegionEdit {
             files_to_add: file_metas,
             files_to_remove: Vec::new(),
@@ -405,10 +398,10 @@ impl RegionFlushTask {
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
         self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list, || {
-                version_control.apply_edit(edit, &memtables_to_remove, self.file_purger.clone());
-            })
-            .await
+            .update_manifest(RegionState::Writable, action_list)
+            .await?;
+
+        Ok(edit)
     }
 
     /// Notify flush job status.
@@ -796,7 +789,6 @@ mod tests {
             senders: Vec::new(),
             request_sender: tx,
             access_layer: env.access_layer.clone(),
-            file_purger: builder.file_purger(),
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,

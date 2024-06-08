@@ -21,6 +21,8 @@ addr = "127.0.0.1:3001"
 hostname = "127.0.0.1"
 ## The number of server worker threads.
 runtime_size = 8
+## Parallelism of initializing regions.
+init_regions_parallelism = 16
 
 
 ## gRPC server TLS options, see `mysql.tls` section.
