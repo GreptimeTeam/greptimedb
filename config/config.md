@@ -1,8 +1,7 @@
 # Configurations
 
-- [Configurations](#configurations)
-  - [Standalone Mode](#standalone-mode)
-  - [Distributed Mode](#distributed-mode)
+- [Standalone Mode](#standalone-mode)
+- [Distributed Mode](#distributed-mode)
     - [Frontend](#frontend)
     - [Metasrv](#metasrv)
     - [Datanode](#datanode)
@@ -311,6 +310,7 @@
 | `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname to advertise to the metasrv. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
 | `grpc.tls.cert_path` | String | `None` | Certificate file path. |
