@@ -175,6 +175,32 @@ impl<'a> ParserContext<'a> {
         }
     }
 
+    /// Parses MySQL style 'PREPARE stmt_name FROM stmt' into a (stmt_name, stmt) tuple.
+    pub fn parse_mysql_prepare_stmt(
+        sql: &'a str,
+        dialect: &dyn Dialect,
+    ) -> Result<(String, String)> {
+        let mut parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
+            .try_with_sql(sql)
+            .context(SyntaxSnafu)?;
+
+        let next_token = parser.peek_token();
+        match next_token.token.clone() {
+            Token::Word(w) => match w.keyword {
+                Keyword::PREPARE => {
+                    let _ = parser.next_token();
+                    let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
+                    let _ = parser.consume_token(&Token::make_keyword("FROM"));
+                    let stmt = parser.parse_literal_string().context(SyntaxSnafu)?;
+                    Ok((stmt_name.value, stmt))
+                }
+                _ => parser.expected("PREPARE", next_token).context(SyntaxSnafu),
+            },
+            _ => parser.expected("PREPARE", next_token).context(SyntaxSnafu),
+        }
+    }
+
     /// Raises an "unsupported statement" error.
     pub fn unsupported<T>(&self, keyword: String) -> Result<T> {
         error::UnsupportedSnafu {

@@ -45,6 +45,8 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
+    #[builder(default)]
+    prepared_statements: HashMap<String, u32>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -77,6 +79,7 @@ impl Clone for QueryContext {
             timezone: self.timezone.load().clone().into(),
             sql_dialect: self.sql_dialect.clone(),
             extensions: self.extensions.clone(),
+            prepared_statements: self.prepared_statements.clone(),
             configuration_parameter: self.configuration_parameter.clone(),
         }
     }
@@ -202,6 +205,14 @@ impl QueryContext {
         self.extensions.clone()
     }
 
+    pub fn set_prepared_stmt<S1: Into<String>, S2: Into<u32>>(&mut self, key: S1, value: S2) {
+        self.prepared_statements.insert(key.into(), value.into());
+    }
+
+    pub fn get_prepared_stmt_id<S: AsRef<str>>(&self, key: S) -> Option<u32> {
+        self.prepared_statements.get(key.as_ref()).copied()
+    }
+
     /// SQL like `set variable` may change timezone or other info in `QueryContext`.
     /// We need persist these change in `Session`.
     pub fn update_session(&self, session: &SessionRef) {
@@ -246,6 +257,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions: self.extensions.unwrap_or_default(),
+            prepared_statements: self.prepared_statements.unwrap_or_default(),
             configuration_parameter: self.configuration_parameter.unwrap_or_default(),
         }
     }
@@ -265,6 +277,7 @@ impl QueryContextBuilder {
             timezone: Some(context.timezone.load().clone().into()),
             sql_dialect: Some(context.sql_dialect.clone()),
             extensions: Some(context.extensions.clone()),
+            prepared_statements: Some(context.prepared_statements.clone()),
             configuration_parameter: Some(context.configuration_parameter.clone()),
         }
     }

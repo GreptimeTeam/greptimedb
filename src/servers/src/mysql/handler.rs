@@ -147,6 +147,67 @@ impl MysqlInstanceShim {
         let guard = self.prepared_stmts.read();
         guard.get(&stmt_id).cloned()
     }
+
+    async fn do_prepare(
+        &mut self,
+        raw_query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<(u32, Vec<Column>, Vec<Column>)> {
+        let (query, param_num) = replace_placeholders(raw_query);
+
+        let statement = validate_query(raw_query).await?;
+
+        // We have to transform the placeholder, because DataFusion only parses placeholders
+        // in the form of "$i", it can't process "?" right now.
+        let statement = transform_placeholders(statement);
+
+        let describe_result = self
+            .do_describe(statement.clone(), query_ctx.clone())
+            .await?;
+        let (plan, schema) = if let Some(DescribeResult {
+            logical_plan,
+            schema,
+        }) = describe_result
+        {
+            (Some(logical_plan), Some(schema))
+        } else {
+            (None, None)
+        };
+
+        let params = if let Some(plan) = &plan {
+            prepared_params(
+                &plan
+                    .get_param_types()
+                    .context(error::GetPreparedStmtParamsSnafu)?,
+            )?
+        } else {
+            dummy_params(param_num)?
+        };
+
+        debug_assert_eq!(params.len(), param_num - 1);
+
+        let columns = schema
+            .as_ref()
+            .map(|schema| {
+                schema
+                    .column_schemas()
+                    .iter()
+                    .map(|column_schema| {
+                        create_mysql_column(&column_schema.data_type, &column_schema.name)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let stmt_id = self.save_plan(SqlPlan {
+            query: query.to_string(),
+            plan,
+            schema,
+        });
+
+        Ok((stmt_id, params, columns))
+    }
 }
 
 #[async_trait]
@@ -210,59 +271,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
         let query_ctx = self.session.new_query_context();
-        let (query, param_num) = replace_placeholders(raw_query);
-
-        let statement = validate_query(raw_query).await?;
-
-        // We have to transform the placeholder, because DataFusion only parses placeholders
-        // in the form of "$i", it can't process "?" right now.
-        let statement = transform_placeholders(statement);
-
-        let describe_result = self
-            .do_describe(statement.clone(), query_ctx.clone())
-            .await?;
-        let (plan, schema) = if let Some(DescribeResult {
-            logical_plan,
-            schema,
-        }) = describe_result
-        {
-            (Some(logical_plan), Some(schema))
-        } else {
-            (None, None)
-        };
-
-        let params = if let Some(plan) = &plan {
-            prepared_params(
-                &plan
-                    .get_param_types()
-                    .context(error::GetPreparedStmtParamsSnafu)?,
-            )?
-        } else {
-            dummy_params(param_num)?
-        };
-
-        debug_assert_eq!(params.len(), param_num - 1);
-
-        let columns = schema
-            .as_ref()
-            .map(|schema| {
-                schema
-                    .column_schemas()
-                    .iter()
-                    .map(|column_schema| {
-                        create_mysql_column(&column_schema.data_type, &column_schema.name)
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-
-        let stmt_id = self.save_plan(SqlPlan {
-            query: query.to_string(),
-            plan,
-            schema,
-        });
-
+        let (stmt_id, params, columns) = self.do_prepare(raw_query, query_ctx.clone()).await?;
         w.reply(stmt_id, &params, &columns).await?;
         crate::metrics::METRIC_MYSQL_PREPARED_COUNT
             .with_label_values(&[query_ctx.get_db_string().as_str()])
@@ -364,6 +373,34 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
+
+        if query.to_uppercase().starts_with("PREPARE ") {
+            let mut outputs = vec![];
+            match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
+                Ok((stmt_name, stmt)) => match self.do_prepare(&stmt, query_ctx.clone()).await {
+                    Ok((stmt_id, _, _)) => {
+                        let mut new_query_ctx = query_ctx.as_ref().clone();
+                        new_query_ctx.set_prepared_stmt(stmt_name, stmt_id);
+                        outputs.push(Ok(Output::new_with_affected_rows(0)));
+                    }
+                    Err(e) => {
+                        writer
+                            .error(ErrorKind::ER_PARSE_ERROR, e.output_msg().as_bytes())
+                            .await?;
+                        return Ok(());
+                    }
+                },
+                Err(e) => {
+                    writer
+                        .error(ErrorKind::ER_PARSE_ERROR, e.output_msg().as_bytes())
+                        .await?;
+                    return Ok(());
+                }
+            }
+            writer::write_output(writer, query_ctx, outputs).await?;
+            return Ok(());
+        }
+
         let outputs = self.do_query(query, query_ctx.clone()).await;
         writer::write_output(writer, query_ctx, outputs).await?;
         Ok(())
