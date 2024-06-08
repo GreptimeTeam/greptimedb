@@ -54,3 +54,9 @@ impl IntoIterator for Array {
         self.values.into_iter()
     }
 }
+
+impl From<Vec<Value>> for Array {
+    fn from(values: Vec<Value>) -> Self {
+        Array { values }
+    }
+}
