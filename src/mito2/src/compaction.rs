@@ -40,7 +40,7 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::compaction::compactor::{CompactionRegion, CompactorRequest, DefaultCompactor};
+use crate::compaction::compactor::{CompactionRegion, DefaultCompactor};
 use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
@@ -282,15 +282,8 @@ impl CompactionScheduler {
         match &self.remote_job_scheduler {
             Some(remote_job_scheduler) => {
                 let remote_compaction_job = CompactionJob {
-                    request: CompactorRequest {
-                        region_id,
-                        region_dir: compaction_region.access_layer.region_dir().to_string(),
-
-                        // FIXME(zyy17): How to conver region_options to HashMap<String, String>?
-                        region_options: HashMap::default(),
-                        compaction_options: options.clone(),
-                        picker_output,
-                    },
+                    compaction_region: compaction_region.clone(),
+                    picker_output,
                 };
 
                 // Return 0 to the client as we are going to schedule the compaction job remotely.

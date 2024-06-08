@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::compaction::compactor::CompactorRequest;
+use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::PickerOutput;
 use crate::error::Result;
 
 pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
@@ -40,17 +41,18 @@ impl JobId {
 }
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub enum RemoteJob {
     CompactionJob(CompactionJob),
 }
 
 /// CompactionJob is a remote job that compacts a set of files in a compaction service.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct CompactionJob {
-    pub request: CompactorRequest,
+    pub compaction_region: CompactionRegion,
+    pub picker_output: PickerOutput,
 }
 
 /// RemoteJobSchedulerOption is an option to create a RemoteJobScheduler.
