@@ -179,8 +179,8 @@ impl StartCommand {
             opts.grpc.addr.clone_from(addr);
         }
 
-        if self.rpc_hostname.is_some() {
-            opts.rpc_hostname.clone_from(&self.rpc_hostname);
+        if let Some(hostname) = &self.rpc_hostname {
+            opts.grpc.hostname.clone_from(hostname);
         }
 
         if let Some(node_id) = self.node_id {
@@ -309,10 +309,10 @@ mod tests {
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            rpc_hostname = "127.0.0.1"
             
             [grpc]
             addr = "127.0.0.1:3001"
+            hostname = "127.0.0.1"
             runtime_size = 8
 
             [heartbeat]
@@ -477,13 +477,15 @@ mod tests {
             enable_memory_catalog = false
             node_id = 42
             rpc_addr = "127.0.0.1:3001"
-            rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
 
             [meta_client]
             timeout = "3s"
             connect_timeout = "5s"
             tcp_nodelay = true
+
+            [grpc]
+            hostname = "10.103.174.219"
 
             [wal]
             provider = "raft_engine"
@@ -574,6 +576,7 @@ mod tests {
                     opts.http.addr,
                     DatanodeOptions::default().component.http.addr
                 );
+                assert_eq!(opts.grpc.hostname, "10.103.174.219");
             },
         );
     }

@@ -45,7 +45,6 @@ fn test_load_datanode_example_config() {
         },
         component: DatanodeOptions {
             node_id: Some(42),
-            rpc_hostname: Some("127.0.0.1".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),

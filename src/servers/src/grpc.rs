@@ -55,11 +55,12 @@ type TonicResult<T> = std::result::Result<T, Status>;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrpcOptions {
     pub addr: String,
-    pub runtime_size: usize,
+    pub hostname: String,
     // Max gRPC receiving(decoding) message size
     pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
+    pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
 }
@@ -68,9 +69,10 @@ impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4001".to_string(),
-            runtime_size: 8,
+            hostname: "127.0.0.1".to_string(),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            runtime_size: 8,
             tls: TlsOption::default(),
         }
     }

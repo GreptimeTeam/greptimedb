@@ -1,8 +1,7 @@
 # Configurations
 
-- [Configurations](#configurations)
-  - [Standalone Mode](#standalone-mode)
-  - [Distributed Mode](#distributed-mode)
+- [Standalone Mode](#standalone-mode)
+- [Distributed Mode](#distributed-mode)
     - [Frontend](#frontend)
     - [Metasrv](#metasrv)
     - [Datanode](#datanode)
@@ -307,9 +306,9 @@
 | `node_id` | Integer | `None` | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
-| `rpc_hostname` | String | `None` | The hostname of the datanode. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname to advertise to the metasrv. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |

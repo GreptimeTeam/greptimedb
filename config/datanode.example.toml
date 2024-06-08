@@ -13,16 +13,15 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
-## The hostname of the datanode.
-## +toml2docs:none-default
-rpc_hostname = "127.0.0.1"
-
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
 addr = "127.0.0.1:3001"
+## The hostname to advertise to the metasrv.
+hostname = "127.0.0.1"
 ## The number of server worker threads.
 runtime_size = 8
+
 
 ## gRPC server TLS options, see `mysql.tls` section.
 [grpc.tls]
