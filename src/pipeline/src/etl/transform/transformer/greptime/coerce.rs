@@ -16,7 +16,7 @@ use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 
 use crate::etl::transform::index::Index;
-use crate::etl::transform::Transform;
+use crate::etl::transform::{OnFailure, Transform};
 use crate::etl::value::{Epoch, Time, Value};
 
 impl TryFrom<Value> for ValueData {
@@ -177,8 +177,20 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
         Value::Boolean(_) => ValueData::BoolValue(b),
         Value::String(_) => ValueData::StringValue(b.to_string()),
 
-        Value::Time(_) => return Err("Boolean type not supported for Time".to_string()),
-        Value::Epoch(_) => return Err("Boolean type not supported for Epoch".to_string()),
+        Value::Time(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Time".to_string())
+            }
+            None => return Err("Boolean type not supported for Time".to_string()),
+        },
+        Value::Epoch(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Epoch".to_string())
+            }
+            None => return Err("Boolean type not supported for Epoch".to_string()),
+        },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
@@ -207,8 +219,21 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Boolean(_) => ValueData::BoolValue(n != 0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Time(_) => return Err("Integer type not supported for Time".to_string()),
-        Value::Epoch(_) => return Err("Integer type not supported for Epoch".to_string()),
+        Value::Time(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Time".to_string())
+            }
+            None => return Err("Integer type not supported for Time".to_string()),
+        },
+
+        Value::Epoch(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Epoch".to_string())
+            }
+            None => return Err("Integer type not supported for Epoch".to_string()),
+        },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
@@ -237,8 +262,21 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Boolean(_) => ValueData::BoolValue(n != 0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Time(_) => return Err("Integer type not supported for Time".to_string()),
-        Value::Epoch(_) => return Err("Integer type not supported for Epoch".to_string()),
+        Value::Time(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Time".to_string())
+            }
+            None => return Err("Integer type not supported for Time".to_string()),
+        },
+
+        Value::Epoch(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Epoch".to_string())
+            }
+            None => return Err("Integer type not supported for Epoch".to_string()),
+        },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
@@ -267,8 +305,21 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, 
         Value::Boolean(_) => ValueData::BoolValue(n != 0.0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Time(_) => return Err("Float type not supported for Time".to_string()),
-        Value::Epoch(_) => return Err("Float type not supported for Epoch".to_string()),
+        Value::Time(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Time".to_string())
+            }
+            None => return Err("Float type not supported for Time".to_string()),
+        },
+
+        Value::Epoch(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => return Ok(None),
+            Some(OnFailure::Default) => {
+                return Err("default value not supported for Epoch".to_string())
+            }
+            None => return Err("Float type not supported for Epoch".to_string()),
+        },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
@@ -280,31 +331,156 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>, 
 }
 
 fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueData>, String> {
-    let val = match transform.type_ {
-        Value::Int8(_) => ValueData::I8Value(s.parse::<i32>().map_err(|e| e.to_string())?),
-        Value::Int16(_) => ValueData::I16Value(s.parse::<i32>().map_err(|e| e.to_string())?),
-        Value::Int32(_) => ValueData::I32Value(s.parse::<i32>().map_err(|e| e.to_string())?),
-        Value::Int64(_) => ValueData::I64Value(s.parse::<i64>().map_err(|e| e.to_string())?),
+    match transform.type_ {
+        Value::Int8(_) if s.parse::<i32>().is_ok() => {
+            Ok(Some(ValueData::I8Value(s.parse().unwrap())))
+        }
+        Value::Int16(_) if s.parse::<i32>().is_ok() => {
+            Ok(Some(ValueData::I16Value(s.parse().unwrap())))
+        }
+        Value::Int32(_) if s.parse::<i32>().is_ok() => {
+            Ok(Some(ValueData::I32Value(s.parse().unwrap())))
+        }
+        Value::Int64(_) if s.parse::<i64>().is_ok() => {
+            Ok(Some(ValueData::I64Value(s.parse().unwrap())))
+        }
 
-        Value::Uint8(_) => ValueData::U8Value(s.parse::<u32>().map_err(|e| e.to_string())?),
-        Value::Uint16(_) => ValueData::U16Value(s.parse::<u32>().map_err(|e| e.to_string())?),
-        Value::Uint32(_) => ValueData::U32Value(s.parse::<u32>().map_err(|e| e.to_string())?),
-        Value::Uint64(_) => ValueData::U64Value(s.parse::<u64>().map_err(|e| e.to_string())?),
+        Value::Uint8(_) if s.parse::<u32>().is_ok() => {
+            Ok(Some(ValueData::U8Value(s.parse().unwrap())))
+        }
+        Value::Uint16(_) if s.parse::<u32>().is_ok() => {
+            Ok(Some(ValueData::U16Value(s.parse().unwrap())))
+        }
+        Value::Uint32(_) if s.parse::<u32>().is_ok() => {
+            Ok(Some(ValueData::U32Value(s.parse().unwrap())))
+        }
+        Value::Uint64(_) if s.parse::<u64>().is_ok() => {
+            Ok(Some(ValueData::U64Value(s.parse().unwrap())))
+        }
 
-        Value::Float32(_) => ValueData::F32Value(s.parse::<f32>().map_err(|e| e.to_string())?),
-        Value::Float64(_) => ValueData::F64Value(s.parse::<f64>().map_err(|e| e.to_string())?),
+        Value::Float32(_) if s.parse::<f32>().is_ok() => {
+            Ok(Some(ValueData::F32Value(s.parse().unwrap())))
+        }
+        Value::Float64(_) if s.parse::<f64>().is_ok() => {
+            Ok(Some(ValueData::F64Value(s.parse().unwrap())))
+        }
 
-        Value::Boolean(_) => ValueData::BoolValue(s.parse::<bool>().map_err(|e| e.to_string())?),
-        Value::String(_) => ValueData::StringValue(s.to_string()),
+        Value::Boolean(_) if s.parse::<bool>().is_ok() => {
+            Ok(Some(ValueData::BoolValue(s.parse().unwrap())))
+        }
 
-        Value::Time(_) => return Err("String type not supported for Time".to_string()),
-        Value::Epoch(_) => return Err("String type not supported for Epoch".to_string()),
+        // on_failure
+        Value::Int8(_)
+        | Value::Int16(_)
+        | Value::Int32(_)
+        | Value::Int64(_)
+        | Value::Uint8(_)
+        | Value::Uint16(_)
+        | Value::Uint32(_)
+        | Value::Uint64(_)
+        | Value::Float32(_)
+        | Value::Float64(_)
+        | Value::Boolean(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => Ok(None),
+            Some(OnFailure::Default) => match transform.get_default() {
+                Some(default) => coerce_value(default, transform),
+                None => coerce_value(transform.get_type_matched_default_val(), transform),
+            },
+            None => Err(format!(
+                "failed to coerce string value '{s}' to type '{}'",
+                transform.type_.to_str_type()
+            )),
+        },
+
+        Value::String(_) => Ok(Some(ValueData::StringValue(s.to_string()))),
+
+        Value::Time(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => Ok(None),
+            Some(OnFailure::Default) => Err("default value not supported for Time".to_string()),
+            None => Err("String type not supported for Time".to_string()),
+        },
+
+        Value::Epoch(_) => match transform.on_failure {
+            Some(OnFailure::Ignore) => Ok(None),
+            Some(OnFailure::Default) => Err("default value not supported for Epoch".to_string()),
+            None => Err("String type not supported for Epoch".to_string()),
+        },
 
         Value::Array(_) => unimplemented!("Array type not supported"),
         Value::Map(_) => unimplemented!("Object type not supported"),
 
-        Value::Null => return Ok(None),
-    };
+        Value::Null => Ok(None),
+    }
+}
 
-    Ok(Some(val))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::etl::field::Fields;
+
+    #[test]
+    fn test_coerce_string_without_on_failure() {
+        let transform = Transform {
+            fields: Fields::default(),
+            type_: Value::Int32(0),
+            default: None,
+            index: None,
+            on_failure: None,
+        };
+
+        // valid string
+        {
+            let val = Value::String("123".to_string());
+            let result = coerce_value(&val, &transform).unwrap();
+            assert_eq!(result, Some(ValueData::I32Value(123)));
+        }
+
+        // invalid string
+        {
+            let val = Value::String("hello".to_string());
+            let result = coerce_value(&val, &transform);
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_coerce_string_with_on_failure_ignore() {
+        let transform = Transform {
+            fields: Fields::default(),
+            type_: Value::Int32(0),
+            default: None,
+            index: None,
+            on_failure: Some(OnFailure::Ignore),
+        };
+
+        let val = Value::String("hello".to_string());
+        let result = coerce_value(&val, &transform).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_string_with_on_failure_default() {
+        let mut transform = Transform {
+            fields: Fields::default(),
+            type_: Value::Int32(0),
+            default: None,
+            index: None,
+            on_failure: Some(OnFailure::Default),
+        };
+
+        // with no explicit default value
+        {
+            let val = Value::String("hello".to_string());
+            let result = coerce_value(&val, &transform).unwrap();
+            assert_eq!(result, Some(ValueData::I32Value(0)));
+        }
+
+        // with explicit default value
+        {
+            transform.default = Some(Value::Int32(42));
+            let val = Value::String("hello".to_string());
+            let result = coerce_value(&val, &transform).unwrap();
+            assert_eq!(result, Some(ValueData::I32Value(42)));
+        }
+    }
 }

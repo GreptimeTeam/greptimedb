@@ -27,6 +27,7 @@ const TRANSFORM_FIELDS: &str = "fields";
 const TRANSFORM_TYPE: &str = "type";
 const TRANSFORM_INDEX: &str = "index";
 const TRANSFORM_DEFAULT: &str = "default";
+const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
 // pub use transformer::noop::NoopTransformer;
@@ -36,6 +37,34 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
 
     fn new(transforms: Transforms) -> Result<Self, String>;
     fn transform(&self, val: crate::etl::value::Value) -> Result<Self::Output, String>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum OnFailure {
+    #[default]
+    Ignore,
+    Default,
+}
+
+impl std::str::FromStr for OnFailure {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ignore" => Ok(OnFailure::Ignore),
+            "default" => Ok(OnFailure::Default),
+            _ => Err(format!("invalid transform on_failure value: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for OnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            OnFailure::Ignore => write!(f, "ignore"),
+            OnFailure::Default => write!(f, "default"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -97,6 +126,8 @@ pub struct Transform {
     pub default: Option<Value>,
 
     pub index: Option<Index>,
+
+    pub on_failure: Option<OnFailure>,
 }
 
 impl std::fmt::Display for Transform {
@@ -107,10 +138,21 @@ impl std::fmt::Display for Transform {
             "".to_string()
         };
 
-        let fields = format!("field(s): {}", self.fields);
         let type_ = format!("type: {}", self.type_);
+        let fields = format!("field(s): {}", self.fields);
+        let default = if let Some(default) = &self.default {
+            format!(", default: {}", default)
+        } else {
+            "".to_string()
+        };
 
-        write!(f, "{type_}{index}, {fields}")
+        let on_failure = if let Some(on_failure) = &self.on_failure {
+            format!(", on_failure: {}", on_failure)
+        } else {
+            "".to_string()
+        };
+
+        write!(f, "{type_}{index}, {fields}{default}{on_failure}",)
     }
 }
 
@@ -121,6 +163,7 @@ impl Default for Transform {
             type_: Value::Null,
             default: None,
             index: None,
+            on_failure: None,
         }
     }
 }
@@ -155,8 +198,16 @@ impl Transform {
         self.index = Some(index);
     }
 
+    fn with_on_failure(&mut self, on_failure: OnFailure) {
+        self.on_failure = Some(on_failure);
+    }
+
     pub(crate) fn get_default(&self) -> Option<&Value> {
         self.default.as_ref()
+    }
+
+    pub(crate) fn get_type_matched_default_val(&self) -> &Value {
+        &self.type_
     }
 }
 
@@ -192,6 +243,12 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 TRANSFORM_DEFAULT => {
                     default_opt = Some(Value::try_from(v)?);
                 }
+
+                TRANSFORM_ON_FAILURE => {
+                    let on_failure = yaml_string(v, TRANSFORM_ON_FAILURE)?;
+                    transform.with_on_failure(on_failure.parse()?);
+                }
+
                 _ => {}
             }
         }
