@@ -285,28 +285,30 @@ impl CompactionScheduler {
             if let Some(remote_job_scheduler) = &self.remote_job_scheduler {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
-                    picker_output,
+                    picker_output: picker_output.clone(),
                 };
 
-                // Return 0 to the client as we are going to schedule the compaction job remotely.
-                for waiter in waiters {
-                    waiter.send(Ok(0));
-                }
-
-                let job_id = remote_job_scheduler
+                let result = remote_job_scheduler
                     .schedule(RemoteJob::CompactionJob(remote_compaction_job))
-                    .await.map_err(|e| {
-                    error!(e; "Failed to schedule remote compaction job for region {}", region_id);
-                    self.region_status.remove(&region_id);
-                    e
-                })?;
-                info!(
-                    "Scheduled remote compaction job {} for region {}",
-                    job_id.as_u64(),
-                    region_id
-                );
+                    .await;
 
-                return Ok(());
+                if let Ok(job_id) = result {
+                    info!(
+                        "Scheduled remote compaction job {} for region {}",
+                        job_id.as_u64(),
+                        region_id
+                    );
+
+                    // Return 0 to the client as we are going to schedule the compaction job remotely.
+                    for waiter in waiters {
+                        waiter.send(Ok(0));
+                    }
+
+                    // Finish the remote compaction job.
+                    return Ok(());
+                } else {
+                    error!("Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id)
+                }
             } else {
                 info!(
                     "Remote compaction is not enabled, fallback to local compaction for region {}",
