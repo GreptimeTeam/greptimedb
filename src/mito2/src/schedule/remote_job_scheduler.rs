@@ -14,8 +14,6 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
 use crate::error::Result;
@@ -53,10 +51,4 @@ pub enum RemoteJob {
 pub struct CompactionJob {
     pub compaction_region: CompactionRegion,
     pub picker_output: PickerOutput,
-}
-
-/// RemoteJobSchedulerOption is an option to create a RemoteJobScheduler.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RemoteJobSchedulerOption {
-    pub addr: String,
 }
