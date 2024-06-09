@@ -279,8 +279,10 @@ impl CompactionScheduler {
             return Ok(());
         };
 
-        match &self.remote_job_scheduler {
-            Some(remote_job_scheduler) => {
+        // If specified to run compaction remotely, we schedule the compaction job remotely.
+        // It will fall back to local compaction if there is no remote job scheduler.
+        if let compact_request::Options::Remote(_) = &options {
+            if let Some(remote_job_scheduler) = &self.remote_job_scheduler {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
                     picker_output,
@@ -294,42 +296,47 @@ impl CompactionScheduler {
                 let job_id = remote_job_scheduler
                     .schedule(RemoteJob::CompactionJob(remote_compaction_job))
                     .await.map_err(|e| {
-                        error!(e; "Failed to schedule remote compaction job for region {}", region_id);
-                        self.region_status.remove(&region_id);
-                        e
-                    })?;
+                    error!(e; "Failed to schedule remote compaction job for region {}", region_id);
+                    self.region_status.remove(&region_id);
+                    e
+                })?;
                 info!(
                     "Scheduled remote compaction job {} for region {}",
                     job_id.as_u64(),
                     region_id
                 );
 
-                Ok(())
-            }
-            None => {
-                let mut local_compaction_task = Box::new(CompactionTaskImpl {
-                    request_sender,
-                    waiters,
-                    start_time,
-                    listener,
-                    picker_output,
-                    compaction_region,
-                    compactor: Arc::new(DefaultCompactor {}),
-                });
-
-                // Submit the compaction task.
-                self.scheduler
-                    .schedule(Box::pin(async move {
-                        local_compaction_task.run().await;
-                    }))
-                    .map_err(|e| {
-                        error!(e; "Failed to submit compaction request for region {}", region_id);
-                        // If failed to submit the job, we need to remove the region from the scheduler.
-                        self.region_status.remove(&region_id);
-                        e
-                    })
+                return Ok(());
+            } else {
+                info!(
+                    "Remote compaction is not enabled, fallback to local compaction for region {}",
+                    region_id
+                );
             }
         }
+
+        // Create a local compaction task.
+        let mut local_compaction_task = Box::new(CompactionTaskImpl {
+            request_sender,
+            waiters,
+            start_time,
+            listener,
+            picker_output,
+            compaction_region,
+            compactor: Arc::new(DefaultCompactor {}),
+        });
+
+        // Submit the compaction task.
+        self.scheduler
+            .schedule(Box::pin(async move {
+                local_compaction_task.run().await;
+            }))
+            .map_err(|e| {
+                error!(e; "Failed to submit compaction request for region {}", region_id);
+                // If failed to submit the job, we need to remove the region from the scheduler.
+                self.region_status.remove(&region_id);
+                e
+            })
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
