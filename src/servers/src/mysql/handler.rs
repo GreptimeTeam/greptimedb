@@ -148,6 +148,7 @@ impl MysqlInstanceShim {
         guard.get(&stmt_id).cloned()
     }
 
+    /// Save the prepared statement and return the statement id, parameters and result columns
     async fn do_prepare(
         &mut self,
         raw_query: &str,
@@ -343,7 +344,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 ]
             }
             None => {
-                let query = replace_params(params, sql_plan.query);
+                let param_strs = params
+                    .iter()
+                    .map(|x| convert_param_value_to_string(x))
+                    .collect();
+                let query = replace_params(param_strs, sql_plan.query);
                 debug!("Mysql execute replaced query: {}", query);
                 self.do_query(&query, query_ctx.clone()).await
             }
@@ -399,6 +404,48 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
             writer::write_output(writer, query_ctx, outputs).await?;
             return Ok(());
+        } else if query.to_uppercase().starts_with("EXECUTE ") {
+            match ParserContext::parse_mysql_execute_stmt(query, query_ctx.sql_dialect()) {
+                // TODO: similar to on_execute, refactor this
+                Ok((stmt_name, params)) => {
+                    let stmt_id = match query_ctx.get_prepared_stmt_id(stmt_name) {
+                        Some(stmt_id) => stmt_id,
+                        None => {
+                            writer
+                                .error(
+                                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
+                                    b"prepare statement not exist",
+                                )
+                                .await?;
+                            return Ok(());
+                        }
+                    };
+                    let sql_plan = match self.plan(stmt_id) {
+                        None => {
+                            writer
+                                .error(
+                                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
+                                    b"prepare statement not exist",
+                                )
+                                .await?;
+                            return Ok(());
+                        }
+                        Some(sql_plan) => sql_plan,
+                    };
+                    let param_strs = params.iter().map(|x| x.to_string()).collect();
+                    let query = replace_params(param_strs, sql_plan.query);
+                    debug!("Mysql execute replaced query: {}", query);
+                    let outputs = self.do_query(&query, query_ctx.clone()).await;
+                    writer::write_output(writer, query_ctx, outputs).await?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    writer
+                        .error(ErrorKind::ER_PARSE_ERROR, e.output_msg().as_bytes())
+                        .await?;
+                    return Ok(());
+                }
+            }
         }
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
@@ -457,21 +504,24 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 }
 
-fn replace_params(params: Vec<ParamValue>, query: String) -> String {
+fn convert_param_value_to_string(param: &ParamValue) -> String {
+    match param.value.into_inner() {
+        ValueInner::Int(u) => u.to_string(),
+        ValueInner::UInt(u) => u.to_string(),
+        ValueInner::Double(u) => u.to_string(),
+        ValueInner::NULL => "NULL".to_string(),
+        ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
+        ValueInner::Date(_) => NaiveDate::from(param.value).to_string(),
+        ValueInner::Datetime(_) => NaiveDateTime::from(param.value).to_string(),
+        ValueInner::Time(_) => format_duration(Duration::from(param.value)),
+    }
+}
+
+fn replace_params(params: Vec<String>, query: String) -> String {
     let mut query = query;
     let mut index = 1;
     for param in params {
-        let s = match param.value.into_inner() {
-            ValueInner::Int(u) => u.to_string(),
-            ValueInner::UInt(u) => u.to_string(),
-            ValueInner::Double(u) => u.to_string(),
-            ValueInner::NULL => "NULL".to_string(),
-            ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
-            ValueInner::Date(_) => NaiveDate::from(param.value).to_string(),
-            ValueInner::Datetime(_) => NaiveDateTime::from(param.value).to_string(),
-            ValueInner::Time(_) => format_duration(Duration::from(param.value)),
-        };
-        query = query.replace(&format_placeholder(index), &s);
+        query = query.replace(&format_placeholder(index), &param);
         index += 1;
     }
     query

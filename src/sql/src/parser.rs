@@ -185,19 +185,60 @@ impl<'a> ParserContext<'a> {
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
+        parser
+            .expect_keyword(Keyword::PREPARE)
+            .context(SyntaxSnafu)?;
+        let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
+        parser.expect_keyword(Keyword::FROM).context(SyntaxSnafu)?;
         let next_token = parser.peek_token();
-        match next_token.token.clone() {
-            Token::Word(w) => match w.keyword {
-                Keyword::PREPARE => {
-                    let _ = parser.next_token();
-                    let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
-                    let _ = parser.consume_token(&Token::make_keyword("FROM"));
-                    let stmt = parser.parse_literal_string().context(SyntaxSnafu)?;
-                    Ok((stmt_name.value, stmt))
+        let stmt = match next_token.token {
+            Token::SingleQuotedString(s) => {
+                let _ = parser.next_token();
+                s
+            }
+            _ => parser
+                .expected("string literal", next_token)
+                .context(SyntaxSnafu)?,
+        };
+        if !parser.consume_token(&Token::EOF) {
+            parser
+                .expected("end of statement", parser.peek_token())
+                .context(SyntaxSnafu)?;
+        }
+        Ok((stmt_name.value, stmt))
+    }
+
+    /// Parses MySQL style 'EXECUTE stmt_name USING param_list' into a stmt_name string and a list of parameters.
+    pub fn parse_mysql_execute_stmt(
+        sql: &'a str,
+        dialect: &dyn Dialect,
+    ) -> Result<(String, Vec<Expr>)> {
+        let mut parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
+            .try_with_sql(sql)
+            .context(SyntaxSnafu)?;
+
+        parser
+            .expect_keyword(Keyword::EXECUTE)
+            .context(SyntaxSnafu)?;
+        let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
+        if parser.parse_keyword(Keyword::USING) {
+            let mut param_list = vec![];
+            loop {
+                let param = parser.parse_expr().context(SyntaxSnafu)?;
+                param_list.push(param);
+                if !parser.consume_token(&Token::Comma) {
+                    break;
                 }
-                _ => parser.expected("PREPARE", next_token).context(SyntaxSnafu),
-            },
-            _ => parser.expected("PREPARE", next_token).context(SyntaxSnafu),
+            }
+            if !parser.consume_token(&Token::EOF) {
+                parser
+                    .expected("end of statement", parser.peek_token())
+                    .context(SyntaxSnafu)?;
+            }
+            Ok((stmt_name.value, param_list))
+        } else {
+            Ok((stmt_name.value, vec![]))
         }
     }
 
