@@ -16,11 +16,11 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Attribute, AttributeArgs, Ident, ItemFn, Signature, Type, TypePath,
-    TypeReference, Visibility,
+    parse_macro_input, Attribute, Ident, ItemFn, Signature, Type, TypePath, TypeReference,
+    Visibility,
 };
 
-use crate::utils::{extract_arg_map, extract_input_types, get_ident};
+use crate::utils::extract_input_types;
 
 /// Internal util macro to early return on error.
 macro_rules! ok {
@@ -40,12 +40,31 @@ macro_rules! error {
 }
 
 pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
-    let mut result = TokenStream::new();
+    let mut name: Option<Ident> = None;
+    let mut display_name: Option<Ident> = None;
+    let mut sig_fn: Option<Ident> = None;
+    let mut ret: Option<Ident> = None;
+
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("name") {
+            name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("display_name") {
+            display_name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("sig_fn") {
+            sig_fn = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("ret") {
+            ret = Some(meta.value()?.parse()?);
+            Ok(())
+        } else {
+            Err(meta.error("unsupported property"))
+        }
+    });
 
     // extract arg map
-    let arg_pairs = parse_macro_input!(args as AttributeArgs);
-    let arg_span = arg_pairs[0].span();
-    let arg_map = ok!(extract_arg_map(arg_pairs));
+    parse_macro_input!(args with parser);
 
     // decompose the fn block
     let compute_fn = parse_macro_input!(input as ItemFn);
@@ -72,16 +91,17 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
     }
     let handler_type = ok!(extract_handler_type(&arg_types));
 
+    let mut result = TokenStream::new();
     // build the struct and its impl block
     // only do this when `display_name` is specified
-    if let Ok(display_name) = get_ident(&arg_map, "display_name", arg_span) {
+    if let Some(display_name) = display_name {
         let struct_code = build_struct(
             attrs,
             vis,
             fn_name,
-            ok!(get_ident(&arg_map, "name", arg_span)),
-            ok!(get_ident(&arg_map, "sig_fn", arg_span)),
-            ok!(get_ident(&arg_map, "ret", arg_span)),
+            name.expect("name required"),
+            sig_fn.expect("sig_fn required"),
+            ret.expect("ret required"),
             handler_type,
             display_name,
         );

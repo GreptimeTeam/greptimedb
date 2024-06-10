@@ -16,13 +16,13 @@
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, quote_spanned};
-use syn2::spanned::Spanned;
-use syn2::{parenthesized, Attribute, Ident, ItemEnum, Variant};
+use syn::spanned::Spanned;
+use syn::{parenthesized, Attribute, Ident, ItemEnum, Variant};
 
 pub fn stack_trace_style_impl(args: TokenStream2, input: TokenStream2) -> TokenStream2 {
     let input_cloned: TokenStream2 = input.clone();
 
-    let error_enum_definition: ItemEnum = syn2::parse2(input_cloned).unwrap();
+    let error_enum_definition: ItemEnum = syn::parse2(input_cloned).unwrap();
     let enum_name = error_enum_definition.ident;
 
     let mut variants = vec![];
