@@ -108,7 +108,7 @@ impl HeartbeatTask {
 
         let mut last_received_lease = Instant::now();
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_hb(async move {
             while let Some(res) = rx.message().await.unwrap_or_else(|e| {
                 error!(e; "Error while reading heartbeat response");
                 None
@@ -215,7 +215,7 @@ impl HeartbeatTask {
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
             loop {
