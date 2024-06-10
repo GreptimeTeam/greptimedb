@@ -85,7 +85,7 @@ impl HeartbeatTask {
         let capture_self = self.clone();
         let retry_interval = self.retry_interval;
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_hb(async move {
             loop {
                 match resp_stream.message().await {
                     Ok(Some(resp)) => {
@@ -132,7 +132,7 @@ impl HeartbeatTask {
             addr: self.server_addr.clone(),
         });
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
