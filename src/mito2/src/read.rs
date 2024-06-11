@@ -215,6 +215,11 @@ impl Batch {
                 data: column.data.slice(offset, length),
             })
             .collect();
+        // FIXME(yingwen): Remove the put_only field.
+        let op_types = Arc::new(self.op_types.get_slice(offset, length));
+        // We need to compute the put only flag again as the output batch may
+        // only contains put.
+        let put_only = is_put_only(&op_types);
         // We skip using the builder to avoid validating the batch again.
         Batch {
             // Now we need to clone the primary key. We could try `Bytes` if
@@ -225,7 +230,7 @@ impl Batch {
             sequences: Arc::new(self.sequences.get_slice(offset, length)),
             op_types: Arc::new(self.op_types.get_slice(offset, length)),
             fields,
-            put_only: self.put_only,
+            put_only,
         }
     }
 

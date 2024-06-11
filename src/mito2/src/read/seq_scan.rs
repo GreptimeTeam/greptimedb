@@ -187,8 +187,8 @@ impl SeqScan {
         }
 
         let dedup = !stream_ctx.input.append_mode;
-        let mut builder =
-            MergeReaderBuilder::from_sources(sources, dedup, stream_ctx.input.filter_deleted);
+        // TODO(yingwen): Impl dedup reader.
+        let mut builder = MergeReaderBuilder::from_sources(sources);
         builder.build().await.map(Some)
     }
 
