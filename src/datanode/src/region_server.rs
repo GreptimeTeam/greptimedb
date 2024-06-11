@@ -18,13 +18,14 @@ use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 
 use api::region::RegionResponse;
-use api::v1::region::{region_request, QueryRequest, RegionResponse as RegionResponseV1};
+use api::v1::region::{region_request, RegionResponse as RegionResponseV1};
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
+use common_query::request::QueryRequest;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
@@ -32,6 +33,10 @@ use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
+use datafusion::datasource::{provider_as_source, TableProvider};
+use datafusion::error::Result as DfResult;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_expr::{LogicalPlan, TableSource};
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::MITO_ENGINE_NAME;
@@ -44,7 +49,7 @@ use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as S
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
@@ -56,10 +61,10 @@ use store_api::storage::RegionId;
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
-    self, BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
-    FindLogicalRegionsSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
-    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result,
-    StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    self, BuildRegionRequestsSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
+    ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, HandleBatchOpenRequestSnafu,
+    HandleRegionRequestSnafu, NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
+    RegionNotReadySnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -138,9 +143,94 @@ impl RegionServer {
         self.inner.handle_request(region_id, request).await
     }
 
+    async fn table_provider(&self, region_id: RegionId) -> Result<Arc<dyn TableProvider>> {
+        let status = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .context(RegionNotFoundSnafu { region_id })?
+            .clone();
+        ensure!(
+            matches!(status, RegionEngineWithStatus::Ready(_)),
+            RegionNotReadySnafu { region_id }
+        );
+
+        self.inner
+            .table_provider_factory
+            .create(region_id, status.into_engine())
+            .await
+            .context(ExecuteLogicalPlanSnafu)
+    }
+
+    /// Handle reads from remote. They're often query requests received by our Arrow Flight service.
+    pub async fn handle_remote_read(
+        &self,
+        request: api::v1::region::QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        let region_id = RegionId::from_u64(request.region_id);
+        let provider = self.table_provider(region_id).await?;
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
+
+        let query_ctx: QueryContextRef = request
+            .header
+            .as_ref()
+            .map(|h| Arc::new(h.into()))
+            .unwrap_or_else(|| Arc::new(QueryContextBuilder::default().build()));
+
+        let decoder = self
+            .inner
+            .query_engine
+            .engine_context(query_ctx)
+            .new_plan_decoder()
+            .context(NewPlanDecoderSnafu)?;
+
+        let plan = decoder
+            .decode(Bytes::from(request.plan), catalog_list, false)
+            .await
+            .context(DecodeLogicalPlanSnafu)?;
+
+        self.inner
+            .handle_read(QueryRequest {
+                header: request.header,
+                region_id,
+                plan,
+            })
+            .await
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        self.inner.handle_read(request).await
+        let provider = self.table_provider(request.region_id).await?;
+
+        struct RegionDataSourceInjector {
+            source: Arc<dyn TableSource>,
+        }
+
+        impl TreeNodeRewriter for RegionDataSourceInjector {
+            type Node = LogicalPlan;
+
+            fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+                Ok(match node {
+                    LogicalPlan::TableScan(mut scan) => {
+                        scan.source = self.source.clone();
+                        Transformed::yes(LogicalPlan::TableScan(scan))
+                    }
+                    _ => Transformed::no(node),
+                })
+            }
+        }
+
+        let plan = request
+            .plan
+            .rewrite(&mut RegionDataSourceInjector {
+                source: provider_as_source(provider),
+            })
+            .context(DataFusionSnafu)?
+            .data;
+
+        self.inner
+            .handle_read(QueryRequest { plan, ..request })
+            .await
     }
 
     /// Returns all opened and reportable regions.
@@ -302,7 +392,7 @@ impl FlightCraft for RegionServer {
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
         let ticket = request.into_inner().ticket;
-        let request = QueryRequest::decode(ticket.as_ref())
+        let request = api::v1::region::QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
         let tracing_context = request
             .header
@@ -311,7 +401,7 @@ impl FlightCraft for RegionServer {
             .unwrap_or_default();
 
         let result = self
-            .handle_read(request)
+            .handle_remote_read(request)
             .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
             .await?;
 
@@ -338,10 +428,6 @@ impl RegionEngineWithStatus {
             RegionEngineWithStatus::Deregistering(engine) => engine,
             RegionEngineWithStatus::Ready(engine) => engine,
         }
-    }
-
-    pub fn is_registering(&self) -> bool {
-        matches!(self, Self::Registering(_))
     }
 }
 
@@ -741,51 +827,16 @@ impl RegionServerInner {
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
 
-        let QueryRequest {
-            header,
-            region_id,
-            plan,
-        } = request;
-        let region_id = RegionId::from_u64(region_id);
-
         // Build query context from gRPC header
-        let ctx: QueryContextRef = header
+        let query_ctx: QueryContextRef = request
+            .header
             .as_ref()
             .map(|h| Arc::new(h.into()))
             .unwrap_or_else(|| QueryContextBuilder::default().build().into());
 
-        // build dummy catalog list
-        let region_status = self
-            .region_map
-            .get(&region_id)
-            .with_context(|| RegionNotFoundSnafu { region_id })?
-            .clone();
-
-        if region_status.is_registering() {
-            return error::RegionNotReadySnafu { region_id }.fail();
-        }
-
-        let table_provider = self
-            .table_provider_factory
-            .create(region_id, region_status.into_engine())
-            .await
-            .context(ExecuteLogicalPlanSnafu)?;
-
-        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
-        let query_engine_ctx = self.query_engine.engine_context(ctx.clone());
-        let plan_decoder = query_engine_ctx
-            .new_plan_decoder()
-            .context(NewPlanDecoderSnafu)?;
-
-        // decode substrait plan to logical plan and execute it
-        let logical_plan = plan_decoder
-            .decode(Bytes::from(plan), catalog_list, false)
-            .await
-            .context(DecodeLogicalPlanSnafu)?;
-
         let result = self
             .query_engine
-            .execute(logical_plan.into(), ctx)
+            .execute(request.plan.into(), query_ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 

@@ -647,8 +647,6 @@ pub struct TableInfo {
     /// Id and version of the table.
     #[builder(default, setter(into))]
     pub ident: TableIdent,
-
-    // TODO(LFC): Remove the catalog, schema and table names from TableInfo.
     /// Name of the table.
     #[builder(setter(into))]
     pub name: String,

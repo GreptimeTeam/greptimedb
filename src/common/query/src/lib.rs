@@ -17,6 +17,7 @@ pub mod error;
 mod function;
 pub mod logical_plan;
 pub mod prelude;
+pub mod request;
 mod signature;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
