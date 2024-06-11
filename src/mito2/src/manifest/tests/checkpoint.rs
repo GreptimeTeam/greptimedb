@@ -14,6 +14,7 @@
 
 use std::assert_matches::assert_matches;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
 use store_api::storage::RegionId;
@@ -113,6 +114,10 @@ async fn manager_with_checkpoint_distance_1() {
     // apply 10 actions
     for _ in 0..10 {
         manager.update(nop_action()).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     // has checkpoint
@@ -240,6 +245,10 @@ async fn generate_checkpoint_with_compression_types(
 
     for action in actions {
         manager.update(action).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     RegionManifestManager::last_checkpoint(&mut manager.store())

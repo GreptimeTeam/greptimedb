@@ -5862,6 +5862,7 @@ dependencies = [
  "rskafka",
  "rstest",
  "rstest_reuse",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_with",

@@ -28,6 +28,7 @@ use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
 };
+use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{file_version, is_delta_file, ManifestObjectStore};
 use crate::metrics::MANIFEST_OP_ELAPSED;
 
@@ -112,10 +113,8 @@ pub struct RegionManifestOptions {
 #[derive(Debug)]
 pub struct RegionManifestManager {
     store: ManifestObjectStore,
-    options: RegionManifestOptions,
     last_version: ManifestVersion,
-    /// The last version included in checkpoint file.
-    last_checkpoint_version: ManifestVersion,
+    checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
     stopped: bool,
 }
@@ -150,6 +149,7 @@ impl RegionManifestManager {
             },
         );
         let manifest = manifest_builder.try_build()?;
+        let region_id = metadata.region_id;
 
         debug!(
             "Build region manifest in {}, manifest: {:?}",
@@ -161,11 +161,12 @@ impl RegionManifestManager {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
         store.save(version, &action_list.encode()?).await?;
 
+        let checkpointer =
+            Checkpointer::new(region_id, options, Arc::new(store.clone()), MIN_VERSION);
         Ok(Self {
             store,
-            options,
             last_version: version,
-            last_checkpoint_version: MIN_VERSION,
+            checkpointer,
             manifest: Arc::new(manifest),
             stopped: false,
         })
@@ -255,11 +256,16 @@ impl RegionManifestManager {
         );
         let version = manifest.manifest_version;
 
+        let checkpointer = Checkpointer::new(
+            manifest.metadata.region_id,
+            options,
+            Arc::new(store.clone()),
+            last_checkpoint_version,
+        );
         Ok(Some(Self {
             store,
-            options,
             last_version: version,
-            last_checkpoint_version,
+            checkpointer,
             manifest: Arc::new(manifest),
             stopped: false,
         }))
@@ -309,7 +315,9 @@ impl RegionManifestManager {
         }
         let new_manifest = manifest_builder.try_build()?;
         self.manifest = Arc::new(new_manifest);
-        self.may_do_checkpoint(version).await?;
+
+        self.checkpointer
+            .maybe_do_checkpoint(self.manifest.as_ref());
 
         Ok(version)
     }
@@ -363,58 +371,6 @@ impl RegionManifestManager {
         self.last_version
     }
 
-    async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
-        if version - self.last_checkpoint_version >= self.options.checkpoint_distance
-            && self.options.checkpoint_distance != 0
-        {
-            debug!(
-                "Going to do checkpoint for version [{} ~ {}]",
-                self.last_checkpoint_version, version
-            );
-            if let Some(checkpoint) = self.do_checkpoint().await? {
-                self.last_checkpoint_version = checkpoint.last_version();
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Makes a new checkpoint. Return the fresh one if there are some actions to compact.
-    async fn do_checkpoint(&mut self) -> Result<Option<RegionCheckpoint>> {
-        let _t = MANIFEST_OP_ELAPSED
-            .with_label_values(&["checkpoint"])
-            .start_timer();
-
-        let start_version = if self.last_checkpoint_version == 0 {
-            // Checkpoint version can't be zero by implementation.
-            // So last checkpoint version is zero means no last checkpoint.
-            MIN_VERSION
-        } else {
-            self.last_checkpoint_version + 1
-        };
-        let end_version = self.last_version;
-        let last_version = self.last_version;
-        let compacted_actions = (end_version - start_version + 1) as usize;
-        let region_manifest = self.manifest.as_ref().clone();
-        let checkpoint = RegionCheckpoint {
-            last_version,
-            compacted_actions,
-            checkpoint: Some(region_manifest),
-        };
-
-        self.store
-            .save_checkpoint(last_version, &checkpoint.encode()?)
-            .await?;
-        // TODO(ruihang): this task can be detached
-        self.store.delete_until(last_version, true).await?;
-
-        info!(
-            "Done manifest checkpoint for region {}, version: [{}, {}], current latest version: {}, compacted {} actions.",
-            self.manifest.metadata.region_id, start_version, end_version, last_version, compacted_actions
-        );
-        Ok(Some(checkpoint))
-    }
-
     /// Fetches the last [RegionCheckpoint] from storage.
     pub(crate) async fn last_checkpoint(
         store: &mut ManifestObjectStore,
@@ -427,6 +383,11 @@ impl RegionManifestManager {
         } else {
             Ok(None)
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpointer(&self) -> &Checkpointer {
+        &self.checkpointer
     }
 }
 
@@ -446,6 +407,7 @@ impl RegionManifestManager {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
 
     use api::v1::SemanticType;
     use common_datasource::compression::CompressionType;
@@ -609,6 +571,10 @@ mod test {
                 )]))
                 .await
                 .unwrap();
+        }
+
+        while manager.checkpointer.is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         // check manifest size again

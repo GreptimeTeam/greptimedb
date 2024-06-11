@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::iter::Iterator;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
@@ -135,7 +135,7 @@ pub struct ManifestObjectStore {
     compress_type: CompressionType,
     path: String,
     /// Stores the size of each manifest file.
-    manifest_size_map: HashMap<FileKey, u64>,
+    manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
 }
 
@@ -150,7 +150,7 @@ impl ManifestObjectStore {
             object_store,
             compress_type,
             path: util::normalize_dir(path),
-            manifest_size_map: HashMap::new(),
+            manifest_size_map: Arc::new(RwLock::new(HashMap::new())),
             total_manifest_size,
         }
     }
@@ -280,7 +280,7 @@ impl ManifestObjectStore {
     /// ### Return
     /// The number of deleted files.
     pub async fn delete_until(
-        &mut self,
+        &self,
         end: ManifestVersion,
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
@@ -390,7 +390,11 @@ impl ManifestObjectStore {
     }
 
     /// Save the checkpoint manifest file.
-    pub async fn save_checkpoint(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub(crate) async fn save_checkpoint(
+        &self,
+        version: ManifestVersion,
+        bytes: &[u8],
+    ) -> Result<()> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["save_checkpoint"])
             .start_timer();
@@ -586,24 +590,28 @@ impl ManifestObjectStore {
 
     /// Compute the size(Byte) in manifest size map.
     pub(crate) fn total_manifest_size(&self) -> u64 {
-        self.manifest_size_map.values().sum()
+        self.manifest_size_map.read().unwrap().values().sum()
     }
 
     /// Set the size of the delta file by delta version.
     pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.manifest_size_map.insert(FileKey::Delta(version), size);
+        let mut m = self.manifest_size_map.write().unwrap();
+        m.insert(FileKey::Delta(version), size);
+
         self.inc_total_manifest_size(size);
     }
 
     /// Set the size of the checkpoint file by checkpoint version.
-    pub(crate) fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.manifest_size_map
-            .insert(FileKey::Checkpoint(version), size);
+    fn set_checkpoint_file_size(&self, version: ManifestVersion, size: u64) {
+        let mut m = self.manifest_size_map.write().unwrap();
+        m.insert(FileKey::Checkpoint(version), size);
+
         self.inc_total_manifest_size(size);
     }
 
-    fn unset_file_size(&mut self, key: &FileKey) {
-        if let Some(val) = self.manifest_size_map.remove(key) {
+    fn unset_file_size(&self, key: &FileKey) {
+        let mut m = self.manifest_size_map.write().unwrap();
+        if let Some(val) = m.remove(key) {
             self.dec_total_manifest_size(val);
         }
     }
