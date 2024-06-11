@@ -1921,7 +1921,6 @@ dependencies = [
  "quote",
  "snafu 0.8.3",
  "static_assertions",
- "syn 1.0.109",
  "syn 2.0.66",
 ]
 
