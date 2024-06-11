@@ -518,13 +518,10 @@ fn get_expired_ssts(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::schedule::scheduler::{Job, Scheduler};
-    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
 
     #[tokio::test]
@@ -572,29 +569,6 @@ mod tests {
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
-    }
-
-    #[derive(Default)]
-    struct VecScheduler {
-        jobs: Mutex<Vec<Job>>,
-    }
-
-    impl VecScheduler {
-        fn num_jobs(&self) -> usize {
-            self.jobs.lock().unwrap().len()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Scheduler for VecScheduler {
-        fn schedule(&self, job: Job) -> Result<()> {
-            self.jobs.lock().unwrap().push(job);
-            Ok(())
-        }
-
-        async fn stop(&self, _await_termination: bool) -> Result<()> {
-            Ok(())
-        }
     }
 
     #[tokio::test]
