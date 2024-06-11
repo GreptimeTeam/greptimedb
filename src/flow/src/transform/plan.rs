@@ -293,9 +293,16 @@ fn rewrite_projection_after_reduce(
     for (key_idx, key_expr) in key_exprs.iter().enumerate() {
         if let ScalarExpr::Column(_) = key_expr {
             if !all_cols_ref_in_proj.contains(&key_idx) {
-                return InvalidQuerySnafu{
-                    reason: format!("Expect normal column in group by also appear in projection, but column {}(name is {}) is missing", key_idx, reduce_output_type.get_name(key_idx).clone().map(|s|format!("'{}'",s)).unwrap_or("unknown".to_string()))
-                }.fail();
+                let err_msg = format!(
+                    "Expect normal column in group by also appear in projection, but column {}(name is {}) is missing", 
+                    key_idx,
+                    reduce_output_type
+                        .get_name(key_idx)
+                        .clone()
+                        .map(|s|format!("'{}'",s))
+                        .unwrap_or("unknown".to_string())
+            );
+                return InvalidQuerySnafu { reason: err_msg }.fail();
             }
         }
     }
