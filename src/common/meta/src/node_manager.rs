@@ -16,26 +16,13 @@ use std::sync::Arc;
 
 use api::region::RegionResponse;
 use api::v1::flow::{FlowRequest, FlowResponse};
-use api::v1::region::{InsertRequests, RegionRequest, RegionRequestHeader};
+use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion_expr::LogicalPlan;
-use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::peer::Peer;
-
-/// The query request to be handled by the RegionServer(Datanode).
-pub struct QueryRequest {
-    /// The header of this request. Often to store some context of the query. None means all to defaults.
-    pub header: Option<RegionRequestHeader>,
-
-    /// The id of the region to be queried.
-    pub region_id: RegionId,
-
-    /// The form of the query: a logical plan.
-    pub plan: LogicalPlan,
-}
 
 /// The trait for handling requests to datanode.
 #[async_trait::async_trait]

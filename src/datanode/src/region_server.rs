@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
-use common_meta::node_manager::QueryRequest;
+use common_query::request::QueryRequest;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;

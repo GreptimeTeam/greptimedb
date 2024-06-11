@@ -20,7 +20,7 @@ use datafusion::logical_expr::LogicalPlan;
 use crate::error::Result;
 use crate::logical_plan::SubstraitPlanDecoder;
 
-/// Dummy `[SubstraitPlanDecoder]` for test.
+/// Dummy [`SubstraitPlanDecoder`] for test.
 pub struct DummyDecoder;
 
 impl DummyDecoder {

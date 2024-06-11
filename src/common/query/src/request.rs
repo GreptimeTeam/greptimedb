@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use api::v1::region::RegionRequestHeader;
+use datafusion_expr::LogicalPlan;
+use store_api::storage::RegionId;
 
-use async_trait::async_trait;
-use common_query::request::QueryRequest;
-use common_recordbatch::SendableRecordBatchStream;
+/// The query request to be handled by the RegionServer (Datanode).
+pub struct QueryRequest {
+    /// The header of this request. Often to store some context of the query. None means all to defaults.
+    pub header: Option<RegionRequestHeader>,
 
-use crate::error::Result;
+    /// The id of the region to be queried.
+    pub region_id: RegionId,
 
-#[async_trait]
-pub trait RegionQueryHandler: Send + Sync {
-    async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
+    /// The form of the query: a logical plan.
+    pub plan: LogicalPlan,
 }
-
-pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;

@@ -18,6 +18,7 @@ use api::region::RegionResponse;
 use api::v1::flow::{FlowRequest, FlowResponse};
 use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
@@ -30,7 +31,7 @@ use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
 use crate::node_manager::{
-    Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef, QueryRequest,
+    Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef,
 };
 use crate::peer::Peer;
 use crate::region_keeper::MemoryRegionKeeper;

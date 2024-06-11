@@ -20,8 +20,8 @@ use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
-use common_meta::node_manager::QueryRequest;
 use common_plugins::GREPTIME_EXEC_READ_COST;
+use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{

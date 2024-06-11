@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::node_manager::{NodeManagerRef, QueryRequest};
+use common_meta::node_manager::NodeManagerRef;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};

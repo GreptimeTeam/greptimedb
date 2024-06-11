@@ -134,6 +134,7 @@ mod tests {
     use api::v1::region::RegionRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_error::ext::BoxedError;
+    use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use table::table_name::TableName;
 
@@ -143,7 +144,6 @@ mod tests {
     use crate::ddl::test_util::{create_logical_table, create_physical_table};
     use crate::error::{self, Error, Result};
     use crate::key::datanode_table::DatanodeTableKey;
-    use crate::node_manager::QueryRequest;
     use crate::peer::Peer;
     use crate::rpc::router::region_distribution;
     use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
