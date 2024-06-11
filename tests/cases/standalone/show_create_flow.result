@@ -1,0 +1,41 @@
+CREATE TABLE numbers_input (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+create table out_num_cnt (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE FLOW filter_numbers SINK TO out_num_cnt AS SELECT number FROM numbers_input where number > 10;
+
+Affected Rows: 0
+
+SHOW CREATE FLOW filter_numbers;
+
++----------------+-------------------------------------------------------+
+| Flow           | Create Flow                                           |
++----------------+-------------------------------------------------------+
+| filter_numbers | CREATE OR REPLACE FLOW IF NOT EXISTS filter_numbers   |
+|                | SINK TO out_num_cnt                                   |
+|                | AS SELECT number FROM numbers_input WHERE number > 10 |
++----------------+-------------------------------------------------------+
+
+drop flow filter_numbers;
+
+Affected Rows: 0
+
+drop table out_num_cnt;
+
+Affected Rows: 0
+
+drop table numbers_input;
+
+Affected Rows: 0
+

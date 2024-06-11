@@ -1921,7 +1921,6 @@ dependencies = [
  "quote",
  "snafu 0.8.3",
  "static_assertions",
- "syn 1.0.109",
  "syn 2.0.66",
 ]
 
@@ -9664,6 +9663,7 @@ dependencies = [
  "tokio-rustls 0.25.0",
  "tokio-stream",
  "tokio-test",
+ "tokio-util",
  "tonic 0.11.0",
  "tonic-reflection",
  "tower",

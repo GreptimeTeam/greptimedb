@@ -109,11 +109,9 @@ impl Picker for WindowedCompactionPicker {
             access_layer,
             request_sender,
             waiters,
-            file_purger,
             start_time,
             cache_manager,
             manifest_ctx,
-            version_control,
             listener,
         } = req;
 
@@ -130,14 +128,12 @@ impl Picker for WindowedCompactionPicker {
             compaction_time_window: Some(time_window),
             request_sender,
             waiters,
-            file_purger,
             start_time,
             cache_manager,
             storage: current_version.options.storage.clone(),
             index_options: current_version.options.index_options.clone(),
             append_mode: current_version.options.append_mode,
             manifest_ctx,
-            version_control,
             listener,
         };
         Some(Box::new(task))

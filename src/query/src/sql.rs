@@ -31,6 +31,7 @@ use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -49,10 +50,13 @@ use regex::Regex;
 use session::context::QueryContextRef;
 pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::create::Partitions;
+use sql::ast::Ident;
+use sql::parser::ParserContext;
+use sql::statements::create::{CreateFlow, Partitions};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
+use sqlparser::ast::ObjectName;
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
@@ -131,6 +135,13 @@ static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
         ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("Create Table", ConcreteDataType::string_datatype(), false),
+    ]))
+});
+
+static SHOW_CREATE_FLOW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("Flow", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Create Flow", ConcreteDataType::string_datatype(), false),
     ]))
 });
 
@@ -601,6 +612,46 @@ pub fn show_create_table(
         Arc::new(StringVector::from(vec![sql])) as _,
     ];
     let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_flow(
+    flow_name: ObjectName,
+    flow_val: FlowInfoValue,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let mut parser_ctx =
+        ParserContext::new(query_ctx.sql_dialect(), flow_val.raw_sql()).context(error::SqlSnafu)?;
+
+    let query = parser_ctx.parser_query().context(error::SqlSnafu)?;
+
+    let comment = if flow_val.comment().is_empty() {
+        None
+    } else {
+        Some(flow_val.comment().clone())
+    };
+
+    let stmt = CreateFlow {
+        flow_name,
+        sink_table_name: ObjectName(vec![Ident {
+            value: flow_val.sink_table_name().table_name.clone(),
+            quote_style: None,
+        }]),
+        or_replace: true,
+        if_not_exists: true,
+        expire_after: flow_val.expire_after(),
+        comment,
+        query,
+    };
+
+    let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![flow_val.flow_name().clone()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_FLOW_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
 
     Ok(Output::new_with_record_batches(records))

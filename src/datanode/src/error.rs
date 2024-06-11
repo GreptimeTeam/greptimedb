@@ -292,6 +292,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to open batch regions"))]
+    HandleBatchOpenRequest {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -455,9 +462,9 @@ impl ErrorExt for Error {
             TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
                 StatusCode::Unsupported
             }
-            HandleRegionRequest { source, .. } | GetRegionMetadata { source, .. } => {
-                source.status_code()
-            }
+            HandleRegionRequest { source, .. }
+            | GetRegionMetadata { source, .. }
+            | HandleBatchOpenRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),
