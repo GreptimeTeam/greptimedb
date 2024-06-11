@@ -285,6 +285,20 @@ impl KeyValPlan {
     }
 }
 
+/// find out the column that should be time index in group exprs(which is all columns that should be keys)
+/// TODO(discord9): better ways to assign time index
+fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
+    group_exprs.iter().position(|expr| {
+        matches!(
+            &expr.expr,
+            ScalarExpr::CallUnary {
+                func: UnaryFunc::TumbleWindowFloor { .. },
+                expr: _
+            }
+        )
+    })
+}
+
 impl TypedPlan {
     /// Convert AggregateRel into Flow's TypedPlan
     ///
@@ -313,15 +327,7 @@ impl TypedPlan {
             TypedExpr::expand_multi_value(&input.schema.typ, &group_exprs)?
         };
 
-        let time_index = group_exprs.iter().position(|expr| {
-            matches!(
-                &expr.expr,
-                ScalarExpr::CallUnary {
-                    func: UnaryFunc::TumbleWindowFloor { .. },
-                    expr: _
-                }
-            )
-        });
+        let time_index = find_time_index_in_group_exprs(&group_exprs);
 
         let (mut aggr_exprs, post_mfp) = AggregateExpr::from_substrait_agg_measures(
             ctx,

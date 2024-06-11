@@ -205,6 +205,9 @@ impl TypedPlan {
 
 /// if reduce_plan contains the special function like tumble floor/ceiling, add them to the proj_exprs
 /// so the effect is the window_start, window_end column are auto added to output rows
+///
+/// This is to fix a problem that we have certain functions that return two values, but since substrait doesn't know that, it will assume it return one value
+/// this function fix that and rewrite `proj_exprs` to correct form
 fn rewrite_projection_after_reduce(
     key_val_plan: KeyValPlan,
     reduce_output_type: &RelationDesc,
@@ -262,13 +265,14 @@ fn rewrite_projection_after_reduce(
         return Ok(());
     }
 
-    // shift proj_exprs to the right by spec_key_arity
-    // because substrait use offset before we add those two keys
+    // shuffle proj_exprs
+    // because substrait use offset while assume `tumble` only return one value
     for proj_expr in proj_exprs.iter_mut() {
         proj_expr.expr.permute_map(&shuffle)?;
     } // add key to the end
     for (key_idx, _key_expr) in special_keys {
-        // here we assume the output type of reduce operator is just first keys columns, then append value columns
+        // here we assume the output type of reduce operator(`reduce_output_type`) is just first keys columns, then append value columns
+        // so we can use `key_idx` to index `reduce_output_type` and get the keys we need to append to `proj_exprs`
         proj_exprs.push(
             ScalarExpr::Column(key_idx)
                 .with_type(reduce_output_type.typ().column_types[key_idx].clone()),
@@ -290,7 +294,7 @@ fn rewrite_projection_after_reduce(
         if let ScalarExpr::Column(_) = key_expr {
             if !all_cols_ref_in_proj.contains(&key_idx) {
                 return InvalidQuerySnafu{
-                    reason: format!("Expect normal column in group by also appear in projection, but column {}(name is '{}') is missing", key_idx, reduce_output_type.get_name(key_idx).clone().unwrap_or("unknown".to_string()))
+                    reason: format!("Expect normal column in group by also appear in projection, but column {}(name is {}) is missing", key_idx, reduce_output_type.get_name(key_idx).clone().map(|s|format!("'{}'",s)).unwrap_or("unknown".to_string()))
                 }.fail();
             }
         }

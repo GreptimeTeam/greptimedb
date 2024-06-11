@@ -133,24 +133,7 @@ impl RelationType {
             })
             .try_collect()?;
 
-        let old_to_new_col =
-            BTreeMap::from_iter(mfp.projection.clone().into_iter().enumerate().map(
-                |(new, old)| {
-                    let mut old = old;
-                    // trace back to the original column
-                    while let Some(ScalarExpr::Column(prev)) = if old >= mfp.input_arity {
-                        mfp.expressions.get(old - mfp.input_arity)
-                    } else {
-                        None
-                    } {
-                        old = *prev;
-                        if old < mfp.input_arity {
-                            break;
-                        }
-                    }
-                    (old, new)
-                },
-            ));
+        let old_to_new_col = mfp.get_old_to_new_mapping();
 
         // since it's just a mfp, we also try to preserve keys&time index information, if they survive mfp transform
         let keys = self

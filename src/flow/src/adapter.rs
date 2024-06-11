@@ -332,7 +332,7 @@ impl FlownodeManager {
                     true,
                 );
 
-                let wout_ts = schema
+                let original_schema = schema
                     .typ()
                     .column_types
                     .clone()
@@ -354,21 +354,22 @@ impl FlownodeManager {
                     })
                     .collect_vec();
 
-                let mut with_ts = wout_ts.clone();
-                with_ts.push(update_at);
+                let mut with_auto_added_col = original_schema.clone();
+                with_auto_added_col.push(update_at);
 
-                // if no time index, add one
-                if schema.typ().time_index.is_none() {
+                // if no time index, add one as placeholder
+                let no_time_index = schema.typ().time_index.is_none();
+                if no_time_index {
                     let ts_col = ColumnSchema::new(
                         AUTO_CREATED_PLACEHOLDER_TS_COL,
                         ConcreteDataType::timestamp_millisecond_datatype(),
                         true,
                     )
                     .with_time_index(true);
-                    with_ts.push(ts_col);
+                    with_auto_added_col.push(ts_col);
                 }
 
-                (primary_keys, with_ts, schema.typ().time_index.is_none())
+                (primary_keys, with_auto_added_col, no_time_index)
             };
             let schema_len = schema.len();
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
@@ -523,11 +524,11 @@ impl FlownodeManager {
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
             if let Err(err) = self.run_available(true).await {
-                common_telemetry::error!("Run available errors: {:?}", err);
+                common_telemetry::error!(err;"Run available errors");
             }
             // TODO(discord9): error handling
             if let Err(err) = self.send_writeback_requests().await {
-                common_telemetry::error!("Send writeback request errors: {:?}", err);
+                common_telemetry::error!(err;"Send writeback request errors");
             };
             self.log_all_errors().await;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
