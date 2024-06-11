@@ -34,13 +34,11 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
-use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionState};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
 use crate::sst::file::{FileHandle, FileMeta, IndexType};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -54,7 +52,6 @@ pub(crate) struct CompactionTaskImpl {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
     pub compaction_time_window: Option<i64>,
-    pub file_purger: FilePurgerRef,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Senders that are used to notify waiters waiting for pending compaction tasks.
@@ -70,8 +67,6 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) append_mode: bool,
     /// Manifest context.
     pub(crate) manifest_ctx: ManifestContextRef,
-    /// Version control to update.
-    pub(crate) version_control: VersionControlRef,
     /// Event listener.
     pub(crate) listener: WorkerListener,
 }
@@ -216,7 +211,7 @@ impl CompactionTaskImpl {
         Ok((output_files, inputs))
     }
 
-    async fn handle_compaction(&mut self) -> error::Result<()> {
+    async fn handle_compaction(&mut self) -> error::Result<RegionEdit> {
         self.mark_files_compacting(true);
         let merge_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["merge"])
@@ -260,11 +255,10 @@ impl CompactionTaskImpl {
         // We might leak files if we fail to update manifest. We can add a cleanup task to
         // remove them later.
         self.manifest_ctx
-            .update_manifest(RegionState::Writable, action_list, || {
-                self.version_control
-                    .apply_edit(edit, &[], self.file_purger.clone());
-            })
-            .await
+            .update_manifest(RegionState::Writable, action_list)
+            .await?;
+
+        Ok(edit)
     }
 
     /// Handles compaction failure, notifies all waiters.
@@ -292,10 +286,11 @@ impl CompactionTaskImpl {
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
         let notify = match self.handle_compaction().await {
-            Ok(()) => BackgroundNotify::CompactionFinished(CompactionFinished {
+            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                 region_id: self.region_id,
                 senders: std::mem::take(&mut self.waiters),
                 start_time: self.start_time,
+                edit,
             }),
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.region_id);

@@ -13,13 +13,7 @@ workspace = true
 [dependencies]
 proc-macro2 = "1.0.66"
 quote = "1.0"
-syn = "1.0"
-syn2 = { version = "2.0", package = "syn", features = [
-    "derive",
-    "parsing",
-    "printing",
-    "clone-impls",
-    "proc-macro",
+syn = { version = "2.0", features = [
     "extra-traits",
     "full",
 ] }

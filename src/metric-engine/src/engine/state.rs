@@ -132,23 +132,6 @@ impl MetricEngineState {
         Ok(())
     }
 
-    /// Check if a physical column exists.
-    pub fn is_physical_column_exist(
-        &self,
-        physical_region_id: RegionId,
-        column_name: &str,
-    ) -> Result<bool> {
-        let data_region_id = to_data_region_id(physical_region_id);
-        let exist = self
-            .physical_columns()
-            .get(&data_region_id)
-            .context(PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            })?
-            .contains(column_name);
-        Ok(exist)
-    }
-
     pub fn is_logical_region_exist(&self, logical_region_id: RegionId) -> bool {
         self.logical_regions().contains_key(&logical_region_id)
     }

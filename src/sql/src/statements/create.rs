@@ -269,17 +269,17 @@ impl Display for CreateFlow {
         if self.or_replace {
             write!(f, "OR REPLACE ")?;
         }
-        write!(f, "TASK ")?;
+        write!(f, "FLOW ")?;
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{} ", &self.flow_name)?;
-        write!(f, "OUTPUT AS {} ", &self.sink_table_name)?;
+        writeln!(f, "{}", &self.flow_name)?;
+        writeln!(f, "SINK TO {}", &self.sink_table_name)?;
         if let Some(expire_after) = &self.expire_after {
-            write!(f, "EXPIRE AFTER {} ", expire_after)?;
+            writeln!(f, "EXPIRE AFTER {} ", expire_after)?;
         }
         if let Some(comment) = &self.comment {
-            write!(f, "COMMENT '{}' ", comment)?;
+            writeln!(f, "COMMENT '{}'", comment)?;
         }
         write!(f, "AS {}", &self.query)
     }
@@ -602,6 +602,39 @@ WITH(
             _ => {
                 unreachable!();
             }
+        }
+    }
+
+    #[test]
+    fn test_display_create_flow() {
+        let sql = r"CREATE FLOW filter_numbers
+            SINK TO out_num_cnt
+            AS SELECT number FROM numbers_input where number > 10;";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        match &result[0] {
+            Statement::CreateFlow(c) => {
+                let new_sql = format!("\n{}", c);
+                assert_eq!(
+                    r#"
+CREATE FLOW filter_numbers
+SINK TO out_num_cnt
+AS SELECT number FROM numbers_input WHERE number > 10"#,
+                    &new_sql
+                );
+
+                let new_result = ParserContext::create_with_dialect(
+                    &new_sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(result, new_result);
+            }
+            _ => unreachable!(),
         }
     }
 }

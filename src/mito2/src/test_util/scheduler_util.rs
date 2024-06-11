@@ -14,7 +14,7 @@
 
 //! Utilities to mock flush and compaction schedulers.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -28,11 +28,12 @@ use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
+use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionState};
 use crate::request::WorkerRequest;
-use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::worker::WorkerListener;
 
@@ -121,5 +122,28 @@ impl SchedulerEnv {
         self.scheduler
             .clone()
             .unwrap_or_else(|| Arc::new(LocalScheduler::new(1)))
+    }
+}
+
+#[derive(Default)]
+pub struct VecScheduler {
+    jobs: Mutex<Vec<Job>>,
+}
+
+impl VecScheduler {
+    pub fn num_jobs(&self) -> usize {
+        self.jobs.lock().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl Scheduler for VecScheduler {
+    fn schedule(&self, job: Job) -> Result<()> {
+        self.jobs.lock().unwrap().push(job);
+        Ok(())
+    }
+
+    async fn stop(&self, _await_termination: bool) -> Result<()> {
+        Ok(())
     }
 }

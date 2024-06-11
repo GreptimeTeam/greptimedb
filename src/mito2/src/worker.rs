@@ -657,6 +657,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
 
+            self.listener.on_recv_requests(buffer.len());
+
             self.handle_requests(&mut buffer).await;
 
             self.handle_periodical_tasks();
@@ -783,6 +785,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
+            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req),
         }
     }
 
@@ -898,6 +902,15 @@ impl WorkerListener {
         }
         // Avoid compiler warning.
         let _ = region_id;
+    }
+
+    pub(crate) fn on_recv_requests(&self, request_num: usize) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_recv_requests(request_num);
+        }
+        // Avoid compiler warning.
+        let _ = request_num;
     }
 }
 

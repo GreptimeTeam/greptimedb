@@ -29,7 +29,7 @@ use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
 /// used to count the number of times the time series starts over.
-#[range_fn(name = "Resets", ret = "Float64Array", display_name = "prom_resets")]
+#[range_fn(name = Resets, ret = Float64Array, display_name = prom_resets)]
 pub fn resets(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
         None
