@@ -76,6 +76,7 @@ fn test_load_datanode_example_config() {
                 sst_meta_cache_size: ReadableSize::mb(128),
                 vector_cache_size: ReadableSize::mb(512),
                 page_cache_size: ReadableSize::mb(512),
+                max_background_jobs: 4,
                 ..Default::default()
             })],
             logging: LoggingOptions {
@@ -205,6 +206,7 @@ fn test_load_standalone_example_config() {
                 sst_meta_cache_size: ReadableSize::mb(128),
                 vector_cache_size: ReadableSize::mb(512),
                 page_cache_size: ReadableSize::mb(512),
+                max_background_jobs: 4,
                 ..Default::default()
             })],
             storage: StorageConfig {
