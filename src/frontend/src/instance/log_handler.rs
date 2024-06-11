@@ -46,10 +46,11 @@ impl LogHandler for Instance {
     async fn get_pipeline(
         &self,
         name: &str,
+        version: Option<String>,
         query_ctx: QueryContextRef,
     ) -> ServerResult<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipeline_operator
-            .get_pipeline(query_ctx, name)
+            .get_pipeline(query_ctx, name, version)
             .await
             .context(PipelineSnafu)
     }

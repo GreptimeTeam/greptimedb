@@ -132,6 +132,7 @@ pub trait LogHandler {
     async fn get_pipeline(
         &self,
         name: &str,
+        version: Option<String>,
         query_ctx: QueryContextRef,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>>;
 

@@ -301,13 +301,11 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
-    /// Updates the manifest if current state is `expect_state` and executes
-    /// the `applier` if the manifest is updated.
+    /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
         expect_state: RegionState,
         action_list: RegionMetaActionList,
-        applier: impl FnOnce(),
     ) -> Result<()> {
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
@@ -364,9 +362,6 @@ impl ManifestContext {
         manager.update(action_list).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
-
-        // Executes the applier. We MUST hold the write lock.
-        applier();
 
         if self.state.load() == RegionState::ReadOnly {
             warn!(

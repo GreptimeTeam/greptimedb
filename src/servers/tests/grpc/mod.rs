@@ -60,7 +60,7 @@ impl MockGrpcServer {
         let service: FlightCraftWrapper<_> = GreptimeRequestHandler::new(
             self.query_handler.clone(),
             self.user_provider.clone(),
-            self.runtime.clone(),
+            Some(self.runtime.clone()),
         )
         .into();
         FlightServiceServer::new(service)

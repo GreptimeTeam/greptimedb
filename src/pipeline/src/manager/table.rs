@@ -22,14 +22,15 @@ use api::v1::{
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
-use common_time::util;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use dashmap::DashMap;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
 use datafusion_common::{TableReference, ToDFSchema};
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlanBuilder};
 use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{StringVector, Vector};
+use datatypes::timestamp::TimestampNanosecond;
+use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::plan::LogicalPlan;
@@ -132,7 +133,7 @@ impl PipelineTable {
                 },
                 ColumnDef {
                     name: PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
-                    data_type: ColumnDataType::TimestampMillisecond as i32,
+                    data_type: ColumnDataType::TimestampNanosecond as i32,
                     is_nullable: false,
                     default_constraint: vec![],
                     semantic_type: SemanticType::Timestamp as i32,
@@ -172,7 +173,7 @@ impl PipelineTable {
             },
             PbColumnSchema {
                 column_name: PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::TimestampMillisecond.into(),
+                datatype: ColumnDataType::TimestampNanosecond.into(),
                 semantic_type: SemanticType::Timestamp.into(),
                 ..Default::default()
             },
@@ -195,8 +196,21 @@ impl PipelineTable {
     }
 
     #[inline]
-    fn generate_pipeline_cache_key(schema: &str, name: &str) -> String {
-        format!("{}.{}", schema, name)
+    fn generate_pipeline_cache_key(schema: &str, name: &str, version: Option<&str>) -> String {
+        format!("{}-{}-{}", schema, name, version.unwrap_or("latest"))
+    }
+
+    fn remove_pipeline_cache_with_schema_and_name(&self, schema: &str, name: &str) {
+        let key_prefix = format!("{}-{}", schema, name);
+        let keys = self
+            .pipelines
+            .iter()
+            .filter(|en| en.key().starts_with(&key_prefix))
+            .map(|en| en.key().clone())
+            .collect::<Vec<String>>();
+        for key in keys.iter() {
+            self.pipelines.remove(key);
+        }
     }
 
     #[inline]
@@ -204,9 +218,10 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
+        version: Option<&str>,
     ) -> Option<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipelines
-            .get(&Self::generate_pipeline_cache_key(schema, name))
+            .get(&Self::generate_pipeline_cache_key(schema, name, version))
             .map(|x| x.value().clone())
     }
 
@@ -217,8 +232,8 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<()> {
-        let now = util::current_time_millis();
+    ) -> Result<Timestamp> {
+        let now = Timestamp::current_time(TimeUnit::Nanosecond);
 
         let table_info = self.table.table_info();
 
@@ -232,7 +247,7 @@ impl PipelineTable {
                         ValueData::StringValue(schema.to_string()).into(),
                         ValueData::StringValue(content_type.to_string()).into(),
                         ValueData::StringValue(pipeline.to_string()).into(),
-                        ValueData::TimestampMillisecondValue(now).into(),
+                        ValueData::TimestampNanosecondValue(now.value()).into(),
                     ],
                 }],
             }),
@@ -260,7 +275,7 @@ impl PipelineTable {
             output
         );
 
-        Ok(())
+        Ok(now)
     }
 
     /// Get a pipeline by name.
@@ -269,20 +284,27 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
+        version: Option<String>,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
-        if let Some(pipeline) = self.get_compiled_pipeline_from_cache(schema, name) {
+        info!("pipeline version: {:?}", version);
+        if let Some(pipeline) =
+            self.get_compiled_pipeline_from_cache(schema, name, version.as_deref())
+        {
             return Ok(pipeline);
         }
 
         let pipeline = self
-            .find_pipeline_by_name(schema, name)
+            .find_pipeline_by_name(schema, name, version.as_ref())
             .await?
-            .context(PipelineNotFoundSnafu { name })?;
-        let compiled_pipeline = Self::compile_pipeline(&pipeline)?;
+            .context(PipelineNotFoundSnafu {
+                name,
+                version: version.clone(),
+            })?;
+        let compiled_pipeline = Self::compile_pipeline(&pipeline.0)?;
         let compiled_pipeline = Arc::new(compiled_pipeline);
 
         self.pipelines.insert(
-            Self::generate_pipeline_cache_key(schema, name),
+            Self::generate_pipeline_cache_key(schema, name, version.as_deref()),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
@@ -299,24 +321,26 @@ impl PipelineTable {
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         let compiled_pipeline = Self::compile_pipeline(pipeline)?;
         let compiled_pipeline = Arc::new(compiled_pipeline);
-
-        self.insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
+        // we will use the version in the future
+        let version = self
+            .insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
             .await?;
 
         self.pipelines.insert(
-            Self::generate_pipeline_cache_key(schema, name),
+            Self::generate_pipeline_cache_key(schema, name, None),
+            compiled_pipeline.clone(),
+        );
+        self.pipelines.insert(
+            Self::generate_pipeline_cache_key(schema, name, Some(&version.to_iso8601_string())),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
     }
 
     pub async fn delete_pipeline_by_name(&self, schema: &str, name: &str) -> Result<()> {
-        let pipeline_key = Self::generate_pipeline_cache_key(schema, name);
-
         // 1. check pipeline exist in catalog
-        let pipeline = self.find_pipeline_by_name(schema, name).await?;
+        let pipeline = self.find_pipeline_by_name(schema, name, None).await?;
         if pipeline.is_none() {
-            self.pipelines.remove(&pipeline_key);
             return Ok(());
         }
 
@@ -369,12 +393,18 @@ impl PipelineTable {
 
         // cloud be deleting multiple rows
         info!("delete pipeline: {:?}, output: {:?}", name, output);
-        self.pipelines.remove(&pipeline_key);
+        // remove all caches
+        self.remove_pipeline_cache_with_schema_and_name(schema, name);
 
         Ok(())
     }
 
-    async fn find_pipeline_by_name(&self, schema: &str, name: &str) -> Result<Option<String>> {
+    async fn find_pipeline_by_name(
+        &self,
+        schema: &str,
+        name: &str,
+        version: Option<&String>,
+    ) -> Result<Option<(String, TimestampNanosecond)>> {
         let table_info = self.table.table_info();
 
         let table_name = TableReference::full(
@@ -385,24 +415,38 @@ impl PipelineTable {
 
         let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
         let table_source = Arc::new(DefaultTableSource::new(table_provider));
+        let schema_and_name_filter = and(
+            col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
+            col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name)),
+        );
+        let filter = if let Some(v) = version {
+            and(
+                schema_and_name_filter,
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v)),
+            )
+        } else {
+            schema_and_name_filter
+        };
 
         let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
             .context(BuildDfLogicalPlanSnafu)?
-            .filter(and(
-                col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
-                col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name)),
-            ))
+            .filter(filter)
             .context(BuildDfLogicalPlanSnafu)?
-            .project(vec![col(PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME)])
+            .project(vec![
+                col(PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME),
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME),
+            ])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, false)
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(true, true)
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .limit(0, Some(1))
             .context(BuildDfLogicalPlanSnafu)?
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
+
+        info!("find_pipeline_by_name: plan: {:?}", plan);
 
         let output = self
             .query_engine
@@ -425,24 +469,52 @@ impl PipelineTable {
 
         // limit 1
         ensure!(
-            records.len() == 1 && records[0].num_columns() == 1,
-            PipelineNotFoundSnafu { name }
+            records.len() == 1 && records[0].num_columns() == 2,
+            PipelineNotFoundSnafu {
+                name,
+                version: version.cloned()
+            }
         );
 
-        let pipeline_column = records[0].column(0);
-        let pipeline_column = pipeline_column
+        let pipeline_content_column = records[0].column(0);
+        let pipeline_content = pipeline_content_column
             .as_any()
             .downcast_ref::<StringVector>()
             .with_context(|| CastTypeSnafu {
                 msg: format!(
                     "can't downcast {:?} array into string vector",
-                    pipeline_column.data_type()
+                    pipeline_content_column.data_type()
                 ),
             })?;
 
-        ensure!(pipeline_column.len() == 1, PipelineNotFoundSnafu { name });
+        let pipeline_created_at_column = records[0].column(1);
+        let pipeline_created_at = pipeline_created_at_column
+            .as_any()
+            .downcast_ref::<TimestampNanosecondVector>()
+            .with_context(|| CastTypeSnafu {
+                msg: format!(
+                    "can't downcast {:?} array into scalar vector",
+                    pipeline_created_at_column.data_type()
+                ),
+            })?;
+
+        info!(
+            "find_pipeline_by_name: pipeline_content: {:?}, pipeline_created_at: {:?}",
+            pipeline_content, pipeline_created_at
+        );
+
+        ensure!(
+            pipeline_content.len() == 1,
+            PipelineNotFoundSnafu {
+                name,
+                version: version.cloned()
+            }
+        );
 
         // Safety: asserted above
-        Ok(Some(pipeline_column.get_data(0).unwrap().to_string()))
+        Ok(Some((
+            pipeline_content.get_data(0).unwrap().to_string(),
+            pipeline_created_at.get_data(0).unwrap(),
+        )))
     }
 }
