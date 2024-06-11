@@ -642,20 +642,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Do not support {} in multiple catalogs", ddl_name))]
-    DdlWithMultiCatalogs {
-        ddl_name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Do not support {} in multiple schemas", ddl_name))]
-    DdlWithMultiSchemas {
-        ddl_name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Empty {} expr", name))]
     EmptyDdlExpr {
         name: String,
@@ -835,9 +821,7 @@ impl ErrorExt for Error {
 
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
-            Error::DdlWithMultiCatalogs { .. }
-            | Error::DdlWithMultiSchemas { .. }
-            | Error::EmptyDdlExpr { .. }
+            Error::EmptyDdlExpr { .. }
             | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
