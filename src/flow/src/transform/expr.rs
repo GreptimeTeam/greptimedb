@@ -29,7 +29,7 @@ use crate::adapter::error::{
 use crate::expr::{
     BinaryFunc, ScalarExpr, TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
-use crate::repr::{ColumnType, RelationType};
+use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
 use crate::transform::{substrait_proto, FunctionExtensions};
 // TODO: found proper place for this
@@ -75,7 +75,7 @@ impl TypedExpr {
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
         f: &ScalarFunction,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let fn_name =
@@ -208,7 +208,7 @@ impl TypedExpr {
     /// Convert IfThen into Flow's ScalarExpr
     pub fn from_substrait_ifthen_rex(
         if_then: &IfThen,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let ifs: Vec<_> = if_then
@@ -263,7 +263,7 @@ impl TypedExpr {
     /// Convert Substrait Rex into Flow's ScalarExpr
     pub fn from_substrait_rex(
         e: &Expression,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         match &e.rex_type {
@@ -294,7 +294,7 @@ impl TypedExpr {
                         }
                         None => {
                             let column = x.field as usize;
-                            let column_type = input_schema.column_types[column].clone();
+                            let column_type = input_schema.typ().column_types[column].clone();
                             Ok(TypedExpr::new(ScalarExpr::Column(column), column_type))
                         }
                     },
@@ -601,7 +601,8 @@ mod test {
             output_type: None,
             ..Default::default()
         };
-        let input_schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
+        let input_schema =
+            RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]).into_unnamed();
         let extensions = FunctionExtensions {
             anchor_to_name: HashMap::from([(0, "is_null".to_string())]),
         };
@@ -628,7 +629,8 @@ mod test {
         let input_schema = RelationType::new(vec![
             ColumnType::new(CDT::uint32_datatype(), false),
             ColumnType::new(CDT::uint32_datatype(), false),
-        ]);
+        ])
+        .into_unnamed();
         let extensions = FunctionExtensions {
             anchor_to_name: HashMap::from([(0, "add".to_string())]),
         };
@@ -656,7 +658,8 @@ mod test {
         let input_schema = RelationType::new(vec![
             ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
             ColumnType::new(CDT::string_datatype(), false),
-        ]);
+        ])
+        .into_unnamed();
         let extensions = FunctionExtensions {
             anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
         };
@@ -685,7 +688,8 @@ mod test {
         let input_schema = RelationType::new(vec![
             ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
             ColumnType::new(CDT::string_datatype(), false),
-        ]);
+        ])
+        .into_unnamed();
         let extensions = FunctionExtensions {
             anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
         };

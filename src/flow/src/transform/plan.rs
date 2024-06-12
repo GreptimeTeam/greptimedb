@@ -80,7 +80,7 @@ impl TypedPlan {
 
                 let mut exprs: Vec<TypedExpr> = vec![];
                 for e in &p.expressions {
-                    let expr = TypedExpr::from_substrait_rex(e, &input.schema.typ, extensions)?;
+                    let expr = TypedExpr::from_substrait_rex(e, &input.schema, extensions)?;
                     exprs.push(expr);
                 }
                 let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
@@ -133,7 +133,7 @@ impl TypedPlan {
                 };
 
                 let expr = if let Some(condition) = filter.condition.as_ref() {
-                    TypedExpr::from_substrait_rex(condition, &input.schema.typ, extensions)?
+                    TypedExpr::from_substrait_rex(condition, &input.schema, extensions)?
                 } else {
                     return not_impl_err!("Filter without an condition is not valid");
                 };
