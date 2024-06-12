@@ -212,7 +212,7 @@ mod test {
             let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
 
             tri_map.insert(Some(name.clone()), Some(1024), gid);
-            schemas.insert(gid, schema.into_unnamed());
+            schemas.insert(gid, schema.into_named(vec![Some("number".to_string())]));
         }
 
         {
@@ -226,7 +226,10 @@ mod test {
                 ColumnType::new(CDT::uint32_datatype(), false),
                 ColumnType::new(CDT::datetime_datatype(), false),
             ]);
-            schemas.insert(gid, schema.into_unnamed());
+            schemas.insert(
+                gid,
+                schema.into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+            );
             tri_map.insert(Some(name.clone()), Some(1025), gid);
         }
 

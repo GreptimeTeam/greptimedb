@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
-use common_catalog::consts::default_engine;
 use common_meta::RegionIdent;
 
 use crate::error::Result;
@@ -91,8 +90,7 @@ impl HeartbeatHandler for RegionFailureHandler {
                         datanode_id: stat.id,
                         table_id: region_id.table_id(),
                         region_number: region_id.region_number(),
-                        // TODO(LFC): Use the actual table engine (maybe retrieve from heartbeat).
-                        engine: default_engine().to_string(),
+                        engine: x.engine.clone(),
                     }
                 })
                 .collect(),
@@ -109,6 +107,7 @@ impl HeartbeatHandler for RegionFailureHandler {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use common_catalog::consts::default_engine;
     use common_meta::key::MAINTENANCE_KEY;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;

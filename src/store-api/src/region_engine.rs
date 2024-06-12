@@ -21,14 +21,13 @@ use std::sync::{Arc, Mutex};
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
-use common_query::error::ExecuteRepeatedlySnafu;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
@@ -295,10 +294,12 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
-        stream
-            .take()
-            .context(ExecuteRepeatedlySnafu)
-            .map_err(BoxedError::new)
+        stream.take().ok_or_else(|| {
+            BoxedError::new(PlainError::new(
+                "Not expected to run ExecutionPlan more than once".to_string(),
+                StatusCode::Unexpected,
+            ))
+        })
     }
 }
 

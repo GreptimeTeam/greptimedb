@@ -321,6 +321,38 @@ impl MapFilterProject {
     pub fn optimize(&mut self) {
         // TODO(discord9): optimize
     }
+    /// get the mapping of old columns to new columns after the mfp
+    pub fn get_old_to_new_mapping(&self) -> BTreeMap<usize, usize> {
+        BTreeMap::from_iter(
+            self.projection
+                .clone()
+                .into_iter()
+                .enumerate()
+                .map(|(new, old)| {
+                    // `projection` give the new -> old mapping
+                    let mut old = old;
+                    // trace back to the original column
+                    // since there maybe indirect ref to old columns like
+                    // col 2 <- expr=col(2) at pos col 4 <- expr=col(4) at pos col 6
+                    // ideally such indirect ref should be optimize away
+                    // TODO(discord9): refactor this after impl `optimize()`
+                    while let Some(ScalarExpr::Column(prev)) = if old >= self.input_arity {
+                        // get the correspond expr if not a original column
+                        self.expressions.get(old - self.input_arity)
+                    } else {
+                        // we don't care about non column ref case since only need old to new column mapping
+                        // in which case, the old->new mapping remain the same
+                        None
+                    } {
+                        old = *prev;
+                        if old < self.input_arity {
+                            break;
+                        }
+                    }
+                    (old, new)
+                }),
+        )
+    }
 
     /// Convert the `MapFilterProject` into a staged evaluation plan.
     ///
