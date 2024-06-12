@@ -17,8 +17,6 @@ use std::sync::Arc;
 
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
-use rskafka::client::producer::aggregator::RecordAggregator;
-use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
 use snafu::ResultExt;
@@ -27,7 +25,6 @@ use tokio::sync::RwLock;
 use crate::error::{
     BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
 };
-use crate::kafka::util::record::MIN_BATCH_SIZE;
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
@@ -42,24 +39,12 @@ pub(crate) type ClientManagerRef = Arc<ClientManager>;
 pub(crate) struct Client {
     /// A raw client used to construct a batch producer and/or a stream consumer for a specific topic.
     pub(crate) raw_client: Arc<PartitionClient>,
-    /// A producer used to buffer log entries for a specific topic before sending them in a batching manner.
-    pub(crate) producer: Arc<BatchProducer<RecordAggregator>>,
 }
 
 impl Client {
     /// Creates a Client from the raw client.
-    pub(crate) fn new(raw_client: Arc<PartitionClient>, config: &DatanodeKafkaConfig) -> Self {
-        let record_aggregator =
-            RecordAggregator::new((config.max_batch_size.as_bytes() as usize).max(MIN_BATCH_SIZE));
-        let batch_producer = BatchProducerBuilder::new(raw_client.clone())
-            .with_compression(config.compression)
-            .with_linger(config.linger)
-            .build(record_aggregator);
-
-        Self {
-            raw_client,
-            producer: Arc::new(batch_producer),
-        }
+    pub(crate) fn new(raw_client: Arc<PartitionClient>) -> Self {
+        Self { raw_client }
     }
 }
 
@@ -137,7 +122,7 @@ impl ClientManager {
             })
             .map(Arc::new)?;
 
-        Ok(Client::new(raw_client, &self.config))
+        Ok(Client::new(raw_client))
     }
 }
 

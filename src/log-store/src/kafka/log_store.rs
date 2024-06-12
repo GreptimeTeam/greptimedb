@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use futures::future::try_join_all;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
+use rskafka::client::ClientBuilder;
+use rskafka::BackoffConfig;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
@@ -28,26 +31,60 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
+use super::producer_registry::OrderedBatchProducerRef;
+use super::util::record::convert_to_kafka_records;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
+use crate::kafka::producer_registry::ProducerRegistry;
 use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{
-    maybe_emit_entry, remaining_entries, Record, RecordProducer, ESTIMATED_META_SIZE,
+    maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
 };
 use crate::metrics;
+
+/// The min flush queue size.
+pub(crate) const MIN_FLUSH_QUEUE_SIZE: usize = 64;
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {
     config: DatanodeKafkaConfig,
+    /// TODO(weny): remove it.
     /// Manages kafka clients through which the log store contact the Kafka cluster.
     client_manager: ClientManagerRef,
+
+    producer_registry: ProducerRegistry,
 }
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
     pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
+        let backoff_config = BackoffConfig {
+            init_backoff: config.backoff.init,
+            max_backoff: config.backoff.max,
+            base: config.backoff.base as f64,
+            deadline: config.backoff.deadline,
+        };
+        let broker_endpoints = common_wal::resolve_to_ipv4(&config.broker_endpoints)
+            .await
+            .context(error::ResolveKafkaEndpointSnafu)?;
+        let client = ClientBuilder::new(broker_endpoints)
+            .backoff_config(backoff_config)
+            .build()
+            .await
+            .with_context(|_| error::BuildClientSnafu {
+                broker_endpoints: config.broker_endpoints.clone(),
+            })?;
+        let producer_registry = ProducerRegistry::new(
+            client,
+            config.linger,
+            config.max_batch_size.as_bytes() as usize,
+            config.compression,
+            MIN_FLUSH_QUEUE_SIZE,
+        );
+
         Ok(Self {
+            producer_registry,
             client_manager: Arc::new(ClientManager::try_new(config).await?),
             config: config.clone(),
         })
@@ -137,8 +174,9 @@ impl LogStore for KafkaLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        // Groups entries by region id and pushes them to an associated record producer.
-        let mut producers = HashMap::with_capacity(entries.len());
+        let mut region_grouped_records: HashMap<RegionId, Vec<_>> = HashMap::new();
+        let mut region_grouped_producers: HashMap<RegionId, OrderedBatchProducerRef> =
+            HashMap::new();
         for entry in entries {
             let provider = entry
                 .provider()
@@ -148,26 +186,47 @@ impl LogStore for KafkaLogStore {
                     actual: entry.provider().type_name(),
                 })?
                 .clone();
-            producers
-                .entry(entry.region_id())
-                .or_insert_with(|| RecordProducer::new(provider))
-                .push(entry);
+
+            let region_id = entry.region_id();
+
+            if let hash_map::Entry::Vacant(e) = region_grouped_producers.entry(region_id) {
+                let producer = self.producer_registry.get_or_register(&provider).await?;
+                e.insert(producer);
+            };
+            region_grouped_records
+                .entry(region_id)
+                .or_default()
+                .extend(convert_to_kafka_records(entry)?);
         }
 
-        // Produces entries for each region and gets the offset those entries written to.
-        // The returned offset is then converted into an entry id.
-        let last_entry_ids = futures::future::try_join_all(producers.into_iter().map(
-            |(region_id, producer)| async move {
-                let entry_id = producer
-                    .produce(&self.client_manager)
-                    .await
-                    .map(TryInto::try_into)??;
-                Ok((region_id, entry_id))
-            },
-        ))
-        .await?
-        .into_iter()
-        .collect::<HashMap<_, _>>();
+        let mut region_ids = Vec::with_capacity(region_grouped_records.keys().len());
+        let mut region_grouped_result_receivers =
+            Vec::with_capacity(region_grouped_records.keys().len());
+        for (region_id, records) in region_grouped_records {
+            region_ids.push(region_id);
+            let producer = region_grouped_producers.get(&region_id).unwrap();
+            let mut receivers = Vec::with_capacity(records.len());
+            for record in records {
+                receivers.push(producer.produce(record).await?);
+            }
+            region_grouped_result_receivers.push(receivers)
+        }
+
+        let region_grouped_offsets = try_join_all(
+            region_grouped_result_receivers
+                .into_iter()
+                .map(|handles| try_join_all(handles.into_iter().map(|handle| handle.wait()))),
+        )
+        .await?;
+
+        let region_grouped_max_offset = region_grouped_offsets
+            .into_iter()
+            .map(|offsets| offsets.into_iter().max().unwrap() as u64);
+
+        let last_entry_ids = region_ids
+            .into_iter()
+            .zip(region_grouped_max_offset)
+            .collect::<HashMap<_, _>>();
 
         Ok(AppendBatchResponse { last_entry_ids })
     }
