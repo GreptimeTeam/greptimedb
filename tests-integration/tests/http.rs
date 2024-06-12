@@ -76,6 +76,8 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_prometheus_remote_write,
                 test_vm_proto_remote_write,
+
+                test_pipeline_api,
             );
         )*
     };
@@ -993,6 +995,77 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+
+    let body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.text().await, "ok");
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "I",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+    "#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. remove pipeline
+    let res = client.delete("/v1/events/pipelines/test").send().await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.text().await, "ok");
 
     guard.remove_all().await;
 }

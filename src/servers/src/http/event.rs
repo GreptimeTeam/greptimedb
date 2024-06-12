@@ -30,7 +30,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Value};
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
@@ -130,11 +130,14 @@ pub async fn add_pipeline(
 pub async fn delete_pipeline(
     State(handler): State<LogHandlerRef>,
     Extension(query_ctx): Extension<QueryContextRef>,
-    Query(query_params): Query<LogIngesterQueryParams>,
+    Path(pipeline_name): Path<String>,
 ) -> Result<String> {
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
+            reason: "pipeline_name is required",
+        }
+    );
 
     handler
         .delete_pipeline(&pipeline_name, query_ctx)
