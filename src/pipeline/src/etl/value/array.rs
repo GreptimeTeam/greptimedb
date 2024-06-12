@@ -45,6 +45,12 @@ impl std::ops::Deref for Array {
     }
 }
 
+impl std::ops::DerefMut for Array {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
 impl IntoIterator for Array {
     type Item = Value;
 

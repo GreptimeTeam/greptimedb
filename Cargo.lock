@@ -339,7 +339,7 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "chrono",
- "chrono-tz",
+ "chrono-tz 0.8.6",
  "half 2.4.1",
  "hashbrown 0.14.5",
  "num",
@@ -771,6 +771,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -1388,7 +1389,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d59ae0466b83e838b81a54256c39d5d7c20b9d7daa10510a242d9b75abd5936e"
 dependencies = [
  "chrono",
- "chrono-tz-build",
+ "chrono-tz-build 0.2.1",
+ "phf",
+]
+
+[[package]]
+name = "chrono-tz"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93698b29de5e97ad0ae26447b344c482a7284c737d9ddc5f9e52b74a336671bb"
+dependencies = [
+ "chrono",
+ "chrono-tz-build 0.3.0",
  "phf",
 ]
 
@@ -1397,6 +1409,17 @@ name = "chrono-tz-build"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "433e39f13c9a060046954e0592a8d0a4bcb1040125cbf91cb8ee58964cfb350f"
+dependencies = [
+ "parse-zoneinfo",
+ "phf",
+ "phf_codegen",
+]
+
+[[package]]
+name = "chrono-tz-build"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c088aee841df9c3041febbb73934cfc39708749bf96dc827e3359cd39ef11b1"
 dependencies = [
  "parse-zoneinfo",
  "phf",
@@ -2141,7 +2164,7 @@ version = "0.8.1"
 dependencies = [
  "arrow",
  "chrono",
- "chrono-tz",
+ "chrono-tz 0.8.6",
  "common-error",
  "common-macro",
  "once_cell",
@@ -3545,6 +3568,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a357d28ed41a50f9c765dbfe56cbc04a64e53e5fc58ba79fbc34c10ef3df831f"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b45de904aa0b010bce2ab45264d0631681847fa7b6f2eaa7dab7619943bc4f59"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "endian-type"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3913,6 +3945,7 @@ dependencies = [
  "common-time",
  "common-version",
  "datanode",
+ "datatypes",
  "futures",
  "humantime-serde",
  "lazy_static",
@@ -3922,12 +3955,14 @@ dependencies = [
  "opentelemetry-proto 0.5.0",
  "operator",
  "partition",
+ "pipeline",
  "prometheus",
  "prost 0.12.6",
  "query",
  "raft-engine",
  "script",
  "serde",
+ "serde_json",
  "servers",
  "session",
  "snafu 0.8.3",
@@ -5942,6 +5977,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01acbdc23469fd8fe07ab135923371d5f5a422fbf9c522158677c8eb15bc51c2"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 0.2.12",
+ "httparse",
+ "log",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
+]
+
+[[package]]
 name = "multimap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6756,7 +6809,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "chrono-tz",
+ "chrono-tz 0.8.6",
  "datafusion 37.1.0",
  "datafusion-expr 37.1.0",
  "datafusion-physical-expr 37.1.0",
@@ -7228,6 +7281,57 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "pipeline"
+version = "0.8.1"
+dependencies = [
+ "api",
+ "arrow",
+ "async-trait",
+ "catalog",
+ "chrono",
+ "chrono-tz 0.9.0",
+ "common-catalog",
+ "common-error",
+ "common-function",
+ "common-macro",
+ "common-meta",
+ "common-query",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "common-time",
+ "crossbeam-utils",
+ "csv",
+ "datafusion 38.0.0",
+ "datafusion-common 38.0.0",
+ "datafusion-expr 38.0.0",
+ "datafusion-functions 38.0.0",
+ "datafusion-physical-expr 38.0.0",
+ "datatypes",
+ "futures",
+ "greptime-proto",
+ "itertools 0.10.5",
+ "lazy_static",
+ "once_cell",
+ "operator",
+ "paste",
+ "prometheus",
+ "query",
+ "rayon",
+ "regex",
+ "ron",
+ "serde",
+ "serde_json",
+ "session",
+ "snafu 0.8.3",
+ "sql",
+ "table",
+ "tokio",
+ "urlencoding",
+ "yaml-rust",
+]
 
 [[package]]
 name = "pkcs1"
@@ -9637,6 +9741,7 @@ dependencies = [
  "permutation",
  "pgwire",
  "pin-project",
+ "pipeline",
  "postgres-types",
  "pprof",
  "prometheus",

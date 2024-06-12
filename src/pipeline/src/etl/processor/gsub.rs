@@ -14,16 +14,17 @@
 
 use regex::Regex;
 
-use crate::field::{Field, Fields};
-use crate::processor::{
+use crate::etl::field::{Field, Fields};
+use crate::etl::processor::{
     yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, PATTERN_NAME,
+    IGNORE_MISSING_NAME,
 };
-use crate::value::{Array, Map, Value};
+use crate::etl::value::{Array, Map, Value};
 
 pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 
 const REPLACEMENT_NAME: &str = "replacement";
+const PATTERN_NAME: &str = "pattern";
 
 /// only support string value, and array string value
 #[derive(Debug, Default)]
@@ -147,7 +148,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessor {
     }
 }
 
-impl crate::processor::Processor for GsubProcessor {
+impl crate::etl::processor::Processor for GsubProcessor {
     fn kind(&self) -> &str {
         PROCESSOR_GSUB
     }
@@ -174,10 +175,10 @@ impl crate::processor::Processor for GsubProcessor {
 
 #[cfg(test)]
 mod tests {
-    use crate::field::Field;
-    use crate::processor::gsub::GsubProcessor;
-    use crate::processor::Processor;
-    use crate::value::{Map, Value};
+    use crate::etl::field::Field;
+    use crate::etl::processor::gsub::GsubProcessor;
+    use crate::etl::processor::Processor;
+    use crate::etl::value::{Map, Value};
 
     #[test]
     fn test_string_value() {
