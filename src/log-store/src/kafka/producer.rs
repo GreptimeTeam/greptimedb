@@ -120,7 +120,7 @@ pub enum ResultReceiver<A: Aggregator> {
 }
 
 impl<A: Aggregator> ResultReceiver<A> {
-    async fn wait(self) -> Result<<A as AggregatorStatus>::Status> {
+    pub(crate) async fn wait(self) -> Result<<A as AggregatorStatus>::Status> {
         match self {
             ResultReceiver::Waiter { mut handle } => {
                 let status = handle.wait().await?;
