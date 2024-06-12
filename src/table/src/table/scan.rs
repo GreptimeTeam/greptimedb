@@ -53,7 +53,7 @@ impl RegionScanExec {
         let mut num_output_partition = scanner_props.partitioning().num_partitions();
         // The meaning of word "partition" is different in different context. For datafusion
         // it's about "parallelism" and for storage it's about "data range". Thus here we add
-        // a special case to handle the situation where the number of storage partiton is 0.
+        // a special case to handle the situation where the number of storage partition is 0.
         if num_output_partition == 0 {
             num_output_partition = 1;
         }
