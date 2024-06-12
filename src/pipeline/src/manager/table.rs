@@ -361,7 +361,7 @@ impl PipelineTable {
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(true, true)
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, true)
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .limit(0, Some(1))
