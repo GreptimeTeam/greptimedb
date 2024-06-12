@@ -355,7 +355,7 @@ mod tests {
     use common_telemetry::debug;
     use futures::future::BoxFuture;
     use futures::stream::{FuturesOrdered, FuturesUnordered};
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
     use rskafka::client::error::{Error as ClientError, RequestContext};
     use rskafka::client::partition::Compression;
     use rskafka::client::producer::aggregator::RecordAggregator;
@@ -506,5 +506,57 @@ mod tests {
 
         futures.next().await.unwrap().unwrap_err();
         futures.next().await.unwrap().unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn test_producer_cancel() {
+        let record = record();
+        let linger = Duration::from_millis(5);
+        let client = Arc::new(MockClient {
+            error: None,
+            panic: None,
+            delay: Duration::from_millis(1),
+            batch_sizes: Default::default(),
+        });
+
+        let aggregator = RecordAggregator::new(record.approximate_size() * 2);
+        let producer = OrderedBatchProducer::new(
+            aggregator,
+            client.clone(),
+            linger,
+            Compression::NoCompression,
+            128,
+        );
+
+        let a = producer
+            .produce(record.clone())
+            .await
+            .unwrap()
+            .wait()
+            .fuse();
+        let b = producer.produce(record).await.unwrap().wait().fuse();
+
+        let mut b = Box::pin(b);
+
+        {
+            // Cancel a when it exits this block
+            let mut a = Box::pin(a);
+
+            // Select biased to encourage `a` to be the one with the linger that
+            // expires first and performs the produce operation
+            futures::select_biased! {
+                _ = &mut a => panic!("a should not have flushed"),
+                _ = &mut b => panic!("b should not have flushed"),
+                _ = tokio::time::sleep(Duration::from_millis(1)).fuse() => {},
+            }
+        }
+
+        // But `b` should still complete successfully
+        tokio::time::timeout(Duration::from_secs(1), b)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2]);
     }
 }
