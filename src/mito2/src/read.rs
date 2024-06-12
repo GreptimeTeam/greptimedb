@@ -15,6 +15,7 @@
 //! Common structs and utilities for reading data.
 
 pub mod compat;
+pub mod dedup;
 pub mod merge;
 pub mod projection;
 pub(crate) mod scan_region;
