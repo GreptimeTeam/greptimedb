@@ -22,7 +22,7 @@ use batch::{AggregatedStatus, BatchBuilder, BatchFlushState, FlushRequest, Resul
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, warn};
 use rskafka::client::partition::Compression;
-use rskafka::client::producer::aggregator::{self, Aggregator, TryPush};
+use rskafka::client::producer::aggregator::{Aggregator, AggregatorStatus, TryPush};
 use rskafka::client::producer::ProducerClient;
 use snafu::ResultExt;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -137,7 +137,7 @@ pub enum ResultReceiver<A: Aggregator> {
 }
 
 impl<A: Aggregator> ResultReceiver<A> {
-    async fn wait(self) -> Result<<A as aggregator::AggregatorStatus>::Status> {
+    async fn wait(self) -> Result<<A as AggregatorStatus>::Status> {
         match self {
             ResultReceiver::Waiter { mut handle } => {
                 let status = handle.wait().await?;
@@ -184,9 +184,10 @@ impl<A: Aggregator> ResultReceiver<A> {
 }
 
 pub(crate) struct OrderedBatchProducerInner<A: Aggregator> {
-    /// It's wrapped in an [`Option`] to allow the [`OrderedProducerInner`]
-    /// to consume the [`BatchBuilder`] and yield the next [`BatchBuilder`].    
-    batch_builder: Option<BatchBuilder<A>>,
+    /// Attempts to aggregates inputs.
+    batch_builder: BatchBuilder<A>,
+
+    /// Sends [`FlushRequest`] to [`BackgroundProducerWorker`].
     sender: Sender<FlushRequest<A>>,
 
     /// Used to track if a [`CallerRole::Leader`] has been returned for the
@@ -201,7 +202,7 @@ pub(crate) struct OrderedBatchProducerInner<A: Aggregator> {
 impl<A: Aggregator> OrderedBatchProducerInner<A> {
     pub(crate) fn new(aggregator: A, sender: Sender<FlushRequest<A>>) -> Self {
         Self {
-            batch_builder: Some(BatchBuilder::new(aggregator)),
+            batch_builder: BatchBuilder::new(aggregator),
             sender,
             has_leader: false,
             flush_clock: 0,
@@ -209,11 +210,11 @@ impl<A: Aggregator> OrderedBatchProducerInner<A> {
     }
 
     pub(crate) async fn try_push(&mut self, data: A::Input) -> Result<CallerRole<A>> {
-        let handle = match self.batch_builder.as_mut().unwrap().try_push(data)? {
+        let handle = match self.batch_builder.try_push(data)? {
             TryPush::Aggregated(handle) => handle,
             TryPush::NoCapacity(data) => {
                 self.try_flush(None).await?;
-                match self.batch_builder.as_mut().unwrap().try_push(data)? {
+                match self.batch_builder.try_push(data)? {
                     TryPush::Aggregated(handle) => handle,
                     TryPush::NoCapacity(_) => {
                         return error::AggregatorInputTooLargeSnafu {}.fail();
@@ -243,10 +244,8 @@ impl<A: Aggregator> OrderedBatchProducerInner<A> {
                 return Ok(());
             }
         }
-        let builder = self.batch_builder.take().expect("no batch builder");
 
-        let (builder, maybe_flush_request) = builder.next_batch();
-        self.batch_builder = Some(builder);
+        let maybe_flush_request = self.batch_builder.yield_flush();
         self.has_leader = false;
         self.flush_clock = self.flush_clock.wrapping_add(1);
 
