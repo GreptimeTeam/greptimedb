@@ -60,7 +60,7 @@ async fn do_flush<A: Aggregator>(
     if let Err(err) = match client
         .produce(batch, compression)
         .await
-        .context(error::ProduceBatchSnafu)
+        .context(error::BatchProduceSnafu)
     {
         Ok(aggregated_status) => sender.send(BatchFlushState::Result(Arc::new(AggregatedStatus {
             aggregated_status,
