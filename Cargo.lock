@@ -3827,6 +3827,7 @@ dependencies = [
  "common-time",
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
+ "datafusion-physical-expr 38.0.0",
  "datatypes",
  "enum-as-inner",
  "enum_dispatch",

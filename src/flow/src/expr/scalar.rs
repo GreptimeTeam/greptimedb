@@ -15,7 +15,9 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+use datafusion_physical_expr::PhysicalExpr;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use serde::{Deserialize, Serialize};
@@ -149,6 +151,38 @@ pub enum ScalarExpr {
         then: Box<ScalarExpr>,
         els: Box<ScalarExpr>,
     },
+}
+
+/// a way to represent a scalar function that is implemented in Data Fusion
+#[derive(Debug, Clone)]
+pub struct CallDfScalarFunction {
+    fn_name: String,
+    // TODO(discord9): directly from datafusion expr
+    fn_impl: Arc<dyn PhysicalExpr>,
+}
+
+impl std::cmp::PartialEq for CallDfScalarFunction {
+    fn eq(&self, other: &Self) -> bool {
+        self.fn_name.eq(&other.fn_name)
+    }
+}
+
+impl std::cmp::Eq for CallDfScalarFunction {}
+
+impl std::cmp::PartialOrd for CallDfScalarFunction {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl std::cmp::Ord for CallDfScalarFunction {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fn_name.cmp(&other.fn_name)
+    }
+}
+impl std::hash::Hash for CallDfScalarFunction {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.fn_name.hash(state);
+    }
 }
 
 impl ScalarExpr {

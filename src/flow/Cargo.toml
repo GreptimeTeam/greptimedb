@@ -30,6 +30,7 @@ common-function.workspace = true
 common-meta.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
+datafusion-physical-expr.workspace = true
 enum-as-inner = "0.6.0"
 greptime-proto.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
