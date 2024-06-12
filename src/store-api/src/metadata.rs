@@ -75,7 +75,8 @@ impl ColumnMetadata {
             column_def.datatype_extension.clone(),
         )
         .into();
-        ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
+        ColumnSchema::new(&column_def.name, data_type, column_def.is_nullable)
+            .with_time_index(column_def.semantic_type() == SemanticType::Timestamp)
             .with_default_constraint(default_constrain)
             .context(ConvertDatatypesSnafu)
     }

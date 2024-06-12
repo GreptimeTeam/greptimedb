@@ -35,6 +35,7 @@ use common_query::Output;
 use headers::HeaderValue;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pipeline::{GreptimeTransformer, Pipeline};
 use serde_json::Value;
 use session::context::QueryContextRef;
 
@@ -48,6 +49,7 @@ pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + 
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
+pub type LogHandlerRef = Arc<dyn LogHandler + Send + Sync>;
 
 #[async_trait]
 pub trait ScriptHandler {
@@ -117,4 +119,30 @@ pub trait OpenTelemetryProtocolHandler {
         request: ExportTraceServiceRequest,
         ctx: QueryContextRef,
     ) -> Result<Output>;
+}
+
+/// LogHandler is responsible for handling log related requests.
+/// It should be able to insert logs and manage pipelines.
+/// The pipeline is a series of transformations that can be applied to logs.
+/// The pipeline is stored in the database and can be retrieved by name.
+#[async_trait]
+pub trait LogHandler {
+    async fn insert_logs(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+
+    async fn get_pipeline(
+        &self,
+        name: &str,
+        version: Option<String>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Pipeline<GreptimeTransformer>>;
+
+    async fn insert_pipeline(
+        &self,
+        name: &str,
+        content_type: &str,
+        pipeline: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<()>;
+
+    async fn delete_pipeline(&self, name: &str, query_ctx: QueryContextRef) -> Result<()>;
 }

@@ -46,6 +46,7 @@ members = [
     "src/object-store",
     "src/operator",
     "src/partition",
+    "src/pipeline",
     "src/plugins",
     "src/promql",
     "src/puffin",
@@ -224,6 +225,7 @@ mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
 partition = { path = "src/partition" }
+pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }

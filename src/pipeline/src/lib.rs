@@ -12,20 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
-use syn::token::Comma;
-use syn::{FnArg, Type};
+mod etl;
+mod manager;
 
-/// Extract the argument list from the annotated function.
-pub(crate) fn extract_input_types(
-    inputs: &Punctuated<FnArg, Comma>,
-) -> Result<Vec<Type>, syn::Error> {
-    inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Receiver(receiver) => Err(syn::Error::new(receiver.span(), "expected bool")),
-            FnArg::Typed(pat_type) => Ok(*pat_type.ty.clone()),
-        })
-        .collect()
-}
+pub use etl::transform::GreptimeTransformer;
+pub use etl::value::Value;
+pub use etl::{parse, Content, Pipeline};
+pub use manager::{error, pipeline_operator, table};
