@@ -45,7 +45,7 @@ use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
-/// The output order is always `order by primary key, time index`.
+/// The output order is always `order by primary keys, time index`.
 pub struct SeqScan {
     /// Properties of the scanner.
     properties: ScannerProperties,

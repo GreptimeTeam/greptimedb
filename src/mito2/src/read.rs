@@ -747,8 +747,6 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 }
 
 /// Metrics for scanners.
-// We allow dead code here because we only read some fields in formatting `Debug`.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct ScannerMetrics {
     /// Duration to prepare the scan task.

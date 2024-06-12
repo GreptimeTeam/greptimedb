@@ -50,9 +50,16 @@ impl RegionScanExec {
     pub fn new(scanner: RegionScannerRef) -> Self {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
+        let mut num_output_partition = scanner_props.partitioning().num_partitions();
+        // The meaning of word "partition" is different in different context. For datafusion
+        // it's about "parallelism" and for storage it's about "data range". Thus here we add
+        // a special case to handle the situation where the number of storage partiton is 0.
+        if num_output_partition == 0 {
+            num_output_partition = 1;
+        }
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
-            Partitioning::UnknownPartitioning(scanner_props.partitioning().num_partitions()),
+            Partitioning::UnknownPartitioning(num_output_partition),
             ExecutionMode::Bounded,
         );
         Self {

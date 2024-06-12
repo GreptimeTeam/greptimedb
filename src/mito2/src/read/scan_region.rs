@@ -797,7 +797,7 @@ impl StreamContext {
                     inner.num_memtables(),
                     inner.num_file_ranges()
                 ),
-                DisplayFormatType::Verbose => write!(f, "{:?}", &&*inner),
+                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner),
             },
             Err(_) => write!(f, "<locked>"),
         }
