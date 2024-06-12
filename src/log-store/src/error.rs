@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
@@ -186,6 +187,14 @@ pub enum Error {
         error: rskafka::client::producer::Error,
     },
 
+    #[snafu(display("Failed to produce batch records to Kafka"))]
+    ProduceBatch {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
     #[snafu(display("Failed to read a record from Kafka, topic: {}", topic))]
     ConsumeRecord {
         topic: String,
@@ -243,6 +252,59 @@ pub enum Error {
         region_id: RegionId,
         last_index: u64,
         attempt_index: u64,
+    },
+
+    #[snafu(display("Failed to push data to aggregator"))]
+    AggregateInput {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[snafu(display("Failed to flush data from aggregator"))]
+    FlushAggregator {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[snafu(display("Failed to aggregate input, data is too large"))]
+    AggregatorInputTooLarge {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to send flush request to loop, reason: {}", reason))]
+    SendFlushRequest {
+        #[snafu(implicit)]
+        location: Location,
+
+        reason: String,
+    },
+
+    #[snafu(display("Failed to deaggregate status"))]
+    DeaggregateStatus {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[snafu(display("Failed to receive state"))]
+    StateRecv {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::watch::error::RecvError,
+    },
+
+    #[snafu(display("Failed to flush"))]
+    FlushErr {
+        #[snafu(implicit)]
+        location: Location,
+        source: Arc<Error>,
     },
 }
 
