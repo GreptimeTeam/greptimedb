@@ -19,10 +19,6 @@ use greptime_proto::v1::value::ValueData::{
 use greptime_proto::v1::Value as GreptimeValue;
 use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
 
-// use pipeline::transform::GreptimeTransformer;
-// use pipeline::value::Value;
-// use pipeline::{parse, Content, Pipeline};
-
 #[test]
 fn main() {
     let input_value_str = r#"
