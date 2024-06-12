@@ -35,7 +35,6 @@ use crate::error::{
     ChecksumMismatchSnafu, CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu,
     OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
-use crate::metrics::MANIFEST_OP_ELAPSED;
 
 lazy_static! {
     static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json").unwrap();
@@ -243,10 +242,6 @@ impl ManifestObjectStore {
         start_version: ManifestVersion,
         end_version: ManifestVersion,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
-        let _t = MANIFEST_OP_ELAPSED
-            .with_label_values(&["fetch_manifests"])
-            .start_timer();
-
         let manifests = self.scan(start_version, end_version).await?;
 
         // TODO(weny): Make it configurable.
@@ -284,10 +279,6 @@ impl ManifestObjectStore {
         end: ManifestVersion,
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
-        let _t = MANIFEST_OP_ELAPSED
-            .with_label_values(&["delete_manifests"])
-            .start_timer();
-
         // Stores (entry, is_checkpoint, version) in a Vec.
         let entries: Vec<_> = self
             .get_paths(|entry| {
@@ -395,10 +386,6 @@ impl ManifestObjectStore {
         version: ManifestVersion,
         bytes: &[u8],
     ) -> Result<()> {
-        let _t = MANIFEST_OP_ELAPSED
-            .with_label_values(&["save_checkpoint"])
-            .start_timer();
-
         let path = self.checkpoint_file_path(version);
         let data = self
             .compress_type
@@ -506,10 +493,6 @@ impl ManifestObjectStore {
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let _t = MANIFEST_OP_ELAPSED
-            .with_label_values(&["last_checkpoint"])
-            .start_timer();
-
         let last_checkpoint_path = self.last_checkpoint_path();
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
             Ok(data) => data,
