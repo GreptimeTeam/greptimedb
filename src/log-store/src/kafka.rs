@@ -14,6 +14,9 @@
 
 pub(crate) mod client_manager;
 pub mod log_store;
+// TODO(weny): remove it.
+#[allow(dead_code)]
+pub(crate) mod producer;
 pub(crate) mod util;
 
 use serde::{Deserialize, Serialize};
