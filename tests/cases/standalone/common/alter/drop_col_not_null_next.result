@@ -28,6 +28,7 @@ INSERT INTO test VALUES (3, 13);
 
 Affected Rows: 1
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +-------------------------+----+
