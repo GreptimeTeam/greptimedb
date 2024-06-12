@@ -14,12 +14,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use datafusion_common::DFSchema;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::adapter::error::{InvalidQuerySnafu, Result, UnexpectedSnafu};
+use crate::adapter::error::{DatafusionSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
 use crate::expr::{MapFilterProject, SafeMfpPlan, ScalarExpr};
 
 /// a set of column indices that are "keys" for the collection.
@@ -338,6 +340,28 @@ pub struct RelationDesc {
 }
 
 impl RelationDesc {
+    pub fn to_df_schema(&self) -> Result<DFSchema> {
+        let fields: Vec<_> = self
+            .iter()
+            .enumerate()
+            .map(|(i, (name, typ))| {
+                let name = name.clone().unwrap_or(format!("Col_{i}"));
+                let nullable = typ.nullable;
+                let data_type = typ.scalar_type.clone().as_arrow_type();
+                arrow_schema::Field::new(name, data_type, nullable)
+            })
+            .collect();
+        let arrow_schema = arrow_schema::Schema::new(fields);
+
+        DFSchema::try_from(arrow_schema.clone()).map_err(|err| {
+            DatafusionSnafu {
+                raw: err,
+                context: format!("Error when converting to DFSchema: {:?}", arrow_schema),
+            }
+            .build()
+        })
+    }
+
     /// apply mfp, and also project col names for the projected columns
     pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
         // TODO: find a way to deduce name at best effect

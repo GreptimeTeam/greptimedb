@@ -71,7 +71,7 @@ mod plan;
 ///
 /// So in substrait plan, a ref to a function can be a single u32 anchor instead of a full name in string
 pub struct FunctionExtensions {
-    anchor_to_name: HashMap<u32, String>,
+    pub anchor_to_name: HashMap<u32, String>,
 }
 
 impl FunctionExtensions {
@@ -95,6 +95,10 @@ impl FunctionExtensions {
     /// Get the name of a function by it's anchor
     pub fn get(&self, anchor: &u32) -> Option<&String> {
         self.anchor_to_name.get(anchor)
+    }
+
+    pub fn inner_ref(&self) -> HashMap<u32, &String> {
+        self.anchor_to_name.iter().map(|(k, v)| (*k, v)).collect()
     }
 }
 

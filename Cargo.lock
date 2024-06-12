@@ -3810,6 +3810,7 @@ name = "flow"
 version = "0.8.1"
 dependencies = [
  "api",
+ "arrow-schema",
  "async-trait",
  "catalog",
  "common-base",
@@ -3825,6 +3826,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "datafusion 38.0.0",
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
  "datafusion-physical-expr 38.0.0",

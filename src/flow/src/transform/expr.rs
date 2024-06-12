@@ -55,6 +55,23 @@ fn typename_to_cdt(name: &str) -> CDT {
 }
 
 impl TypedExpr {
+    pub async fn from_substrait_to_datafusion_scalar_func(
+        f: &ScalarFunction,
+        input_schema: &RelationType,
+        extensions: &FunctionExtensions,
+    ) -> Result<TypedExpr, Error> {
+        let e = Expression {
+            rex_type: Some(RexType::ScalarFunction(f.clone())),
+        };
+        /*substrait::df_logical_plan::consumer::from_substrait_rex(
+            &datafusion::prelude::SessionContext::new(),
+            &e,
+            input_schema,
+            &extensions.inner_ref(),
+        )
+        .await;*/
+        todo!()
+    }
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
         f: &ScalarFunction,
