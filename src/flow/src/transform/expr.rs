@@ -24,12 +24,13 @@ use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::Expression;
 
 use crate::adapter::error::{
-    DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
+    DatafusionSnafu, DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu,
+    PlanSnafu,
 };
 use crate::expr::{
     BinaryFunc, ScalarExpr, TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
-use crate::repr::{ColumnType, RelationDesc, RelationType};
+use crate::repr::{ColumnType, RelationDesc};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
 use crate::transform::{substrait_proto, FunctionExtensions};
 // TODO: found proper place for this
@@ -57,19 +58,37 @@ fn typename_to_cdt(name: &str) -> CDT {
 impl TypedExpr {
     pub async fn from_substrait_to_datafusion_scalar_func(
         f: &ScalarFunction,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let e = Expression {
             rex_type: Some(RexType::ScalarFunction(f.clone())),
         };
-        /*substrait::df_logical_plan::consumer::from_substrait_rex(
+        let schema = input_schema.to_df_schema()?;
+        let expr = substrait::df_logical_plan::consumer::from_substrait_rex(
             &datafusion::prelude::SessionContext::new(),
             &e,
-            input_schema,
+            &schema,
             &extensions.inner_ref(),
         )
-        .await;*/
+        .await
+        .map_err(|err| {
+            DatafusionSnafu {
+                raw: err,
+                context:
+                    "Failed to convert substrait scalar function to datafusion scalar function",
+            }
+            .build()
+        })?;
+        let phy_expr =
+            datafusion::physical_expr::create_physical_expr(&expr, &schema, &Default::default())
+                .map_err(|err| {
+                    DatafusionSnafu {
+                        raw: err,
+                        context: "Failed to create physical expression from logical expression",
+                    }
+                    .build()
+                })?;
         todo!()
     }
     /// Convert ScalarFunction into Flow's ScalarExpr
