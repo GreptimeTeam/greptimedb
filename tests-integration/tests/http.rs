@@ -1067,5 +1067,14 @@ transform:
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.text().await, "ok");
 
+    // 4. write data failed
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_ne!(res.status(), StatusCode::OK);
+
     guard.remove_all().await;
 }
