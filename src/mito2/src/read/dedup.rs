@@ -18,7 +18,7 @@ use api::v1::OpType;
 use async_trait::async_trait;
 use common_base::BitVec;
 use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{BooleanVector, VectorRef};
+use datatypes::vectors::{BooleanVector, UInt8Vector, VectorRef};
 
 use crate::error::Result;
 use crate::read::{Batch, BatchReader};
@@ -77,12 +77,24 @@ struct BatchState {
 }
 
 /// Dedup strategy that keeps the row with latest sequence of each key.
-#[derive(Default)]
 pub(crate) struct LastRow {
     /// Previous batch that has the same key as the batch to push.
     prev_batch: Option<BatchState>,
     /// Reusable bitmap for selection. `true` means the row is selected.
     selected: BitVec,
+    /// Filter deleted rows.
+    filter_deleted: bool,
+}
+
+impl LastRow {
+    /// Creates a new strategy with the given `filter_deleted` flag.
+    pub(crate) fn new(filter_deleted: bool) -> Self {
+        Self {
+            prev_batch: None,
+            selected: BitVec::new(),
+            filter_deleted,
+        }
+    }
 }
 
 impl DedupStrategy for LastRow {
@@ -90,6 +102,10 @@ impl DedupStrategy for LastRow {
         if batch.is_empty() {
             return Ok(None);
         }
+
+        // Reinitializes the bit map to zeros.
+        self.selected.clear();
+        self.selected.resize(batch.num_rows(), false);
 
         let prev_timestamps = match &self.prev_batch {
             Some(prev_batch) => {
@@ -103,21 +119,13 @@ impl DedupStrategy for LastRow {
             }
             None => None,
         };
-
-        // Reinitializes the bit map to zeros.
-        self.selected.clear();
-        self.selected.resize(batch.num_rows(), false);
         // Finds unique timestamps. The last row of a key has the largest sequence and we
         // sort rows by (timestamp, sequence desc).
         batch
             .timestamps()
             .find_unique(&mut self.selected, prev_timestamps);
-        // Finds deleted rows and unselects them.
-        let op_types = batch.op_types();
-        for (i, op_type) in op_types.as_arrow().values().iter().enumerate() {
-            if *op_type == OpType::Delete as u8 {
-                self.selected.set(i, false);
-            }
+        if self.filter_deleted {
+            unselect_deleted(batch.op_types(), &mut self.selected);
         }
 
         // Store current batch to `prev_batch` so we could compare the next batch
@@ -138,9 +146,11 @@ impl DedupStrategy for LastRow {
             }
         }
 
-        // Removes deleted rows.
-        let predicate = BooleanVector::from_iterator(self.selected.iter().by_vals());
-        batch.filter(&predicate)?;
+        // Filters the batch if not all rows are needed.
+        if self.selected.count_zeros() > 0 {
+            let predicate = BooleanVector::from_iterator(self.selected.iter().by_vals());
+            batch.filter(&predicate)?;
+        }
 
         if batch.is_empty() {
             Ok(None)
@@ -151,5 +161,14 @@ impl DedupStrategy for LastRow {
 
     fn finish(&mut self) -> Result<Option<Batch>> {
         Ok(None)
+    }
+}
+
+/// Finds deleted rows and unselects them.
+fn unselect_deleted(op_types: &UInt8Vector, selected: &mut BitVec) {
+    for (i, op_type) in op_types.as_arrow().values().iter().enumerate() {
+        if *op_type == OpType::Delete as u8 {
+            selected.set(i, false);
+        }
     }
 }

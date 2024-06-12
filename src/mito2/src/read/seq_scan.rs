@@ -34,7 +34,8 @@ use tokio::sync::Semaphore;
 
 use crate::error::Result;
 use crate::memtable::MemtableRef;
-use crate::read::merge::{MergeReader, MergeReaderBuilder};
+use crate::read::dedup::{DedupReader, LastRow};
+use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
 };
@@ -149,7 +150,7 @@ impl SeqScan {
         partition: Option<usize>,
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
-    ) -> Result<Option<MergeReader>> {
+    ) -> Result<Option<BoxedBatchReader>> {
         let mut parts = stream_ctx.parts.lock().await;
         maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
 
@@ -186,10 +187,18 @@ impl SeqScan {
                 .create_parallel_sources(sources, semaphore.clone())?;
         }
 
-        let dedup = !stream_ctx.input.append_mode;
-        // TODO(yingwen): Impl dedup reader.
         let mut builder = MergeReaderBuilder::from_sources(sources);
-        builder.build().await.map(Some)
+        let reader = builder.build().await?;
+
+        let dedup = !stream_ctx.input.append_mode;
+        if dedup {
+            let dedup_strategy = Box::new(LastRow::new(stream_ctx.input.filter_deleted));
+            let reader = Box::new(DedupReader::new(reader, dedup_strategy));
+            Ok(Some(reader))
+        } else {
+            let reader = Box::new(reader);
+            Ok(Some(reader))
+        }
     }
 
     /// Scans one partition or all partitions.
