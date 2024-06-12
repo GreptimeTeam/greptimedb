@@ -67,10 +67,10 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => {
                 let stream = seq_scan.build_stream().await?;
-                let scanner = Arc::new(SinglePartitionScanner::new(stream));
+                let scanner = Box::new(SinglePartitionScanner::new(stream));
                 Ok(scanner)
             }
-            Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
+            Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),
         }
     }
 }

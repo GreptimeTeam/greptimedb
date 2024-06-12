@@ -27,7 +27,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use snafu::ResultExt;
-use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
+use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 use tokio::sync::Mutex;
 
 use crate::cache::CacheManager;
@@ -57,8 +57,7 @@ impl UnorderedScan {
     pub(crate) fn new(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let prepare_scan_cost = query_start.elapsed();
-        let properties =
-            ScannerProperties::new(ScannerPartitioning::Unknown(input.parallelism.parallelism));
+        let properties = ScannerProperties::new_with_partitions(input.parallelism.parallelism);
 
         // Observes metrics.
         READ_STAGE_ELAPSED
@@ -80,7 +79,7 @@ impl UnorderedScan {
 
     /// Scans the region and returns a stream.
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part_num = self.properties.partitioning().num_partitions();
+        let part_num = self.properties.num_partitions();
         let streams = (0..part_num)
             .map(|i| self.scan_partition(i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
@@ -156,6 +155,11 @@ impl RegionScanner for UnorderedScan {
 
     fn schema(&self) -> SchemaRef {
         self.stream_ctx.input.mapper.output_schema()
+    }
+
+    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        self.properties = ScannerProperties::new(ranges);
+        Ok(())
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {

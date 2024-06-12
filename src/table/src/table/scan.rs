@@ -14,7 +14,7 @@
 
 use std::any::Any;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
@@ -38,7 +38,7 @@ use crate::table::metrics::MemoryUsageMetrics;
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Debug)]
 pub struct RegionScanExec {
-    scanner: RegionScannerRef,
+    scanner: Mutex<RegionScannerRef>,
     arrow_schema: ArrowSchemaRef,
     /// The expected output ordering for the plan.
     output_ordering: Option<Vec<PhysicalSortExpr>>,
@@ -52,11 +52,11 @@ impl RegionScanExec {
         let scanner_props = scanner.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
-            Partitioning::UnknownPartitioning(scanner_props.partitioning().num_partitions()),
+            Partitioning::UnknownPartitioning(scanner_props.num_partitions()),
             ExecutionMode::Bounded,
         );
         Self {
-            scanner,
+            scanner: Mutex::new(scanner),
             arrow_schema,
             output_ordering: None,
             metric: ExecutionPlanMetricsSet::new(),
@@ -106,6 +106,8 @@ impl ExecutionPlan for RegionScanExec {
 
         let stream = self
             .scanner
+            .lock()
+            .unwrap()
             .scan_partition(partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let mem_usage_metrics = MemoryUsageMetrics::new(&self.metric, partition);
@@ -210,7 +212,7 @@ mod test {
             RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
         let stream = recordbatches.as_stream();
 
-        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        let scanner = Box::new(SinglePartitionScanner::new(stream));
         let plan = RegionScanExec::new(scanner);
         let actual: SchemaRef = Arc::new(
             plan.properties
