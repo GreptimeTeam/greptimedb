@@ -188,7 +188,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to produce batch records to Kafka"))]
-    ProduceBatch {
+    BatchProduce {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
