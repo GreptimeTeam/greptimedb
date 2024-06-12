@@ -249,7 +249,7 @@ mod tests {
             let region_id = RegionId::new(table_id, *region);
 
             let stream = region_server
-                .handle_read(QueryRequest {
+                .handle_remote_read(QueryRequest {
                     region_id: region_id.as_u64(),
                     plan: plan.to_vec(),
                     ..Default::default()

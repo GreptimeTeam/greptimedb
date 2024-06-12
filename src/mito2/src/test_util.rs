@@ -737,9 +737,7 @@ impl CreateRequestBuilder {
     }
 }
 
-// TODO(yingwen): Support conversion in greptime-proto.
 /// Creates value for i64.
-#[cfg(test)]
 pub(crate) fn i64_value(data: i64) -> v1::Value {
     v1::Value {
         value_data: Some(ValueData::I64Value(data)),
@@ -747,7 +745,6 @@ pub(crate) fn i64_value(data: i64) -> v1::Value {
 }
 
 /// Creates value for timestamp millis.
-#[cfg(test)]
 pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
     v1::Value {
         value_data: Some(ValueData::TimestampMillisecondValue(data)),

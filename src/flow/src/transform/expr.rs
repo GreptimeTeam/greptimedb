@@ -363,16 +363,20 @@ mod test {
             ],
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
+                .into_named(vec![Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
                         id: crate::expr::Id::Global(GlobalId::User(0)),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        ConcreteDataType::uint32_datatype(),
-                        false,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_named(vec![Some("number".to_string())]),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)])
@@ -397,7 +401,8 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Constant {
                 rows: vec![(
                     repr::Row::new(vec![Value::from(true)]),
@@ -421,16 +426,20 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
                         id: crate::expr::Id::Global(GlobalId::User(0)),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        ConcreteDataType::uint32_datatype(),
-                        false,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_named(vec![Some("number".to_string())]),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0).call_binary(
@@ -455,16 +464,20 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
                         id: crate::expr::Id::Global(GlobalId::User(0)),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        ConcreteDataType::uint32_datatype(),
-                        false,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_named(vec![Some("number".to_string())]),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Literal(
@@ -490,16 +503,20 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
 
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
                         id: crate::expr::Id::Global(GlobalId::User(0)),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        ConcreteDataType::uint32_datatype(),
-                        false,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_named(vec![Some("number".to_string())]),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0)

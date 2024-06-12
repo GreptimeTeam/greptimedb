@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use api::region::RegionResponse;
 use api::v1::flow::{FlowRequest, FlowResponse};
-use api::v1::region::{InsertRequests, QueryRequest, RegionRequest};
+use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
