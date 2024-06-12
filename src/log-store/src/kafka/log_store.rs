@@ -42,8 +42,8 @@ use crate::kafka::util::record::{
 };
 use crate::metrics;
 
-/// The min flush queue size.
-pub(crate) const MIN_FLUSH_QUEUE_SIZE: usize = 64;
+/// The max flush queue size.
+pub(crate) const MAX_FLUSH_QUEUE_SIZE: usize = 512;
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
@@ -80,7 +80,7 @@ impl KafkaLogStore {
             config.linger,
             config.max_batch_size.as_bytes() as usize,
             config.compression,
-            MIN_FLUSH_QUEUE_SIZE,
+            MAX_FLUSH_QUEUE_SIZE,
         );
 
         Ok(Self {
