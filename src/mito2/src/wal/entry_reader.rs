@@ -94,7 +94,7 @@ mod tests {
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
 
-    use crate::error::{self};
+    use crate::error;
     use crate::test_util::wal_util::MockRawEntryStream;
     use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 
