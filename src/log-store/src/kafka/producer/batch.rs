@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use common_telemetry::warn;
-use rskafka::client::producer::aggregator::{self, Aggregator, StatusDeaggregator, TryPush};
+use rskafka::client::producer::aggregator::{
+    Aggregator, AggregatorStatus, StatusDeaggregator, TryPush,
+};
 use rskafka::record::Record;
 use snafu::ResultExt;
 use tokio::sync::watch;
@@ -53,7 +55,7 @@ where
     tag: A::Tag,
 }
 
-impl<A: aggregator::Aggregator> ResultHandle<A> {
+impl<A: Aggregator> ResultHandle<A> {
     /// Waits for [`BatchFlushState`] changed(exclude [`BatchFlushState::Init`]) and returns the  [`AggregatedStatus`].
     ///
     /// # Cancel safety
@@ -80,7 +82,7 @@ impl<A: aggregator::Aggregator> ResultHandle<A> {
     pub(crate) fn result(
         self,
         status: Arc<AggregatedStatus<A>>,
-    ) -> Result<<A as aggregator::AggregatorStatus>::Status> {
+    ) -> Result<<A as AggregatorStatus>::Status> {
         status
             .status_deagg
             .deaggregate(&status.aggregated_status, self.tag)
@@ -90,10 +92,7 @@ impl<A: aggregator::Aggregator> ResultHandle<A> {
 
 /// A [`BatchBuilder`] uses an [`Aggregator`] to construct maximally large batch
 /// of writes, and returning a [`ResultHandle`] for callers to demux the result.
-pub(crate) struct BatchBuilder<A>
-where
-    A: aggregator::Aggregator,
-{
+pub(crate) struct BatchBuilder<A: Aggregator> {
     aggregator: A,
     /// Sends the flush `results` to [ResultHandle]s.
     sender: watch::Sender<BatchFlushState<A>>,
@@ -108,7 +107,7 @@ pub(crate) struct FlushRequest<A: Aggregator> {
     pub(crate) sender: watch::Sender<BatchFlushState<A>>,
 }
 
-impl<A: aggregator::Aggregator> BatchBuilder<A> {
+impl<A: Aggregator> BatchBuilder<A> {
     pub(crate) fn new(aggregator: A) -> Self {
         let (sender, receiver) = watch::channel(BatchFlushState::Init);
 
@@ -136,40 +135,49 @@ impl<A: aggregator::Aggregator> BatchBuilder<A> {
         }
     }
 
-    pub(crate) fn next_batch(self) -> (Self, Result<Option<FlushRequest<A>>>) {
-        let BatchBuilder {
-            mut aggregator,
-            sender,
-            ..
-        } = self;
-        let (batch, status_deagg) = match aggregator.flush().context(error::FlushAggregatorSnafu) {
-            Ok(v) => v,
-            Err(e) => return (Self::new(aggregator), Err(e)),
-        };
+    fn reset_channel(&mut self) {
+        let (sender, receiver) = watch::channel(BatchFlushState::Init);
+        self.sender = sender;
+        self.receiver = receiver;
+    }
+
+    pub(crate) fn yield_flush(&mut self) -> Result<Option<FlushRequest<A>>> {
+        let (batch, status_deagg) =
+            match self.aggregator.flush().context(error::FlushAggregatorSnafu) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.reset_channel();
+                    return Err(e);
+                }
+            };
 
         if batch.is_empty() {
             // The aggregator might have produced no records,
             // but the `produce()` callers are still waiting for their responses.
             //
             // Sends an empty result set to all waiters.
-            if let Err(err) = sender.send(BatchFlushState::Result(Arc::new(AggregatedStatus {
-                aggregated_status: vec![],
-                status_deagg,
-            }))) {
+            if let Err(err) =
+                self.sender
+                    .send(BatchFlushState::Result(Arc::new(AggregatedStatus {
+                        aggregated_status: vec![],
+                        status_deagg,
+                    })))
+            {
                 warn!(err; "Failed to send batch write state");
             }
 
-            return (Self::new(aggregator), Ok(None));
+            self.reset_channel();
+            return Ok(None);
         }
 
-        (
-            Self::new(aggregator),
-            Ok(Some(FlushRequest {
-                batch,
-                status_deagg,
-                sender,
-            })),
-        )
+        let request = FlushRequest {
+            batch,
+            status_deagg,
+            sender: self.sender.clone(),
+        };
+
+        self.reset_channel();
+        Ok(Some(request))
     }
 }
 
@@ -202,7 +210,7 @@ mod tests {
 
         let mut handle = batch.try_push(record).unwrap().unwrap_tag();
 
-        let (_, flush_req) = batch.next_batch();
+        let flush_req = batch.yield_flush();
         tokio::spawn(async move {
             let FlushRequest {
                 batch: _batch,
