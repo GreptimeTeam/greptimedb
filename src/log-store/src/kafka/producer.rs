@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use batch::{AggregatedStatus, BatchBuilder, BatchFlushState, FlushRequest, ResultHandle};
 use common_runtime::JoinHandle;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, warn};
 use rskafka::client::partition::Compression;
 use rskafka::client::producer::aggregator::{Aggregator, AggregatorStatus, TryPush};
 use rskafka::client::producer::ProducerClient;
@@ -44,8 +44,6 @@ struct BackgroundProducerWorker<A: Aggregator> {
     receiver: Receiver<FlushRequest<A>>,
     // The running flag.
     running: Arc<AtomicBool>,
-    // Current flushing request.
-    flushing: Option<FlushingRequest>,
 }
 
 async fn do_flush<A: Aggregator>(
@@ -75,32 +73,17 @@ async fn do_flush<A: Aggregator>(
 impl<A: Aggregator> BackgroundProducerWorker<A> {
     async fn run(&mut self) {
         while self.running.load(Ordering::Relaxed) {
-            match self.flushing.take() {
-                Some(current) => {
-                    if let Err(err) = current.receiver.await {
-                        error!(err; "Flushing task is panicked");
-                    };
+            match self.receiver.recv().await {
+                Some(request) => {
+                    let client = self.client.clone();
+                    let compression = self.compression;
+                    do_flush(client, request, compression).await;
                 }
-                None => match self.receiver.recv().await {
-                    Some(request) => {
-                        let (tx, rx) = oneshot::channel();
-                        let client = self.client.clone();
-                        let compression = self.compression;
-                        self.flushing = Some(FlushingRequest {
-                            handle: tokio::spawn(async move {
-                                do_flush(client, request, compression).await;
-                                // Ignores the error if the loop is exited.
-                                let _ = tx.send(());
-                            }),
-                            receiver: rx,
-                        });
-                    }
-                    None => {
-                        debug!("The sender is dropped, BackgroundProducerWorker exited");
-                        // Exits the loop if the `sender` is dropped.
-                        break;
-                    }
-                },
+                None => {
+                    debug!("The sender is dropped, BackgroundProducerWorker exited");
+                    // Exits the loop if the `sender` is dropped.
+                    break;
+                }
             }
         }
     }
@@ -309,7 +292,6 @@ impl<A: Aggregator> OrderedBatchProducer<A> {
             receiver: rx,
             compression,
             running: running.clone(),
-            flushing: None,
         };
 
         Self {
