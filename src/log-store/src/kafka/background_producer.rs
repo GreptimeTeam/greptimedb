@@ -23,7 +23,7 @@ use rskafka::client::producer::ProducerClient;
 use rskafka::record::Record;
 use snafu::ResultExt;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
 use crate::error::{self, Result};
 
@@ -183,7 +183,7 @@ impl BackgroundProducerWorker {
 }
 
 pub(crate) struct OrderedBatchProducer {
-    sender: Mutex<Sender<ProduceRequest>>,
+    sender: Sender<ProduceRequest>,
     /// Used to control the [`BackgroundProducerWorker`].
     running: Arc<AtomicBool>,
     /// The handle of [`BackgroundProducerWorker`].
@@ -193,6 +193,16 @@ pub(crate) struct OrderedBatchProducer {
 impl Drop for OrderedBatchProducer {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+    }
+}
+
+pub(crate) struct ProduceResultHandle {
+    receiver: oneshot::Receiver<ProduceResultReceiver>,
+}
+
+impl ProduceResultHandle {
+    pub(crate) async fn wait(self) -> Result<Vec<i64>> {
+        self.receiver.await.unwrap().wait().await
     }
 }
 
@@ -218,26 +228,22 @@ impl OrderedBatchProducer {
         };
 
         Self {
-            sender: Mutex::new(tx),
+            sender: tx,
             running,
             handle: tokio::spawn(async move { worker.run().await }),
         }
     }
 
-    pub(crate) async fn produce(
-        &self,
-        batch: Vec<Record>,
-    ) -> Result<oneshot::Receiver<ProduceResultReceiver>> {
+    pub(crate) async fn produce(&self, batch: Vec<Record>) -> Result<ProduceResultHandle> {
         let receiver = {
             let (tx, rx) = oneshot::channel();
-            let sender = self.sender.lock().await;
-            sender
+            self.sender
                 .send(ProduceRequest { batch, sender: tx })
                 .await
                 .expect("worker panic");
             rx
         };
 
-        Ok(receiver)
+        Ok(ProduceResultHandle { receiver })
     }
 }

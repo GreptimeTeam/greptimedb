@@ -42,9 +42,6 @@ use crate::kafka::util::record::{
 };
 use crate::metrics;
 
-/// The max flush queue size.
-pub(crate) const MAX_FLUSH_QUEUE_SIZE: usize = 512;
-
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {
@@ -77,10 +74,8 @@ impl KafkaLogStore {
             })?;
         let producer_registry = ProducerRegistry::new(
             client,
-            config.linger,
             config.max_batch_size.as_bytes() as usize,
             config.compression,
-            MAX_FLUSH_QUEUE_SIZE,
         );
 
         Ok(Self {
@@ -205,17 +200,13 @@ impl LogStore for KafkaLogStore {
         for (region_id, records) in region_grouped_records {
             region_ids.push(region_id);
             let producer = region_grouped_producers.get(&region_id).unwrap();
-            let mut receivers = Vec::with_capacity(records.len());
-            for record in records {
-                receivers.push(producer.produce(record).await?);
-            }
-            region_grouped_result_receivers.push(receivers)
+            region_grouped_result_receivers.push(producer.produce(records).await?)
         }
 
         let region_grouped_offsets = try_join_all(
             region_grouped_result_receivers
                 .into_iter()
-                .map(|handles| try_join_all(handles.into_iter().map(|handle| handle.wait()))),
+                .map(|handle| handle.wait()),
         )
         .await?;
 
