@@ -295,7 +295,6 @@ fn main() {
                     let kafka_cfg = KafkaConfig {
                         broker_endpoints: cfg.bootstrap_brokers.clone(),
                         max_batch_size: cfg.max_batch_size,
-                        linger: cfg.linger,
                         backoff: BackoffConfig {
                             init: cfg.backoff_init,
                             max: cfg.backoff_max,

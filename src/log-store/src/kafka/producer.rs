@@ -209,11 +209,11 @@ impl OrderedBatchProducer {
     pub(crate) fn new(
         client: Arc<dyn ProducerClient>,
         compression: Compression,
-        produce_channel_size: usize,
+        channel_size: usize,
         request_batch_size: usize,
         max_flush_size: usize,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(produce_channel_size);
+        let (tx, rx) = mpsc::channel(channel_size);
         let running = Arc::new(AtomicBool::new(true));
         let mut worker = BackgroundProducerWorker {
             client,

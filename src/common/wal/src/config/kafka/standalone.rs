@@ -45,9 +45,10 @@ pub struct StandaloneKafkaConfig {
     pub compression: Compression,
     /// The max size of a single producer batch.
     pub max_batch_size: ReadableSize,
-    /// The linger duration of a kafka batch producer.
-    #[serde(with = "humantime_serde")]
-    pub linger: Duration,
+    /// Request channel size of each `OrderedBatchProducer`.
+    pub producer_channel_size: usize,
+    /// Max batch size for a `OrderedBatchProducer` to handle requests.
+    pub producer_request_batch_size: usize,
     /// The consumer wait timeout.
     #[serde(with = "humantime_serde")]
     pub consumer_wait_timeout: Duration,
@@ -71,7 +72,8 @@ impl Default for StandaloneKafkaConfig {
             compression: Compression::NoCompression,
             // Warning: Kafka has a default limit of 1MB per message in a topic.
             max_batch_size: ReadableSize::mb(1),
-            linger: Duration::from_millis(200),
+            producer_channel_size: 128,
+            producer_request_batch_size: 64,
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
         }

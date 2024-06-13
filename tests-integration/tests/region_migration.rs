@@ -113,7 +113,6 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
@@ -240,7 +239,6 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
@@ -362,7 +360,6 @@ pub async fn test_region_migration_multiple_regions(
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
@@ -499,7 +496,6 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
@@ -631,7 +627,6 @@ pub async fn test_region_migration_incorrect_from_peer(
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
@@ -706,7 +701,6 @@ pub async fn test_region_migration_incorrect_region_id(
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
             ..Default::default()
         }))
         .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {

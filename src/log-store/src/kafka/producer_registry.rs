@@ -38,7 +38,9 @@ pub(crate) const MIN_FLUSH_BATCH_SIZE: usize = 4 * 1024;
 pub struct ProducerRegistry {
     registry: RwLock<HashMap<Arc<KafkaProvider>, OrderedBatchProducerRef>>,
     client: rskafka::client::Client,
-    aggregator_batch_size: usize,
+    producer_channel_size: usize,
+    producer_request_batch_size: usize,
+    flush_batch_size: usize,
     compression: Compression,
 }
 
@@ -51,14 +53,18 @@ impl Debug for ProducerRegistry {
 impl ProducerRegistry {
     pub fn new(
         client: rskafka::client::Client,
-        aggregator_batch_size: usize,
+        flush_batch_size: usize,
+        producer_channel_size: usize,
+        producer_request_batch_size: usize,
         compression: Compression,
     ) -> Self {
-        let aggregator_batch_size = aggregator_batch_size.max(MIN_FLUSH_BATCH_SIZE);
+        let flush_batch_size = flush_batch_size.max(MIN_FLUSH_BATCH_SIZE);
         Self {
             registry: RwLock::new(HashMap::new()),
             client,
-            aggregator_batch_size,
+            producer_channel_size,
+            producer_request_batch_size,
+            flush_batch_size,
             compression,
         }
     }
@@ -83,9 +89,10 @@ impl ProducerRegistry {
         let producer = OrderedBatchProducer::new(
             Arc::new(partition_client),
             self.compression,
-            128,
-            64,
-            self.aggregator_batch_size,
+            // TODO(weny): make these configurable
+            self.producer_channel_size,
+            self.producer_request_batch_size,
+            self.flush_batch_size,
         );
 
         Ok(Arc::new(producer))

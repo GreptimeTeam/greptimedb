@@ -178,8 +178,12 @@ broker_endpoints = ["127.0.0.1:9092"]
 max_batch_size = "1MB"
 
 ## The linger duration of a kafka batch producer.
-## **It's only used when the provider is `kafka`**.
-linger = "200ms"
+## Request channel size of each `OrderedBatchProducer`.
+producer_channel_size = 128
+
+## The linger duration of a kafka batch producer.
+## Max batch size for a `OrderedBatchProducer` to handle requests.
+producer_request_batch_size = 64
 
 ## The consumer wait timeout.
 ## **It's only used when the provider is `kafka`**.

@@ -102,9 +102,10 @@ impl From<StandaloneWalConfig> for DatanodeWalConfig {
                 broker_endpoints: config.broker_endpoints,
                 compression: config.compression,
                 max_batch_size: config.max_batch_size,
-                linger: config.linger,
                 consumer_wait_timeout: config.consumer_wait_timeout,
                 backoff: config.backoff,
+                producer_channel_size: config.producer_channel_size,
+                producer_request_batch_size: config.producer_request_batch_size,
             }),
         }
     }
@@ -210,7 +211,8 @@ mod tests {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             compression: Compression::default(),
             max_batch_size: ReadableSize::mb(1),
-            linger: Duration::from_millis(200),
+            producer_channel_size: 128,
+            producer_request_batch_size: 64,
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
                 init: Duration::from_millis(500),
@@ -233,7 +235,8 @@ mod tests {
             create_topic_timeout: Duration::from_secs(30),
             compression: Compression::default(),
             max_batch_size: ReadableSize::mb(1),
-            linger: Duration::from_millis(200),
+            producer_channel_size: 128,
+            producer_request_batch_size: 64,
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
                 init: Duration::from_millis(500),

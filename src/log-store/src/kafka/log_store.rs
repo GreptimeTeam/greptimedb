@@ -75,6 +75,8 @@ impl KafkaLogStore {
         let producer_registry = ProducerRegistry::new(
             client,
             config.max_batch_size.as_bytes() as usize,
+            config.producer_channel_size,
+            config.producer_request_batch_size,
             config.compression,
         );
 
