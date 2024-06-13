@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
@@ -31,7 +32,7 @@ use datafusion_common::DataFusionError;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use futures::{Stream, StreamExt};
-use store_api::region_engine::RegionScannerRef;
+use store_api::region_engine::{PartitionRange, RegionScannerRef};
 
 use crate::table::metrics::MemoryUsageMetrics;
 
@@ -68,6 +69,27 @@ impl RegionScanExec {
     pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
         self.output_ordering = Some(output_ordering);
         self
+    }
+
+    /// Get the partition ranges of the scanner. This method will collapse the ranges into
+    /// a single vector.
+    pub fn get_partition_ranges(&self) -> Vec<PartitionRange> {
+        let scanner = self.scanner.lock().unwrap();
+        let raw_ranges = &scanner.properties().ranges;
+
+        // collapse the ranges
+        let mut ranges = Vec::with_capacity(raw_ranges.len());
+        for partition in raw_ranges {
+            ranges.extend_from_slice(partition);
+        }
+
+        ranges
+    }
+
+    /// Update the partition ranges of underlying scanner.
+    pub fn set_partitions(&self, partitions: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        let mut scanner = self.scanner.lock().unwrap();
+        scanner.prepare(partitions)
     }
 }
 
