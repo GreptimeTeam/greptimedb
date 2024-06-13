@@ -146,10 +146,10 @@ impl AccessLayer {
                 index_options: request.index_options,
             }
             .build();
-            let mut writer = ParquetWriter::new(
+            let mut writer = ParquetWriter::new_with_object_store(
+                self.object_store.clone(),
                 file_path,
                 request.metadata,
-                self.object_store.clone(),
                 indexer,
             );
             writer.write_all(request.source, write_opts).await?
