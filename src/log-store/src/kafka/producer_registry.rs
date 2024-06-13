@@ -15,19 +15,17 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::Duration;
 
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
-use rskafka::client::producer::aggregator::RecordAggregator;
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::RwLock;
 
 use crate::error;
 use crate::error::Result;
-use crate::kafka::producer::OrderedBatchProducer;
+use crate::kafka::background_producer::OrderedBatchProducer;
 
-pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer<RecordAggregator>>;
+pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
@@ -39,12 +37,9 @@ pub(crate) const MIN_FLUSH_BATCH_SIZE: usize = 4 * 1024;
 /// The registry or [OrderedBatchProducer].
 pub struct ProducerRegistry {
     registry: RwLock<HashMap<Arc<KafkaProvider>, OrderedBatchProducerRef>>,
-
     client: rskafka::client::Client,
-    linger: Duration,
     aggregator_batch_size: usize,
     compression: Compression,
-    flush_queue_size: usize,
 }
 
 impl Debug for ProducerRegistry {
@@ -56,19 +51,15 @@ impl Debug for ProducerRegistry {
 impl ProducerRegistry {
     pub fn new(
         client: rskafka::client::Client,
-        linger: Duration,
         aggregator_batch_size: usize,
         compression: Compression,
-        flush_queue_size: usize,
     ) -> Self {
         let aggregator_batch_size = aggregator_batch_size.max(MIN_FLUSH_BATCH_SIZE);
         Self {
             registry: RwLock::new(HashMap::new()),
             client,
-            linger,
             aggregator_batch_size,
             compression,
-            flush_queue_size,
         }
     }
 
@@ -89,13 +80,12 @@ impl ProducerRegistry {
                 partition: DEFAULT_PARTITION,
             })?;
 
-        let aggregator = RecordAggregator::new(self.aggregator_batch_size);
         let producer = OrderedBatchProducer::new(
-            aggregator,
             Arc::new(partition_client),
-            self.linger,
             self.compression,
-            self.flush_queue_size,
+            128,
+            64,
+            self.aggregator_batch_size,
         );
 
         Ok(Arc::new(producer))
