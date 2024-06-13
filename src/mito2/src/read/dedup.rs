@@ -17,10 +17,12 @@
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_base::BitVec;
+use common_telemetry::debug;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{BooleanVector, UInt8Vector, VectorRef};
 
 use crate::error::Result;
+use crate::metrics::MERGE_FILTER_ROWS_TOTAL;
 use crate::read::{Batch, BatchReader};
 
 /// A reader that dedup sorted batches from a source based on the
@@ -57,6 +59,28 @@ impl<R: BatchReader> BatchReader for DedupReader<R> {
     }
 }
 
+impl<R> Drop for DedupReader<R> {
+    fn drop(&mut self) {
+        let metrics = self.strategy.metrics();
+
+        debug!("Dedup reader finished, metrics: {:?}", metrics);
+
+        MERGE_FILTER_ROWS_TOTAL
+            .with_label_values(&["dedup"])
+            .inc_by(metrics.num_unselected_rows as u64);
+        MERGE_FILTER_ROWS_TOTAL
+            .with_label_values(&["delete"])
+            .inc_by(metrics.num_unselected_rows as u64);
+    }
+}
+
+#[cfg(test)]
+impl<R> DedupReader<R> {
+    fn metrics(&self) -> &DedupMetrics {
+        self.strategy.metrics()
+    }
+}
+
 /// Strategy to remove duplicate rows from sorted batches.
 pub(crate) trait DedupStrategy: Send {
     /// Pushes a batch to the dedup strategy.
@@ -68,6 +92,9 @@ pub(crate) trait DedupStrategy: Send {
     /// Users must ensure that `push_batch` is called for all batches before
     /// calling this method.
     fn finish(&mut self) -> Result<Option<Batch>>;
+
+    /// Returns the metrics of the deduplication.
+    fn metrics(&self) -> &DedupMetrics;
 }
 
 /// State of the batch for dedup.
@@ -84,6 +111,7 @@ pub(crate) struct LastRow {
     selected: BitVec,
     /// Filter deleted rows.
     filter_deleted: bool,
+    metrics: DedupMetrics,
 }
 
 impl LastRow {
@@ -93,6 +121,7 @@ impl LastRow {
             prev_batch: None,
             selected: BitVec::new(),
             filter_deleted,
+            metrics: DedupMetrics::default(),
         }
     }
 }
@@ -125,7 +154,8 @@ impl DedupStrategy for LastRow {
             .timestamps()
             .find_unique(&mut self.selected, prev_timestamps);
         if self.filter_deleted {
-            unselect_deleted(batch.op_types(), &mut self.selected);
+            let num_deleted = unselect_deleted(batch.op_types(), &mut self.selected);
+            self.metrics.num_deleted_rows += num_deleted;
         }
 
         // Store current batch to `prev_batch` so we could compare the next batch
@@ -147,9 +177,11 @@ impl DedupStrategy for LastRow {
         }
 
         // Filters the batch if not all rows are needed.
-        if self.selected.count_zeros() > 0 {
+        let num_unselected = self.selected.count_zeros();
+        if num_unselected > 0 {
             let predicate = BooleanVector::from_iterator(self.selected.iter().by_vals());
             batch.filter(&predicate)?;
+            self.metrics.num_unselected_rows += num_unselected;
         }
 
         if batch.is_empty() {
@@ -162,15 +194,31 @@ impl DedupStrategy for LastRow {
     fn finish(&mut self) -> Result<Option<Batch>> {
         Ok(None)
     }
+
+    fn metrics(&self) -> &DedupMetrics {
+        &self.metrics
+    }
+}
+
+/// Metrics for deduplication.
+#[derive(Debug, Default)]
+pub(crate) struct DedupMetrics {
+    /// Number of rows removed during deduplication.
+    pub(crate) num_unselected_rows: usize,
+    /// Number of deleted rows.
+    pub(crate) num_deleted_rows: usize,
 }
 
 /// Finds deleted rows and unselects them.
-fn unselect_deleted(op_types: &UInt8Vector, selected: &mut BitVec) {
+fn unselect_deleted(op_types: &UInt8Vector, selected: &mut BitVec) -> usize {
+    let mut num_deleted = 0;
     for (i, op_type) in op_types.as_arrow().values().iter().enumerate() {
         if *op_type == OpType::Delete as u8 {
             selected.set(i, false);
+            num_deleted += 1;
         }
     }
+    num_deleted
 }
 
 #[cfg(test)]
@@ -200,6 +248,8 @@ mod tests {
         let reader = VecBatchReader::new(&input);
         let mut reader = DedupReader::new(reader, Box::new(LastRow::new(true)));
         check_reader_result(&mut reader, &input).await;
+        assert_eq!(0, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
     }
 
     #[tokio::test]
@@ -254,6 +304,8 @@ mod tests {
             ],
         )
         .await;
+        assert_eq!(7, reader.metrics().num_unselected_rows);
+        assert_eq!(3, reader.metrics().num_deleted_rows);
 
         // Does not filter deleted.
         let reader = VecBatchReader::new(&input);
@@ -286,5 +338,7 @@ mod tests {
             ],
         )
         .await;
+        assert_eq!(5, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
     }
 }
