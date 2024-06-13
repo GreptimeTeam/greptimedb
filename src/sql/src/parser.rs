@@ -200,11 +200,6 @@ impl<'a> ParserContext<'a> {
                 .expected("string literal", next_token)
                 .context(SyntaxSnafu)?,
         };
-        if !parser.consume_token(&Token::EOF) {
-            parser
-                .expected("end of statement", parser.peek_token())
-                .context(SyntaxSnafu)?;
-        }
         Ok((stmt_name.value, stmt))
     }
 
@@ -223,14 +218,9 @@ impl<'a> ParserContext<'a> {
             .context(SyntaxSnafu)?;
         let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
         if parser.parse_keyword(Keyword::USING) {
-            let mut param_list = vec![];
-            loop {
-                let param = parser.parse_expr().context(SyntaxSnafu)?;
-                param_list.push(param);
-                if !parser.consume_token(&Token::Comma) {
-                    break;
-                }
-            }
+            let param_list = parser
+                .parse_comma_separated(Parser::parse_expr)
+                .context(SyntaxSnafu)?;
             if !parser.consume_token(&Token::EOF) {
                 parser
                     .expected("end of statement", parser.peek_token())
