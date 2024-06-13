@@ -152,7 +152,6 @@ impl LogStore for KafkaLogStore {
         ))
     }
 
-    // TODO(weny): refactor the writing.
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse> {
@@ -200,6 +199,7 @@ impl LogStore for KafkaLogStore {
         for (region_id, records) in region_grouped_records {
             region_ids.push(region_id);
             let producer = region_grouped_producers.get(&region_id).unwrap();
+            // Safety: `Record`'s `approximate_size` must be less or equal to `max_flush_size`.
             region_grouped_result_receivers.push(producer.produce(records).await?)
         }
 

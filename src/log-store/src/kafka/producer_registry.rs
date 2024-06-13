@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 
 use crate::error;
 use crate::error::Result;
-use crate::kafka::background_producer::OrderedBatchProducer;
+use crate::kafka::producer::OrderedBatchProducer;
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
 

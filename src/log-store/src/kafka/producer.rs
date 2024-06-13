@@ -12,532 +12,242 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod batch;
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use batch::{AggregatedStatus, BatchBuilder, BatchFlushState, FlushRequest, ResultHandle};
-use common_runtime::JoinHandle;
 use common_telemetry::{debug, warn};
+use futures::future::try_join_all;
 use rskafka::client::partition::Compression;
-use rskafka::client::producer::aggregator::{Aggregator, AggregatorStatus, TryPush};
 use rskafka::client::producer::ProducerClient;
+use rskafka::record::Record;
 use snafu::ResultExt;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
 use crate::error::{self, Result};
 
-struct FlushingRequest {
-    handle: JoinHandle<()>,
-    receiver: oneshot::Receiver<()>,
+struct ProduceRequest {
+    batch: Vec<Record>,
+    sender: oneshot::Sender<ProduceResultReceiver>,
 }
 
-struct BackgroundProducerWorker<A: Aggregator> {
+#[derive(Default)]
+struct ProduceResultReceiver {
+    receivers: Vec<oneshot::Receiver<Result<Vec<i64>>>>,
+}
+
+impl ProduceResultReceiver {
+    fn add_receiver(&mut self, receiver: oneshot::Receiver<Result<Vec<i64>>>) {
+        self.receivers.push(receiver)
+    }
+
+    pub(crate) async fn wait(self) -> Result<Vec<i64>> {
+        Ok(try_join_all(self.receivers)
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>())
+    }
+}
+
+struct BackgroundProducerWorker {
     /// The [`ProducerClient`].
     client: Arc<dyn ProducerClient>,
     // The compression configuration.
     compression: Compression,
-    /// Receives [`FlushRequest`] from [`OrderedBatchProducerInner`].
-    receiver: Receiver<FlushRequest<A>>,
     // The running flag.
     running: Arc<AtomicBool>,
+    /// Receiver of [ProduceRequest].
+    receiver: Receiver<ProduceRequest>,
+    /// Max batch size for a worker to handle requests.
+    request_batch_size: usize,
+    /// Max size for a single flush.
+    max_flush_size: usize,
+    /// The [PendingRequest]s.
+    pending_requests: Vec<PendingRequest>,
 }
 
-async fn do_flush<A: Aggregator>(
-    client: Arc<dyn ProducerClient>,
-    FlushRequest {
+struct PendingRequest {
+    batch: Vec<Record>,
+    size: usize,
+    sender: oneshot::Sender<Result<Vec<i64>>>,
+}
+
+/// ## Panic
+/// Panic if any [Record]'s `approximate_size` > `max_flush_size`.
+fn handle_produce_requests(
+    requests: &mut Vec<ProduceRequest>,
+    max_flush_size: usize,
+) -> Vec<PendingRequest> {
+    let mut records_buffer = vec![];
+    let mut batch_size = 0;
+    let mut pending_requests = vec![];
+
+    for ProduceRequest { batch, sender } in requests.drain(..) {
+        let mut receiver = ProduceResultReceiver::default();
+        for record in batch {
+            assert!(record.approximate_size() <= max_flush_size);
+            // Yields the `PendingRequest` if buffer is full.
+            if batch_size + record.approximate_size() > max_flush_size {
+                let (tx, rx) = oneshot::channel();
+                pending_requests.push(PendingRequest {
+                    batch: std::mem::take(&mut records_buffer),
+                    size: batch_size,
+                    sender: tx,
+                });
+                batch_size = 0;
+                receiver.add_receiver(rx);
+            }
+
+            batch_size += record.approximate_size();
+            records_buffer.push(record);
+        }
+        // The remaining records.
+        if batch_size > 0 {
+            // Yields `PendingRequest`
+            let (tx, rx) = oneshot::channel();
+            pending_requests.push(PendingRequest {
+                batch: std::mem::take(&mut records_buffer),
+                size: batch_size,
+                sender: tx,
+            });
+            batch_size = 0;
+            receiver.add_receiver(rx);
+        }
+
+        let _ = sender.send(receiver);
+    }
+    pending_requests
+}
+
+async fn do_flush(
+    client: &Arc<dyn ProducerClient>,
+    PendingRequest {
         batch,
-        status_deagg,
         sender,
-    }: FlushRequest<A>,
+        size: _size,
+    }: PendingRequest,
     compression: Compression,
 ) {
-    if let Err(err) = match client
+    let result = client
         .produce(batch, compression)
         .await
-        .context(error::BatchProduceSnafu)
-    {
-        Ok(aggregated_status) => sender.send(BatchFlushState::Result(Arc::new(AggregatedStatus {
-            aggregated_status,
-            status_deagg,
-        }))),
-        Err(err) => sender.send(BatchFlushState::Err(Arc::new(err))),
-    } {
+        .context(error::BatchProduceSnafu);
+
+    if let Err(err) = sender.send(result) {
         warn!(err; "BatchFlushState Receiver is dropped");
     }
 }
 
-impl<A: Aggregator> BackgroundProducerWorker<A> {
+impl BackgroundProducerWorker {
     async fn run(&mut self) {
+        let mut buffer = Vec::with_capacity(self.request_batch_size);
         while self.running.load(Ordering::Relaxed) {
-            match self.receiver.recv().await {
-                Some(request) => {
-                    let client = self.client.clone();
-                    let compression = self.compression;
-                    do_flush(client, request, compression).await;
+            // Processes pending requests first.
+            if !self.pending_requests.is_empty() {
+                // TODO(weny): Considering merge `PendingRequest`s.
+                for req in self.pending_requests.drain(..) {
+                    do_flush(&self.client, req, self.compression).await
                 }
-                None => {
-                    debug!("The sender is dropped, BackgroundProducerWorker exited");
-                    // Exits the loop if the `sender` is dropped.
-                    break;
-                }
-            }
-        }
-    }
-}
-
-pub(crate) enum CallerRole<A: Aggregator> {
-    /// The caller has no additional book-keeping to perform, and can wait on
-    /// the result handle for the batched write result.
-    Waiter(ResultHandle<A>),
-
-    /// This caller has been selected to perform the "linger" timeout to drive
-    /// timely flushing of the batch.
-    ///
-    /// The caller MUST wait for the configured linger time before calling
-    /// [`OrderedBatchProducerInner::try_enqueue()`] with the provided `flush_token`.
-    Leader {
-        handle: ResultHandle<A>,
-        flush_token: usize,
-    },
-}
-
-/// [`ResultReceiver`] will receive the result when data has been committed to Kafka
-/// or an unrecoverable error has been encountered.
-pub enum ResultReceiver<A: Aggregator> {
-    Waiter {
-        handle: ResultHandle<A>,
-    },
-    Leader {
-        handle: ResultHandle<A>,
-        flush_token: usize,
-        linger: Duration,
-        inner: Arc<Mutex<OrderedBatchProducerInner<A>>>,
-    },
-}
-
-impl<A: Aggregator> ResultReceiver<A> {
-    pub(crate) async fn wait(self) -> Result<<A as AggregatorStatus>::Status> {
-        match self {
-            ResultReceiver::Waiter { mut handle } => {
-                let status = handle.wait().await?;
-                handle.result(status)
-            }
-            ResultReceiver::Leader {
-                mut handle,
-                flush_token,
-                inner,
-                linger,
-            } => {
-                // This caller has been selected to wait for the linger
-                // duration, and then attempt to flush the batch of writes.
-                //
-                // Spawn a task for the linger to ensure cancellation safety.
-                let linger = tokio::spawn({
-                    async move {
-                        tokio::time::sleep(linger).await;
-
-                        // The linger has expired, attempt to conditionally flush the
-                        // batch using the provided token to ensure only the correct
-                        // batch is flushed.
-                        inner.lock().await.try_flush(Some(flush_token)).await?;
-                        Ok(())
+            } else {
+                match self.receiver.recv().await {
+                    Some(req) => {
+                        buffer.clear();
+                        buffer.push(req);
+                        for _ in 1..self.request_batch_size {
+                            match self.receiver.try_recv() {
+                                Ok(req) => buffer.push(req),
+                                Err(_) => break,
+                            }
+                        }
+                        self.pending_requests =
+                            handle_produce_requests(&mut buffer, self.max_flush_size);
                     }
-                });
-
-                // The batch may be flushed before the linger period expires if
-                // the aggregator becomes full, so watch for both outcomes.
-                tokio::select! {
-                    res = linger => res.expect("linger panic")?,
-                    r = handle.wait() => return handle.result(r?),
-                }
-
-                // The linger expired & completed.
-                //
-                // Wait for the result of the flush to be published.
-                let status = handle.wait().await?;
-                // And demux the status for this caller.
-                handle.result(status)
-            }
-        }
-    }
-}
-
-pub(crate) struct OrderedBatchProducerInner<A: Aggregator> {
-    /// Attempts to aggregates inputs.
-    batch_builder: BatchBuilder<A>,
-
-    /// Sends [`FlushRequest`] to [`BackgroundProducerWorker`].
-    sender: Sender<FlushRequest<A>>,
-
-    /// Used to track if a [`CallerRole::Leader`] has been returned for the
-    /// current batch_builder.
-    has_leader: bool,
-
-    /// A logical clock to enable a conditional flush of a specific
-    /// [`BatchBuilder`] instance.
-    flush_clock: usize,
-}
-
-impl<A: Aggregator> OrderedBatchProducerInner<A> {
-    pub(crate) fn new(aggregator: A, sender: Sender<FlushRequest<A>>) -> Self {
-        Self {
-            batch_builder: BatchBuilder::new(aggregator),
-            sender,
-            has_leader: false,
-            flush_clock: 0,
-        }
-    }
-
-    pub(crate) async fn try_push(&mut self, data: A::Input) -> Result<CallerRole<A>> {
-        let handle = match self.batch_builder.try_push(data)? {
-            TryPush::Aggregated(handle) => handle,
-            TryPush::NoCapacity(data) => {
-                self.try_flush(None).await?;
-                match self.batch_builder.try_push(data)? {
-                    TryPush::Aggregated(handle) => handle,
-                    TryPush::NoCapacity(_) => {
-                        return error::AggregatorInputTooLargeSnafu {}.fail();
+                    None => {
+                        debug!("The sender is dropped, BackgroundProducerWorker exited");
+                        // Exits the loop if the `sender` is dropped.
+                        break;
                     }
                 }
             }
-        };
-
-        if self.has_leader {
-            return Ok(CallerRole::Waiter(handle));
         }
-
-        // This caller is the first writer to this batch,
-        // and it should wait for the `linger` time before flushing.
-        self.has_leader = true;
-        Ok(CallerRole::Leader {
-            handle,
-            flush_token: self.flush_clock,
-        })
-    }
-
-    /// Sends [FlushRequest] to [OrderedProducerLoop], and yields the next [BatchBuilder].
-    pub(crate) async fn try_flush(&mut self, flush_token: Option<usize>) -> Result<()> {
-        if let Some(flush_token) = flush_token {
-            if self.flush_clock != flush_token {
-                // The flush has been triggered.
-                return Ok(());
-            }
-        }
-
-        let maybe_flush_request = self.batch_builder.yield_flush();
-        self.has_leader = false;
-        self.flush_clock = self.flush_clock.wrapping_add(1);
-
-        match maybe_flush_request {
-            Ok(Some(flush_request)) => {
-                self.sender.send(flush_request).await.map_err(|err| {
-                    error::SendFlushRequestSnafu {
-                        reason: err.to_string(),
-                    }
-                    .build()
-                })?;
-            }
-            Ok(None) => {
-                // Nothing to flush
-            }
-            Err(err) => return Err(err),
-        }
-
-        Ok(())
     }
 }
 
 /// [`OrderedBatchProducer`] attempts to aggregate multiple produce requests together
-/// using the provided [`Aggregator`].
-///
-/// It will buffer up records until either the linger time expires or
-/// [`Aggregator`] cannot accommodate another record.
-///
-/// At this point it will flush the [`Aggregator`].
-///
-/// The flush will respect the order of aggregated data.
-pub struct OrderedBatchProducer<A: Aggregator> {
-    /// The timeout of performing aggregating.
-    linger: Duration,
-    inner: Arc<Mutex<OrderedBatchProducerInner<A>>>,
+pub(crate) struct OrderedBatchProducer {
+    sender: Sender<ProduceRequest>,
     /// Used to control the [`BackgroundProducerWorker`].
     running: Arc<AtomicBool>,
-    /// The handle of [`BackgroundProducerWorker`].
-    handle: JoinHandle<()>,
 }
 
-impl<A: Aggregator> Drop for OrderedBatchProducer<A> {
+impl Drop for OrderedBatchProducer {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
     }
 }
 
-impl<A: Aggregator> OrderedBatchProducer<A> {
+/// Receives the committed offsets when data has been committed to Kafka
+/// or an unrecoverable error has been encountered.
+pub(crate) struct ProduceResultHandle {
+    receiver: oneshot::Receiver<ProduceResultReceiver>,
+}
+
+impl ProduceResultHandle {
+    /// Waits for the data has been committed to Kafka.
+    /// Returns the committed offsets.
+    pub(crate) async fn wait(self) -> Result<Vec<i64>> {
+        self.receiver.await.unwrap().wait().await
+    }
+}
+
+impl OrderedBatchProducer {
     /// Constructs a new [`OrderedBatchProducer`].
     pub(crate) fn new(
-        aggregator: A,
         client: Arc<dyn ProducerClient>,
-        linger: Duration,
         compression: Compression,
-        flush_queue_size: usize,
+        produce_channel_size: usize,
+        request_batch_size: usize,
+        max_flush_size: usize,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(flush_queue_size);
+        let (tx, rx) = mpsc::channel(produce_channel_size);
         let running = Arc::new(AtomicBool::new(true));
         let mut worker = BackgroundProducerWorker {
             client,
-            receiver: rx,
             compression,
             running: running.clone(),
+            receiver: rx,
+            request_batch_size,
+            max_flush_size,
+            pending_requests: vec![],
         };
-
+        tokio::spawn(async move { worker.run().await });
         Self {
-            linger,
-            inner: Arc::new(Mutex::new(OrderedBatchProducerInner::new(aggregator, tx))),
+            sender: tx,
             running,
-            handle: tokio::spawn(async move { worker.run().await }),
         }
     }
 
     /// Writes `data` to the [`OrderedBatchProducer`].
     ///
-    /// Returns the [ResultReceiver], which will receive a result when data has been committed to Kafka
+    /// Returns the [ProduceResultHandle], which will receive a result when data has been committed to Kafka
     /// or an unrecoverable error has been encountered.
-    pub(crate) async fn produce(&self, data: A::Input) -> Result<ResultReceiver<A>> {
-        let role = {
-            let mut inner = self.inner.lock().await;
-            inner.try_push(data).await?
+    ///
+    /// ## Panic
+    /// Panic if any [Record]'s `approximate_size` > `max_flush_size`.
+    pub(crate) async fn produce(&self, batch: Vec<Record>) -> Result<ProduceResultHandle> {
+        let receiver = {
+            let (tx, rx) = oneshot::channel();
+            self.sender
+                .send(ProduceRequest { batch, sender: tx })
+                .await
+                .expect("worker panic");
+            rx
         };
 
-        match role {
-            CallerRole::Waiter(handle) => Ok(ResultReceiver::Waiter { handle }),
-            CallerRole::Leader {
-                handle,
-                flush_token,
-            } => Ok(ResultReceiver::Leader {
-                handle,
-                flush_token,
-                linger: self.linger,
-                inner: self.inner.clone(),
-            }),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use chrono::{TimeZone, Utc};
-    use common_telemetry::debug;
-    use futures::future::BoxFuture;
-    use futures::stream::{FuturesOrdered, FuturesUnordered};
-    use futures::{FutureExt, StreamExt};
-    use rskafka::client::error::{Error as ClientError, RequestContext};
-    use rskafka::client::partition::Compression;
-    use rskafka::client::producer::aggregator::RecordAggregator;
-    use rskafka::client::producer::ProducerClient;
-    use rskafka::protocol::error::Error as ProtocolError;
-    use rskafka::record::Record;
-
-    use crate::kafka::producer::OrderedBatchProducer;
-
-    #[derive(Debug)]
-    struct MockClient {
-        error: Option<ProtocolError>,
-        panic: Option<String>,
-        delay: Duration,
-        batch_sizes: Mutex<Vec<usize>>,
-    }
-
-    impl ProducerClient for MockClient {
-        fn produce(
-            &self,
-            records: Vec<Record>,
-            _compression: Compression,
-        ) -> BoxFuture<'_, Result<Vec<i64>, ClientError>> {
-            Box::pin(async move {
-                tokio::time::sleep(self.delay).await;
-
-                if let Some(e) = self.error {
-                    return Err(ClientError::ServerError {
-                        protocol_error: e,
-                        error_message: None,
-                        request: RequestContext::Partition("foo".into(), 1),
-                        response: None,
-                        is_virtual: false,
-                    });
-                }
-
-                if let Some(p) = self.panic.as_ref() {
-                    panic!("{}", p);
-                }
-
-                let mut batch_sizes = self.batch_sizes.lock().unwrap();
-                let offset_base = batch_sizes.iter().sum::<usize>();
-                let offsets = (0..records.len())
-                    .map(|x| (x + offset_base) as i64)
-                    .collect();
-                batch_sizes.push(records.len());
-                debug!("Return offsets: {offsets:?}");
-                Ok(offsets)
-            })
-        }
-    }
-
-    fn record() -> Record {
-        Record {
-            key: Some(vec![0; 4]),
-            value: Some(vec![0; 6]),
-            headers: Default::default(),
-            timestamp: Utc.timestamp_millis_opt(320).unwrap(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_producer() {
-        common_telemetry::init_default_ut_logging();
-        let record = record();
-        let linger = Duration::from_millis(100);
-        let delay = Duration::from_secs(0);
-        let client = Arc::new(MockClient {
-            error: None,
-            panic: None,
-            delay,
-            batch_sizes: Default::default(),
-        });
-        let aggregator = RecordAggregator::new(record.approximate_size() * 2);
-        let producer = OrderedBatchProducer::new(
-            aggregator,
-            client.clone(),
-            linger,
-            Compression::NoCompression,
-            128,
-        );
-        let mut futures = FuturesOrdered::new();
-
-        // Produces 3 records
-        futures.push_back(producer.produce(record.clone()).await.unwrap().wait());
-        futures.push_back(producer.produce(record.clone()).await.unwrap().wait());
-        futures.push_back(producer.produce(record.clone()).await.unwrap().wait());
-
-        assert_eq!(
-            tokio::time::timeout(Duration::from_millis(10), futures.next())
-                .await
-                .expect("no timeout")
-                .expect("future left")
-                .expect("no error"),
-            0,
-        );
-        assert_eq!(
-            tokio::time::timeout(Duration::from_millis(10), futures.next())
-                .await
-                .expect("no timeout")
-                .expect("future left")
-                .expect("no error"),
-            1,
-        );
-
-        // Third should leader
-        tokio::time::timeout(Duration::from_millis(10), futures.next())
-            .await
-            .expect_err("timeout");
-
-        assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2]);
-
-        // Should publish third record after linger expires
-        assert_eq!(
-            tokio::time::timeout(linger * 2, futures.next())
-                .await
-                .expect("no timeout")
-                .expect("future left")
-                .expect("no error"),
-            2,
-        );
-        assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1]);
-    }
-
-    #[tokio::test]
-    async fn test_producer_client_error() {
-        let record = record();
-        let linger = Duration::from_millis(5);
-        let client = Arc::new(MockClient {
-            error: Some(ProtocolError::NetworkException),
-            panic: None,
-            delay: Duration::from_millis(1),
-            batch_sizes: Default::default(),
-        });
-
-        let aggregator = RecordAggregator::new(record.approximate_size() * 2);
-        let producer = OrderedBatchProducer::new(
-            aggregator,
-            client.clone(),
-            linger,
-            Compression::NoCompression,
-            128,
-        );
-
-        let mut futures = FuturesUnordered::new();
-        futures.push(producer.produce(record.clone()).await.unwrap().wait());
-        futures.push(producer.produce(record.clone()).await.unwrap().wait());
-
-        futures.next().await.unwrap().unwrap_err();
-        futures.next().await.unwrap().unwrap_err();
-    }
-
-    #[tokio::test]
-    async fn test_producer_cancel() {
-        let record = record();
-        let linger = Duration::from_millis(5);
-        let client = Arc::new(MockClient {
-            error: None,
-            panic: None,
-            delay: Duration::from_millis(1),
-            batch_sizes: Default::default(),
-        });
-
-        let aggregator = RecordAggregator::new(record.approximate_size() * 2);
-        let producer = OrderedBatchProducer::new(
-            aggregator,
-            client.clone(),
-            linger,
-            Compression::NoCompression,
-            128,
-        );
-
-        let a = producer
-            .produce(record.clone())
-            .await
-            .unwrap()
-            .wait()
-            .fuse();
-        let b = producer.produce(record).await.unwrap().wait().fuse();
-
-        let mut b = Box::pin(b);
-
-        {
-            // Cancel a when it exits this block
-            let mut a = Box::pin(a);
-
-            // Select biased to encourage `a` to be the one with the linger that
-            // expires first and performs the produce operation
-            futures::select_biased! {
-                _ = &mut a => panic!("a should not have flushed"),
-                _ = &mut b => panic!("b should not have flushed"),
-                _ = tokio::time::sleep(Duration::from_millis(1)).fuse() => {},
-            }
-        }
-
-        // But `b` should still complete successfully
-        tokio::time::timeout(Duration::from_secs(1), b)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2]);
+        Ok(ProduceResultHandle { receiver })
     }
 }
