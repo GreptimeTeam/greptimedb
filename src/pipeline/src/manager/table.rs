@@ -22,7 +22,7 @@ use api::v1::{
 };
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
@@ -273,7 +273,6 @@ impl PipelineTable {
         name: &str,
         version: Option<String>,
     ) -> Result<Pipeline<GreptimeTransformer>> {
-        info!("pipeline version: {:?}", version);
         if let Some(pipeline) =
             self.get_compiled_pipeline_from_cache(schema, name, version.as_deref())
         {
@@ -369,7 +368,7 @@ impl PipelineTable {
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
 
-        info!("find_pipeline_by_name: plan: {:?}", plan);
+        debug!("find_pipeline_by_name: plan: {:?}", plan);
 
         let output = self
             .query_engine
@@ -424,7 +423,7 @@ impl PipelineTable {
                 ),
             })?;
 
-        info!(
+        debug!(
             "find_pipeline_by_name: pipeline_content: {:?}, pipeline_created_at: {:?}",
             pipeline_content, pipeline_created_at
         );
