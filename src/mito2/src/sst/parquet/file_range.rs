@@ -28,6 +28,7 @@ use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
@@ -71,6 +72,11 @@ impl FileRange {
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
         self.context.compat_batch()
+    }
+
+    /// Returns the file handle of the file range.
+    pub(crate) fn file_handle(&self) -> &FileHandle {
+        self.context.reader_builder.file_handle()
     }
 }
 

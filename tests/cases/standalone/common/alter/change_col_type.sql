@@ -16,12 +16,14 @@ SELECT * FROM test;
 
 INSERT INTO test VALUES (3, "greptime", 3, true);
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 DESCRIBE test;
 
 ALTER TABLE test MODIFY I INTEGER;
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 DESCRIBE test;
