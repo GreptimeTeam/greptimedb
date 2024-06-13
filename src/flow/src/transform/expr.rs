@@ -374,8 +374,6 @@ impl TypedExpr {
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
-
     use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;

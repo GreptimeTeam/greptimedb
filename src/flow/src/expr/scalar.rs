@@ -19,16 +19,20 @@ use std::sync::{Arc, Mutex};
 
 use common_error::ext::BoxedError;
 use datafusion_physical_expr::PhysicalExpr;
+use datatypes::arrow_array;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 use crate::adapter::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
-use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+use crate::expr::error::{
+    ArrowSnafu, EvalError, ExternalSnafu, InvalidArgumentSnafu, OptimizeSnafu,
+};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
@@ -162,16 +166,64 @@ pub struct DfScalarFunction {
     // TODO(discord9): directly from datafusion expr
     #[serde(skip)]
     fn_impl: Arc<dyn PhysicalExpr>,
+    #[serde(skip)]
+    df_schema: Arc<datafusion_common::DFSchema>,
 }
 
 impl DfScalarFunction {
     pub fn new(raw_fn: RawDfScalarFn, fn_impl: Arc<dyn PhysicalExpr>) -> Result<Self, Error> {
-        Ok(Self { raw_fn, fn_impl })
+        Ok(Self {
+            df_schema: Arc::new(raw_fn.input_schema.to_df_schema()?),
+            raw_fn,
+            fn_impl,
+        })
     }
 
+    // TODO: add RecordBatch support
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         // TODO(discord9): make cols all array length of one
-        todo!()
+        let mut cols = vec![];
+        for (idx, typ) in self
+            .raw_fn
+            .input_schema
+            .typ()
+            .column_types
+            .iter()
+            .enumerate()
+        {
+            let typ = typ.scalar_type();
+            let mut array = typ.create_mutable_vector(1);
+            array.push_value_ref(values[idx].as_value_ref());
+            cols.push(array.to_vector().to_arrow_array());
+        }
+        let schema = self.df_schema.inner().clone();
+        let rb = common_recordbatch::DfRecordBatch::try_new(schema, cols).map_err(|err| {
+            ArrowSnafu {
+                raw: err,
+                context:
+                    "Failed to create RecordBatch from values when eval datafusion scalar function",
+            }
+            .build()
+        })?;
+        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
+            crate::expr::error::DatafusionSnafu {
+                raw: err,
+                context: "Failed to evaluate datafusion scalar function",
+            }
+            .build()
+        })?;
+        let res = common_query::columnar_value::ColumnarValue::try_from(&res)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let res_vec = res
+            .try_into_vector(1)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let res_val = res_vec
+            .try_get(0)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(res_val)
     }
 }
 
