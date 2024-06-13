@@ -237,6 +237,7 @@ impl MergeReader {
 }
 
 /// Builder to build and initialize a [MergeReader].
+#[derive(Default)]
 pub struct MergeReaderBuilder {
     /// Input sources.
     ///
@@ -271,14 +272,6 @@ impl MergeReaderBuilder {
     pub async fn build(&mut self) -> Result<MergeReader> {
         let sources = mem::take(&mut self.sources);
         MergeReader::new(sources).await
-    }
-}
-
-impl Default for MergeReaderBuilder {
-    fn default() -> Self {
-        MergeReaderBuilder {
-            sources: Vec::new(),
-        }
     }
 }
 
