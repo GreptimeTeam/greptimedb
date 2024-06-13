@@ -172,3 +172,119 @@ fn unselect_deleted(op_types: &UInt8Vector, selected: &mut BitVec) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
+
+    #[tokio::test]
+    async fn test_dedup_reader_no_duplications() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[1, 2],
+                &[11, 12],
+                &[OpType::Put, OpType::Put],
+                &[21, 22],
+            ),
+            new_batch(b"k1", &[3], &[13], &[OpType::Put], &[23]),
+            new_batch(
+                b"k2",
+                &[1, 2],
+                &[111, 112],
+                &[OpType::Put, OpType::Put],
+                &[31, 32],
+            ),
+        ];
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, Box::new(LastRow::new(true)));
+        check_reader_result(&mut reader, &input).await;
+    }
+
+    #[tokio::test]
+    async fn test_dedup_reader_duplications() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[1, 1, 2],
+                &[13, 12, 11],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[11, 1, 12],
+            ),
+            // Duplicate with the previous batch.
+            new_batch(
+                b"k1",
+                &[2, 3, 3, 4],
+                &[10, 13, 12, 13],
+                &[OpType::Put, OpType::Put, OpType::Put, OpType::Delete],
+                &[2, 13, 3, 14],
+            ),
+            new_batch(
+                b"k2",
+                &[1, 2, 2],
+                &[20, 20, 19],
+                &[OpType::Put, OpType::Delete, OpType::Put],
+                &[101, 0, 102],
+            ),
+            new_batch(
+                b"k3",
+                &[2, 2],
+                &[20, 19],
+                &[OpType::Put, OpType::Delete],
+                &[202, 0],
+            ),
+        ];
+        let reader = VecBatchReader::new(&input);
+        // Filter deleted.
+        let mut reader = DedupReader::new(reader, Box::new(LastRow::new(true)));
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch(
+                    b"k1",
+                    &[1, 2],
+                    &[13, 11],
+                    &[OpType::Put, OpType::Put],
+                    &[11, 12],
+                ),
+                new_batch(b"k1", &[3], &[13], &[OpType::Put], &[13]),
+                new_batch(b"k2", &[1], &[20], &[OpType::Put], &[101]),
+                new_batch(b"k3", &[2], &[20], &[OpType::Put], &[202]),
+            ],
+        )
+        .await;
+
+        // Does not filter deleted.
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, Box::new(LastRow::new(false)));
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch(
+                    b"k1",
+                    &[1, 2],
+                    &[13, 11],
+                    &[OpType::Put, OpType::Put],
+                    &[11, 12],
+                ),
+                new_batch(
+                    b"k1",
+                    &[3, 4],
+                    &[13, 13],
+                    &[OpType::Put, OpType::Delete],
+                    &[13, 14],
+                ),
+                new_batch(
+                    b"k2",
+                    &[1, 2],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Delete],
+                    &[101, 0],
+                ),
+                new_batch(b"k3", &[2], &[20], &[OpType::Put], &[202]),
+            ],
+        )
+        .await;
+    }
+}
