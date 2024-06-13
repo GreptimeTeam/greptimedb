@@ -58,7 +58,7 @@ fn typename_to_cdt(name: &str) -> CDT {
     }
 }
 
-/// Convert ScalarFunction to corrseponding Datafusion's PhysicalExpr
+/// Convert ScalarFunction to corresponding Datafusion's PhysicalExpr
 pub(crate) fn from_scalar_fn_to_df_fn_impl(
     f: &ScalarFunction,
     input_schema: &RelationDesc,
