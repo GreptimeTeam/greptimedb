@@ -30,8 +30,8 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
-use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 

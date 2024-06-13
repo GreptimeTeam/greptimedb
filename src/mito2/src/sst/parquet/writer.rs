@@ -35,11 +35,11 @@ use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 use crate::sst::index::Indexer;
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// Parquet SST writer.
 pub struct ParquetWriter<W, F> {
@@ -82,10 +82,7 @@ impl ParquetWriter<Compat<FuturesAsyncWriter>, ObjectStoreWriterFactory> {
         indexer: Indexer,
     ) -> ParquetWriter<Compat<FuturesAsyncWriter>, ObjectStoreWriterFactory> {
         ParquetWriter::new(
-            ObjectStoreWriterFactory {
-                path,
-                object_store,
-            },
+            ObjectStoreWriterFactory { path, object_store },
             metadata,
             indexer,
         )
@@ -95,10 +92,8 @@ impl ParquetWriter<Compat<FuturesAsyncWriter>, ObjectStoreWriterFactory> {
 impl<W, F> ParquetWriter<W, F>
 where
     W: AsyncWrite + Send + Unpin,
-    F: WriterFactory<W>
+    F: WriterFactory<W>,
 {
-
-
     /// Creates a new parquet SST writer.
     pub fn new(factory: F, metadata: RegionMetadataRef, indexer: Indexer) -> ParquetWriter<W, F> {
         ParquetWriter {
@@ -232,8 +227,10 @@ where
             let props_builder = Self::customize_column_config(props_builder, &self.metadata);
             let writer_props = props_builder.build();
 
-            let writer =
-                SizeAwareWriter::new(self.writer_factory.create().await?, self.bytes_written.clone());
+            let writer = SizeAwareWriter::new(
+                self.writer_factory.create().await?,
+                self.bytes_written.clone(),
+            );
             let arrow_writer =
                 AsyncArrowWriter::try_new(writer, schema.clone(), Some(writer_props))
                     .context(WriteParquetSnafu)?;
