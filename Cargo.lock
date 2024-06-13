@@ -877,39 +877,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "benchmarks"
-version = "0.8.2"
-dependencies = [
- "api",
- "arrow",
- "chrono",
- "clap 4.5.4",
- "common-base",
- "common-telemetry",
- "common-wal",
- "dotenv",
- "futures",
- "futures-util",
- "humantime",
- "humantime-serde",
- "indicatif",
- "itertools 0.10.5",
- "lazy_static",
- "log-store",
- "mito2",
- "num_cpus",
- "parquet",
- "prometheus",
- "rand",
- "rskafka",
- "serde",
- "store-api",
- "tokio",
- "toml 0.8.13",
- "uuid",
-]
-
-[[package]]
 name = "bigdecimal"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4851,19 +4818,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indicatif"
-version = "0.17.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "763a5a8f45087d6bcea4222e7b72c291a054edf80e4ef6efd2a4979878c7bea3"
-dependencies = [
- "console",
- "instant",
- "number_prefix",
- "portable-atomic",
- "unicode-width",
-]
-
-[[package]]
 name = "indoc"
 version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6466,12 +6420,6 @@ checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "objc"
