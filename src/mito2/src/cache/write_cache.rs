@@ -17,23 +17,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::AsyncWriteExt;
+use snafu::ResultExt;
+
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
-use futures::AsyncWriteExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
-use snafu::ResultExt;
-use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use crate::access_layer::{new_fs_object_store, SstWriteRequest};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
-use crate::error::{self, OpenDalSnafu, Result};
+use crate::error::{self,  Result};
 use crate::metrics::{FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL};
-use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::IndexerBuilder;
-use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::index::IndexerBuilder;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::writer::{ ParquetWriter};
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -128,17 +128,9 @@ impl WriteCache {
         .build();
 
         // Write to FileCache.
-        let mut writer = ParquetWriter::new(
-            || async {
-                self.file_cache
-                    .local_store()
-                    .writer_with(&self.file_cache.cache_file_path(parquet_key))
-                    .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|v| v.into_futures_async_write().compat_write())
-                    .context(OpenDalSnafu)
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            self.file_cache.local_store(),
+            self.file_cache.cache_file_path(parquet_key),
             write_request.metadata,
             indexer,
         );
@@ -257,9 +249,8 @@ pub struct SstUploadRequest {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
 
-    use super::*;
-    use crate::cache::test_util::new_fs_store;
     use crate::cache::CacheManager;
+    use crate::cache::test_util::new_fs_store;
     use crate::region::options::IndexOptions;
     use crate::sst::file::FileId;
     use crate::sst::location::{index_file_path, sst_file_path};
@@ -269,6 +260,8 @@ mod tests {
         sst_region_metadata,
     };
     use crate::test_util::TestEnv;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {

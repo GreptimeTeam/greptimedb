@@ -16,11 +16,12 @@
 
 use std::sync::Arc;
 
-use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
-use crate::sst::file::FileTimeRange;
+use common_base::readable_size::ReadableSize;
+
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
+use crate::sst::file::FileTimeRange;
 
 pub(crate) mod file_range;
 mod format;
@@ -79,31 +80,33 @@ pub struct SstInfo {
 mod tests {
     use std::sync::Arc;
 
-    use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Expr, Operator};
-    use datatypes::arrow;
-    use datatypes::arrow::array::RecordBatch;
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
-    use table::predicate::Predicate;
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
-    use super::*;
+    use common_time::Timestamp;
+    use datatypes::arrow;
+    use datatypes::arrow::array::RecordBatch;
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use table::predicate::Predicate;
+
     use crate::cache::{CacheManager, PageKey};
+    use crate::sst::DEFAULT_WRITE_CONCURRENCY;
     use crate::sst::index::Indexer;
     use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
-    use crate::sst::parquet::writer::ParquetWriter;
-    use crate::sst::DEFAULT_WRITE_CONCURRENCY;
+    use crate::sst::parquet::writer::{ParquetWriter};
+    use crate::test_util::{check_reader_result, TestEnv};
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
         new_batch_with_binary, new_source, sst_file_handle, sst_region_metadata,
     };
-    use crate::test_util::{check_reader_result, TestEnv};
+
+    use super::*;
 
     const FILE_DIR: &str = "/";
 
@@ -124,19 +127,13 @@ mod tests {
             row_group_size: 50,
             ..Default::default()
         };
-
-        let mut writer = ParquetWriter::new(
-            || async {
-                Ok(object_store
-                    .writer_with(&file_path)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|v| v.into_futures_async_write().compat_write())
-                    .unwrap())
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            file_path,
             metadata,
             Indexer::default(),
         );
+
         let info = writer
             .write_all(source, &write_opts)
             .await
@@ -185,18 +182,13 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(
-            || async {
-                Ok(object_store
-                    .writer_with(&file_path)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|w| w.into_futures_async_write().compat_write())
-                    .unwrap())
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            file_path,
             metadata.clone(),
             Indexer::default(),
         );
+
         writer
             .write_all(source, &write_opts)
             .await
@@ -265,18 +257,13 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer = ParquetWriter::new(
-            || async {
-                Ok(object_store
-                    .writer_with(&file_path)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|v| v.into_futures_async_write().compat_write())
-                    .unwrap())
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            file_path,
             metadata.clone(),
             Indexer::default(),
         );
+
         let sst_info = writer
             .write_all(source, &write_opts)
             .await
@@ -310,15 +297,9 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(
-            || async {
-                Ok(object_store
-                    .writer_with(&file_path)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|v| v.into_futures_async_write().compat_write())
-                    .unwrap())
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            file_path,
             metadata.clone(),
             Indexer::default(),
         );
@@ -369,15 +350,9 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(
-            || async {
-                Ok(object_store
-                    .writer_with(&file_path)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|v| v.into_futures_async_write().compat_write())
-                    .unwrap())
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            file_path,
             metadata.clone(),
             Indexer::default(),
         );
@@ -410,18 +385,13 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(
-            || async {
-                Ok(object_store
-                    .writer_with(&file_path)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .map(|v| v.into_futures_async_write().compat_write())
-                    .unwrap())
-            },
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            file_path,
             metadata.clone(),
             Indexer::default(),
         );
+
         writer
             .write_all(source, &write_opts)
             .await

@@ -19,7 +19,6 @@ use object_store::util::{join_dir, with_instrument_layers};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
@@ -29,10 +28,10 @@ use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::IndexerBuilder;
+use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
-use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::{location, DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::parquet::writer::ParquetWriter;
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
@@ -147,16 +146,9 @@ impl AccessLayer {
                 index_options: request.index_options,
             }
             .build();
-            let mut writer = ParquetWriter::new(
-                || async {
-                    self.object_store
-                        .writer_with(&file_path)
-                        .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-                        .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                        .await
-                        .map(|v| v.into_futures_async_write().compat_write())
-                        .context(OpenDalSnafu)
-                },
+            let mut writer = ParquetWriter::new_with_object_store(
+                self.object_store.clone(),
+                file_path,
                 request.metadata,
                 indexer,
             );
