@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 use crate::error::{self, Result};
 
-struct ProduceRequest {
+pub struct ProduceRequest {
     batch: Vec<Record>,
     sender: oneshot::Sender<ProduceResultReceiver>,
 }
@@ -84,7 +84,7 @@ fn handle_produce_requests(
 ) -> Vec<PendingRequest> {
     let mut records_buffer = vec![];
     let mut batch_size = 0;
-    let mut pending_requests = vec![];
+    let mut pending_requests = Vec::with_capacity(requests.len());
 
     for ProduceRequest { batch, sender } in requests.drain(..) {
         let mut receiver = ProduceResultReceiver::default();
@@ -244,7 +244,7 @@ impl OrderedBatchProducer {
             self.sender
                 .send(ProduceRequest { batch, sender: tx })
                 .await
-                .expect("worker panic");
+                .context(error::SendProduceRequestSnafu)?;
             rx
         };
 

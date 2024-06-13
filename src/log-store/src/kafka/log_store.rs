@@ -171,8 +171,7 @@ impl LogStore for KafkaLogStore {
         }
 
         let mut region_grouped_records: HashMap<RegionId, Vec<_>> = HashMap::new();
-        let mut region_grouped_producers: HashMap<RegionId, OrderedBatchProducerRef> =
-            HashMap::new();
+        let mut region_producers: HashMap<RegionId, OrderedBatchProducerRef> = HashMap::new();
         for entry in entries {
             let provider = entry
                 .provider()
@@ -185,7 +184,7 @@ impl LogStore for KafkaLogStore {
 
             let region_id = entry.region_id();
 
-            if let hash_map::Entry::Vacant(e) = region_grouped_producers.entry(region_id) {
+            if let hash_map::Entry::Vacant(e) = region_producers.entry(region_id) {
                 let producer = self.producer_registry.get_or_register(&provider).await?;
                 e.insert(producer);
             };
@@ -200,7 +199,7 @@ impl LogStore for KafkaLogStore {
             Vec::with_capacity(region_grouped_records.keys().len());
         for (region_id, records) in region_grouped_records {
             region_ids.push(region_id);
-            let producer = region_grouped_producers.get(&region_id).unwrap();
+            let producer = region_producers.get(&region_id).unwrap();
             // Safety: `Record`'s `approximate_size` must be less or equal to `max_flush_size`.
             region_grouped_result_receivers.push(producer.produce(records).await?)
         }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
@@ -21,6 +20,8 @@ use common_runtime::error::Error as RuntimeError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
+
+use crate::kafka::producer::ProduceRequest;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -254,57 +255,12 @@ pub enum Error {
         attempt_index: u64,
     },
 
-    #[snafu(display("Failed to push data to aggregator"))]
-    AggregateInput {
+    #[snafu(display("Failed to send produce request",))]
+    SendProduceRequest {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[snafu(display("Failed to flush data from aggregator"))]
-    FlushAggregator {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[snafu(display("Failed to aggregate input, data is too large"))]
-    AggregatorInputTooLarge {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to send flush request to loop, reason: {}", reason))]
-    SendFlushRequest {
-        #[snafu(implicit)]
-        location: Location,
-
-        reason: String,
-    },
-
-    #[snafu(display("Failed to deaggregate status"))]
-    DeaggregateStatus {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[snafu(display("Failed to receive state"))]
-    StateRecv {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: tokio::sync::watch::error::RecvError,
-    },
-
-    #[snafu(display("Failed to flush"))]
-    FlushErr {
-        #[snafu(implicit)]
-        location: Location,
-        source: Arc<Error>,
+        error: tokio::sync::mpsc::error::SendError<ProduceRequest>,
     },
 }
 
