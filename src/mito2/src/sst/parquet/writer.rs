@@ -16,28 +16,32 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
-use common_time::Timestamp;
-use datatypes::arrow::datatypes::SchemaRef;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
+use tokio::io::AsyncWrite;
+use tokio_util::compat::FuturesAsyncWriteCompatExt;
+
+use common_time::Timestamp;
+use datatypes::arrow::datatypes::SchemaRef;
+use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
-use tokio::io::AsyncWrite;
 
 use crate::error::{InvalidMetadataSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 use crate::sst::index::Indexer;
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
-use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 
 /// Parquet SST writer.
 pub struct ParquetWriter<W, F> {
@@ -49,12 +53,38 @@ pub struct ParquetWriter<W, F> {
     bytes_written: Arc<AtomicUsize>,
 }
 
-impl<W, Fut, F> ParquetWriter<W, F>
+
+
+impl<W, Fut: Future<Output = Result<W>>,
+    F: FnMut() -> Fut> ParquetWriter<W, F>
 where
     W: AsyncWrite + Send + Unpin,
-    Fut: Future<Output = Result<W>>,
-    F: FnMut() -> Fut,
 {
+
+    pub fn new_with_object_store(
+        object_store: ObjectStore,
+        file_path: String,
+        metadata: RegionMetadataRef,
+        indexer: Indexer,
+    ) -> Self {
+        ParquetWriter::new(
+            || {
+                let path = file_path.clone();
+                async move {
+                    Ok(object_store
+                        .writer_with(&path)
+                        .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                        .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+                        .await
+                        .map(|v| v.into_futures_async_write().compat_write())
+                        .unwrap())
+                }
+            },
+            metadata.clone(),
+            indexer,
+        )
+    }
+
     /// Creates a new parquet SST writer.
     pub fn new(factory: F, metadata: RegionMetadataRef, indexer: Indexer) -> ParquetWriter<W, F> {
         ParquetWriter {
