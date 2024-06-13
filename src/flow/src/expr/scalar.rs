@@ -157,27 +157,32 @@ pub enum ScalarExpr {
 
 /// a way to represent a scalar function that is implemented in Data Fusion
 #[derive(Debug, Clone, Serialize)]
-pub struct CallDfScalarFunction {
+pub struct DfScalarFunction {
     raw_fn: RawDfScalarFn,
     // TODO(discord9): directly from datafusion expr
     #[serde(skip)]
     fn_impl: Arc<dyn PhysicalExpr>,
 }
 
-impl CallDfScalarFunction {
+impl DfScalarFunction {
     pub fn new(raw_fn: RawDfScalarFn, fn_impl: Arc<dyn PhysicalExpr>) -> Result<Self, Error> {
         Ok(Self { raw_fn, fn_impl })
     }
+
+    pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+        // TODO(discord9): make cols all array length of one
+        todo!()
+    }
 }
 
-impl<'de> serde::de::Deserialize<'de> for CallDfScalarFunction {
+impl<'de> serde::de::Deserialize<'de> for DfScalarFunction {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::de::Deserializer<'de>,
     {
         let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
         let fn_impl = raw_fn.get_fn_impl().map_err(serde::de::Error::custom)?;
-        CallDfScalarFunction::new(raw_fn, fn_impl).map_err(serde::de::Error::custom)
+        DfScalarFunction::new(raw_fn, fn_impl).map_err(serde::de::Error::custom)
     }
 }
 
@@ -201,25 +206,25 @@ impl RawDfScalarFn {
     }
 }
 
-impl std::cmp::PartialEq for CallDfScalarFunction {
+impl std::cmp::PartialEq for DfScalarFunction {
     fn eq(&self, other: &Self) -> bool {
         self.raw_fn.eq(&other.raw_fn)
     }
 }
 
-impl std::cmp::Eq for CallDfScalarFunction {}
+impl std::cmp::Eq for DfScalarFunction {}
 
-impl std::cmp::PartialOrd for CallDfScalarFunction {
+impl std::cmp::PartialOrd for DfScalarFunction {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
-impl std::cmp::Ord for CallDfScalarFunction {
+impl std::cmp::Ord for DfScalarFunction {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.raw_fn.cmp(&other.raw_fn)
     }
 }
-impl std::hash::Hash for CallDfScalarFunction {
+impl std::hash::Hash for DfScalarFunction {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.raw_fn.hash(state);
     }
