@@ -262,6 +262,8 @@ mod tests {
                 &[OpType::Put, OpType::Put, OpType::Put],
                 &[11, 1, 12],
             ),
+            // empty batch.
+            new_batch(b"k1", &[], &[], &[], &[]),
             // Duplicate with the previous batch.
             new_batch(
                 b"k1",
