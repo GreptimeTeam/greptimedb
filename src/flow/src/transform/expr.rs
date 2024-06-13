@@ -14,6 +14,9 @@
 
 #![warn(unused_imports)]
 
+use std::sync::Arc;
+
+use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
@@ -55,40 +58,53 @@ fn typename_to_cdt(name: &str) -> CDT {
     }
 }
 
-impl TypedExpr {
-    pub async fn from_substrait_to_datafusion_scalar_func(
-        f: &ScalarFunction,
-        input_schema: &RelationDesc,
-        extensions: &FunctionExtensions,
-    ) -> Result<TypedExpr, Error> {
-        let e = Expression {
-            rex_type: Some(RexType::ScalarFunction(f.clone())),
-        };
-        let schema = input_schema.to_df_schema()?;
-        let expr = substrait::df_logical_plan::consumer::from_substrait_rex(
+/// Convert ScalarFunction to corrseponding Datafusion's PhysicalExpr
+pub(crate) fn from_scalar_fn_to_df_fn_impl(
+    f: &ScalarFunction,
+    input_schema: &RelationDesc,
+    extensions: &FunctionExtensions,
+) -> Result<Arc<dyn PhysicalExpr>, Error> {
+    let e = Expression {
+        rex_type: Some(RexType::ScalarFunction(f.clone())),
+    };
+    let schema = input_schema.to_df_schema()?;
+    let expr = common_runtime::block_on_bg(async {
+        // FIXME(discord9): this function have no blocking path, so it's safe to use block_on_bg
+        // since this doesn't actually blocking
+        substrait::df_logical_plan::consumer::from_substrait_rex(
             &datafusion::prelude::SessionContext::new(),
             &e,
             &schema,
             &extensions.inner_ref(),
         )
         .await
-        .map_err(|err| {
-            DatafusionSnafu {
-                raw: err,
-                context:
-                    "Failed to convert substrait scalar function to datafusion scalar function",
-            }
-            .build()
-        })?;
-        let phy_expr =
-            datafusion::physical_expr::create_physical_expr(&expr, &schema, &Default::default())
-                .map_err(|err| {
-                    DatafusionSnafu {
-                        raw: err,
-                        context: "Failed to create physical expression from logical expression",
-                    }
-                    .build()
-                })?;
+    })
+    .map_err(|err| {
+        DatafusionSnafu {
+            raw: err,
+            context: "Failed to convert substrait scalar function to datafusion scalar function",
+        }
+        .build()
+    })?;
+    let phy_expr =
+        datafusion::physical_expr::create_physical_expr(&expr, &schema, &Default::default())
+            .map_err(|err| {
+                DatafusionSnafu {
+                    raw: err,
+                    context: "Failed to create physical expression from logical expression",
+                }
+                .build()
+            })?;
+    Ok(phy_expr)
+}
+
+impl TypedExpr {
+    pub fn from_substrait_to_datafusion_scalar_func(
+        f: &ScalarFunction,
+        input_schema: &RelationDesc,
+        extensions: &FunctionExtensions,
+    ) -> Result<TypedExpr, Error> {
+        let phy_expr = from_scalar_fn_to_df_fn_impl(f, input_schema, extensions)?;
         todo!()
     }
     /// Convert ScalarFunction into Flow's ScalarExpr
@@ -622,9 +638,7 @@ mod test {
         };
         let input_schema =
             RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]).into_unnamed();
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "is_null".to_string())]),
-        };
+        let extensions = FunctionExtensions::from_iter([(0, "is_null".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(
@@ -650,9 +664,7 @@ mod test {
             ColumnType::new(CDT::uint32_datatype(), false),
         ])
         .into_unnamed();
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "add".to_string())]),
-        };
+        let extensions = FunctionExtensions::from_iter([(0, "add".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(
@@ -679,9 +691,7 @@ mod test {
             ColumnType::new(CDT::string_datatype(), false),
         ])
         .into_unnamed();
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
-        };
+        let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(
@@ -709,9 +719,7 @@ mod test {
             ColumnType::new(CDT::string_datatype(), false),
         ])
         .into_unnamed();
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
-        };
+        let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(

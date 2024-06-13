@@ -15,21 +15,23 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use common_error::ext::BoxedError;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::adapter::error::{
-    Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
+    DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
-use crate::repr::{ColumnType, RelationType};
-
+use crate::repr::{ColumnType, RelationDesc, RelationType};
+use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct TypedExpr {
@@ -154,16 +156,54 @@ pub enum ScalarExpr {
 }
 
 /// a way to represent a scalar function that is implemented in Data Fusion
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallDfScalarFunction {
-    fn_name: String,
+    raw_fn: RawDfScalarFn,
     // TODO(discord9): directly from datafusion expr
+    #[serde(skip)]
     fn_impl: Arc<dyn PhysicalExpr>,
+}
+
+impl CallDfScalarFunction {
+    pub fn new(raw_fn: RawDfScalarFn, fn_impl: Arc<dyn PhysicalExpr>) -> Result<Self, Error> {
+        Ok(Self { raw_fn, fn_impl })
+    }
+}
+
+impl<'de> serde::de::Deserialize<'de> for CallDfScalarFunction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
+        let fn_impl = raw_fn.get_fn_impl().map_err(serde::de::Error::custom)?;
+        CallDfScalarFunction::new(raw_fn, fn_impl).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawDfScalarFn {
+    f: bytes::BytesMut,
+    input_schema: RelationDesc,
+    extensions: FunctionExtensions,
+}
+
+impl RawDfScalarFn {
+    fn get_fn_impl(&self) -> crate::adapter::error::Result<Arc<dyn PhysicalExpr>> {
+        use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
+        use substrait::substrait_proto_df::proto::Expression;
+        let f = ScalarFunction::decode(&mut self.f.as_ref()).unwrap();
+
+        let input_schema = &self.input_schema;
+        let extensions = &self.extensions;
+
+        from_scalar_fn_to_df_fn_impl(&f, input_schema, extensions)
+    }
 }
 
 impl std::cmp::PartialEq for CallDfScalarFunction {
     fn eq(&self, other: &Self) -> bool {
-        self.fn_name.eq(&other.fn_name)
+        self.raw_fn.eq(&other.raw_fn)
     }
 }
 
@@ -176,12 +216,12 @@ impl std::cmp::PartialOrd for CallDfScalarFunction {
 }
 impl std::cmp::Ord for CallDfScalarFunction {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.fn_name.cmp(&other.fn_name)
+        self.raw_fn.cmp(&other.raw_fn)
     }
 }
 impl std::hash::Hash for CallDfScalarFunction {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.fn_name.hash(state);
+        self.raw_fn.hash(state);
     }
 }
 

@@ -13,9 +13,10 @@
 // limitations under the License.
 
 //! Transform Substrait into execution plan
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use bytes::buf::IntoIter;
 use common_error::ext::BoxedError;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType as CDT;
@@ -25,6 +26,7 @@ use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
+use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
@@ -43,7 +45,6 @@ use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::RelationType;
-
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
     ($($arg:tt)*)  => {
@@ -67,17 +68,26 @@ mod expr;
 mod literal;
 mod plan;
 
+pub(crate) use expr::from_scalar_fn_to_df_fn_impl;
+
 /// In Substrait, a function can be define by an u32 anchor, and the anchor can be mapped to a name
 ///
 /// So in substrait plan, a ref to a function can be a single u32 anchor instead of a full name in string
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FunctionExtensions {
-    pub anchor_to_name: HashMap<u32, String>,
+    anchor_to_name: BTreeMap<u32, String>,
 }
 
 impl FunctionExtensions {
+    pub fn from_iter(inner: impl IntoIterator<Item = (u32, String)>) -> Self {
+        Self {
+            anchor_to_name: inner.into_iter().collect(),
+        }
+    }
+
     /// Create a new FunctionExtensions from a list of SimpleExtensionDeclaration
     pub fn try_from_proto(extensions: &[SimpleExtensionDeclaration]) -> Result<Self, Error> {
-        let mut anchor_to_name = HashMap::new();
+        let mut anchor_to_name = BTreeMap::new();
         for e in extensions {
             match &e.mapping_type {
                 Some(ext) => match ext {
