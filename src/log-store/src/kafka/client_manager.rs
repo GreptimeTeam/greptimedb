@@ -132,7 +132,32 @@ mod tests {
     use tokio::sync::Barrier;
 
     use super::*;
-    use crate::test_util::kafka::create_topics;
+
+    /// Creates `num_topiocs` number of topics each will be decorated by the given decorator.
+    pub async fn create_topics<F>(
+        num_topics: usize,
+        decorator: F,
+        broker_endpoints: &[String],
+    ) -> Vec<String>
+    where
+        F: Fn(usize) -> String,
+    {
+        assert!(!broker_endpoints.is_empty());
+        let client = ClientBuilder::new(broker_endpoints.to_vec())
+            .build()
+            .await
+            .unwrap();
+        let ctrl_client = client.controller_client().unwrap();
+        let (topics, tasks): (Vec<_>, Vec<_>) = (0..num_topics)
+            .map(|i| {
+                let topic = decorator(i);
+                let task = ctrl_client.create_topic(topic.clone(), 1, 1, 500);
+                (topic, task)
+            })
+            .unzip();
+        futures::future::try_join_all(tasks).await.unwrap();
+        topics
+    }
 
     /// Prepares for a test in that a collection of topics and a client manager are created.
     async fn prepare(

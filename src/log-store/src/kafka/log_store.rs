@@ -36,7 +36,6 @@ use super::util::record::convert_to_kafka_records;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::producer_registry::ProducerRegistry;
-use crate::kafka::util::offset::Offset;
 use crate::kafka::util::record::{
     maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
 };
@@ -260,7 +259,7 @@ impl LogStore for KafkaLogStore {
             })?
             - 1;
         // Reads entries with offsets in the range [start_offset, end_offset].
-        let start_offset = Offset::try_from(entry_id)?.0;
+        let start_offset = entry_id as i64;
 
         debug!(
             "Start reading entries in range [{}, {}] for ns {}",
