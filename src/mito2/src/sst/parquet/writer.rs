@@ -14,6 +14,7 @@
 
 //! Parquet writer.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,9 +52,8 @@ pub struct ParquetWriter<W, F> {
     bytes_written: Arc<AtomicUsize>,
 }
 
-#[async_trait::async_trait]
 pub trait WriterFactory<W> {
-    async fn create(&mut self) -> Result<W>;
+    fn create(&mut self) -> impl Future<Output=Result<W>>;
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -61,16 +61,17 @@ pub struct ObjectStoreWriterFactory {
     object_store: ObjectStore,
 }
 
-#[async_trait::async_trait]
 impl WriterFactory<Compat<FuturesAsyncWriter>> for ObjectStoreWriterFactory {
-    async fn create(&mut self) -> Result<Compat<FuturesAsyncWriter>> {
-        self.object_store
-            .writer_with(&self.path)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-            .concurrent(DEFAULT_WRITE_CONCURRENCY)
-            .await
-            .map(|v| v.into_futures_async_write().compat_write())
-            .context(OpenDalSnafu)
+    fn create(&mut self) -> impl Future<Output=Result<Compat<FuturesAsyncWriter>>> {
+        async {
+            self.object_store
+                .writer_with(&self.path)
+                .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+                .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                .await
+                .map(|v| v.into_futures_async_write().compat_write())
+                .context(OpenDalSnafu)
+        }
     }
 }
 
