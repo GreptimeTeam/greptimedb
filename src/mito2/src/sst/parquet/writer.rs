@@ -53,7 +53,7 @@ pub struct ParquetWriter<W, F> {
 }
 
 pub trait WriterFactory<W> {
-    fn create(&mut self) -> impl Future<Output=Result<W>>;
+    fn create(&mut self) -> impl Future<Output = Result<W>>;
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -62,7 +62,7 @@ pub struct ObjectStoreWriterFactory {
 }
 
 impl WriterFactory<Compat<FuturesAsyncWriter>> for ObjectStoreWriterFactory {
-    fn create(&mut self) -> impl Future<Output=Result<Compat<FuturesAsyncWriter>>> {
+    fn create(&mut self) -> impl Future<Output = Result<Compat<FuturesAsyncWriter>>> {
         async {
             self.object_store
                 .writer_with(&self.path)
