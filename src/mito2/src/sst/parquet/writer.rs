@@ -43,8 +43,8 @@ use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// Parquet SST writer.
-pub struct ParquetWriter<W, F> {
-    writer: Option<AsyncArrowWriter<SizeAwareWriter<W>>>,
+pub struct ParquetWriter<F: WriterFactory> {
+    writer: Option<AsyncArrowWriter<SizeAwareWriter<F::Writer>>>,
     writer_factory: F,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
@@ -52,8 +52,9 @@ pub struct ParquetWriter<W, F> {
     bytes_written: Arc<AtomicUsize>,
 }
 
-pub trait WriterFactory<W> {
-    fn create(&mut self) -> impl Future<Output = Result<W>>;
+pub trait WriterFactory {
+    type Writer: AsyncWrite + Send + Unpin;
+    fn create(&mut self) -> impl Future<Output = Result<Self::Writer>>;
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -61,27 +62,27 @@ pub struct ObjectStoreWriterFactory {
     object_store: ObjectStore,
 }
 
-impl WriterFactory<Compat<FuturesAsyncWriter>> for ObjectStoreWriterFactory {
-    fn create(&mut self) -> impl Future<Output = Result<Compat<FuturesAsyncWriter>>> {
-        async {
-            self.object_store
-                .writer_with(&self.path)
-                .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-                .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                .await
-                .map(|v| v.into_futures_async_write().compat_write())
-                .context(OpenDalSnafu)
-        }
+impl WriterFactory for ObjectStoreWriterFactory {
+    type Writer = Compat<FuturesAsyncWriter>;
+
+    async fn create(&mut self) -> Result<Self::Writer> {
+        self.object_store
+            .writer_with(&self.path)
+            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .concurrent(DEFAULT_WRITE_CONCURRENCY)
+            .await
+            .map(|v| v.into_futures_async_write().compat_write())
+            .context(OpenDalSnafu)
     }
 }
 
-impl ParquetWriter<Compat<FuturesAsyncWriter>, ObjectStoreWriterFactory> {
+impl ParquetWriter<ObjectStoreWriterFactory> {
     pub fn new_with_object_store(
         object_store: ObjectStore,
         path: String,
         metadata: RegionMetadataRef,
         indexer: Indexer,
-    ) -> ParquetWriter<Compat<FuturesAsyncWriter>, ObjectStoreWriterFactory> {
+    ) -> ParquetWriter<ObjectStoreWriterFactory> {
         ParquetWriter::new(
             ObjectStoreWriterFactory { path, object_store },
             metadata,
@@ -90,13 +91,12 @@ impl ParquetWriter<Compat<FuturesAsyncWriter>, ObjectStoreWriterFactory> {
     }
 }
 
-impl<W, F> ParquetWriter<W, F>
+impl<F> ParquetWriter<F>
 where
-    W: AsyncWrite + Send + Unpin,
-    F: WriterFactory<W>,
+    F: WriterFactory,
 {
     /// Creates a new parquet SST writer.
-    pub fn new(factory: F, metadata: RegionMetadataRef, indexer: Indexer) -> ParquetWriter<W, F> {
+    pub fn new(factory: F, metadata: RegionMetadataRef, indexer: Indexer) -> ParquetWriter<F> {
         ParquetWriter {
             writer: None,
             writer_factory: factory,
@@ -211,7 +211,7 @@ where
         &mut self,
         schema: &SchemaRef,
         opts: &WriteOptions,
-    ) -> Result<&mut AsyncArrowWriter<SizeAwareWriter<W>>> {
+    ) -> Result<&mut AsyncArrowWriter<SizeAwareWriter<F::Writer>>> {
         if let Some(ref mut w) = self.writer {
             Ok(w)
         } else {
