@@ -23,6 +23,7 @@ pub(crate) mod unordered_scan;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::OpType;
 use async_trait::async_trait;
@@ -50,6 +51,7 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
+use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::sst::parquet::reader::RowGroupReader;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
@@ -741,6 +743,55 @@ pub type BoxedBatchStream = BoxStream<'static, Result<Batch>>;
 impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         (**self).next_batch().await
+    }
+}
+
+/// Metrics for scanners.
+#[derive(Debug, Default)]
+pub(crate) struct ScannerMetrics {
+    /// Duration to prepare the scan task.
+    prepare_scan_cost: Duration,
+    /// Duration to build parts.
+    build_parts_cost: Duration,
+    /// Duration to scan data.
+    scan_cost: Duration,
+    /// Duration to convert batches.
+    convert_cost: Duration,
+    /// Duration of the scan.
+    total_cost: Duration,
+    /// Number of batches returned.
+    num_batches: usize,
+    /// Number of rows returned.
+    num_rows: usize,
+}
+
+impl ScannerMetrics {
+    /// Sets and observes metrics on initializing parts.
+    fn observe_init_part(&mut self, build_parts_cost: Duration) {
+        self.build_parts_cost = build_parts_cost;
+
+        // Observes metrics.
+        READ_STAGE_ELAPSED
+            .with_label_values(&["prepare_scan"])
+            .observe(self.prepare_scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_parts"])
+            .observe(self.build_parts_cost.as_secs_f64());
+    }
+
+    /// Observes metrics on scanner finish.
+    fn observe_metrics_on_finish(&self) {
+        READ_STAGE_ELAPSED
+            .with_label_values(&["convert_rb"])
+            .observe(self.convert_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan"])
+            .observe(self.scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["total"])
+            .observe(self.total_cost.as_secs_f64());
+        READ_ROWS_RETURN.observe(self.num_rows as f64);
+        READ_BATCHES_RETURN.observe(self.num_batches as f64);
     }
 }
 

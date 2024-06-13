@@ -12,20 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
-use syn::token::Comma;
-use syn::{FnArg, Type};
+use api::v1::region::RegionRequestHeader;
+use datafusion_expr::LogicalPlan;
+use store_api::storage::RegionId;
 
-/// Extract the argument list from the annotated function.
-pub(crate) fn extract_input_types(
-    inputs: &Punctuated<FnArg, Comma>,
-) -> Result<Vec<Type>, syn::Error> {
-    inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Receiver(receiver) => Err(syn::Error::new(receiver.span(), "expected bool")),
-            FnArg::Typed(pat_type) => Ok(*pat_type.ty.clone()),
-        })
-        .collect()
+/// The query request to be handled by the RegionServer (Datanode).
+pub struct QueryRequest {
+    /// The header of this request. Often to store some context of the query. None means all to defaults.
+    pub header: Option<RegionRequestHeader>,
+
+    /// The id of the region to be queried.
+    pub region_id: RegionId,
+
+    /// The form of the query: a logical plan.
+    pub plan: LogicalPlan,
 }

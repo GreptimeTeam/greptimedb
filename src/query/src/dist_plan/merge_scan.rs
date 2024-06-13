@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::stream;
-use common_base::bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
 use common_plugins::GREPTIME_EXEC_READ_COST;
+use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
@@ -40,7 +40,7 @@ use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
-use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
+use greptime_proto::v1::region::RegionRequestHeader;
 use greptime_proto::v1::QueryContext;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
@@ -125,7 +125,7 @@ impl MergeScanLogicalPlan {
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,
-    substrait_plan: Bytes,
+    plan: LogicalPlan,
     schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
@@ -150,7 +150,7 @@ impl MergeScanExec {
     pub fn new(
         table: TableName,
         regions: Vec<RegionId>,
-        substrait_plan: Bytes,
+        plan: LogicalPlan,
         arrow_schema: &ArrowSchema,
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
@@ -166,7 +166,7 @@ impl MergeScanExec {
         Ok(Self {
             table,
             regions,
-            substrait_plan,
+            plan,
             schema: schema_without_metadata,
             arrow_schema: arrow_schema_without_metadata,
             region_query_handler,
@@ -178,7 +178,6 @@ impl MergeScanExec {
     }
 
     pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
-        let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
@@ -192,6 +191,7 @@ impl MergeScanExec {
         let extensions = self.query_ctx.extensions();
 
         let sub_sgate_metrics_moved = self.sub_stage_metrics.clone();
+        let plan = self.plan.clone();
         let stream = Box::pin(stream!({
             MERGE_SCAN_REGIONS.observe(regions.len() as f64);
             let _finish_timer = metric.finish_time().timer();
@@ -210,8 +210,8 @@ impl MergeScanExec {
                             extensions: extensions.clone(),
                         }),
                     }),
-                    region_id: region_id.into(),
-                    plan: substrait_plan.clone(),
+                    region_id,
+                    plan: plan.clone(),
                 };
                 let mut stream = region_query_handler
                     .do_get(request)

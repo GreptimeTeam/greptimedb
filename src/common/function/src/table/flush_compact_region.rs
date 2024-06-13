@@ -35,7 +35,7 @@ use crate::helper::cast_u64;
 macro_rules! define_region_function {
     ($name: expr, $display_name_str: expr, $display_name: ident) => {
         /// A function to $display_name
-        #[admin_fn(name = $name, display_name = $display_name_str, sig_fn = "signature", ret = "uint64")]
+        #[admin_fn(name = $name, display_name = $display_name_str, sig_fn = signature, ret = uint64)]
         pub(crate) async fn $display_name(
             table_mutation_handler: &TableMutationHandlerRef,
             query_ctx: &QueryContextRef,
@@ -53,7 +53,7 @@ macro_rules! define_region_function {
 
             let Some(region_id) = cast_u64(&params[0])? else {
                 return UnsupportedInputDataTypeSnafu {
-                    function: $display_name_str,
+                    function: stringify!($display_name_str),
                     datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
                 }
                 .fail();
@@ -68,9 +68,9 @@ macro_rules! define_region_function {
     };
 }
 
-define_region_function!("FlushRegionFunction", "flush_region", flush_region);
+define_region_function!(FlushRegionFunction, flush_region, flush_region);
 
-define_region_function!("CompactRegionFunction", "compact_region", compact_region);
+define_region_function!(CompactRegionFunction, compact_region, compact_region);
 
 fn signature() -> Signature {
     Signature::uniform(1, ConcreteDataType::numerics(), Volatility::Immutable)

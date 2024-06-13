@@ -1560,6 +1560,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "prometheus",
  "prost 0.12.6",
+ "query",
  "rand",
  "serde_json",
  "snafu 0.8.3",
@@ -1921,7 +1922,6 @@ dependencies = [
  "quote",
  "snafu 0.8.3",
  "static_assertions",
- "syn 1.0.109",
  "syn 2.0.66",
 ]
 
@@ -1956,11 +1956,13 @@ dependencies = [
  "common-macro",
  "common-procedure",
  "common-procedure-test",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "common-time",
  "common-wal",
  "datafusion-common 38.0.0",
+ "datafusion-expr 38.0.0",
  "datatypes",
  "derive_builder 0.12.0",
  "etcd-client",
@@ -2049,6 +2051,7 @@ dependencies = [
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlparser_derive 0.1.1",
  "statrs",
+ "store-api",
  "tokio",
 ]
 
@@ -3216,6 +3219,7 @@ dependencies = [
  "session",
  "snafu 0.8.3",
  "store-api",
+ "substrait 0.8.1",
  "table",
  "tokio",
  "toml 0.8.13",
@@ -10245,7 +10249,6 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
- "common-query",
  "common-recordbatch",
  "common-wal",
  "datafusion-expr 38.0.0",

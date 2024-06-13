@@ -64,11 +64,19 @@ impl Default for MemtableConfig {
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     estimated_bytes: usize,
-    /// The time range that this memtable contains.
+    /// The time range that this memtable contains. It is None if
+    /// and only if the memtable is empty.
     time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl MemtableStats {
+    /// Attaches the time range to the stats.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> Self {
+        self.time_range = time_range;
+        self
+    }
+
     /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes

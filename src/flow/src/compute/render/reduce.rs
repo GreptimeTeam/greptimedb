@@ -813,11 +813,12 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
-            ]),
+            ])
+            .into_unnamed(),
             // TODO(discord9): mfp indirectly ref to key columns
             /*
             .with_key(vec![1])
@@ -829,10 +830,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -880,7 +884,8 @@ mod test {
                             ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
                         ])
                         .with_key(vec![1])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .into_unnamed(),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -977,7 +982,8 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -985,9 +991,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::int64_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::int64_datatype(),
+                                    false,
+                                )])
+                                .into_unnamed(),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -1008,10 +1018,13 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(RelationType::new(vec![
-                        ColumnType::new(ConcreteDataType::uint32_datatype(), true),
-                        ColumnType::new(ConcreteDataType::int64_datatype(), true),
-                    ])),
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(ConcreteDataType::uint32_datatype(), true),
+                            ColumnType::new(ConcreteDataType::int64_datatype(), true),
+                        ])
+                        .into_unnamed(),
+                    ),
                 ),
                 mfp: MapFilterProject::new(2)
                     .map(vec![
@@ -1068,7 +1081,7 @@ mod test {
         let reduce_plan = ReducePlan::Distinct;
         let bundle = ctx
             .render_reduce(
-                Box::new(input_plan.with_types(typ)),
+                Box::new(input_plan.with_types(typ.into_unnamed())),
                 key_val_plan,
                 reduce_plan,
                 RelationType::empty(),
@@ -1143,7 +1156,7 @@ mod test {
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
             .render_reduce(
-                Box::new(input_plan.with_types(typ)),
+                Box::new(input_plan.with_types(typ.into_unnamed())),
                 key_val_plan,
                 reduce_plan,
                 RelationType::empty(),
@@ -1224,7 +1237,7 @@ mod test {
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
             .render_reduce(
-                Box::new(input_plan.with_types(typ)),
+                Box::new(input_plan.with_types(typ.into_unnamed())),
                 key_val_plan,
                 reduce_plan,
                 RelationType::empty(),
@@ -1301,7 +1314,7 @@ mod test {
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
             .render_reduce(
-                Box::new(input_plan.with_types(typ)),
+                Box::new(input_plan.with_types(typ.into_unnamed())),
                 key_val_plan,
                 reduce_plan,
                 RelationType::empty(),
@@ -1393,7 +1406,7 @@ mod test {
         let reduce_plan = ReducePlan::Accumulable(accum_plan);
         let bundle = ctx
             .render_reduce(
-                Box::new(input_plan.with_types(typ)),
+                Box::new(input_plan.with_types(typ.into_unnamed())),
                 key_val_plan,
                 reduce_plan,
                 RelationType::empty(),

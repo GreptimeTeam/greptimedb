@@ -39,6 +39,7 @@ INSERT INTO test VALUES (3, "greptime", 3, true);
 
 Affected Rows: 1
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +----+----------+-------------------------+-------+
@@ -64,6 +65,7 @@ ALTER TABLE test MODIFY I INTEGER;
 
 Affected Rows: 0
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test;
 
 +----+---+-------------------------+-------+
