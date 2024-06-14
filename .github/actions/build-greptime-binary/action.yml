@@ -24,6 +24,14 @@ inputs:
     description: Build android artifacts
     required: false
     default: 'false'
+  image-namespace:
+    description: Image Namespace
+    required: false
+    default: 'greptime'
+  image-registry:
+    description: Image Registry
+    required: false
+    default: 'docker.io'
 runs:
   using: composite
   steps:
@@ -35,7 +43,9 @@ runs:
         make build-by-dev-builder \
           CARGO_PROFILE=${{ inputs.cargo-profile }} \
           FEATURES=${{ inputs.features }} \
-          BASE_IMAGE=${{ inputs.base-image }}
+          BASE_IMAGE=${{ inputs.base-image }} \
+          IMAGE_NAMESPACE=${{ input.image-namespace }} \
+          IMAGE_REGISTRY=${{ input.image-registry }}
 
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts
