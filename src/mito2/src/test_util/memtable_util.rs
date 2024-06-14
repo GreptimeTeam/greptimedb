@@ -19,6 +19,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
+use common_time::Timestamp;
 use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -42,12 +43,26 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 pub(crate) struct EmptyMemtable {
     /// Id of this memtable.
     id: MemtableId,
+    /// Time range to return.
+    time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl EmptyMemtable {
     /// Returns a new memtable with specific `id`.
     pub(crate) fn new(id: MemtableId) -> EmptyMemtable {
-        EmptyMemtable { id }
+        EmptyMemtable {
+            id,
+            time_range: None,
+        }
+    }
+
+    /// Attaches the time range to the memtable.
+    pub(crate) fn with_time_range(
+        mut self,
+        time_range: Option<(Timestamp, Timestamp)>,
+    ) -> EmptyMemtable {
+        self.time_range = time_range;
+        self
     }
 }
 
@@ -81,7 +96,7 @@ impl Memtable for EmptyMemtable {
     }
 
     fn stats(&self) -> MemtableStats {
-        MemtableStats::default()
+        MemtableStats::default().with_time_range(self.time_range)
     }
 
     fn fork(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {

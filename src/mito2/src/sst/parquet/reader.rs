@@ -62,7 +62,7 @@ use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 
 /// Parquet SST reader builder.
-pub(crate) struct ParquetReaderBuilder {
+pub struct ParquetReaderBuilder {
     /// SST directory.
     file_dir: String,
     file_handle: FileHandle,
@@ -138,7 +138,7 @@ impl ParquetReaderBuilder {
 
     /// Attaches the index applier to the builder.
     #[must_use]
-    pub fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
+    pub(crate) fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
         self.index_applier = index_applier;
         self
     }
@@ -568,6 +568,11 @@ impl RowGroupReaderBuilder {
     /// Path of the file to read.
     pub(crate) fn file_path(&self) -> &str {
         &self.file_path
+    }
+
+    /// Handle of the file to read.
+    pub(crate) fn file_handle(&self) -> &FileHandle {
+        &self.file_handle
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.

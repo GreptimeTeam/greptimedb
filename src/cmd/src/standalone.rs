@@ -454,9 +454,11 @@ impl StartCommand {
         );
         let flownode = Arc::new(flow_builder.build().await);
 
-        let builder =
-            DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
-        let datanode = builder.build().await.context(StartDatanodeSnafu)?;
+        let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
+            .with_kv_backend(kv_backend.clone())
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),

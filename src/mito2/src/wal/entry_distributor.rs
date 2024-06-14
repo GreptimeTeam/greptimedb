@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::WalEntry;
 use async_stream::stream;
 use common_telemetry::{debug, error};
 use futures::future::join_all;
-use snafu::{ensure, OptionExt};
+use snafu::OptionExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
@@ -99,7 +97,6 @@ impl WalEntryDistributor {
 /// Receives the Wal entries from [WalEntryDistributor].
 #[derive(Debug)]
 pub(crate) struct WalEntryReceiver {
-    region_id: RegionId,
     /// Receives the [Entry] from the [WalEntryDistributor].
     entry_receiver: Option<Receiver<Entry>>,
     /// Sends the `start_id` to the [WalEntryDistributor].
@@ -107,13 +104,8 @@ pub(crate) struct WalEntryReceiver {
 }
 
 impl WalEntryReceiver {
-    pub fn new(
-        region_id: RegionId,
-        entry_receiver: Receiver<Entry>,
-        arg_sender: oneshot::Sender<EntryId>,
-    ) -> Self {
+    pub fn new(entry_receiver: Receiver<Entry>, arg_sender: oneshot::Sender<EntryId>) -> Self {
         Self {
-            region_id,
             entry_receiver: Some(entry_receiver),
             arg_sender: Some(arg_sender),
         }
@@ -121,8 +113,8 @@ impl WalEntryReceiver {
 }
 
 impl WalEntryReader for WalEntryReceiver {
-    fn read(&mut self, provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
-        let mut arg_sender =
+    fn read(&mut self, _provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
+        let arg_sender =
             self.arg_sender
                 .take()
                 .with_context(|| error::InvalidWalReadRequestSnafu {
@@ -205,7 +197,7 @@ pub fn build_wal_entry_distributor_and_receivers(
 
         senders.insert(region_id, entry_sender);
         arg_receivers.push((region_id, arg_receiver));
-        readers.push(WalEntryReceiver::new(region_id, entry_receiver, arg_sender));
+        readers.push(WalEntryReceiver::new(entry_receiver, arg_sender));
     }
 
     (
@@ -223,7 +215,7 @@ pub fn build_wal_entry_distributor_and_receivers(
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::{Mutation, OpType};
+    use api::v1::{Mutation, OpType, WalEntry};
     use futures::{stream, TryStreamExt};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
@@ -244,7 +236,7 @@ mod tests {
     }
 
     impl RawEntryReader for MockRawEntryReader {
-        fn read(&self, provider: &Provider, _start_id: EntryId) -> Result<EntryStream<'static>> {
+        fn read(&self, _provider: &Provider, _start_id: EntryId) -> Result<EntryStream<'static>> {
             let stream = stream::iter(self.entries.clone().into_iter().map(Ok));
             Ok(Box::pin(stream))
         }

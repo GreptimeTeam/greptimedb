@@ -155,7 +155,6 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
-          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -203,7 +202,6 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
-          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -277,16 +275,39 @@ jobs:
           version: current
 
   distributed-fuzztest: 
-    name: Fuzz Test (Distributed, Disk)
+    name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
     strategy:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+        mode: 
+          - name: "Disk"
+            minio: false
+            kafka: false
+            values: "with-disk.yaml"
+          - name: "Minio"
+            minio: true
+            kafka: false
+            values: "with-minio.yaml"
+          - name: "Minio with Cache"
+            minio: true
+            kafka: false
+            values: "with-minio-and-cache.yaml"
+          - name: "Remote WAL"
+            minio: true
+            kafka: true
+            values: "with-remote-wal.yaml"
     steps:
       - uses: actions/checkout@v4
       - name: Setup Kind
         uses: ./.github/actions/setup-kind
+      - if: matrix.mode.minio
+        name: Setup Minio
+        uses: ./.github/actions/setup-minio
+      - if: matrix.mode.kafka
+        name: Setup Kafka cluser
+        uses: ./.github/actions/setup-kafka-cluster
       - name: Setup Etcd cluser
         uses: ./.github/actions/setup-etcd-cluster
       # Prepares for fuzz tests
@@ -301,7 +322,6 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "fuzz-test-targets"
-          cache-targets: "false"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -327,6 +347,22 @@ jobs:
             pod -l app.kubernetes.io/instance=etcd \
             --timeout=120s \
             -n etcd-cluster
+      - if: matrix.mode.minio
+        name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
+      - if: matrix.mode.kafka
+        name: Wait for kafka
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=kafka \
+            --timeout=120s \
+            -n kafka-cluster
       - name: Print etcd info
         shell: bash
         run: kubectl get all --show-labels -n etcd-cluster
@@ -335,6 +371,7 @@ jobs:
         uses: ./.github/actions/setup-greptimedb-cluster
         with:
           image-registry: localhost:5001
+          values-filename: ${{ matrix.mode.values }}
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
@@ -360,7 +397,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-tests-kind-logs-${{ matrix.target }}
+          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
           path: /tmp/kind
           retention-days: 3
       - name: Delete cluster

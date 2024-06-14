@@ -151,16 +151,17 @@ pub enum Error {
         error: ArrowError,
     },
 
-    #[snafu(display("Failed to write to buffer"))]
-    WriteBuffer {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_datasource::error::Error,
-    },
-
     #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write parquet file"))]
+    WriteParquet {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
         #[snafu(implicit)]
@@ -808,7 +809,7 @@ impl ErrorExt for Error {
             | BuildEntry { .. } => StatusCode::Internal,
             OpenRegion { source, .. } => source.status_code(),
 
-            WriteBuffer { source, .. } => source.status_code(),
+            WriteParquet { .. } => StatusCode::Internal,
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
             SerializeField { .. } => StatusCode::Internal,

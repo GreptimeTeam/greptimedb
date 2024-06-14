@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use api::region::RegionResponse;
-use api::v1::region::{QueryRequest, RegionRequest};
+use api::v1::region::RegionRequest;
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use snafu::{ResultExt, Snafu};

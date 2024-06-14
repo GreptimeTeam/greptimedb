@@ -65,10 +65,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // We are already in the worker loop so we can set the state first.
         region.switch_state_to_writable(RegionState::Truncating);
 
-        if let Err(e) = truncate_result.result {
-            // Unable to truncate the region.
-            truncate_result.sender.send(Err(e));
-            return;
+        match truncate_result.result {
+            Ok(()) => {
+                // Applies the truncate action to the region.
+                region.version_control.truncate(
+                    truncate_result.truncated_entry_id,
+                    truncate_result.truncated_sequence,
+                    &region.memtable_builder,
+                );
+            }
+            Err(e) => {
+                // Unable to truncate the region.
+                truncate_result.sender.send(Err(e));
+                return;
+            }
         }
 
         // Notifies flush scheduler.

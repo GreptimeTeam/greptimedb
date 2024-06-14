@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, Mode};
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
@@ -142,11 +142,15 @@ where
         };
 
         let user_provider = self.plugins.get::<UserProviderRef>();
+        let runtime = match opts.mode {
+            Mode::Standalone => Some(builder.runtime().clone()),
+            _ => None,
+        };
 
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
-            builder.runtime().clone(),
+            runtime,
         );
 
         let grpc_server = builder

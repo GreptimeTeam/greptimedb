@@ -46,10 +46,10 @@ const DEFAULT_REPLAY_TIMEOUT_SECS: u64 = 10;
 /// - `from_peer`:  the source peer id
 /// - `to_peer`:  the target peer id
 #[admin_fn(
-    name = "MigrateRegionFunction",
-    display_name = "migrate_region",
-    sig_fn = "signature",
-    ret = "string"
+    name = MigrateRegionFunction,
+    display_name = migrate_region,
+    sig_fn = signature,
+    ret = string
 )]
 pub(crate) async fn migrate_region(
     procedure_service_handler: &ProcedureServiceHandlerRef,

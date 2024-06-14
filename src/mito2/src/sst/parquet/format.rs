@@ -77,8 +77,8 @@ impl WriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
-    pub(crate) fn arrow_schema(&self) -> SchemaRef {
-        self.arrow_schema.clone()
+    pub(crate) fn arrow_schema(&self) -> &SchemaRef {
+        &self.arrow_schema
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
@@ -700,7 +700,7 @@ mod tests {
     fn test_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
         let write_format = WriteFormat::new(metadata);
-        assert_eq!(build_test_arrow_schema(), write_format.arrow_schema());
+        assert_eq!(&build_test_arrow_schema(), write_format.arrow_schema());
     }
 
     #[test]

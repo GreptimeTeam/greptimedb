@@ -16,12 +16,10 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
-use common_wal::options::{KafkaWalOptions, WalOptions};
 use futures::stream::BoxStream;
-use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
-use store_api::logstore::provider::{KafkaProvider, Provider, RaftEngineProvider};
+use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio_stream::StreamExt;
@@ -119,12 +117,9 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use common_wal::options::WalOptions;
-    use futures::stream;
+    use futures::{stream, TryStreamExt};
     use store_api::logstore::entry::{Entry, NaiveEntry};
-    use store_api::logstore::{
-        AppendBatchResponse, AppendResponse, EntryId, LogStore, SendableEntryStream,
-    };
+    use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
     use store_api::storage::RegionId;
 
     use super::*;
@@ -145,24 +140,24 @@ mod tests {
 
         async fn append_batch(
             &self,
-            entries: Vec<Entry>,
+            _entries: Vec<Entry>,
         ) -> Result<AppendBatchResponse, Self::Error> {
             unreachable!()
         }
 
         async fn read(
             &self,
-            provider: &Provider,
-            id: EntryId,
+            _provider: &Provider,
+            _id: EntryId,
         ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error> {
             Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
         }
 
-        async fn create_namespace(&self, ns: &Provider) -> Result<(), Self::Error> {
+        async fn create_namespace(&self, _ns: &Provider) -> Result<(), Self::Error> {
             unreachable!()
         }
 
-        async fn delete_namespace(&self, ns: &Provider) -> Result<(), Self::Error> {
+        async fn delete_namespace(&self, _ns: &Provider) -> Result<(), Self::Error> {
             unreachable!()
         }
 
@@ -172,18 +167,18 @@ mod tests {
 
         async fn obsolete(
             &self,
-            provider: &Provider,
-            entry_id: EntryId,
+            _provider: &Provider,
+            _entry_id: EntryId,
         ) -> Result<(), Self::Error> {
             unreachable!()
         }
 
         fn entry(
             &self,
-            data: &mut Vec<u8>,
-            entry_id: EntryId,
-            region_id: RegionId,
-            provider: &Provider,
+            _data: &mut Vec<u8>,
+            _entry_id: EntryId,
+            _region_id: RegionId,
+            _provider: &Provider,
         ) -> Result<Entry, Self::Error> {
             unreachable!()
         }

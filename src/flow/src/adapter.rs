@@ -265,7 +265,7 @@ impl FlownodeManager {
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
             // TODO(discord9): instead of auto build table from request schema, actually build table
             // before `create flow` to be able to assign pk and ts etc.
-            let (primary_keys, schema, is_auto_create) = if let Some(table_id) = self
+            let (primary_keys, schema, is_ts_placeholder) = if let Some(table_id) = self
                 .table_info_source
                 .get_table_id_from_name(&table_name)
                 .await?
@@ -317,7 +317,12 @@ impl FlownodeManager {
                     .map(|v| {
                         v.column_indices
                             .iter()
-                            .map(|i| format!("Col_{i}"))
+                            .map(|i| {
+                                schema
+                                    .get_name(*i)
+                                    .clone()
+                                    .unwrap_or_else(|| format!("Col_{i}"))
+                            })
                             .collect_vec()
                     })
                     .unwrap_or_default();
@@ -326,15 +331,8 @@ impl FlownodeManager {
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 );
-                // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
-                let ts_col = ColumnSchema::new(
-                    AUTO_CREATED_PLACEHOLDER_TS_COL,
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true);
 
-                let wout_ts = schema
+                let original_schema = schema
                     .typ()
                     .column_types
                     .clone()
@@ -345,16 +343,33 @@ impl FlownodeManager {
                             .names
                             .get(idx)
                             .cloned()
+                            .flatten()
                             .unwrap_or(format!("Col_{}", idx));
-                        ColumnSchema::new(name, typ.scalar_type, typ.nullable)
+                        let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
+                        if schema.typ().time_index == Some(idx) {
+                            ret.with_time_index(true)
+                        } else {
+                            ret
+                        }
                     })
                     .collect_vec();
 
-                let mut with_ts = wout_ts.clone();
-                with_ts.push(update_at);
-                with_ts.push(ts_col);
+                let mut with_auto_added_col = original_schema.clone();
+                with_auto_added_col.push(update_at);
 
-                (primary_keys, with_ts, true)
+                // if no time index, add one as placeholder
+                let no_time_index = schema.typ().time_index.is_none();
+                if no_time_index {
+                    let ts_col = ColumnSchema::new(
+                        AUTO_CREATED_PLACEHOLDER_TS_COL,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        true,
+                    )
+                    .with_time_index(true);
+                    with_auto_added_col.push(ts_col);
+                }
+
+                (primary_keys, with_auto_added_col, no_time_index)
             };
             let schema_len = schema.len();
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
@@ -377,7 +392,7 @@ impl FlownodeManager {
                                     now,
                                 ))]);
                                 // ts col, if auto create
-                                if is_auto_create {
+                                if is_ts_placeholder {
                                     ensure!(
                                         row.len() == schema_len - 1,
                                         InternalSnafu {
@@ -508,12 +523,13 @@ impl FlownodeManager {
         debug!("Starting to run");
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            debug!("call run_available in run every second");
-            self.run_available(true).await.unwrap();
-            debug!("call send_writeback_requests in run every second");
+            if let Err(err) = self.run_available(true).await {
+                common_telemetry::error!(err;"Run available errors");
+            }
             // TODO(discord9): error handling
-            self.send_writeback_requests().await.unwrap();
-            debug!("call log_all_errors in run every second");
+            if let Err(err) = self.send_writeback_requests().await {
+                common_telemetry::error!(err;"Send writeback request errors");
+            };
             self.log_all_errors().await;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -596,6 +612,7 @@ impl FlownodeManager {
                 break;
             }
         }
+        self.node_context.write().await.remove_flow(flow_id);
         Ok(())
     }
 
@@ -642,8 +659,9 @@ impl FlownodeManager {
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
+
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-        node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
+        node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
 
         let _ = comment;
         let _ = flow_options;

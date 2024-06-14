@@ -27,6 +27,7 @@ snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 statrs = "0.16"
+store-api.workspace = true
 
 [dev-dependencies]
 common-base.workspace = true

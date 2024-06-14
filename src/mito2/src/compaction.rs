@@ -58,7 +58,6 @@ use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileId, Level};
-use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
@@ -71,12 +70,10 @@ pub struct CompactionRequest {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
     pub(crate) waiters: Vec<OutputTx>,
-    pub(crate) file_purger: FilePurgerRef,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
-    pub(crate) version_control: VersionControlRef,
     pub(crate) listener: WorkerListener,
 }
 
@@ -142,7 +139,6 @@ impl CompactionScheduler {
         compact_options: compact_request::Options,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
-        file_purger: &FilePurgerRef,
         waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
     ) -> Result<()> {
@@ -153,12 +149,8 @@ impl CompactionScheduler {
         }
 
         // The region can compact directly.
-        let mut status = CompactionStatus::new(
-            region_id,
-            version_control.clone(),
-            access_layer.clone(),
-            file_purger.clone(),
-        );
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             waiter,
@@ -330,8 +322,6 @@ struct CompactionStatus {
     version_control: VersionControlRef,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
-    /// File purger of the region.
-    file_purger: FilePurgerRef,
     /// Compaction pending to schedule.
     ///
     /// For simplicity, we merge all pending compaction requests into one.
@@ -344,13 +334,11 @@ impl CompactionStatus {
         region_id: RegionId,
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
-        file_purger: FilePurgerRef,
     ) -> CompactionStatus {
         CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            file_purger,
             pending_compaction: None,
         }
     }
@@ -392,11 +380,9 @@ impl CompactionStatus {
             access_layer: self.access_layer.clone(),
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
-            file_purger: self.file_purger.clone(),
             start_time,
             cache_manager,
             manifest_ctx: manifest_ctx.clone(),
-            version_control: self.version_control.clone(),
             listener,
         };
 
@@ -532,13 +518,10 @@ fn get_expired_ssts(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::schedule::scheduler::{Job, Scheduler};
-    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
 
     #[tokio::test]
@@ -547,7 +530,6 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
-        let purger = builder.file_purger();
 
         // Nothing to compact.
         let version_control = Arc::new(builder.build());
@@ -562,7 +544,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 waiter,
                 &manifest_ctx,
             )
@@ -581,7 +562,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 waiter,
                 &manifest_ctx,
             )
@@ -589,29 +569,6 @@ mod tests {
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
-    }
-
-    #[derive(Default)]
-    struct VecScheduler {
-        jobs: Mutex<Vec<Job>>,
-    }
-
-    impl VecScheduler {
-        fn num_jobs(&self) -> usize {
-            self.jobs.lock().unwrap().len()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Scheduler for VecScheduler {
-        fn schedule(&self, job: Job) -> Result<()> {
-            self.jobs.lock().unwrap().push(job);
-            Ok(())
-        }
-
-        async fn stop(&self, _await_termination: bool) -> Result<()> {
-            Ok(())
-        }
     }
 
     #[tokio::test]
@@ -644,7 +601,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
@@ -673,7 +629,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
@@ -705,7 +660,6 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                &purger,
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
