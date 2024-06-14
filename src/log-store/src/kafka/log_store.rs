@@ -14,6 +14,7 @@
 
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
@@ -21,8 +22,6 @@ use futures::future::try_join_all;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
-use rskafka::client::ClientBuilder;
-use rskafka::BackoffConfig;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
@@ -31,58 +30,34 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
-use super::producer_registry::OrderedBatchProducerRef;
-use super::util::record::convert_to_kafka_records;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::producer_registry::ProducerRegistry;
+use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
+    convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
 };
 use crate::metrics;
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {
-    config: DatanodeKafkaConfig,
-    /// TODO(weny): remove it.
-    /// Manages kafka clients through which the log store contact the Kafka cluster.
+    /// The manager of topic clients.
     client_manager: ClientManagerRef,
-
-    producer_registry: ProducerRegistry,
+    /// The max size of a batch.
+    max_batch_size: usize,
+    /// The consumer wait timeout.
+    consumer_wait_timeout: Duration,
 }
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
     pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
-        let backoff_config = BackoffConfig {
-            init_backoff: config.backoff.init,
-            max_backoff: config.backoff.max,
-            base: config.backoff.base as f64,
-            deadline: config.backoff.deadline,
-        };
-        let broker_endpoints = common_wal::resolve_to_ipv4(&config.broker_endpoints)
-            .await
-            .context(error::ResolveKafkaEndpointSnafu)?;
-        let client = ClientBuilder::new(broker_endpoints)
-            .backoff_config(backoff_config)
-            .build()
-            .await
-            .with_context(|_| error::BuildClientSnafu {
-                broker_endpoints: config.broker_endpoints.clone(),
-            })?;
-        let producer_registry = ProducerRegistry::new(
-            client,
-            config.max_batch_size.as_bytes() as usize,
-            config.producer_channel_size,
-            config.producer_request_batch_size,
-            config.compression,
-        );
+        let client_manager = Arc::new(ClientManager::try_new(config).await?);
 
         Ok(Self {
-            producer_registry,
-            client_manager: Arc::new(ClientManager::try_new(config).await?),
-            config: config.clone(),
+            client_manager,
+            max_batch_size: config.max_batch_size.as_bytes() as usize,
+            consumer_wait_timeout: config.consumer_wait_timeout,
         })
     }
 }
@@ -142,8 +117,7 @@ impl LogStore for KafkaLogStore {
                 actual: provider.type_name(),
             })?;
 
-        let max_data_size =
-            self.client_manager.config.max_batch_size.as_bytes() as usize - ESTIMATED_META_SIZE;
+        let max_data_size = self.max_batch_size - ESTIMATED_META_SIZE;
         Ok(build_entry(
             data,
             entry_id,
@@ -184,7 +158,12 @@ impl LogStore for KafkaLogStore {
             let region_id = entry.region_id();
 
             if let hash_map::Entry::Vacant(e) = region_producers.entry(region_id) {
-                let producer = self.producer_registry.get_or_register(&provider).await?;
+                let producer = self
+                    .client_manager
+                    .get_or_insert(&provider)
+                    .await?
+                    .producer()
+                    .clone();
                 e.insert(producer);
             };
             region_grouped_records
@@ -242,9 +221,9 @@ impl LogStore for KafkaLogStore {
         // Gets the client associated with the topic.
         let client = self
             .client_manager
-            .get_or_insert(&provider.topic)
+            .get_or_insert(provider)
             .await?
-            .raw_client
+            .client()
             .clone();
 
         // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
@@ -277,8 +256,8 @@ impl LogStore for KafkaLogStore {
         }
 
         let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
-            .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
-            .with_max_wait_ms(self.config.consumer_wait_timeout.as_millis() as i32)
+            .with_max_batch_size(self.max_batch_size as i32)
+            .with_max_wait_ms(self.consumer_wait_timeout.as_millis() as i32)
             .build();
 
         debug!(

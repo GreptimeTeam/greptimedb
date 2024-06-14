@@ -177,7 +177,10 @@ impl BackgroundProducerWorker {
     }
 }
 
+pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
+
 /// [`OrderedBatchProducer`] attempts to aggregate multiple produce requests together
+#[derive(Debug)]
 pub(crate) struct OrderedBatchProducer {
     sender: Sender<ProduceRequest>,
     /// Used to control the [`BackgroundProducerWorker`].

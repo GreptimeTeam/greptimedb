@@ -131,6 +131,12 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to found client"))]
+    ClientNotFount {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to resolve Kafka broker endpoint."))]
     ResolveKafkaEndpoint { source: common_wal::error::Error },
 

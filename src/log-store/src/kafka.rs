@@ -15,7 +15,6 @@
 pub(crate) mod client_manager;
 pub mod log_store;
 pub(crate) mod producer;
-pub(crate) mod producer_registry;
 pub(crate) mod util;
 
 use serde::{Deserialize, Serialize};

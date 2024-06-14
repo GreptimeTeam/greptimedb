@@ -16,15 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
-use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
+use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
+use rskafka::client::ClientBuilder;
 use rskafka::BackoffConfig;
-use snafu::ResultExt;
-use tokio::sync::RwLock;
+use snafu::{OptionExt, ResultExt};
+use store_api::logstore::provider::KafkaProvider;
+use tokio::sync::{Notify, RwLock};
 
+use super::producer::OrderedBatchProducer;
 use crate::error::{
-    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
+    self, BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
 };
+use crate::kafka::producer::OrderedBatchProducerRef;
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
@@ -33,30 +36,44 @@ const DEFAULT_PARTITION: i32 = 0;
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
 
-/// A client through which to contact Kafka cluster. Each client associates with one partition of a topic.
-/// Since a topic only has one partition in our design, the mapping between clients and topics are one-one.
 #[derive(Debug, Clone)]
+/// Topic client.
 pub(crate) struct Client {
-    /// A raw client used to construct a batch producer and/or a stream consumer for a specific topic.
-    pub(crate) raw_client: Arc<PartitionClient>,
+    client: Arc<PartitionClient>,
+    producer: OrderedBatchProducerRef,
 }
 
 impl Client {
-    /// Creates a Client from the raw client.
-    pub(crate) fn new(raw_client: Arc<PartitionClient>) -> Self {
-        Self { raw_client }
+    pub(crate) fn client(&self) -> &Arc<PartitionClient> {
+        &self.client
     }
+
+    pub(crate) fn producer(&self) -> &OrderedBatchProducerRef {
+        &self.producer
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ClientInstance {
+    Initializing(Arc<Notify>),
+    Ready(Client),
 }
 
 /// Manages client construction and accesses.
 #[derive(Debug)]
 pub(crate) struct ClientManager {
-    pub(crate) config: DatanodeKafkaConfig,
-    /// Top-level client in kafka. All clients are constructed by this client.
-    client_factory: RsKafkaClient,
-    /// A pool maintaining a collection of clients.
-    /// Key: a topic. Value: the associated client of the topic.
-    client_pool: RwLock<HashMap<String, Client>>,
+    client: rskafka::client::Client,
+    clients: RwLock<HashMap<Arc<KafkaProvider>, ClientInstance>>,
+
+    producer_channel_size: usize,
+    producer_request_batch_size: usize,
+    flush_batch_size: usize,
+    compression: Compression,
+}
+
+enum Role {
+    Creator(Arc<Notify>),
+    Waiter(Arc<Notify>),
 }
 
 impl ClientManager {
@@ -81,48 +98,107 @@ impl ClientManager {
             })?;
 
         Ok(Self {
-            config: config.clone(),
-            client_factory: client,
-            client_pool: RwLock::new(HashMap::new()),
+            client,
+            clients: RwLock::new(HashMap::new()),
+            producer_channel_size: config.producer_channel_size,
+            producer_request_batch_size: config.producer_request_batch_size,
+            flush_batch_size: config.max_batch_size.as_bytes() as usize,
+            compression: config.compression,
         })
+    }
+
+    async fn wait(&self, provider: &Arc<KafkaProvider>, notify: Arc<Notify>) -> Result<Client> {
+        notify.notified().await;
+        match self
+            .clients
+            .read()
+            .await
+            .get(provider)
+            .cloned()
+            .context(error::ClientNotFountSnafu)?
+        {
+            ClientInstance::Initializing(_) => unreachable!(),
+            ClientInstance::Ready(client) => Ok(client),
+        }
+    }
+
+    async fn try_insert(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
+        let role = {
+            let mut clients = self.clients.write().await;
+            match clients.get(provider).cloned() {
+                Some(client) => match client {
+                    ClientInstance::Initializing(notify) => Role::Waiter(notify),
+                    ClientInstance::Ready(client) => return Ok(client),
+                },
+                None => {
+                    let notify = Arc::new(Notify::new());
+                    clients.insert(
+                        provider.clone(),
+                        ClientInstance::Initializing(notify.clone()),
+                    );
+                    Role::Creator(notify)
+                }
+            }
+        };
+
+        match role {
+            Role::Creator(notify) => {
+                let client = self.try_create_client(provider).await?;
+                self.clients
+                    .write()
+                    .await
+                    .insert(provider.clone(), ClientInstance::Ready(client.clone()));
+                notify.notify_waiters();
+                Ok(client)
+            }
+            Role::Waiter(notify) => self.wait(provider, notify).await,
+        }
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
-    pub(crate) async fn get_or_insert(&self, topic: &String) -> Result<Client> {
-        {
-            let client_pool = self.client_pool.read().await;
-            if let Some(client) = client_pool.get(topic) {
-                return Ok(client.clone());
-            }
-        }
+    pub(crate) async fn get_or_insert(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
+        let instance = {
+            let client_pool = self.clients.read().await;
+            client_pool.get(provider).cloned()
+        };
 
-        let mut client_pool = self.client_pool.write().await;
-        match client_pool.get(topic) {
-            Some(client) => Ok(client.clone()),
-            None => {
-                let client = self.try_create_client(topic).await?;
-                client_pool.insert(topic.clone(), client.clone());
-                Ok(client)
-            }
-        }
+        if let Some(instance) = instance {
+            return match instance {
+                ClientInstance::Initializing(notify) => self.wait(provider, notify).await,
+                ClientInstance::Ready(client) => Ok(client),
+            };
+        };
+        self.try_insert(provider).await
     }
 
-    async fn try_create_client(&self, topic: &String) -> Result<Client> {
+    async fn try_create_client(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
         // Sets to Retry to retry connecting if the kafka cluter replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
-        let raw_client = self
-            .client_factory
-            .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
+        let client = self
+            .client
+            .partition_client(
+                provider.topic.as_str(),
+                DEFAULT_PARTITION,
+                UnknownTopicHandling::Retry,
+            )
             .await
             .context(BuildPartitionClientSnafu {
-                topic,
+                topic: &provider.topic,
                 partition: DEFAULT_PARTITION,
             })
             .map(Arc::new)?;
 
-        Ok(Client::new(raw_client))
+        let producer = Arc::new(OrderedBatchProducer::new(
+            client.clone(),
+            self.compression,
+            self.producer_channel_size,
+            self.producer_request_batch_size,
+            self.flush_batch_size,
+        ));
+
+        Ok(Client { client, producer })
     }
 }
 
@@ -194,12 +270,16 @@ mod tests {
 
                 // Gets all clients sequentially.
                 for (_, topic) in region_topic {
-                    manager.get_or_insert(topic).await.unwrap();
+                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+                    manager.get_or_insert(&provider).await.unwrap();
                 }
 
                 // Ensures all clients exist.
-                let client_pool = manager.client_pool.read().await;
-                let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+                let client_pool = manager.clients.read().await;
+                let all_exist = topics.iter().all(|topic| {
+                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+                    client_pool.contains_key(&provider)
+                });
                 assert!(all_exist);
             })
         })
@@ -225,17 +305,22 @@ mod tests {
                     .map(|topic| {
                         let manager = manager.clone();
                         let barrier = barrier.clone();
+
                         tokio::spawn(async move {
                             barrier.wait().await;
-                            assert!(manager.get_or_insert(&topic).await.is_ok());
+                            let provider = Arc::new(KafkaProvider::new(topic));
+                            assert!(manager.get_or_insert(&provider).await.is_ok());
                         })
                     })
                     .collect::<Vec<_>>();
                 futures::future::try_join_all(tasks).await.unwrap();
 
                 // Ensures all clients exist.
-                let client_pool = manager.client_pool.read().await;
-                let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+                let client_pool = manager.clients.read().await;
+                let all_exist = topics.iter().all(|topic| {
+                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+                    client_pool.contains_key(&provider)
+                });
                 assert!(all_exist);
             })
         })
