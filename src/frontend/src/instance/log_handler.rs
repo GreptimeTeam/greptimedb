@@ -28,7 +28,7 @@ use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use super::Instance;
+use crate::instance::Instance;
 
 #[async_trait]
 impl LogHandler for Instance {
