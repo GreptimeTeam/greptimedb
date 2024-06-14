@@ -49,6 +49,8 @@ use crate::error::{
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
 
+/// Pipeline version. string formatted as iso8601 timestamp with nanosecond precision
+/// if the version is None, it means the latest version of the pipeline
 pub type PipelineVersion = Option<TimestampNanosecond>;
 
 pub type PipelineTableRef = Arc<PipelineTable>;
@@ -209,7 +211,7 @@ impl PipelineTable {
 
     fn generate_pipeline_cache_key(schema: &str, name: &str, version: PipelineVersion) -> String {
         match version {
-            Some(version) => format!("{}/{}/{}", schema, name, Into::<i64>::into(version)),
+            Some(version) => format!("{}/{}/{}", schema, name, i64::from(version)),
             None => format!("{}/{}/latest", schema, name),
         }
     }

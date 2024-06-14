@@ -437,7 +437,7 @@ impl Inserter {
         let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
         let mut create_tables = vec![];
         let mut alter_tables = vec![];
-        let _timer = crate::metrics::CREATE_OR_ALTER_TABLES
+        let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
         for req in &requests.inserts {
@@ -636,17 +636,11 @@ impl Inserter {
 
         match res {
             Ok(table) => {
-                info!(
-                    "Successfully created table {}.{}.{}",
-                    table_ref.catalog, table_ref.schema, table_ref.table,
-                );
+                info!("Successfully created table {}", table_ref,);
                 Ok(table)
             }
             Err(err) => {
-                error!(
-                    "Failed to create table {}.{}.{}: {}",
-                    table_ref.catalog, table_ref.schema, table_ref.table, err
-                );
+                error!(err; "Failed to create table {}", table_ref);
                 Err(err)
             }
         }
