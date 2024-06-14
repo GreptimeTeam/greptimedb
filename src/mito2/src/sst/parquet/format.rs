@@ -33,19 +33,14 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array, UInt64Array};
-use datatypes::arrow::datatypes::{
-    DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef, UInt16Type,
-};
+use datatypes::arrow::datatypes::{SchemaRef, UInt16Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
 use parquet::file::metadata::RowGroupMetaData;
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::storage::consts::{
-    OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
-};
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
@@ -53,6 +48,7 @@ use crate::error::{
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::sst::to_sst_arrow_schema;
 
 /// Number of columns that have fixed positions.
 ///
@@ -114,7 +110,7 @@ impl WriteFormat {
 }
 
 /// Helper for reading the SST format.
-pub(crate) struct ReadFormat {
+pub struct ReadFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
@@ -130,7 +126,7 @@ pub(crate) struct ReadFormat {
 
 impl ReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub(crate) fn new(
+    pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> ReadFormat {
@@ -184,24 +180,24 @@ impl ReadFormat {
     ///
     /// This schema is computed from the region metadata but should be the same
     /// as the arrow schema decoded from the file metadata.
-    pub(crate) fn arrow_schema(&self) -> &SchemaRef {
+    pub fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Gets the metadata of the SST.
-    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
+    pub fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
     }
 
     /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
+    pub fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
     }
 
     /// Convert a arrow record batch into `batches`.
     ///
     /// Note that the `record_batch` may only contains a subset of columns if it is projected.
-    pub(crate) fn convert_record_batch(
+    pub fn convert_record_batch(
         &self,
         record_batch: &RecordBatch,
         batches: &mut VecDeque<Batch>,
@@ -282,7 +278,7 @@ impl ReadFormat {
     }
 
     /// Returns min values of specific column in row groups.
-    pub(crate) fn min_values(
+    pub fn min_values(
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
@@ -302,7 +298,7 @@ impl ReadFormat {
     }
 
     /// Returns max values of specific column in row groups.
-    pub(crate) fn max_values(
+    pub fn max_values(
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
@@ -322,7 +318,7 @@ impl ReadFormat {
     }
 
     /// Returns null counts of specific column in row groups.
-    pub(crate) fn null_counts(
+    pub fn null_counts(
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
@@ -516,28 +512,15 @@ impl ReadFormat {
     }
 }
 
-/// Gets the arrow schema to store in parquet.
-fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
-    let fields = Fields::from_iter(
-        metadata
-            .schema
-            .arrow_schema()
-            .fields()
-            .iter()
-            .zip(&metadata.column_metadatas)
-            .filter_map(|(field, column_meta)| {
-                if column_meta.semantic_type == SemanticType::Field {
-                    Some(field.clone())
-                } else {
-                    // We have fixed positions for tags (primary key) and time index.
-                    None
-                }
-            })
-            .chain([metadata.time_index_field()])
-            .chain(internal_fields()),
-    );
-
-    Arc::new(Schema::new(fields))
+#[cfg(test)]
+impl ReadFormat {
+    /// Creates a helper with existing `metadata` and all columns.
+    pub fn new_with_all_columns(metadata: RegionMetadataRef) -> ReadFormat {
+        Self::new(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+        )
+    }
 }
 
 /// Compute offsets of different primary keys in the array.
@@ -563,25 +546,6 @@ fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt16Type>) -> Result<Ve
     Ok(offsets)
 }
 
-/// Fields for internal columns.
-fn internal_fields() -> [FieldRef; 3] {
-    // Internal columns are always not null.
-    [
-        Arc::new(Field::new_dictionary(
-            PRIMARY_KEY_COLUMN_NAME,
-            ArrowDataType::UInt16,
-            ArrowDataType::Binary,
-            false,
-        )),
-        Arc::new(Field::new(
-            SEQUENCE_COLUMN_NAME,
-            ArrowDataType::UInt64,
-            false,
-        )),
-        Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
-    ]
-}
-
 /// Creates a new array for specific `primary_key`.
 fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
     let values = Arc::new(BinaryArray::from_iter_values([primary_key]));
@@ -595,7 +559,7 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
 mod tests {
     use api::v1::OpType;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
-    use datatypes::arrow::datatypes::TimeUnit;
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
