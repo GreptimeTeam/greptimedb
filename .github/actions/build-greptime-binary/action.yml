@@ -44,8 +44,8 @@ runs:
           CARGO_PROFILE=${{ inputs.cargo-profile }} \
           FEATURES=${{ inputs.features }} \
           BASE_IMAGE=${{ inputs.base-image }} \
-          IMAGE_NAMESPACE=${{ input.image-namespace }} \
-          IMAGE_REGISTRY=${{ input.image-registry }}
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_REGISTRY=${{ inputs.image-registry }}
 
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts
@@ -63,7 +63,9 @@ runs:
       shell: bash
       if: ${{ inputs.build-android-artifacts == 'true' }}
       run: |
-        cd ${{ inputs.working-dir }} && make strip-android-bin
+        cd ${{ inputs.working-dir }} && make strip-android-bin \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_REGISTRY=${{ inputs.image-registry }}
 
     - name: Upload android artifacts
       uses: ./.github/actions/upload-artifacts
