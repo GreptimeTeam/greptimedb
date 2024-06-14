@@ -39,7 +39,7 @@ use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
 };
 use crate::read::{ScannerMetrics, Source};
-use crate::sst::file::FileMeta;
+use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -253,14 +253,14 @@ async fn maybe_init_parts(
 /// is no output ordering guarantee of each partition.
 #[derive(Default)]
 struct UnorderedDistributor {
-    file_ranges: Vec<FileRange>,
+    file_ranges: Vec<Box<dyn FileRange>>,
 }
 
 impl FileRangeCollector for UnorderedDistributor {
     fn append_file_ranges(
         &mut self,
-        _file_meta: &FileMeta,
-        file_ranges: impl Iterator<Item = FileRange>,
+        _time_range: &FileTimeRange,
+        file_ranges: impl Iterator<Item = Box<dyn FileRange>>,
     ) {
         self.file_ranges.extend(file_ranges);
     }
@@ -304,11 +304,12 @@ impl UnorderedDistributor {
             if i == scan_parts.len() {
                 scan_parts.push(ScanPart {
                     memtables: Vec::new(),
-                    file_ranges: smallvec![ranges.to_vec()],
+                    file_ranges: smallvec![ranges.iter().map(|r| r.clone_box()).collect()],
                     time_range: None,
                 });
             } else {
-                scan_parts[i].file_ranges = smallvec![ranges.to_vec()];
+                scan_parts[i].file_ranges =
+                    smallvec![ranges.iter().map(|r| r.clone_box()).collect()];
             }
         }
 

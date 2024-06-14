@@ -39,7 +39,7 @@ use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
 };
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
-use crate::sst::file::FileMeta;
+use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -109,12 +109,12 @@ impl SeqScan {
             }
 
             // Creates a stream to read the file.
-            let ranges = file.clone();
+            let ranges = file.iter().map(|r| r.clone_box()).collect::<Vec<_>>();
             let stream = try_stream! {
                 let mut reader_metrics = ReaderMetrics::default();
                 // Safety: We checked whether it is empty before.
-                let file_id = ranges[0].file_handle().file_id();
-                let region_id = ranges[0].file_handle().region_id();
+                let file_id = ranges[0].file_id();
+                let region_id = ranges[0].region_id();
                 let range_num = ranges.len();
                 for range in ranges {
                     let mut reader = range.reader().await?;
@@ -314,8 +314,8 @@ pub(crate) struct SeqDistributor {
 impl FileRangeCollector for SeqDistributor {
     fn append_file_ranges(
         &mut self,
-        file_meta: &FileMeta,
-        file_ranges: impl Iterator<Item = FileRange>,
+        time_range: &FileTimeRange,
+        file_ranges: impl Iterator<Item = Box<dyn FileRange>>,
     ) {
         // Creates a [ScanPart] for each file.
         let ranges: Vec<_> = file_ranges.collect();
@@ -326,7 +326,7 @@ impl FileRangeCollector for SeqDistributor {
         let part = ScanPart {
             memtables: Vec::new(),
             file_ranges: smallvec![ranges],
-            time_range: Some(file_meta.time_range),
+            time_range: Some(*time_range),
         };
         self.parts.push(part);
     }
@@ -473,7 +473,7 @@ fn maybe_split_parts(mut parts: Vec<ScanPart>, parallelism: usize) -> Vec<ScanPa
         for ranges in part.file_ranges[0].chunks(ranges_per_part) {
             let new_part = ScanPart {
                 memtables: Vec::new(),
-                file_ranges: smallvec![ranges.to_vec()],
+                file_ranges: smallvec![ranges.iter().map(|r| r.clone_box()).collect()],
                 time_range: part.time_range,
             };
             output_parts.push(new_part);

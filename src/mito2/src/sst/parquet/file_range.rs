@@ -23,19 +23,39 @@ use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 
 use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
+
+/// [FileRange] represents a specific range of Parquet files, either on disk (SST) or
+/// in memory.
+#[async_trait::async_trait]
+pub trait FileRange: Send + Sync + 'static {
+    /// Builds reader from file range.
+    async fn reader(&self) -> Result<RowGroupReader>;
+
+    /// Returns the helper to compat batches
+    fn compat_batch(&self) -> Option<&CompatBatch>;
+
+    /// File id of the range
+    fn file_id(&self) -> String;
+
+    /// Region id of the range.
+    fn region_id(&self) -> RegionId;
+
+    /// Clones a range since we cannot add [Clone] bound to [FileRange] trait.
+    fn clone_box(&self) -> Box<dyn FileRange>;
+}
 
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
 #[derive(Clone)]
-pub struct FileRange {
+pub struct SstFileRange {
     /// Shared context.
     context: FileRangeContextRef,
     /// Index of the row group in the SST.
@@ -44,8 +64,41 @@ pub struct FileRange {
     row_selection: Option<RowSelection>,
 }
 
-impl FileRange {
-    /// Creates a new [FileRange].
+#[async_trait::async_trait]
+impl FileRange for SstFileRange {
+    async fn reader(&self) -> Result<RowGroupReader> {
+        let parquet_reader = self
+            .context
+            .reader_builder
+            .build(self.row_group_idx, self.row_selection.clone())
+            .await?;
+
+        Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
+    }
+
+    fn compat_batch(&self) -> Option<&CompatBatch> {
+        self.context.compat_batch()
+    }
+
+    fn file_id(&self) -> String {
+        self.context
+            .reader_builder
+            .file_handle()
+            .file_id()
+            .to_string()
+    }
+
+    fn region_id(&self) -> RegionId {
+        self.context.reader_builder.file_handle().region_id()
+    }
+
+    fn clone_box(&self) -> Box<dyn FileRange> {
+        Box::new(self.clone())
+    }
+}
+
+impl SstFileRange {
+    /// Creates a new [SstFileRange].
     pub(crate) fn new(
         context: FileRangeContextRef,
         row_group_idx: usize,
@@ -56,27 +109,6 @@ impl FileRange {
             row_group_idx,
             row_selection,
         }
-    }
-
-    /// Returns a reader to read the [FileRange].
-    pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
-        let parquet_reader = self
-            .context
-            .reader_builder
-            .build(self.row_group_idx, self.row_selection.clone())
-            .await?;
-
-        Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
-    }
-
-    /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
-        self.context.compat_batch()
-    }
-
-    /// Returns the file handle of the file range.
-    pub(crate) fn file_handle(&self) -> &FileHandle {
-        self.context.reader_builder.file_handle()
     }
 }
 

@@ -43,10 +43,10 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::version::VersionRef;
-use crate::sst::file::{overlaps, FileHandle, FileMeta};
+use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 use crate::sst::index::applier::SstIndexApplierRef;
-use crate::sst::parquet::file_range::FileRange;
+use crate::sst::parquet::file_range::{FileRange, SstFileRange};
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -564,9 +564,13 @@ impl ScanInput {
             let file_ranges = row_groups
                 .into_iter()
                 .map(|(row_group_idx, row_selection)| {
-                    FileRange::new(file_range_ctx.clone(), row_group_idx, row_selection)
+                    Box::new(SstFileRange::new(
+                        file_range_ctx.clone(),
+                        row_group_idx,
+                        row_selection,
+                    )) as _
                 });
-            collector.append_file_ranges(file.meta_ref(), file_ranges);
+            collector.append_file_ranges(&file.meta_ref().time_range, file_ranges);
         }
 
         READ_SST_COUNT.observe(self.files.len() as f64);
@@ -625,7 +629,7 @@ impl ScanInput {
 
 /// Groups of file ranges. Each group in the list contains multiple file
 /// ranges to scan. File ranges in the same group may come from different files.
-pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
+pub(crate) type FileRangesGroup = SmallVec<[Vec<Box<dyn FileRange>>; 4]>;
 
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
@@ -697,8 +701,8 @@ pub(crate) trait FileRangeCollector {
     /// Appends file ranges from the **same file** to the collector.
     fn append_file_ranges(
         &mut self,
-        file_meta: &FileMeta,
-        file_ranges: impl Iterator<Item = FileRange>,
+        time_range: &FileTimeRange,
+        file_ranges: impl Iterator<Item = Box<dyn FileRange>>,
     );
 }
 
