@@ -275,6 +275,8 @@ mod tests {
             ),
             new_batch(b"k2", &[2], &[19], &[OpType::Put], &[102]),
             new_batch(b"k3", &[2], &[20], &[OpType::Put], &[202]),
+            // This batch won't increase the deleted rows count as it
+            // is filtered out by the previous batch.
             new_batch(b"k3", &[2], &[19], &[OpType::Delete], &[0]),
         ];
         let reader = VecBatchReader::new(&input);
@@ -296,8 +298,8 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(4, reader.metrics().num_unselected_rows);
-        assert_eq!(3, reader.metrics().num_deleted_rows);
+        assert_eq!(5, reader.metrics().num_unselected_rows);
+        assert_eq!(2, reader.metrics().num_deleted_rows);
 
         // Does not filter deleted.
         let reader = VecBatchReader::new(&input);
