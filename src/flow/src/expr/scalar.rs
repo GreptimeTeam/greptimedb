@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
 use common_error::ext::BoxedError;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow_array;
@@ -26,6 +27,7 @@ use datatypes::value::Value;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
 
 use crate::adapter::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
@@ -55,6 +57,8 @@ impl TypedExpr {
     /// expand multi-value expression to multiple expressions with new indices
     ///
     /// Currently it just mean expand `TumbleWindow` to `TumbleWindowFloor` and `TumbleWindowCeiling`
+    ///
+    /// TODO(discord9): test if nested reduce combine with df scalar function would cause problem
     pub fn expand_multi_value(
         input_typ: &RelationType,
         exprs: &[TypedExpr],
@@ -145,6 +149,10 @@ pub enum ScalarExpr {
     CallVariadic {
         func: VariadicFunc,
         exprs: Vec<ScalarExpr>,
+    },
+    CallDf {
+        // TODO(discord9): support shuffle
+        df_scalar_fn: DfScalarFunction,
     },
     /// Conditionally evaluated expressions.
     ///
@@ -246,10 +254,29 @@ pub struct RawDfScalarFn {
 }
 
 impl RawDfScalarFn {
+    pub fn from_proto(
+        f: &substrait::substrait_proto_df::proto::expression::ScalarFunction,
+        input_schema: &RelationDesc,
+        extensions: &FunctionExtensions,
+    ) -> Result<Self, Error> {
+        let mut buf = BytesMut::new();
+        f.encode(&mut buf)
+            .context(EncodeRelSnafu)
+            .map_err(BoxedError::new)
+            .context(crate::adapter::error::ExternalSnafu)?;
+        Ok(Self {
+            f: buf,
+            input_schema: input_schema.clone(),
+            extensions: extensions.clone(),
+        })
+    }
     fn get_fn_impl(&self) -> crate::adapter::error::Result<Arc<dyn PhysicalExpr>> {
         use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
         use substrait::substrait_proto_df::proto::Expression;
-        let f = ScalarFunction::decode(&mut self.f.as_ref()).unwrap();
+        let f = ScalarFunction::decode(&mut self.f.as_ref())
+            .context(DecodeRelSnafu)
+            .map_err(BoxedError::new)
+            .context(crate::adapter::error::ExternalSnafu)?;
 
         let input_schema = &self.input_schema;
         let extensions = &self.extensions;
@@ -310,6 +337,23 @@ impl ScalarExpr {
                 Ok(ColumnType::new_nullable(func.signature().output))
             }
             ScalarExpr::If { then, .. } => then.typ(context),
+            ScalarExpr::CallDf { df_scalar_fn } => {
+                let arrow_typ = df_scalar_fn
+                    .fn_impl
+                    // TODO(discord9): get scheme from args instead?
+                    .data_type(df_scalar_fn.df_schema.as_arrow())
+                    .map_err(|err| {
+                        DatafusionSnafu {
+                            raw: err,
+                            context: "Failed to get data type from datafusion scalar function",
+                        }
+                        .build()
+                    })?;
+                let typ = ConcreteDataType::try_from(&arrow_typ)
+                    .map_err(BoxedError::new)
+                    .context(crate::adapter::error::ExternalSnafu)?;
+                Ok(ColumnType::new_nullable(typ))
+            }
         }
     }
 }
@@ -384,6 +428,7 @@ impl ScalarExpr {
                 }
                 .fail(),
             },
+            ScalarExpr::CallDf { df_scalar_fn } => df_scalar_fn.eval(values),
         }
     }
 
@@ -552,6 +597,7 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
+            _ => Ok(()),
         }
     }
 
@@ -587,6 +633,7 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
+            _ => Ok(()),
         }
     }
 }

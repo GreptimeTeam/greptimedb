@@ -31,7 +31,8 @@ use crate::adapter::error::{
     PlanSnafu,
 };
 use crate::expr::{
-    BinaryFunc, ScalarExpr, TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
+    BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr, UnaryFunc,
+    UnmaterializableFunc, VariadicFunc,
 };
 use crate::repr::{ColumnType, RelationDesc};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
@@ -68,18 +69,27 @@ pub(crate) fn from_scalar_fn_to_df_fn_impl(
         rex_type: Some(RexType::ScalarFunction(f.clone())),
     };
     let schema = input_schema.to_df_schema()?;
-    let expr = common_runtime::block_on_bg(async {
-        // FIXME(discord9): this function have no blocking path, so it's safe to use block_on_bg
-        // since this doesn't actually blocking
-        substrait::df_logical_plan::consumer::from_substrait_rex(
-            &datafusion::prelude::SessionContext::new(),
-            &e,
-            &schema,
-            &extensions.inner_ref(),
-        )
-        .await
-    })
-    .map_err(|err| {
+
+    let handle = {
+        let e_inner = e.clone();
+        let schema_inner = schema.clone();
+        let extension_inner = extensions.clone();
+        std::thread::spawn(move || {
+            common_runtime::block_on_bg(async {
+                // FIXME(discord9): consider coloring everything async....
+                substrait::df_logical_plan::consumer::from_substrait_rex(
+                    &datafusion::prelude::SessionContext::new(),
+                    &e_inner,
+                    &schema_inner,
+                    &extension_inner.inner_ref(),
+                )
+                .await
+            })
+        })
+    }
+    .join()
+    .expect("Thread join error");
+    let expr = handle.map_err(|err| {
         DatafusionSnafu {
             raw: err,
             context: "Failed to convert substrait scalar function to datafusion scalar function",
@@ -105,7 +115,12 @@ impl TypedExpr {
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let phy_expr = from_scalar_fn_to_df_fn_impl(f, input_schema, extensions)?;
-        todo!()
+        let raw_fn = RawDfScalarFn::from_proto(f, input_schema, extensions)?;
+        let expr = DfScalarFunction::new(raw_fn, phy_expr)?;
+        let expr = ScalarExpr::CallDf { df_scalar_fn: expr };
+        // df already know it's own schema, so not providing here
+        let ret_type = expr.typ(&[])?;
+        Ok(TypedExpr::new(expr, ret_type))
     }
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
@@ -234,7 +249,13 @@ impl TypedExpr {
                         ret_type,
                     ))
                 } else {
-                    not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
+                    let try_as_df = Self::from_substrait_to_datafusion_scalar_func(
+                        f,
+                        input_schema,
+                        extensions,
+                    )?;
+                    Ok(try_as_df)
+                    // not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
                 }
             }
         }
