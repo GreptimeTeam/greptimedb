@@ -89,7 +89,6 @@ impl ProducerRegistry {
         let producer = OrderedBatchProducer::new(
             Arc::new(partition_client),
             self.compression,
-            // TODO(weny): make these configurable
             self.producer_channel_size,
             self.producer_request_batch_size,
             self.flush_batch_size,
