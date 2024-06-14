@@ -14,12 +14,9 @@
 
 //! Utilities to remove duplicate rows from a sorted batch.
 
-use api::v1::OpType;
 use async_trait::async_trait;
-use common_base::BitVec;
 use common_telemetry::debug;
-use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{BooleanVector, UInt8Vector, VectorRef};
+use common_time::Timestamp;
 
 use crate::error::Result;
 use crate::metrics::MERGE_FILTER_ROWS_TOTAL;
@@ -97,18 +94,25 @@ pub(crate) trait DedupStrategy: Send {
     fn metrics(&self) -> &DedupMetrics;
 }
 
-/// State of the batch for dedup.
-struct BatchState {
+/// State of the last row in a batch for dedup.
+struct BatchLastRow {
     primary_key: Vec<u8>,
-    timestamps: VectorRef,
+    /// The last timestamp of the batch.
+    timestamp: Timestamp,
 }
 
 /// Dedup strategy that keeps the row with latest sequence of each key.
+///
+/// This strategy is optimized specially based on the properties of the SST files,
+/// memtables and the merge reader. It assumes that batches from files and memtables
+/// don't contain duplicate rows and the merge reader never concatenates batches from
+/// different source.
+///
+/// We might implement a new strategy if we need to process files with duplicate rows.
 pub(crate) struct LastRow {
-    /// Previous batch that has the same key as the batch to push.
-    prev_batch: Option<BatchState>,
-    /// Reusable bitmap for selection. `true` means the row is selected.
-    selected: BitVec,
+    /// Meta of the last row in the previous batch that has the same key
+    /// as the batch to push.
+    prev_batch: Option<BatchLastRow>,
     /// Filter deleted rows.
     filter_deleted: bool,
     metrics: DedupMetrics,
@@ -119,7 +123,6 @@ impl LastRow {
     pub(crate) fn new(filter_deleted: bool) -> Self {
         Self {
             prev_batch: None,
-            selected: BitVec::new(),
             filter_deleted,
             metrics: DedupMetrics::default(),
         }
@@ -131,31 +134,29 @@ impl DedupStrategy for LastRow {
         if batch.is_empty() {
             return Ok(None);
         }
-
-        // Reinitializes the bit map to zeros.
-        self.selected.clear();
-        self.selected.resize(batch.num_rows(), false);
-
-        let prev_timestamps = match &self.prev_batch {
+        debug_assert!(batch.first_timestamp().is_some());
+        let prev_timestamp = match &self.prev_batch {
             Some(prev_batch) => {
                 if prev_batch.primary_key != batch.primary_key() {
                     // The key has changed. This is the first batch of the
                     // new key.
                     None
                 } else {
-                    Some(prev_batch.timestamps.as_ref())
+                    Some(prev_batch.timestamp)
                 }
             }
             None => None,
         };
-        // Finds unique timestamps. The last row of a key has the largest sequence and we
-        // sort rows by (timestamp, sequence desc).
-        batch
-            .timestamps()
-            .find_unique(&mut self.selected, prev_timestamps);
-        if self.filter_deleted {
-            let num_deleted = unselect_deleted(batch.op_types(), &mut self.selected);
-            self.metrics.num_deleted_rows += num_deleted;
+        if batch.first_timestamp() == prev_timestamp {
+            self.metrics.num_unselected_rows += 1;
+            // This batch contains a duplicate row, skip it.
+            if batch.num_rows() == 1 {
+                // We don't need to update `prev_batch` because they have the same
+                // key and timestamp.
+                return Ok(None);
+            }
+            // Skips the first row.
+            batch = batch.slice(1, batch.num_rows() - 1);
         }
 
         // Store current batch to `prev_batch` so we could compare the next batch
@@ -166,24 +167,27 @@ impl DedupStrategy for LastRow {
             Some(prev) => {
                 // Reuse the primary key buffer.
                 prev.primary_key.clone_from(&batch.primary_key);
-                prev.timestamps = batch.timestamps.clone();
+                prev.timestamp = batch.last_timestamp().unwrap();
             }
             None => {
-                self.prev_batch = Some(BatchState {
+                self.prev_batch = Some(BatchLastRow {
                     primary_key: batch.primary_key().to_vec(),
-                    timestamps: batch.timestamps.clone(),
+                    timestamp: batch.last_timestamp().unwrap(),
                 })
             }
         }
 
-        // Filters the batch if not all rows are needed.
-        let num_unselected = self.selected.count_zeros();
-        if num_unselected > 0 {
-            let predicate = BooleanVector::from_iterator(self.selected.iter().by_vals());
-            batch.filter(&predicate)?;
-            self.metrics.num_unselected_rows += num_unselected;
+        // Filters deleted rows.
+        if self.filter_deleted {
+            let num_rows = batch.num_rows();
+            batch.filter_deleted()?;
+            let num_rows_after_filter = batch.num_rows();
+            let num_deleted = num_rows - num_rows_after_filter;
+            self.metrics.num_deleted_rows += num_deleted;
+            self.metrics.num_unselected_rows += num_deleted;
         }
 
+        // The batch can become empty if all rows are deleted.
         if batch.is_empty() {
             Ok(None)
         } else {
@@ -209,20 +213,10 @@ pub(crate) struct DedupMetrics {
     pub(crate) num_deleted_rows: usize,
 }
 
-/// Finds deleted rows and unselects them.
-fn unselect_deleted(op_types: &UInt8Vector, selected: &mut BitVec) -> usize {
-    let mut num_deleted = 0;
-    for (i, op_type) in op_types.as_arrow().values().iter().enumerate() {
-        if *op_type == OpType::Delete as u8 {
-            selected.set(i, false);
-            num_deleted += 1;
-        }
-    }
-    num_deleted
-}
-
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
+
     use super::*;
     use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
 
@@ -257,35 +251,31 @@ mod tests {
         let input = [
             new_batch(
                 b"k1",
-                &[1, 1, 2],
-                &[13, 12, 11],
-                &[OpType::Put, OpType::Put, OpType::Put],
-                &[11, 1, 12],
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[11, 12],
             ),
             // empty batch.
             new_batch(b"k1", &[], &[], &[], &[]),
             // Duplicate with the previous batch.
             new_batch(
                 b"k1",
-                &[2, 3, 3, 4],
-                &[10, 13, 12, 13],
-                &[OpType::Put, OpType::Put, OpType::Put, OpType::Delete],
-                &[2, 13, 3, 14],
+                &[2, 3, 4],
+                &[10, 13, 13],
+                &[OpType::Put, OpType::Put, OpType::Delete],
+                &[2, 13, 14],
             ),
             new_batch(
                 b"k2",
-                &[1, 2, 2],
-                &[20, 20, 19],
-                &[OpType::Put, OpType::Delete, OpType::Put],
-                &[101, 0, 102],
-            ),
-            new_batch(
-                b"k3",
-                &[2, 2],
-                &[20, 19],
+                &[1, 2],
+                &[20, 20],
                 &[OpType::Put, OpType::Delete],
-                &[202, 0],
+                &[101, 0],
             ),
+            new_batch(b"k2", &[2], &[19], &[OpType::Put], &[102]),
+            new_batch(b"k3", &[2], &[20], &[OpType::Put], &[202]),
+            new_batch(b"k3", &[2], &[19], &[OpType::Delete], &[0]),
         ];
         let reader = VecBatchReader::new(&input);
         // Filter deleted.
@@ -306,7 +296,7 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(7, reader.metrics().num_unselected_rows);
+        assert_eq!(4, reader.metrics().num_unselected_rows);
         assert_eq!(3, reader.metrics().num_deleted_rows);
 
         // Does not filter deleted.
@@ -340,7 +330,7 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(5, reader.metrics().num_unselected_rows);
+        assert_eq!(3, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
     }
 }
