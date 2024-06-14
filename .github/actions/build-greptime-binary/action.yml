@@ -63,7 +63,9 @@ runs:
       shell: bash
       if: ${{ inputs.build-android-artifacts == 'true' }}
       run: |
-        cd ${{ inputs.working-dir }} && make strip-android-bin
+        cd ${{ inputs.working-dir }} && make strip-android-bin \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_REGISTRY=${{ inputs.image-registry }}
 
     - name: Upload android artifacts
       uses: ./.github/actions/upload-artifacts
