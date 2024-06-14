@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -31,6 +31,7 @@ use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
+use moka::sync::Cache;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::plan::LogicalPlan;
@@ -58,6 +59,11 @@ pub const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type
 pub const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
 pub const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
 
+/// Pipeline table cache size.
+pub const PIPELINES_CACHE_SIZE: u64 = 10000;
+/// Pipeline table cache time to live. unit: second
+pub const PIPELINES_CACHE_TTL: u64 = 10;
+
 /// PipelineTable is a table that stores the pipeline schema and content.
 /// Every catalog has its own pipeline table.
 pub struct PipelineTable {
@@ -65,7 +71,7 @@ pub struct PipelineTable {
     statement_executor: StatementExecutorRef,
     table: TableRef,
     query_engine: QueryEngineRef,
-    pipelines: RwLock<HashMap<String, Pipeline<GreptimeTransformer>>>,
+    pipelines: Cache<String, Arc<Pipeline<GreptimeTransformer>>>,
 }
 
 impl PipelineTable {
@@ -81,7 +87,10 @@ impl PipelineTable {
             statement_executor,
             table,
             query_engine,
-            pipelines: RwLock::new(HashMap::default()),
+            pipelines: Cache::builder()
+                .max_capacity(PIPELINES_CACHE_SIZE)
+                .time_to_live(Duration::from_secs(10))
+                .build(),
         }
     }
 
@@ -204,12 +213,9 @@ impl PipelineTable {
         schema: &str,
         name: &str,
         version: Option<&str>,
-    ) -> Option<Pipeline<GreptimeTransformer>> {
+    ) -> Option<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipelines
-            .read()
-            .unwrap()
             .get(&Self::generate_pipeline_cache_key(schema, name, version))
-            .cloned()
     }
 
     /// Insert a pipeline into the pipeline table.
@@ -272,7 +278,7 @@ impl PipelineTable {
         schema: &str,
         name: &str,
         version: Option<String>,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         if let Some(pipeline) =
             self.get_compiled_pipeline_from_cache(schema, name, version.as_deref())
         {
@@ -282,9 +288,9 @@ impl PipelineTable {
         let pipeline = self
             .find_pipeline_by_name(schema, name, version.as_ref())
             .await?;
-        let compiled_pipeline = Self::compile_pipeline(&pipeline.0)?;
+        let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
-        self.pipelines.write().unwrap().insert(
+        self.pipelines.insert(
             Self::generate_pipeline_cache_key(schema, name, version.as_deref()),
             compiled_pipeline.clone(),
         );
@@ -299,20 +305,19 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
-        let compiled_pipeline = Self::compile_pipeline(pipeline)?;
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+        let compiled_pipeline = Arc::new(Self::compile_pipeline(pipeline)?);
         // we will use the version in the future
         let version = self
             .insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
             .await?;
 
         {
-            let mut g = self.pipelines.write().unwrap();
-            g.insert(
+            self.pipelines.insert(
                 Self::generate_pipeline_cache_key(schema, name, None),
                 compiled_pipeline.clone(),
             );
-            g.insert(
+            self.pipelines.insert(
                 Self::generate_pipeline_cache_key(schema, name, Some(&version.to_iso8601_string())),
                 compiled_pipeline.clone(),
             );

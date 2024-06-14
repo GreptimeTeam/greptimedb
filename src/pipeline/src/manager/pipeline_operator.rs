@@ -152,7 +152,7 @@ impl PipelineOperator {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         self.get_pipeline_table_from_cache(ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
             .insert_and_compile(ctx.current_schema(), name, content_type, pipeline)
@@ -183,7 +183,7 @@ impl PipelineOperator {
         query_ctx: QueryContextRef,
         name: &str,
         version: Option<String>,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())

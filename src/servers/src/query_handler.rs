@@ -134,7 +134,7 @@ pub trait LogHandler {
         name: &str,
         version: Option<String>,
         query_ctx: QueryContextRef,
-    ) -> Result<Pipeline<GreptimeTransformer>>;
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>>;
 
     async fn insert_pipeline(
         &self,
