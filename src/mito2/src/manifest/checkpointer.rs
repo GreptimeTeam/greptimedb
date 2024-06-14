@@ -71,7 +71,7 @@ impl Checkpointer {
         }
 
         // We can simply check whether there's a running checkpoint task like this, all because of
-        // the caller of this function is ran single threaded: it's in the region's worker loop.
+        // the caller of this function is ran single threaded, inside the lock of RegionManifestManager.
         if self.is_doing_checkpoint.load(Ordering::Relaxed) {
             return;
         }
