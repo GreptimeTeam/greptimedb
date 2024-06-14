@@ -38,6 +38,7 @@ futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
+moka = { workspace = true, features = ["sync"] }
 once_cell.workspace = true
 operator.workspace = true
 paste.workspace = true
@@ -52,7 +53,6 @@ table.workspace = true
 tokio.workspace = true
 urlencoding = "2.1"
 yaml-rust = "0.4"
-moka = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
