@@ -49,6 +49,8 @@ use crate::error::{
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
 
+pub type PipelineVersion = Option<TimestampNanosecond>;
+
 pub type PipelineTableRef = Arc<PipelineTable>;
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -61,8 +63,8 @@ pub const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
 
 /// Pipeline table cache size.
 pub const PIPELINES_CACHE_SIZE: u64 = 10000;
-/// Pipeline table cache time to live. unit: second
-pub const PIPELINES_CACHE_TTL: u64 = 10;
+/// Pipeline table cache time to live.
+pub const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 
 /// PipelineTable is a table that stores the pipeline schema and content.
 /// Every catalog has its own pipeline table.
@@ -89,12 +91,13 @@ impl PipelineTable {
             query_engine,
             pipelines: Cache::builder()
                 .max_capacity(PIPELINES_CACHE_SIZE)
-                .time_to_live(Duration::from_secs(10))
+                .time_to_live(PIPELINES_CACHE_TTL)
                 .build(),
         }
     }
 
     /// Build the schema for the pipeline table.
+    /// Returns the (time index, primary keys, column) definitions.
     pub fn build_pipeline_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
         (
             PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
@@ -204,15 +207,18 @@ impl PipelineTable {
             .map_err(|e| CompilePipelineSnafu { reason: e }.build())
     }
 
-    fn generate_pipeline_cache_key(schema: &str, name: &str, version: Option<&str>) -> String {
-        format!("{}-{}-{}", schema, name, version.unwrap_or("latest"))
+    fn generate_pipeline_cache_key(schema: &str, name: &str, version: PipelineVersion) -> String {
+        match version {
+            Some(version) => format!("{}/{}/{}", schema, name, Into::<i64>::into(version)),
+            None => format!("{}/{}/latest", schema, name),
+        }
     }
 
     fn get_compiled_pipeline_from_cache(
         &self,
         schema: &str,
         name: &str,
-        version: Option<&str>,
+        version: PipelineVersion,
     ) -> Option<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipelines
             .get(&Self::generate_pipeline_cache_key(schema, name, version))
@@ -277,21 +283,17 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: Option<String>,
+        version: PipelineVersion,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
-        if let Some(pipeline) =
-            self.get_compiled_pipeline_from_cache(schema, name, version.as_deref())
-        {
+        if let Some(pipeline) = self.get_compiled_pipeline_from_cache(schema, name, version) {
             return Ok(pipeline);
         }
 
-        let pipeline = self
-            .find_pipeline_by_name(schema, name, version.as_ref())
-            .await?;
+        let pipeline = self.find_pipeline_by_name(schema, name, version).await?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.pipelines.insert(
-            Self::generate_pipeline_cache_key(schema, name, version.as_deref()),
+            Self::generate_pipeline_cache_key(schema, name, version),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
@@ -318,7 +320,7 @@ impl PipelineTable {
                 compiled_pipeline.clone(),
             );
             self.pipelines.insert(
-                Self::generate_pipeline_cache_key(schema, name, Some(&version.to_iso8601_string())),
+                Self::generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
                 compiled_pipeline.clone(),
             );
         }
@@ -330,7 +332,7 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: Option<&String>,
+        version: PipelineVersion,
     ) -> Result<(String, TimestampNanosecond)> {
         let table_info = self.table.table_info();
 
@@ -349,7 +351,7 @@ impl PipelineTable {
         let filter = if let Some(v) = version {
             and(
                 schema_and_name_filter,
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v)),
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v.0.to_iso8601_string())),
             )
         } else {
             schema_and_name_filter
@@ -390,20 +392,11 @@ impl PipelineTable {
             .await
             .context(CollectRecordsSnafu)?;
 
-        ensure!(
-            !records.is_empty(),
-            PipelineNotFoundSnafu {
-                name,
-                version: version.cloned()
-            }
-        );
+        ensure!(!records.is_empty(), PipelineNotFoundSnafu { name, version });
 
         ensure!(
             records.len() == 1 && records[0].num_columns() == 2,
-            PipelineNotFoundSnafu {
-                name,
-                version: version.cloned()
-            }
+            PipelineNotFoundSnafu { name, version }
         );
 
         let pipeline_content_column = records[0].column(0);
@@ -435,10 +428,7 @@ impl PipelineTable {
 
         ensure!(
             pipeline_content.len() == 1,
-            PipelineNotFoundSnafu {
-                name,
-                version: version.cloned()
-            }
+            PipelineNotFoundSnafu { name, version }
         );
 
         // Safety: asserted above

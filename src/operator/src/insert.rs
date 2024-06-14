@@ -666,7 +666,7 @@ impl Inserter {
 
         info!("Table `{table_ref}` does not exist, try creating the log table");
         // Set append_mode to true for log table.
-        // because log table does not need to esure the ts and tags unique.
+        // because log tables should keep rows with the same ts and tags.
         create_table_expr
             .table_options
             .insert("append_mode".to_string(), "true".to_string());
@@ -676,17 +676,11 @@ impl Inserter {
 
         match res {
             Ok(table) => {
-                info!(
-                    "Successfully created a log table {}.{}.{}",
-                    table_ref.catalog, table_ref.schema, table_ref.table,
-                );
+                info!("Successfully created a log table {}", table_ref);
                 Ok(table)
             }
             Err(err) => {
-                error!(
-                    "Failed to create a log table {}.{}.{}: {}",
-                    table_ref.catalog, table_ref.schema, table_ref.table, err
-                );
+                error!(err; "Failed to create a log table {}", table_ref);
                 Err(err)
             }
         }

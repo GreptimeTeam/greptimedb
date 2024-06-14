@@ -52,8 +52,8 @@ lazy_static! {
     )
     .unwrap();
     pub static ref CREATE_OR_ALTER_TABLES: HistogramVec = register_histogram_vec!(
-        "greptime_create_or_alter_tables",
-        "grpc region request",
+        "greptime_table_operator_create_or_alter_tables",
+        "table operator create or alter tables",
         &["table_type"]
     )
     .unwrap();

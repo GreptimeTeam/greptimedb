@@ -17,19 +17,13 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::timestamp::TimestampNanosecond;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to find column in pipeline table, name: {}", name))]
-    FindColumnInPipelineTable {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Pipeline table not found"))]
     PipelineTableNotFound {
         #[snafu(implicit)]
@@ -50,10 +44,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.clone().unwrap_or("latest".to_string())))]
+    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.map(|ts| ts.0.to_iso8601_string()).unwrap_or("latest".to_string())))]
     PipelineNotFound {
         name: String,
-        version: Option<String>,
+        version: Option<TimestampNanosecond>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -115,7 +109,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            FindColumnInPipelineTable { .. } | CastType { .. } => StatusCode::Unexpected,
+            CastType { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
