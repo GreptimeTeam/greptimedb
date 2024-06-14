@@ -32,7 +32,7 @@ use crate::kafka::{EntryId, NamespaceImpl};
 pub(crate) const VERSION: u32 = 0;
 
 /// The estimated size in bytes of a serialized RecordMeta.
-/// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_size - ESTIMATED_META_SIZE.
+/// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_byte - ESTIMATED_META_SIZE.
 pub(crate) const ESTIMATED_META_SIZE: usize = 256;
 
 /// The type of a record.

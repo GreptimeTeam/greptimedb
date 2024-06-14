@@ -31,7 +31,8 @@ pub struct DatanodeKafkaConfig {
     #[serde(skip)]
     pub compression: Compression,
     /// The max size of a single producer batch.
-    pub max_batch_size: ReadableSize,
+    #[serde(alias = "max_batch_size")]
+    pub max_batch_bytes: ReadableSize,
     /// Request channel size of each `OrderedBatchProducer`.
     pub producer_channel_size: usize,
     /// Max batch size for a `OrderedBatchProducer` to handle requests.
@@ -50,7 +51,7 @@ impl Default for DatanodeKafkaConfig {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             compression: Compression::NoCompression,
             // Warning: Kafka has a default limit of 1MB per message in a topic.
-            max_batch_size: ReadableSize::mb(1),
+            max_batch_bytes: ReadableSize::mb(1),
             producer_channel_size: 128,
             producer_request_batch_size: 64,
             consumer_wait_timeout: Duration::from_millis(100),

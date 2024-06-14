@@ -101,7 +101,7 @@ impl From<StandaloneWalConfig> for DatanodeWalConfig {
             StandaloneWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
                 compression: config.compression,
-                max_batch_size: config.max_batch_size,
+                max_batch_bytes: config.max_batch_bytes,
                 consumer_wait_timeout: config.consumer_wait_timeout,
                 backoff: config.backoff,
                 producer_channel_size: config.producer_channel_size,
@@ -177,7 +177,7 @@ mod tests {
             topic_name_prefix = "greptimedb_wal_topic"
             replication_factor = 1
             create_topic_timeout = "30s"
-            max_batch_size = "1MB"
+            max_batch_bytes = "1MB"
             linger = "200ms"
             consumer_wait_timeout = "100ms"
             backoff_init = "500ms"
@@ -210,7 +210,7 @@ mod tests {
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             compression: Compression::default(),
-            max_batch_size: ReadableSize::mb(1),
+            max_batch_bytes: ReadableSize::mb(1),
             producer_channel_size: 128,
             producer_request_batch_size: 64,
             consumer_wait_timeout: Duration::from_millis(100),
@@ -234,7 +234,7 @@ mod tests {
             replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
             compression: Compression::default(),
-            max_batch_size: ReadableSize::mb(1),
+            max_batch_bytes: ReadableSize::mb(1),
             producer_channel_size: 128,
             producer_request_batch_size: 64,
             consumer_wait_timeout: Duration::from_millis(100),

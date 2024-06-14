@@ -64,8 +64,8 @@ struct BackgroundProducerWorker {
     receiver: Receiver<ProduceRequest>,
     /// Max batch size for a worker to handle requests.
     request_batch_size: usize,
-    /// Max size for a single flush.
-    max_flush_size: usize,
+    /// Max bytes size for a single flush.
+    max_batch_bytes: usize,
     /// The [PendingRequest]s.
     pending_requests: Vec<PendingRequest>,
 }
@@ -77,10 +77,10 @@ struct PendingRequest {
 }
 
 /// ## Panic
-/// Panic if any [Record]'s `approximate_size` > `max_flush_size`.
+/// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
 fn handle_produce_requests(
     requests: &mut Vec<ProduceRequest>,
-    max_flush_size: usize,
+    max_batch_bytes: usize,
 ) -> Vec<PendingRequest> {
     let mut records_buffer = vec![];
     let mut batch_size = 0;
@@ -89,9 +89,9 @@ fn handle_produce_requests(
     for ProduceRequest { batch, sender } in requests.drain(..) {
         let mut receiver = ProduceResultReceiver::default();
         for record in batch {
-            assert!(record.approximate_size() <= max_flush_size);
+            assert!(record.approximate_size() <= max_batch_bytes);
             // Yields the `PendingRequest` if buffer is full.
-            if batch_size + record.approximate_size() > max_flush_size {
+            if batch_size + record.approximate_size() > max_batch_bytes {
                 let (tx, rx) = oneshot::channel();
                 pending_requests.push(PendingRequest {
                     batch: std::mem::take(&mut records_buffer),
@@ -164,7 +164,7 @@ impl BackgroundProducerWorker {
                             }
                         }
                         self.pending_requests =
-                            handle_produce_requests(&mut buffer, self.max_flush_size);
+                            handle_produce_requests(&mut buffer, self.max_batch_bytes);
                     }
                     None => {
                         debug!("The sender is dropped, BackgroundProducerWorker exited");
@@ -214,7 +214,7 @@ impl OrderedBatchProducer {
         compression: Compression,
         channel_size: usize,
         request_batch_size: usize,
-        max_flush_size: usize,
+        max_batch_bytes: usize,
     ) -> Self {
         let (tx, rx) = mpsc::channel(channel_size);
         let running = Arc::new(AtomicBool::new(true));
@@ -224,7 +224,7 @@ impl OrderedBatchProducer {
             running: running.clone(),
             receiver: rx,
             request_batch_size,
-            max_flush_size,
+            max_batch_bytes,
             pending_requests: vec![],
         };
         tokio::spawn(async move { worker.run().await });
@@ -240,7 +240,7 @@ impl OrderedBatchProducer {
     /// or an unrecoverable error has been encountered.
     ///
     /// ## Panic
-    /// Panic if any [Record]'s `approximate_size` > `max_flush_size`.
+    /// Panic if any [Record]'s `approximate_size` > `max_batch_bytes`.
     pub(crate) async fn produce(&self, batch: Vec<Record>) -> Result<ProduceResultHandle> {
         let receiver = {
             let (tx, rx) = oneshot::channel();

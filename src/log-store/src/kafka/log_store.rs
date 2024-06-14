@@ -44,7 +44,7 @@ pub struct KafkaLogStore {
     /// The manager of topic clients.
     client_manager: ClientManagerRef,
     /// The max size of a batch.
-    max_batch_size: usize,
+    max_batch_bytes: usize,
     /// The consumer wait timeout.
     consumer_wait_timeout: Duration,
 }
@@ -56,7 +56,7 @@ impl KafkaLogStore {
 
         Ok(Self {
             client_manager,
-            max_batch_size: config.max_batch_size.as_bytes() as usize,
+            max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
             consumer_wait_timeout: config.consumer_wait_timeout,
         })
     }
@@ -117,7 +117,7 @@ impl LogStore for KafkaLogStore {
                 actual: provider.type_name(),
             })?;
 
-        let max_data_size = self.max_batch_size - ESTIMATED_META_SIZE;
+        let max_data_size = self.max_batch_bytes - ESTIMATED_META_SIZE;
         Ok(build_entry(
             data,
             entry_id,
@@ -178,7 +178,7 @@ impl LogStore for KafkaLogStore {
         for (region_id, records) in region_grouped_records {
             region_ids.push(region_id);
             let producer = region_producers.get(&region_id).unwrap();
-            // Safety: `Record`'s `approximate_size` must be less or equal to `max_flush_size`.
+            // Safety: `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
             region_grouped_result_receivers.push(producer.produce(records).await?)
         }
 
@@ -256,7 +256,7 @@ impl LogStore for KafkaLogStore {
         }
 
         let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
-            .with_max_batch_size(self.max_batch_size as i32)
+            .with_max_batch_size(self.max_batch_bytes as i32)
             .with_max_wait_ms(self.consumer_wait_timeout.as_millis() as i32)
             .build();
 
@@ -469,7 +469,7 @@ mod tests {
             .collect::<Vec<_>>();
         let config = DatanodeKafkaConfig {
             broker_endpoints,
-            max_batch_size: ReadableSize::kb(32),
+            max_batch_bytes: ReadableSize::kb(32),
             ..Default::default()
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();
@@ -538,7 +538,7 @@ mod tests {
             .collect::<Vec<_>>();
         let config = DatanodeKafkaConfig {
             broker_endpoints,
-            max_batch_size: ReadableSize::kb(8),
+            max_batch_bytes: ReadableSize::kb(8),
             ..Default::default()
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();

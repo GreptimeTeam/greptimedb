@@ -102,7 +102,7 @@ impl ClientManager {
             clients: RwLock::new(HashMap::new()),
             producer_channel_size: config.producer_channel_size,
             producer_request_batch_size: config.producer_request_batch_size,
-            flush_batch_size: config.max_batch_size.as_bytes() as usize,
+            flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: config.compression,
         })
     }
