@@ -1,0 +1,62 @@
+[package]
+name = "pipeline"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+
+[lints]
+workspace = true
+
+[dependencies]
+api.workspace = true
+arrow.workspace = true
+async-trait.workspace = true
+catalog.workspace = true
+chrono.workspace = true
+chrono-tz = "0.9.0"
+common-catalog.workspace = true
+common-error.workspace = true
+common-function.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+crossbeam-utils.workspace = true
+csv = "1.3.0"
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-functions.workspace = true
+datafusion-physical-expr.workspace = true
+datatypes.workspace = true
+futures.workspace = true
+greptime-proto.workspace = true
+itertools.workspace = true
+lazy_static.workspace = true
+moka = { workspace = true, features = ["sync"] }
+once_cell.workspace = true
+operator.workspace = true
+paste.workspace = true
+prometheus.workspace = true
+query.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+session.workspace = true
+snafu.workspace = true
+sql.workspace = true
+table.workspace = true
+tokio.workspace = true
+urlencoding = "2.1"
+yaml-rust = "0.4"
+
+[dev-dependencies]
+catalog = { workspace = true, features = ["testing"] }
+rayon = "1.0"
+ron = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+session = { workspace = true, features = ["testing"] }
