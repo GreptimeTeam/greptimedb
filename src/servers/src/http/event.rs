@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::result::Result as StdResult;
+use std::sync::Arc;
 
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
@@ -47,6 +48,7 @@ pub struct LogIngesterQueryParams {
     pub ignore_errors: Option<bool>,
 
     pub version: Option<String>,
+    pub source: Option<String>,
 }
 
 pub struct PipelineContent(String);
@@ -96,11 +98,12 @@ where
 
 #[axum_macros::debug_handler]
 pub async fn add_pipeline(
-    State(handler): State<LogHandlerRef>,
+    State(state): State<LogState>,
     Path(pipeline_name): Path<String>,
     Extension(query_ctx): Extension<QueryContextRef>,
     PipelineContent(payload): PipelineContent,
 ) -> Result<String> {
+    let handler = state.log_handler;
     if pipeline_name.is_empty() {
         return Err(InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
@@ -128,10 +131,11 @@ pub async fn add_pipeline(
 
 #[axum_macros::debug_handler]
 pub async fn delete_pipeline(
-    State(handler): State<LogHandlerRef>,
+    State(state): State<LogState>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Path(pipeline_name): Path<String>,
 ) -> Result<String> {
+    let handler = state.log_handler;
     ensure!(
         !pipeline_name.is_empty(),
         InvalidParameterSnafu {
@@ -189,12 +193,20 @@ fn transform_ndjson_array_factory(
 
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
-    State(handler): State<LogHandlerRef>,
+    State(log_state): State<LogState>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContextRef>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> Result<HttpResponse> {
+    if let Some(log_validator) = log_state.log_validator {
+        if let Some(response) = log_validator.validate(query_params.source.clone(), &payload) {
+            return response;
+        }
+    }
+
+    let handler = log_state.log_handler;
+
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
@@ -203,7 +215,6 @@ pub async fn log_ingester(
     })?;
 
     let version = query_params.version;
-
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
     let m: mime::Mime = content_type.clone().into();
@@ -261,4 +272,18 @@ async fn ingest_logs_inner(
         .await
         .with_execution_time(start.elapsed().as_millis() as u64);
     Ok(response)
+}
+
+pub trait LogValidator {
+    /// validate payload by source before processing
+    fn validate(&self, source: Option<String>, payload: &str) -> Option<Result<HttpResponse>>;
+}
+
+pub type LogValidatorRef = Arc<dyn LogValidator + Send + Sync>;
+
+/// axum state struct to hold log handler and validator
+#[derive(Clone)]
+pub struct LogState {
+    pub log_handler: LogHandlerRef,
+    pub log_validator: Option<LogValidatorRef>,
 }
