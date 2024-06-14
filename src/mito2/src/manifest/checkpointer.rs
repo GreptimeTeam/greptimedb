@@ -28,31 +28,81 @@ use crate::metrics::MANIFEST_OP_ELAPSED;
 /// [`Checkpointer`] is responsible for doing checkpoint for a region, in an asynchronous way.
 #[derive(Debug)]
 pub(crate) struct Checkpointer {
-    region_id: RegionId,
     manifest_options: RegionManifestOptions,
-    manifest_store: Arc<ManifestObjectStore>,
-    last_checkpoint_version: Arc<AtomicU64>,
     is_doing_checkpoint: Arc<AtomicBool>,
+    inner: Arc<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    region_id: RegionId,
+    manifest_store: ManifestObjectStore,
+    last_checkpoint_version: AtomicU64,
+}
+
+impl Inner {
+    async fn do_checkpoint(&self, checkpoint: RegionCheckpoint) {
+        let _t = MANIFEST_OP_ELAPSED
+            .with_label_values(&["checkpoint"])
+            .start_timer();
+
+        let region_id = self.region_id();
+        let version = checkpoint.last_version();
+        let checkpoint = match checkpoint.encode() {
+            Ok(checkpoint) => checkpoint,
+            Err(e) => {
+                error!(e; "Failed to encode checkpoint {:?}", checkpoint);
+                return;
+            }
+        };
+        if let Err(e) = self
+            .manifest_store
+            .save_checkpoint(version, &checkpoint)
+            .await
+        {
+            error!(e; "Failed to save checkpoint for region {}", region_id);
+            return;
+        }
+
+        if let Err(e) = self.manifest_store.delete_until(version, true).await {
+            error!(e; "Failed to delete manifest actions until version {} for region {}", version, region_id);
+            return;
+        }
+
+        self.last_checkpoint_version
+            .store(version, Ordering::Relaxed);
+
+        info!(
+            "Checkpoint for region {} success, version: {}",
+            region_id, version
+        );
+    }
+
+    fn region_id(&self) -> RegionId {
+        self.region_id
+    }
 }
 
 impl Checkpointer {
     pub(crate) fn new(
         region_id: RegionId,
         manifest_options: RegionManifestOptions,
-        manifest_store: Arc<ManifestObjectStore>,
+        manifest_store: ManifestObjectStore,
         last_checkpoint_version: ManifestVersion,
     ) -> Self {
         Self {
-            region_id,
             manifest_options,
-            manifest_store,
-            last_checkpoint_version: Arc::new(AtomicU64::new(last_checkpoint_version)),
             is_doing_checkpoint: Arc::new(AtomicBool::new(false)),
+            inner: Arc::new(Inner {
+                region_id,
+                manifest_store,
+                last_checkpoint_version: AtomicU64::new(last_checkpoint_version),
+            }),
         }
     }
 
     pub(crate) fn last_checkpoint_version(&self) -> ManifestVersion {
-        self.last_checkpoint_version.load(Ordering::Relaxed)
+        self.inner.last_checkpoint_version.load(Ordering::Relaxed)
     }
 
     /// Check if it's needed to do checkpoint for the region by the checkpoint distance.
@@ -86,7 +136,9 @@ impl Checkpointer {
         let end_version = manifest.manifest_version;
         info!(
             "Start doing checkpoint for region {}, compacted version: [{}, {}]",
-            self.region_id, start_version, end_version,
+            self.inner.region_id(),
+            start_version,
+            end_version,
         );
 
         let checkpoint = RegionCheckpoint {
@@ -104,42 +156,11 @@ impl Checkpointer {
             x.store(false, Ordering::Relaxed);
         });
 
-        let manifest_store = self.manifest_store.clone();
-        let region_id = self.region_id;
-        let last_checkpoint_version = self.last_checkpoint_version.clone();
+        let inner = self.inner.clone();
         common_runtime::spawn_bg(async move {
             let _guard = guard;
 
-            let _t = MANIFEST_OP_ELAPSED
-                .with_label_values(&["checkpoint"])
-                .start_timer();
-
-            let version = checkpoint.last_version();
-
-            let checkpoint = match checkpoint.encode() {
-                Ok(checkpoint) => checkpoint,
-                Err(e) => {
-                    error!(e; "Failed to encode checkpoint {:?}", checkpoint);
-                    return;
-                }
-            };
-
-            if let Err(e) = manifest_store.save_checkpoint(version, &checkpoint).await {
-                error!(e; "Failed to save checkpoint for region {}", region_id);
-                return;
-            }
-
-            if let Err(e) = manifest_store.delete_until(version, true).await {
-                error!(e; "Failed to delete manifest actions until version {} for region {}", version, region_id);
-                return;
-            }
-
-            last_checkpoint_version.store(version, Ordering::Relaxed);
-
-            info!(
-                "Checkpoint for region {} success, version: {}",
-                region_id, version
-            );
+            inner.do_checkpoint(checkpoint).await;
         });
     }
 

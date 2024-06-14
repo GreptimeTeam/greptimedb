@@ -161,8 +161,7 @@ impl RegionManifestManager {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
         store.save(version, &action_list.encode()?).await?;
 
-        let checkpointer =
-            Checkpointer::new(region_id, options, Arc::new(store.clone()), MIN_VERSION);
+        let checkpointer = Checkpointer::new(region_id, options, store.clone(), MIN_VERSION);
         Ok(Self {
             store,
             last_version: version,
@@ -259,7 +258,7 @@ impl RegionManifestManager {
         let checkpointer = Checkpointer::new(
             manifest.metadata.region_id,
             options,
-            Arc::new(store.clone()),
+            store.clone(),
             last_checkpoint_version,
         );
         Ok(Some(Self {
