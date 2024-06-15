@@ -17,14 +17,13 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
-use datafusion_common::DataFusionError;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{self, Value};
 use itertools::Itertools;
 use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
+use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
@@ -204,64 +203,20 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 }
 
 pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
-    let value = match param {
-        Expr::Value(v) => match v {
-            ValueExpr::Boolean(b) => ScalarValue::Boolean(Some(*b)).cast_to(&t.as_arrow_type()),
-            ValueExpr::Number(n, _) => ScalarValue::new_utf8(n).cast_to(&t.as_arrow_type()),
-            ValueExpr::DollarQuotedString(s) => {
-                ScalarValue::new_utf8(s.value.clone()).cast_to(&t.as_arrow_type())
-            }
-            ValueExpr::SingleQuotedString(s)
-            | ValueExpr::EscapedStringLiteral(s)
-            | ValueExpr::SingleQuotedByteStringLiteral(s)
-            | ValueExpr::DoubleQuotedByteStringLiteral(s)
-            | ValueExpr::RawStringLiteral(s)
-            | ValueExpr::NationalStringLiteral(s)
-            | ValueExpr::HexStringLiteral(s)
-            | ValueExpr::DoubleQuotedString(s)
-            | ValueExpr::UnQuotedString(s)
-            | ValueExpr::Placeholder(s) => {
-                match t {
-                    ConcreteDataType::Timestamp(_)
-                    | ConcreteDataType::Date(_)
-                    | ConcreteDataType::DateTime(_)
-                    | ConcreteDataType::Time(_) => {
-                        let time = t.try_cast(Value::String(s.clone().into()));
-                        match time {
-                            Some(v) => {
-                                // Cast twice here to make sure the time unit is correct
-                                let v = t.try_cast(v).unwrap();
-                                let scalar = v.try_to_scalar_value(t);
-                                match scalar {
-                                    Ok(scalar) => Ok(scalar),
-                                    Err(e) => error::InvalidParameterSnafu {
-                                        reason: e.to_string(),
-                                    }
-                                    .fail()?,
-                                }
-                            }
-                            None => error::InvalidParameterSnafu {
-                                reason: format!(
-                                    "cannot convert {:?} to scalar value of type {}",
-                                    param, t
-                                ),
-                            }
-                            .fail()?,
-                        }
-                    }
-                    _ => ScalarValue::new_utf8(s).cast_to(&t.as_arrow_type()),
+    match param {
+        Expr::Value(v) => {
+            let v = sql_value_to_value("", t, v, None);
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
                 }
+                .fail(),
             }
-            ValueExpr::Null => Ok(ScalarValue::Null),
-        },
-        _ => Err(DataFusionError::NotImplemented(
-            "expr to scalar value".to_string(),
-        )),
-    };
-
-    match value {
-        Ok(v) => Ok(v),
-        Err(_) => error::InvalidParameterSnafu {
+        }
+        _ => error::InvalidParameterSnafu {
             reason: format!("cannot convert {:?} to scalar value of type {}", param, t),
         }
         .fail(),
