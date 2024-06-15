@@ -53,19 +53,13 @@ use crate::mysql::writer::create_mysql_column;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-enum StmtKey {
-    Name(String),
-    Id(u32),
-}
-
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
     query_handler: ServerSqlQueryHandlerRef,
     salt: [u8; 20],
     session: SessionRef,
     user_provider: Option<UserProviderRef>,
-    prepared_stmts: Arc<RwLock<HashMap<StmtKey, SqlPlan>>>,
+    prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
 }
 
@@ -141,32 +135,24 @@ impl MysqlInstanceShim {
     }
 
     /// Save query and logical plan, return the unique key
-    fn save_plan(&self, plan: SqlPlan, stmt_key: Option<StmtKey>) -> StmtKey {
-        if let Some(stmt_key) = stmt_key {
-            let mut prepared_stmts = self.prepared_stmts.write();
-            let _ = prepared_stmts.insert(stmt_key.clone(), plan);
-            stmt_key
-        } else {
-            let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
-            let mut prepared_stmts = self.prepared_stmts.write();
-            let _ = prepared_stmts.insert(StmtKey::Id(stmt_id), plan);
-            StmtKey::Id(stmt_id)
-        }
+    fn save_plan(&self, plan: SqlPlan, stmt_key: String) -> () {
+        let mut prepared_stmts = self.prepared_stmts.write();
+        let _ = prepared_stmts.insert(stmt_key, plan);
     }
 
     /// Retrieve the query and logical plan by id
-    fn plan(&self, stmt_key: StmtKey) -> Option<SqlPlan> {
+    fn plan(&self, stmt_key: String) -> Option<SqlPlan> {
         let guard = self.prepared_stmts.read();
         guard.get(&stmt_key).cloned()
     }
 
-    /// Save the prepared statement and return the statement id, parameters and result columns
+    /// Save the prepared statement and return the parameters and result columns
     async fn do_prepare(
         &mut self,
         raw_query: &str,
         query_ctx: QueryContextRef,
-        stmt_key: Option<StmtKey>,
-    ) -> Result<(StmtKey, Vec<Column>, Vec<Column>)> {
+        stmt_key: String,
+    ) -> Result<(Vec<Column>, Vec<Column>)> {
         let (query, param_num) = replace_placeholders(raw_query);
 
         let statement = validate_query(raw_query).await?;
@@ -214,7 +200,7 @@ impl MysqlInstanceShim {
             .transpose()?
             .unwrap_or_default();
 
-        let stmt_key = self.save_plan(
+        self.save_plan(
             SqlPlan {
                 query: query.to_string(),
                 plan,
@@ -223,7 +209,7 @@ impl MysqlInstanceShim {
             stmt_key,
         );
 
-        Ok((stmt_key, params, columns))
+        Ok((params, columns))
     }
 }
 
@@ -288,19 +274,16 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
         let query_ctx = self.session.new_query_context();
-        let prepare_results = self.do_prepare(raw_query, query_ctx.clone(), None).await?;
-        if let (StmtKey::Id(stmt_id), params, columns) = prepare_results {
-            w.reply(stmt_id, &params, &columns).await?;
-            crate::metrics::METRIC_MYSQL_PREPARED_COUNT
-                .with_label_values(&[query_ctx.get_db_string().as_str()])
-                .inc();
-            return Ok(());
-        } else {
-            return error::InternalSnafu {
-                err_msg: "failed to prepare statement".to_string(),
-            }
-            .fail();
-        }
+        let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
+        let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
+        let (params, columns) = self
+            .do_prepare(raw_query, query_ctx.clone(), stmt_key)
+            .await?;
+        w.reply(stmt_id, &params, &columns).await?;
+        crate::metrics::METRIC_MYSQL_PREPARED_COUNT
+            .with_label_values(&[query_ctx.get_db_string().as_str()])
+            .inc();
+        return Ok(());
     }
 
     async fn on_execute<'a>(
@@ -316,11 +299,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .start_timer();
 
         let params: Vec<ParamValue> = p.into_iter().collect();
-        let sql_plan = match self.plan(StmtKey::Id(stmt_id)) {
+        let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
+        let sql_plan = match self.plan(stmt_key) {
             None => {
                 w.error(
                     ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                    b"prepare statement not exist",
+                    b"prepare statement not found",
                 )
                 .await?;
                 return Ok(());
@@ -386,8 +370,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     where
         W: 'async_trait,
     {
+        let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
         let mut guard = self.prepared_stmts.write();
-        let _ = guard.remove(&StmtKey::Id(stmt_id));
+        let _ = guard.remove(&stmt_key);
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "mysql"))]
@@ -402,24 +387,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
 
-        if query.to_uppercase().starts_with("PREPARE ") {
+        let query_upcase = query.to_uppercase();
+        if query_upcase.starts_with("PREPARE ") {
             let mut outputs = vec![];
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
                 Ok((stmt_name, stmt)) => {
-                    let prepare_results = self
-                        .do_prepare(&stmt, query_ctx.clone(), Some(StmtKey::Name(stmt_name)))
-                        .await;
+                    let prepare_results =
+                        self.do_prepare(&stmt, query_ctx.clone(), stmt_name).await;
                     match prepare_results {
-                        Ok((StmtKey::Name(_), _, _)) => {
+                        Ok(_) => {
                             outputs.push(Ok(Output::new_with_affected_rows(0)));
                             writer::write_output(writer, query_ctx, outputs).await?;
                             return Ok(());
-                        }
-                        Ok((StmtKey::Id(_), _, _)) => {
-                            return error::InternalSnafu {
-                                err_msg: "failed to prepare statement".to_string(),
-                            }
-                            .fail();
                         }
                         Err(e) => {
                             writer
@@ -436,16 +415,16 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     return Ok(());
                 }
             }
-        } else if query.to_uppercase().starts_with("EXECUTE ") {
+        } else if query_upcase.starts_with("EXECUTE ") {
             match ParserContext::parse_mysql_execute_stmt(query, query_ctx.sql_dialect()) {
                 // TODO: similar to on_execute, refactor this
                 Ok((stmt_name, params)) => {
-                    let sql_plan = match self.plan(StmtKey::Name(stmt_name)) {
+                    let sql_plan = match self.plan(stmt_name) {
                         None => {
                             writer
                                 .error(
                                     ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                                    b"prepare statement not exist",
+                                    b"prepare statement not found",
                                 )
                                 .await?;
                             return Ok(());
