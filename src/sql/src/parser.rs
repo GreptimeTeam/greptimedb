@@ -180,27 +180,12 @@ impl<'a> ParserContext<'a> {
         sql: &'a str,
         dialect: &dyn Dialect,
     ) -> Result<(String, String)> {
-        let mut parser = Parser::new(dialect)
+        let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        parser
-            .expect_keyword(Keyword::PREPARE)
-            .context(SyntaxSnafu)?;
-        let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
-        parser.expect_keyword(Keyword::FROM).context(SyntaxSnafu)?;
-        let next_token = parser.peek_token();
-        let stmt = match next_token.token {
-            Token::SingleQuotedString(s) => {
-                let _ = parser.next_token();
-                s
-            }
-            _ => parser
-                .expected("string literal", next_token)
-                .context(SyntaxSnafu)?,
-        };
-        Ok((stmt_name.value, stmt))
+        ParserContext { parser, sql }.parse_mysql_prepare()
     }
 
     /// Parses MySQL style 'EXECUTE stmt_name USING param_list' into a stmt_name string and a list of parameters.
@@ -208,28 +193,12 @@ impl<'a> ParserContext<'a> {
         sql: &'a str,
         dialect: &dyn Dialect,
     ) -> Result<(String, Vec<Expr>)> {
-        let mut parser = Parser::new(dialect)
+        let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        parser
-            .expect_keyword(Keyword::EXECUTE)
-            .context(SyntaxSnafu)?;
-        let stmt_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
-        if parser.parse_keyword(Keyword::USING) {
-            let param_list = parser
-                .parse_comma_separated(Parser::parse_expr)
-                .context(SyntaxSnafu)?;
-            if !parser.consume_token(&Token::EOF) {
-                parser
-                    .expected("end of statement", parser.peek_token())
-                    .context(SyntaxSnafu)?;
-            }
-            Ok((stmt_name.value, param_list))
-        } else {
-            Ok((stmt_name.value, vec![]))
-        }
+        ParserContext { parser, sql }.parse_mysql_execute()
     }
 
     /// Raises an "unsupported statement" error.
@@ -314,6 +283,7 @@ impl<'a> ParserContext<'a> {
 mod tests {
 
     use datatypes::prelude::ConcreteDataType;
+    use sqlparser::dialect::MySqlDialect;
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -407,5 +377,47 @@ mod tests {
 
         assert_eq!(object_name.0.len(), 1);
         assert_eq!(object_name.to_string(), table_name.to_ascii_lowercase());
+    }
+
+    #[test]
+    pub fn test_parse_mysql_prepare_stmt() {
+        let sql = "PREPARE stmt1 FROM 'SELECT * FROM t1 WHERE id = ?';";
+        let (stmt_name, stmt) =
+            ParserContext::parse_mysql_prepare_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt1");
+        assert_eq!(stmt, "SELECT * FROM t1 WHERE id = ?");
+
+        let sql = "PREPARE stmt2 FROM \"SELECT * FROM t1 WHERE id = ?\"";
+        let (stmt_name, stmt) =
+            ParserContext::parse_mysql_prepare_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt2");
+        assert_eq!(stmt, "SELECT * FROM t1 WHERE id = ?");
+    }
+
+    #[test]
+    pub fn test_parse_mysql_execute_stmt() {
+        let sql = "EXECUTE stmt1 USING 1, 'hello';";
+        let (stmt_name, params) =
+            ParserContext::parse_mysql_execute_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt1");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].to_string(), "1");
+        assert_eq!(params[1].to_string(), "'hello'");
+
+        let sql = "EXECUTE stmt2;";
+        let (stmt_name, params) =
+            ParserContext::parse_mysql_execute_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt2");
+        assert_eq!(params.len(), 0);
+
+        let sql = "EXECUTE stmt3 USING 231, 'hello', \"2003-03-1\", NULL, ;";
+        let (stmt_name, params) =
+            ParserContext::parse_mysql_execute_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt3");
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[0].to_string(), "231");
+        assert_eq!(params[1].to_string(), "'hello'");
+        assert_eq!(params[2].to_string(), "\"2003-03-1\"");
+        assert_eq!(params[3].to_string(), "NULL");
     }
 }
