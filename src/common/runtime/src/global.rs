@@ -26,7 +26,7 @@ use crate::{Builder, JoinHandle, Runtime};
 const READ_WORKERS: usize = 8;
 const WRITE_WORKERS: usize = 8;
 const BG_WORKERS: usize = 4;
-const HB_WORKERS: usize = 1;
+const HB_WORKERS: usize = 2;
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -49,7 +49,7 @@ impl Default for RuntimeOptions {
             read_rt_size: cpus,
             write_rt_size: cpus,
             bg_rt_size: usize::max(cpus / 2, 1),
-            hb_rt_size: 1,
+            hb_rt_size: HB_WORKERS,
         }
     }
 }

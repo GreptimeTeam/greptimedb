@@ -42,7 +42,7 @@ fn test_load_datanode_example_config() {
             read_rt_size: 8,
             write_rt_size: 8,
             bg_rt_size: 4,
-            hb_rt_size: 1,
+            hb_rt_size: 2,
         },
         component: DatanodeOptions {
             node_id: Some(42),
@@ -102,7 +102,7 @@ fn test_load_frontend_example_config() {
             read_rt_size: 8,
             write_rt_size: 8,
             bg_rt_size: 4,
-            hb_rt_size: 1,
+            hb_rt_size: 2,
         },
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -151,7 +151,7 @@ fn test_load_metasrv_example_config() {
             read_rt_size: 8,
             write_rt_size: 8,
             bg_rt_size: 4,
-            hb_rt_size: 1,
+            hb_rt_size: 2,
         },
         component: MetasrvOptions {
             selector: SelectorType::LeaseBased,
@@ -185,7 +185,7 @@ fn test_load_standalone_example_config() {
             read_rt_size: 8,
             write_rt_size: 8,
             bg_rt_size: 4,
-            hb_rt_size: 1,
+            hb_rt_size: 2,
         },
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
