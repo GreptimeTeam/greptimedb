@@ -16,7 +16,8 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
+| `runtime.hb_rt_size` | Integer | `2` | The number of threads to execute the runtime for heartbeat operations. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `30s` | HTTP request timeout. |
@@ -161,7 +162,8 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
+| `runtime.hb_rt_size` | Integer | `2` | The number of threads to execute the runtime for heartbeat operations. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `18s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
@@ -251,7 +253,8 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
+| `runtime.hb_rt_size` | Integer | `2` | The number of threads to execute the runtime for heartbeat operations. |
 | `procedure` | -- | -- | Procedure storage options. |
 | `procedure.max_retry_times` | Integer | `12` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
@@ -316,7 +319,8 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
+| `runtime.hb_rt_size` | Integer | `2` | The number of threads to execute the runtime for heartbeat operations. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
