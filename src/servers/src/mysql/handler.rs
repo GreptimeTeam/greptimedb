@@ -135,7 +135,7 @@ impl MysqlInstanceShim {
     }
 
     /// Save query and logical plan, return the unique key
-    fn save_plan(&self, plan: SqlPlan, stmt_key: String) -> () {
+    fn save_plan(&self, plan: SqlPlan, stmt_key: String) {
         let mut prepared_stmts = self.prepared_stmts.write();
         let _ = prepared_stmts.insert(stmt_key, plan);
     }
