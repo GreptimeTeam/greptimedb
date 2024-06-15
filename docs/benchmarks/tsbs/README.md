@@ -196,7 +196,7 @@ After the DB is started, we can use `tsbs_load_greptime` to test the write perfo
 
 Parameters here are only provided as an example. You can choose whatever you like or adjust them to match your target scenario.
 
-Notice that if you want to rerun `tsbs_load_greptime`, please destory and restart the DB and clear its previous data first. Existing duplicated data will impact the write and query performance.
+Notice that if you want to rerun `tsbs_load_greptime`, please destroy and restart the DB and clear its previous data first. Existing duplicated data will impact the write and query performance.
 
 ## Query Data
 
