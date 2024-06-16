@@ -15,9 +15,7 @@ read_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 write_rt_size = 8
 ## The number of threads to execute the runtime for global background operations.
-bg_rt_size = 4
-## The number of threads to execute the runtime for heartbeat operations.
-hb_rt_size = 2
+bg_rt_size = 8
 
 ## The HTTP server options.
 [http]
