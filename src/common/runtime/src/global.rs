@@ -26,7 +26,7 @@ use crate::{Builder, JoinHandle, Runtime};
 const READ_WORKERS: usize = 8;
 const WRITE_WORKERS: usize = 8;
 const BG_WORKERS: usize = 4;
-const HB_WORKERS: usize = 1;
+const HB_WORKERS: usize = 2;
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -37,9 +37,6 @@ pub struct RuntimeOptions {
     pub write_rt_size: usize,
     /// The number of threads to execute the runtime for global background operations.
     pub bg_rt_size: usize,
-    /// The number of threads to execute the runtime for heartbeat between meta
-    /// and this node
-    pub hb_rt_size: usize,
 }
 
 impl Default for RuntimeOptions {
@@ -49,7 +46,6 @@ impl Default for RuntimeOptions {
             read_rt_size: cpus,
             write_rt_size: cpus,
             bg_rt_size: usize::max(cpus / 2, 1),
-            hb_rt_size: 1,
         }
     }
 }
@@ -171,11 +167,7 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
             "global-bg-worker",
             options.bg_rt_size,
         ));
-        c.hb_runtime = Some(create_runtime(
-            "global-hb",
-            "global-hb-worker",
-            options.hb_rt_size,
-        ));
+        c.hb_runtime = Some(create_runtime("global-hb", "global-hb-worker", HB_WORKERS));
     });
 }
 
