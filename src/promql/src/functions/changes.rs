@@ -29,7 +29,7 @@ use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
 /// used to count the number of value changes that occur within a specific time range
-#[range_fn(name = "Changes", ret = "Float64Array", display_name = "prom_changes")]
+#[range_fn(name = Changes, ret = Float64Array, display_name = prom_changes)]
 pub fn changes(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
         None

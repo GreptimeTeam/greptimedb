@@ -14,14 +14,8 @@
 
 //! Write ahead log of the engine.
 
-/// TODO(weny): remove it
-#[allow(unused)]
 pub(crate) mod entry_distributor;
-/// TODO(weny): remove it
-#[allow(unused)]
 pub(crate) mod entry_reader;
-/// TODO(weny): remove it
-#[allow(unused)]
 pub(crate) mod raw_entry_reader;
 
 use std::collections::HashMap;

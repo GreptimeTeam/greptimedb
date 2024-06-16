@@ -40,10 +40,10 @@ use crate::handlers::TableMutationHandlerRef;
 const COMPACT_TYPE_STRICT_WINDOW: &str = "strict_window";
 
 #[admin_fn(
-    name = "FlushTableFunction",
-    display_name = "flush_table",
-    sig_fn = "flush_signature",
-    ret = "uint64"
+    name = FlushTableFunction,
+    display_name = flush_table,
+    sig_fn = flush_signature,
+    ret = uint64
 )]
 pub(crate) async fn flush_table(
     table_mutation_handler: &TableMutationHandlerRef,
@@ -87,10 +87,10 @@ pub(crate) async fn flush_table(
 }
 
 #[admin_fn(
-    name = "CompactTableFunction",
-    display_name = "compact_table",
-    sig_fn = "compact_signature",
-    ret = "uint64"
+    name = CompactTableFunction,
+    display_name = compact_table,
+    sig_fn = compact_signature,
+    ret = uint64
 )]
 pub(crate) async fn compact_table(
     table_mutation_handler: &TableMutationHandlerRef,

@@ -82,6 +82,15 @@ impl FromStr for FileId {
 /// Time range of a SST file.
 pub type FileTimeRange = (Timestamp, Timestamp);
 
+/// Checks if two inclusive timestamp ranges overlap with each other.
+pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
+    let (l, r) = if l.0 <= r.0 { (l, r) } else { (r, l) };
+    let (_, l_end) = l;
+    let (r_start, _) = r;
+
+    r_start <= l_end
+}
+
 /// Metadata of a SST file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]

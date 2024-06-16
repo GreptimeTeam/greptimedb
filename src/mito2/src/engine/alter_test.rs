@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
@@ -29,9 +31,11 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
+use crate::engine::listener::AlterFlushListener;
 use crate::engine::MitoEngine;
 use crate::test_util::{
-    build_rows, build_rows_for_key, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
+    TestEnv,
 };
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
@@ -299,4 +303,97 @@ async fn test_alter_region_retry() {
     assert_eq!(2, version_data.committed_sequence);
     assert_eq!(1, version_data.version.flushed_entry_id);
     assert_eq!(2, version_data.version.flushed_sequence);
+}
+
+#[tokio::test]
+async fn test_alter_on_flushing() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Prepares rows for flush.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Spawns a task to flush the engine.
+    let engine_cloned = engine.clone();
+    let flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    // Waits for flush begin.
+    listener.wait_flush_begin().await;
+
+    // Consumes the notify permit in the listener.
+    listener.wait_request_begin().await;
+
+    // Submits an alter request to the region. The region should add the request
+    // to the pending ddl request list.
+    let request = add_tag1();
+    let engine_cloned = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Alter(request))
+            .await
+            .unwrap();
+    });
+    // Waits until the worker handles the alter request.
+    listener.wait_request_begin().await;
+
+    // Spawns two task to flush the engine. The flush scheduler should put them to the
+    // pending task list.
+    let engine_cloned = engine.clone();
+    let pending_flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    // Waits until the worker handles the flush request.
+    listener.wait_request_begin().await;
+
+    // Wake up flush.
+    listener.wake_flush();
+    // Wait for the flush job.
+    tokio::time::timeout(Duration::from_secs(5), flush_job)
+        .await
+        .unwrap()
+        .unwrap();
+    // Wait for pending flush job.
+    tokio::time::timeout(Duration::from_secs(5), pending_flush_job)
+        .await
+        .unwrap()
+        .unwrap();
+    // Wait for the write job.
+    tokio::time::timeout(Duration::from_secs(5), alter_job)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_memtables());
+    assert_eq!(1, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_1 | tag_0 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+|       | a     | 0.0     | 1970-01-01T00:00:00 |
+|       | a     | 1.0     | 1970-01-01T00:00:01 |
++-------+-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
