@@ -23,9 +23,9 @@ use common_time::Timestamp;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::picker::{CompactionTask, Picker};
-use crate::compaction::task::CompactionTaskImpl;
-use crate::compaction::{get_expired_ssts, CompactionOutput, CompactionRequest};
+use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::region::version::VersionRef;
 use crate::sst::file::{FileHandle, FileId};
 
@@ -101,42 +101,18 @@ impl WindowedCompactionPicker {
 }
 
 impl Picker for WindowedCompactionPicker {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
-        let region_id = req.region_id();
-        let CompactionRequest {
-            engine_config,
-            current_version,
-            access_layer,
-            request_sender,
-            waiters,
-            start_time,
-            cache_manager,
-            manifest_ctx,
-            listener,
-        } = req;
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
+        let (outputs, expired_ssts, time_window) = self.pick_inner(
+            compaction_region.current_version.metadata.region_id,
+            &compaction_region.current_version,
+            Timestamp::current_millis(),
+        );
 
-        let (outputs, expired_ssts, time_window) =
-            self.pick_inner(region_id, &current_version, Timestamp::current_millis());
-
-        let task = CompactionTaskImpl {
-            engine_config: engine_config.clone(),
-            region_id,
-            metadata: current_version.metadata.clone().clone(),
-            sst_layer: access_layer.clone(),
+        Some(PickerOutput {
             outputs,
             expired_ssts,
-            compaction_time_window: Some(time_window),
-            request_sender,
-            waiters,
-            start_time,
-            cache_manager,
-            storage: current_version.options.storage.clone(),
-            index_options: current_version.options.index_options.clone(),
-            append_mode: current_version.options.append_mode,
-            manifest_ctx,
-            listener,
-        };
-        Some(Box::new(task))
+            time_window_size: time_window,
+        })
     }
 }
 
