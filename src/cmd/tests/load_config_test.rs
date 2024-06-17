@@ -18,6 +18,9 @@ use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
 use common_base::readable_size::ReadableSize;
 use common_config::Configurable;
+use common_grpc::channel_manager::{
+    DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+};
 use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::LoggingOptions;
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -30,7 +33,9 @@ use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
 use mito2::config::MitoConfig;
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 
+#[allow(deprecated)]
 #[test]
 fn test_load_datanode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/datanode.example.toml");
@@ -89,6 +94,12 @@ fn test_load_datanode_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
+            grpc: GrpcOptions::default().with_addr("127.0.0.1:3001"),
+            rpc_addr: Some("127.0.0.1:3001".to_string()),
+            rpc_hostname: Some("127.0.0.1".to_string()),
+            rpc_runtime_size: Some(8),
+            rpc_max_recv_message_size: Some(DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE),
+            rpc_max_send_message_size: Some(DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE),
             ..Default::default()
         },
     };

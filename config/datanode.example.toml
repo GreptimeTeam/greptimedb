@@ -13,6 +13,32 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
+## Enable telemetry to collect anonymous usage data.
+enable_telemetry = true
+
+## Parallelism of initializing regions.
+init_regions_parallelism = 16
+
+## Deprecated, use `grpc.addr` instead.
+## +toml2docs:none-default
+rpc_addr = "127.0.0.1:3001"
+
+## Deprecated, use `grpc.hostname` instead.
+## +toml2docs:none-default
+rpc_hostname = "127.0.0.1"
+
+## Deprecated, use `grpc.runtime_size` instead.
+## +toml2docs:none-default
+rpc_runtime_size = 8
+
+## Deprecated, use `grpc.rpc_max_recv_message_size` instead.
+## +toml2docs:none-default
+rpc_max_recv_message_size = "512MB"
+
+## Deprecated, use `grpc.rpc_max_send_message_size` instead.
+## +toml2docs:none-default
+rpc_max_send_message_size = "512MB"
+
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
@@ -21,9 +47,10 @@ addr = "127.0.0.1:3001"
 hostname = "127.0.0.1"
 ## The number of server worker threads.
 runtime_size = 8
-## Parallelism of initializing regions.
-init_regions_parallelism = 16
-
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
 
 ## gRPC server TLS options, see `mysql.tls` section.
 [grpc.tls]
@@ -41,9 +68,6 @@ key_path = ""
 ## Watch for Certificate and key file change and auto reload.
 ## For now, gRPC tls config does not support auto reload.
 watch = false
-
-## Enable telemetry to collect anonymous usage data.
-enable_telemetry = true
 
 ## The runtime options.
 [runtime]

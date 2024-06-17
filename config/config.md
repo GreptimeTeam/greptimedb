@@ -306,17 +306,24 @@
 | `node_id` | Integer | `None` | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
+| `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
+| `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `rpc_addr` | String | `None` | Deprecated, use `grpc.addr` instead. |
+| `rpc_hostname` | String | `None` | Deprecated, use `grpc.hostname` instead. |
+| `rpc_runtime_size` | Integer | `None` | Deprecated, use `grpc.runtime_size` instead. |
+| `rpc_max_recv_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_recv_message_size` instead. |
+| `rpc_max_send_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname to advertise to the metasrv. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
-| `grpc.init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
+| `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
 | `grpc.tls.cert_path` | String | `None` | Certificate file path. |
 | `grpc.tls.key_path` | String | `None` | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
-| `grpc.tls.enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |

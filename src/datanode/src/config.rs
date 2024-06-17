@@ -275,9 +275,22 @@ pub struct DatanodeOptions {
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+
+    /// Deprecated options, please use the new options instead.
+    #[deprecated(note = "Please use `grpc.addr` instead.")]
+    pub rpc_addr: Option<String>,
+    #[deprecated(note = "Please use `grpc.hostname` instead.")]
+    pub rpc_hostname: Option<String>,
+    #[deprecated(note = "Please use `grpc.runtime_size` instead.")]
+    pub rpc_runtime_size: Option<usize>,
+    #[deprecated(note = "Please use `grpc.max_recv_message_size` instead.")]
+    pub rpc_max_recv_message_size: Option<ReadableSize>,
+    #[deprecated(note = "Please use `grpc.max_send_message_size` instead.")]
+    pub rpc_max_send_message_size: Option<ReadableSize>,
 }
 
 impl Default for DatanodeOptions {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
@@ -299,6 +312,13 @@ impl Default for DatanodeOptions {
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+
+            // Deprecated options
+            rpc_addr: None,
+            rpc_hostname: None,
+            rpc_runtime_size: None,
+            rpc_max_recv_message_size: None,
+            rpc_max_send_message_size: None,
         }
     }
 }
