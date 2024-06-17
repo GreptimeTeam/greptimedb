@@ -437,4 +437,20 @@ mod tests {
         let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
         assert_matches!(err, error::Error::IllegalSequence { .. });
     }
+
+    #[test]
+    fn test_meta_size() {
+        let meta = RecordMeta {
+            version: VERSION,
+            tp: RecordType::Middle(usize::MAX),
+            entry_id: u64::MAX,
+            ns: NamespaceImpl {
+                region_id: RegionId::new(u32::MAX, u32::MAX).as_u64(),
+                topic: format!("greptime_kafka_cluster/1024/2048/{}", uuid::Uuid::new_v4()),
+            },
+        };
+        let serialized = serde_json::to_vec(&meta).unwrap();
+        // The len of serialized data is 202.
+        assert!(serialized.len() < ESTIMATED_META_SIZE);
+    }
 }
