@@ -13,7 +13,8 @@
 // limitations under the License.
 
 mod buckets;
-mod picker;
+pub mod compactor;
+pub mod picker;
 mod task;
 #[cfg(test)]
 mod test_util;
@@ -31,7 +32,6 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
-pub use picker::CompactionPickerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -40,8 +40,9 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::compaction::twcs::TwcsPicker;
-use crate::compaction::window::WindowedCompactionPicker;
+use crate::compaction::compactor::{CompactionRegion, DefaultCompactor};
+use crate::compaction::picker::{new_picker, CompactionTask};
+use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
@@ -52,7 +53,6 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
-use crate::region::options::CompactionOptions;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
@@ -87,17 +87,6 @@ impl CompactionRequest {
         if let Some(waiter) = waiter.take_inner() {
             self.waiters.push(waiter);
         }
-    }
-}
-
-/// Builds compaction picker according to [CompactionOptions].
-pub fn compaction_options_to_picker(strategy: &CompactionOptions) -> CompactionPickerRef {
-    match strategy {
-        CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
-            twcs_opts.max_active_window_files,
-            twcs_opts.max_inactive_window_files,
-            twcs_opts.time_window_seconds(),
-        )) as Arc<_>,
     }
 }
 
@@ -232,33 +221,12 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
-        let picker = if let compact_request::Options::StrictWindow(window) = &options {
-            let window = if window.window_seconds == 0 {
-                None
-            } else {
-                Some(window.window_seconds)
-            };
-            Arc::new(WindowedCompactionPicker::new(window)) as Arc<_>
-        } else {
-            compaction_options_to_picker(&request.current_version.options.compaction)
-        };
-
         let region_id = request.region_id();
-        debug!(
-            "Pick compaction strategy {:?} for region: {}",
-            picker, region_id
-        );
-
-        let pick_timer = COMPACTION_STAGE_ELAPSED
-            .with_label_values(&["pick"])
-            .start_timer();
-        let Some(mut task) = picker.pick(request) else {
+        let Some(mut task) = self.build_compaction_task(request, options) else {
             // Nothing to compact, remove it from the region status map.
             self.region_status.remove(&region_id);
             return Ok(());
         };
-
-        drop(pick_timer);
 
         // Submit the compaction task.
         self.scheduler
@@ -281,6 +249,70 @@ impl CompactionScheduler {
 
         // Notifies all pending tasks.
         status.on_failure(err);
+    }
+
+    fn build_compaction_task(
+        &self,
+        req: CompactionRequest,
+        options: compact_request::Options,
+    ) -> Option<Box<dyn CompactionTask>> {
+        let picker = new_picker(options, &req.current_version.options.compaction);
+        let region_id = req.region_id();
+        let CompactionRequest {
+            engine_config,
+            current_version,
+            access_layer,
+            request_sender,
+            waiters,
+            start_time,
+            cache_manager,
+            manifest_ctx,
+            listener,
+        } = req;
+        debug!(
+            "Pick compaction strategy {:?} for region: {}",
+            picker, region_id
+        );
+
+        let compaction_region = CompactionRegion {
+            region_id,
+            current_version: current_version.clone(),
+            region_options: current_version.options.clone(),
+            engine_config: engine_config.clone(),
+            region_metadata: current_version.metadata.clone(),
+            cache_manager: cache_manager.clone(),
+            access_layer: access_layer.clone(),
+            manifest_ctx: manifest_ctx.clone(),
+        };
+
+        let picker_output = {
+            let _pick_timer = COMPACTION_STAGE_ELAPSED
+                .with_label_values(&["pick"])
+                .start_timer();
+            picker.pick(&compaction_region)
+        };
+
+        let picker_output = if let Some(picker_output) = picker_output {
+            picker_output
+        } else {
+            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
+            for waiter in waiters {
+                waiter.send(Ok(0));
+            }
+            return None;
+        };
+
+        let task = CompactionTaskImpl {
+            request_sender,
+            waiters,
+            start_time,
+            listener,
+            picker_output,
+            compaction_region,
+            compactor: Arc::new(DefaultCompactor {}),
+        };
+
+        Some(Box::new(task))
     }
 }
 
@@ -395,8 +427,8 @@ impl CompactionStatus {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct CompactionOutput {
+#[derive(Debug, Clone)]
+pub struct CompactionOutput {
     pub output_file_id: FileId,
     /// Compaction output file level.
     pub output_level: Level,

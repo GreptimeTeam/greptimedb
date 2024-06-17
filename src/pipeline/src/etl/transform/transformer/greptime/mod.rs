@@ -47,6 +47,7 @@ impl GreptimeTransformer {
             type_,
             default,
             index: Some(Index::Timestamp),
+            on_failure: None,
         }
     }
 

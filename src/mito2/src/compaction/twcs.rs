@@ -22,9 +22,9 @@ use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::picker::{CompactionTask, Picker};
-use crate::compaction::task::CompactionTaskImpl;
-use crate::compaction::{get_expired_ssts, CompactionOutput, CompactionRequest};
+use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, FileId};
 use crate::sst::version::LevelMeta;
 
@@ -110,25 +110,10 @@ impl TwcsPicker {
 }
 
 impl Picker for TwcsPicker {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
-        let CompactionRequest {
-            engine_config,
-            current_version,
-            access_layer,
-            request_sender,
-            waiters,
-            start_time,
-            cache_manager,
-            manifest_ctx,
-            listener,
-            ..
-        } = req;
-
-        let region_metadata = current_version.metadata.clone();
-        let region_id = region_metadata.region_id;
-
-        let levels = current_version.ssts.levels();
-        let ttl = current_version.options.ttl;
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
+        let region_id = compaction_region.region_id;
+        let levels = compaction_region.current_version.ssts.levels();
+        let ttl = compaction_region.current_version.options.ttl;
         let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
@@ -136,7 +121,8 @@ impl Picker for TwcsPicker {
             expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
 
-        let compaction_time_window = current_version
+        let compaction_time_window = compaction_region
+            .current_version
             .compaction_time_window
             .map(|window| window.as_secs() as i64);
         let time_window_size = compaction_time_window
@@ -157,31 +143,14 @@ impl Picker for TwcsPicker {
         let outputs = self.build_output(&windows, active_window);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
-            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
-            for waiter in waiters {
-                waiter.send(Ok(0));
-            }
             return None;
         }
-        let task = CompactionTaskImpl {
-            engine_config,
-            region_id,
-            metadata: region_metadata,
-            sst_layer: access_layer,
+
+        Some(PickerOutput {
             outputs,
             expired_ssts,
-            compaction_time_window: Some(time_window_size),
-            request_sender,
-            waiters,
-            start_time,
-            cache_manager,
-            storage: current_version.options.storage.clone(),
-            index_options: current_version.options.index_options.clone(),
-            append_mode: current_version.options.append_mode,
-            manifest_ctx,
-            listener,
-        };
-        Some(Box::new(task))
+            time_window_size,
+        })
     }
 }
 

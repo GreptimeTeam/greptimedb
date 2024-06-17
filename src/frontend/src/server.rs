@@ -89,6 +89,8 @@ where
             Some(self.instance.clone()),
         );
 
+        builder = builder.with_log_ingest_handler(self.instance.clone());
+
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
             builder = builder.with_user_provider(user_provider);
         }

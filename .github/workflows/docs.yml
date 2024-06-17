@@ -67,7 +67,7 @@ jobs:
       - run: 'echo "No action required"'
 
   sqlness:
-    name: Sqlness Test
+    name: Sqlness Test (Basic)
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -76,7 +76,7 @@ jobs:
       - run: 'echo "No action required"'
 
   sqlness-kafka-wal:
-    name: Sqlness Test with Kafka Wal
+    name: Sqlness Test (Remote WAL)
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
