@@ -29,7 +29,6 @@ use crate::metrics::MANIFEST_OP_ELAPSED;
 #[derive(Debug)]
 pub(crate) struct Checkpointer {
     manifest_options: RegionManifestOptions,
-    is_doing_checkpoint: Arc<AtomicBool>,
     inner: Arc<Inner>,
 }
 
@@ -38,10 +37,15 @@ struct Inner {
     region_id: RegionId,
     manifest_store: ManifestObjectStore,
     last_checkpoint_version: AtomicU64,
+    is_doing_checkpoint: AtomicBool,
 }
 
 impl Inner {
     async fn do_checkpoint(&self, checkpoint: RegionCheckpoint) {
+        let _guard = scopeguard::guard(&self.is_doing_checkpoint, |x| {
+            x.store(false, Ordering::Relaxed);
+        });
+
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["checkpoint"])
             .start_timer();
@@ -81,6 +85,14 @@ impl Inner {
     fn region_id(&self) -> RegionId {
         self.region_id
     }
+
+    fn is_doing_checkpoint(&self) -> bool {
+        self.is_doing_checkpoint.load(Ordering::Relaxed)
+    }
+
+    fn set_doing_checkpoint(&self) {
+        self.is_doing_checkpoint.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Checkpointer {
@@ -92,11 +104,11 @@ impl Checkpointer {
     ) -> Self {
         Self {
             manifest_options,
-            is_doing_checkpoint: Arc::new(AtomicBool::new(false)),
             inner: Arc::new(Inner {
                 region_id,
                 manifest_store,
                 last_checkpoint_version: AtomicU64::new(last_checkpoint_version),
+                is_doing_checkpoint: AtomicBool::new(false),
             }),
         }
     }
@@ -122,7 +134,7 @@ impl Checkpointer {
 
         // We can simply check whether there's a running checkpoint task like this, all because of
         // the caller of this function is ran single threaded, inside the lock of RegionManifestManager.
-        if self.is_doing_checkpoint.load(Ordering::Relaxed) {
+        if self.inner.is_doing_checkpoint() {
             return;
         }
 
@@ -150,22 +162,16 @@ impl Checkpointer {
     }
 
     fn do_checkpoint(&self, checkpoint: RegionCheckpoint) {
-        let is_doing_checkpoint = self.is_doing_checkpoint.clone();
-        is_doing_checkpoint.store(true, Ordering::Relaxed);
-        let guard = scopeguard::guard(is_doing_checkpoint, |x| {
-            x.store(false, Ordering::Relaxed);
-        });
+        self.inner.set_doing_checkpoint();
 
         let inner = self.inner.clone();
         common_runtime::spawn_bg(async move {
-            let _guard = guard;
-
             inner.do_checkpoint(checkpoint).await;
         });
     }
 
     #[cfg(test)]
     pub(crate) fn is_doing_checkpoint(&self) -> bool {
-        self.is_doing_checkpoint.load(Ordering::Relaxed)
+        self.inner.is_doing_checkpoint()
     }
 }
