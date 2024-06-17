@@ -39,10 +39,14 @@ pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
     fn transform(&self, val: crate::etl::value::Value) -> Result<Self::Output, String>;
 }
 
+/// On Failure behavior when transform fails
 #[derive(Debug, Clone, Default)]
 pub enum OnFailure {
+    // Return None if transform fails
     #[default]
     Ignore,
+    // Return default value of the field if transform fails
+    // Default value depends on the type of the field, or explicitly set by user
     Default,
 }
 
