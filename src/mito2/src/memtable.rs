@@ -34,6 +34,7 @@ use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::region::options::MemtableOptions;
+use crate::sst::parquet::file_range::RangeBase;
 
 pub mod key_values;
 pub mod partition_tree;
@@ -109,6 +110,16 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator>;
+
+    /// Returns the ranges in the memtable.
+    fn ranges(
+        &self,
+        _projection: Option<&[ColumnId]>,
+        _predicate: Option<Predicate>,
+    ) -> Result<Vec<MemRange>> {
+        // FIXME(yingwen): remove the default implementaton.
+        todo!()
+    }
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
@@ -276,6 +287,32 @@ impl MemtableBuilderProvider {
             )),
         }
     }
+}
+
+/// Builder to build an iterator to read the range.
+pub trait IterBuilder: Send {
+    /// Returns the iterator to read the range.
+    fn build(&self) -> Result<BoxedBatchIterator>;
+}
+
+pub type BoxedIterBuilder = Box<dyn IterBuilder>;
+
+/// Context shared by ranges of the same memtable.
+pub(crate) struct MemRangeContext {
+    /// Iterator builder.
+    builder: BoxedIterBuilder,
+    /// Base of the context.
+    base: RangeBase,
+}
+
+pub(crate) type MemRangeContextRef = Arc<MemRangeContext>;
+
+/// A range in the memtable.
+#[derive(Clone)]
+pub struct MemRange {
+    /// Shared context.
+    context: MemRangeContextRef,
+    // TODO(yingwen): Id to identify the range in the memtable.
 }
 
 #[cfg(test)]
