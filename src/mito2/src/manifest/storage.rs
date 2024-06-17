@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::iter::Iterator;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
@@ -134,7 +134,7 @@ pub struct ManifestObjectStore {
     compress_type: CompressionType,
     path: String,
     /// Stores the size of each manifest file.
-    manifest_size_map: HashMap<FileKey, u64>,
+    manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
 }
 
@@ -149,7 +149,7 @@ impl ManifestObjectStore {
             object_store,
             compress_type,
             path: util::normalize_dir(path),
-            manifest_size_map: HashMap::new(),
+            manifest_size_map: Arc::new(RwLock::new(HashMap::new())),
             total_manifest_size,
         }
     }
@@ -239,8 +239,11 @@ impl ManifestObjectStore {
     /// Fetch all manifests in concurrent.
     pub async fn fetch_manifests(
         &self,
-        manifests: &[(u64, Entry)],
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        let manifests = self.scan(start_version, end_version).await?;
+
         // TODO(weny): Make it configurable.
         let semaphore = Semaphore::new(FETCH_MANIFEST_PARALLELISM);
 
@@ -272,7 +275,7 @@ impl ManifestObjectStore {
     /// ### Return
     /// The number of deleted files.
     pub async fn delete_until(
-        &mut self,
+        &self,
         end: ManifestVersion,
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
@@ -378,7 +381,11 @@ impl ManifestObjectStore {
     }
 
     /// Save the checkpoint manifest file.
-    pub async fn save_checkpoint(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub(crate) async fn save_checkpoint(
+        &self,
+        version: ManifestVersion,
+        bytes: &[u8],
+    ) -> Result<()> {
         let path = self.checkpoint_file_path(version);
         let data = self
             .compress_type
@@ -566,24 +573,28 @@ impl ManifestObjectStore {
 
     /// Compute the size(Byte) in manifest size map.
     pub(crate) fn total_manifest_size(&self) -> u64 {
-        self.manifest_size_map.values().sum()
+        self.manifest_size_map.read().unwrap().values().sum()
     }
 
     /// Set the size of the delta file by delta version.
     pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.manifest_size_map.insert(FileKey::Delta(version), size);
+        let mut m = self.manifest_size_map.write().unwrap();
+        m.insert(FileKey::Delta(version), size);
+
         self.inc_total_manifest_size(size);
     }
 
     /// Set the size of the checkpoint file by checkpoint version.
-    pub(crate) fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.manifest_size_map
-            .insert(FileKey::Checkpoint(version), size);
+    fn set_checkpoint_file_size(&self, version: ManifestVersion, size: u64) {
+        let mut m = self.manifest_size_map.write().unwrap();
+        m.insert(FileKey::Checkpoint(version), size);
+
         self.inc_total_manifest_size(size);
     }
 
-    fn unset_file_size(&mut self, key: &FileKey) {
-        if let Some(val) = self.manifest_size_map.remove(key) {
+    fn unset_file_size(&self, key: &FileKey) {
+        let mut m = self.manifest_size_map.write().unwrap();
+        if let Some(val) = m.remove(key) {
             self.dec_total_manifest_size(val);
         }
     }
@@ -682,8 +693,7 @@ mod tests {
                 .unwrap();
         }
 
-        let manifests = log_store.scan(1, 4).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(1, 4).await.unwrap();
         let mut it = manifests.into_iter();
         for v in 1..4 {
             let (version, bytes) = it.next().unwrap();
@@ -692,8 +702,7 @@ mod tests {
         }
         assert!(it.next().is_none());
 
-        let manifests = log_store.scan(0, 11).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
         for v in 0..5 {
             let (version, bytes) = it.next().unwrap();
@@ -721,8 +730,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let _ = log_store.load_last_checkpoint().await.unwrap().unwrap();
-        let manifests = log_store.scan(0, 11).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
 
         let (version, bytes) = it.next().unwrap();
@@ -738,8 +746,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
-        let manifests = log_store.scan(0, 11).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();
 
         assert!(it.next().is_none());
@@ -784,8 +791,7 @@ mod tests {
             .unwrap();
 
         // test data reading
-        let manifests = log_store.scan(0, 10).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 10).await.unwrap();
         let mut it = manifests.into_iter();
 
         for v in 0..10 {
@@ -807,8 +813,7 @@ mod tests {
         // Delete util 10, contain uncompressed/compressed data
         // log 0, 1, 2, 7, 8, 9 will be delete
         assert_eq!(11, log_store.delete_until(10, false).await.unwrap());
-        let manifests = log_store.scan(0, 10).await.unwrap();
-        let manifests = log_store.fetch_manifests(&manifests).await.unwrap();
+        let manifests = log_store.fetch_manifests(0, 10).await.unwrap();
         let mut it = manifests.into_iter();
         assert!(it.next().is_none());
     }

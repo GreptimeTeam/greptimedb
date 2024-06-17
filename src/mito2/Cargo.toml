@@ -58,6 +58,7 @@ regex = "1.5"
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
 rstest_reuse = { workspace = true, optional = true }
+scopeguard = "1.2"
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
