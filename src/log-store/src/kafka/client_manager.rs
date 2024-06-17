@@ -33,9 +33,6 @@ use crate::kafka::producer::OrderedBatchProducerRef;
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
 
-// Request channel size of each `OrderedBatchProducer`.
-const CHANNEL_SIZE: usize = 128;
-
 // Max batch size for a `OrderedBatchProducer` to handle requests.
 const REQUEST_BATCH_SIZE: usize = 64;
 
@@ -98,7 +95,7 @@ impl ClientManager {
             client,
             mutex: Mutex::new(()),
             instances: RwLock::new(HashMap::new()),
-            producer_channel_size: CHANNEL_SIZE,
+            producer_channel_size: REQUEST_BATCH_SIZE * 2,
             producer_request_batch_size: REQUEST_BATCH_SIZE,
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: config.compression,
