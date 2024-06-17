@@ -35,6 +35,7 @@ use common_query::Output;
 use headers::HeaderValue;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pipeline::table::PipelineVersion;
 use pipeline::{GreptimeTransformer, Pipeline};
 use serde_json::Value;
 use session::context::QueryContextRef;
@@ -132,9 +133,9 @@ pub trait LogHandler {
     async fn get_pipeline(
         &self,
         name: &str,
-        version: Option<String>,
+        version: PipelineVersion,
         query_ctx: QueryContextRef,
-    ) -> Result<Pipeline<GreptimeTransformer>>;
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>>;
 
     async fn insert_pipeline(
         &self,

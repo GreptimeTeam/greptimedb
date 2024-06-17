@@ -14,13 +14,11 @@
 
 use api::v1::WalEntry;
 use async_stream::stream;
-use common_telemetry::info;
 use futures::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::storage::RegionId;
 
 use crate::error::{CorruptedEntrySnafu, DecodeWalSnafu, Result};
 use crate::wal::raw_entry_reader::RawEntryReader;
@@ -90,17 +88,15 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::{Mutation, OpType, WalEntry};
-    use futures::{stream, TryStreamExt};
+    use futures::TryStreamExt;
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader};
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
 
-    use crate::error::{self, Result};
+    use crate::error;
     use crate::test_util::wal_util::MockRawEntryStream;
     use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
-    use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
-    use crate::wal::EntryId;
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {

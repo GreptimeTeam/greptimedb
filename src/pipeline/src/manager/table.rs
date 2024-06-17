@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -22,7 +22,7 @@ use api::v1::{
 };
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
@@ -31,6 +31,7 @@ use datafusion_expr::LogicalPlanBuilder;
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
+use moka::sync::Cache;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use query::plan::LogicalPlan;
@@ -48,6 +49,12 @@ use crate::error::{
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
 
+/// Pipeline version. An optional timestamp with nanosecond precision.
+/// If the version is None, it means the latest version of the pipeline.
+/// User can specify the version by providing a timestamp string formatted as iso8601.
+/// When it used in cache key, it will be converted to i64 meaning the number of nanoseconds since the epoch.
+pub type PipelineVersion = Option<TimestampNanosecond>;
+
 pub type PipelineTableRef = Arc<PipelineTable>;
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -58,6 +65,11 @@ pub const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type
 pub const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
 pub const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
 
+/// Pipeline table cache size.
+pub const PIPELINES_CACHE_SIZE: u64 = 10000;
+/// Pipeline table cache time to live.
+pub const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
+
 /// PipelineTable is a table that stores the pipeline schema and content.
 /// Every catalog has its own pipeline table.
 pub struct PipelineTable {
@@ -65,7 +77,7 @@ pub struct PipelineTable {
     statement_executor: StatementExecutorRef,
     table: TableRef,
     query_engine: QueryEngineRef,
-    pipelines: RwLock<HashMap<String, Pipeline<GreptimeTransformer>>>,
+    pipelines: Cache<String, Arc<Pipeline<GreptimeTransformer>>>,
 }
 
 impl PipelineTable {
@@ -81,11 +93,15 @@ impl PipelineTable {
             statement_executor,
             table,
             query_engine,
-            pipelines: RwLock::new(HashMap::default()),
+            pipelines: Cache::builder()
+                .max_capacity(PIPELINES_CACHE_SIZE)
+                .time_to_live(PIPELINES_CACHE_TTL)
+                .build(),
         }
     }
 
     /// Build the schema for the pipeline table.
+    /// Returns the (time index, primary keys, column) definitions.
     pub fn build_pipeline_schema() -> (String, Vec<String>, Vec<ColumnDef>) {
         (
             PIPELINE_TABLE_CREATED_AT_COLUMN_NAME.to_string(),
@@ -195,21 +211,21 @@ impl PipelineTable {
             .map_err(|e| CompilePipelineSnafu { reason: e }.build())
     }
 
-    fn generate_pipeline_cache_key(schema: &str, name: &str, version: Option<&str>) -> String {
-        format!("{}-{}-{}", schema, name, version.unwrap_or("latest"))
+    fn generate_pipeline_cache_key(schema: &str, name: &str, version: PipelineVersion) -> String {
+        match version {
+            Some(version) => format!("{}/{}/{}", schema, name, i64::from(version)),
+            None => format!("{}/{}/latest", schema, name),
+        }
     }
 
     fn get_compiled_pipeline_from_cache(
         &self,
         schema: &str,
         name: &str,
-        version: Option<&str>,
-    ) -> Option<Pipeline<GreptimeTransformer>> {
+        version: PipelineVersion,
+    ) -> Option<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipelines
-            .read()
-            .unwrap()
             .get(&Self::generate_pipeline_cache_key(schema, name, version))
-            .cloned()
     }
 
     /// Insert a pipeline into the pipeline table.
@@ -271,22 +287,17 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: Option<String>,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
-        info!("pipeline version: {:?}", version);
-        if let Some(pipeline) =
-            self.get_compiled_pipeline_from_cache(schema, name, version.as_deref())
-        {
+        version: PipelineVersion,
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+        if let Some(pipeline) = self.get_compiled_pipeline_from_cache(schema, name, version) {
             return Ok(pipeline);
         }
 
-        let pipeline = self
-            .find_pipeline_by_name(schema, name, version.as_ref())
-            .await?;
-        let compiled_pipeline = Self::compile_pipeline(&pipeline.0)?;
+        let pipeline = self.find_pipeline_by_name(schema, name, version).await?;
+        let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
-        self.pipelines.write().unwrap().insert(
-            Self::generate_pipeline_cache_key(schema, name, version.as_deref()),
+        self.pipelines.insert(
+            Self::generate_pipeline_cache_key(schema, name, version),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
@@ -300,21 +311,20 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Pipeline<GreptimeTransformer>> {
-        let compiled_pipeline = Self::compile_pipeline(pipeline)?;
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+        let compiled_pipeline = Arc::new(Self::compile_pipeline(pipeline)?);
         // we will use the version in the future
         let version = self
             .insert_pipeline_to_pipeline_table(schema, name, content_type, pipeline)
             .await?;
 
         {
-            let mut g = self.pipelines.write().unwrap();
-            g.insert(
+            self.pipelines.insert(
                 Self::generate_pipeline_cache_key(schema, name, None),
                 compiled_pipeline.clone(),
             );
-            g.insert(
-                Self::generate_pipeline_cache_key(schema, name, Some(&version.to_iso8601_string())),
+            self.pipelines.insert(
+                Self::generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
                 compiled_pipeline.clone(),
             );
         }
@@ -326,7 +336,7 @@ impl PipelineTable {
         &self,
         schema: &str,
         name: &str,
-        version: Option<&String>,
+        version: PipelineVersion,
     ) -> Result<(String, TimestampNanosecond)> {
         let table_info = self.table.table_info();
 
@@ -345,7 +355,7 @@ impl PipelineTable {
         let filter = if let Some(v) = version {
             and(
                 schema_and_name_filter,
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v)),
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v.0.to_iso8601_string())),
             )
         } else {
             schema_and_name_filter
@@ -361,7 +371,7 @@ impl PipelineTable {
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(true, true)
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, true)
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .limit(0, Some(1))
@@ -369,7 +379,7 @@ impl PipelineTable {
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
 
-        info!("find_pipeline_by_name: plan: {:?}", plan);
+        debug!("find_pipeline_by_name: plan: {:?}", plan);
 
         let output = self
             .query_engine
@@ -386,20 +396,11 @@ impl PipelineTable {
             .await
             .context(CollectRecordsSnafu)?;
 
-        ensure!(
-            !records.is_empty(),
-            PipelineNotFoundSnafu {
-                name,
-                version: version.cloned()
-            }
-        );
+        ensure!(!records.is_empty(), PipelineNotFoundSnafu { name, version });
 
         ensure!(
             records.len() == 1 && records[0].num_columns() == 2,
-            PipelineNotFoundSnafu {
-                name,
-                version: version.cloned()
-            }
+            PipelineNotFoundSnafu { name, version }
         );
 
         let pipeline_content_column = records[0].column(0);
@@ -424,17 +425,14 @@ impl PipelineTable {
                 ),
             })?;
 
-        info!(
+        debug!(
             "find_pipeline_by_name: pipeline_content: {:?}, pipeline_created_at: {:?}",
             pipeline_content, pipeline_created_at
         );
 
         ensure!(
             pipeline_content.len() == 1,
-            PipelineNotFoundSnafu {
-                name,
-                version: version.cloned()
-            }
+            PipelineNotFoundSnafu { name, version }
         );
 
         // Safety: asserted above

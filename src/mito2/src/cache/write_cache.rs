@@ -127,10 +127,10 @@ impl WriteCache {
         .build();
 
         // Write to FileCache.
-        let mut writer = ParquetWriter::new(
+        let mut writer = ParquetWriter::new_with_object_store(
+            self.file_cache.local_store(),
             self.file_cache.cache_file_path(parquet_key),
             write_request.metadata,
-            self.file_cache.local_store(),
             indexer,
         );
 
@@ -246,7 +246,6 @@ pub struct SstUploadRequest {
 
 #[cfg(test)]
 mod tests {
-
     use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
