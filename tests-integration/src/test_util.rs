@@ -425,6 +425,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
             ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
             Some(instance.instance.clone()),
         )
+        .with_log_ingest_handler(instance.instance.clone(), None)
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {

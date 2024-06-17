@@ -26,8 +26,8 @@ use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{and, col, lit};
-use datafusion_common::TableReference;
-use datafusion_expr::LogicalPlanBuilder;
+use datafusion_common::{TableReference, ToDFSchema};
+use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlanBuilder};
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
@@ -218,6 +218,19 @@ impl PipelineTable {
         }
     }
 
+    fn remove_pipeline_cache_with_schema_and_name(&self, schema: &str, name: &str) {
+        let key_prefix = format!("{}/{}", schema, name);
+        let keys = self
+            .pipelines
+            .iter()
+            .filter(|en| en.0.starts_with(&key_prefix))
+            .map(|en| (*en.0).clone())
+            .collect::<Vec<String>>();
+        for key in keys.iter() {
+            self.pipelines.remove(key);
+        }
+    }
+
     fn get_compiled_pipeline_from_cache(
         &self,
         schema: &str,
@@ -293,7 +306,10 @@ impl PipelineTable {
             return Ok(pipeline);
         }
 
-        let pipeline = self.find_pipeline_by_name(schema, name, version).await?;
+        let pipeline = self
+            .find_pipeline_by_name(schema, name, version)
+            .await?
+            .context(PipelineNotFoundSnafu { name, version })?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.pipelines.insert(
@@ -332,12 +348,74 @@ impl PipelineTable {
         Ok(compiled_pipeline)
     }
 
+    pub async fn delete_pipeline_by_name(&self, schema: &str, name: &str) -> Result<()> {
+        // 1. check pipeline exist in catalog
+        let pipeline = self.find_pipeline_by_name(schema, name, None).await?;
+        if pipeline.is_none() {
+            return Ok(());
+        }
+
+        // 2. do delete
+        let table_info = self.table.table_info();
+        let table_name = TableReference::full(
+            table_info.catalog_name.clone(),
+            table_info.schema_name.clone(),
+            table_info.name.clone(),
+        );
+        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
+        let df_schema = Arc::new(
+            table_info
+                .meta
+                .schema
+                .arrow_schema()
+                .clone()
+                .to_dfschema()
+                .context(BuildDfLogicalPlanSnafu)?,
+        );
+
+        // create scan plan
+        let logical_plan = LogicalPlanBuilder::scan(table_name.clone(), table_source, None)
+            .context(BuildDfLogicalPlanSnafu)?
+            .filter(and(
+                col("schema").eq(lit(schema)),
+                col("name").eq(lit(name)),
+            ))
+            .context(BuildDfLogicalPlanSnafu)?
+            .build()
+            .context(BuildDfLogicalPlanSnafu)?;
+
+        // create dml stmt
+        let stmt = DmlStatement::new(
+            table_name,
+            df_schema,
+            datafusion_expr::WriteOp::Delete,
+            Arc::new(logical_plan),
+        );
+
+        let plan = LogicalPlan::DfPlan(DfLogicalPlan::Dml(stmt));
+
+        let output = self
+            .query_engine
+            .execute(plan, Self::query_ctx(&table_info))
+            .await
+            .context(ExecuteInternalStatementSnafu)?;
+
+        // cloud be deleting multiple rows
+        info!("delete pipeline: {:?}, output: {:?}", name, output);
+        // remove all caches
+        self.remove_pipeline_cache_with_schema_and_name(schema, name);
+
+        Ok(())
+    }
+
     async fn find_pipeline_by_name(
         &self,
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<(String, TimestampNanosecond)> {
+    ) -> Result<Option<(String, TimestampNanosecond)>> {
         let table_info = self.table.table_info();
 
         let table_name = TableReference::full(
@@ -396,8 +474,11 @@ impl PipelineTable {
             .await
             .context(CollectRecordsSnafu)?;
 
-        ensure!(!records.is_empty(), PipelineNotFoundSnafu { name, version });
+        if records.is_empty() {
+            return Ok(None);
+        }
 
+        // limit 1
         ensure!(
             records.len() == 1 && records[0].num_columns() == 2,
             PipelineNotFoundSnafu { name, version }
@@ -436,9 +517,9 @@ impl PipelineTable {
         );
 
         // Safety: asserted above
-        Ok((
+        Ok(Some((
             pipeline_content.get_data(0).unwrap().to_string(),
             pipeline_created_at.get_data(0).unwrap(),
-        ))
+        )))
     }
 }
