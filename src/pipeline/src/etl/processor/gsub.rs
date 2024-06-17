@@ -26,7 +26,7 @@ pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 const REPLACEMENT_NAME: &str = "replacement";
 const PATTERN_NAME: &str = "pattern";
 
-/// only support string value, and array string value
+/// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
 #[derive(Debug, Default)]
 pub struct GsubProcessor {
     fields: Fields,
