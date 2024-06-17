@@ -80,6 +80,10 @@
 //!        {flownode_id}/
 //!          {flow_id}/
 //!            {partition_id}
+//!   
+//!   addr/
+//!     {flownode_id}/
+//!       {flownode_addr}
 
 pub mod catalog_name;
 pub mod datanode_table;
