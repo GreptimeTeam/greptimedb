@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use common_error::ext::BoxedError;
+use common_recordbatch::DfRecordBatch;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow_array;
 use datatypes::data_type::DataType;
@@ -171,13 +172,11 @@ pub enum ScalarExpr {
 }
 
 /// A way to represent a scalar function that is implemented in Datafusion
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct DfScalarFunction {
     raw_fn: RawDfScalarFn,
     // TODO(discord9): directly from datafusion expr
-    #[serde(skip)]
     fn_impl: Arc<dyn PhysicalExpr>,
-    #[serde(skip)]
     df_schema: Arc<datafusion_common::DFSchema>,
 }
 
@@ -192,6 +191,12 @@ impl DfScalarFunction {
 
     // TODO(discord9): add RecordBatch support
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+        if values.is_empty() {
+            return InvalidArgumentSnafu {
+                reason: "values is empty".to_string(),
+            }
+            .fail();
+        }
         // TODO(discord9): make cols all array length of one
         let mut cols = vec![];
         for (idx, typ) in self
@@ -208,7 +213,7 @@ impl DfScalarFunction {
             cols.push(array.to_vector().to_arrow_array());
         }
         let schema = self.df_schema.inner().clone();
-        let rb = common_recordbatch::DfRecordBatch::try_new(schema, cols).map_err(|err| {
+        let rb = DfRecordBatch::try_new(schema, cols).map_err(|err| {
             ArrowSnafu {
                 raw: err,
                 context:
@@ -235,6 +240,16 @@ impl DfScalarFunction {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
         Ok(res_val)
+    }
+}
+
+// simply serialize the raw_fn instead of derive to avoid complex deserialize of struct
+impl Serialize for DfScalarFunction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.raw_fn.serialize(serializer)
     }
 }
 
@@ -711,6 +726,15 @@ impl ScalarExpr {
 #[cfg(test)]
 mod test {
     use datatypes::arrow::array::Scalar;
+    use query::parser::QueryLanguageParser;
+    use query::QueryEngine;
+    use session::context::QueryContext;
+    use substrait::extension_serializer;
+    use substrait::substrait_proto_df::proto::expression::literal::LiteralType;
+    use substrait::substrait_proto_df::proto::expression::Literal;
+    use substrait::substrait_proto_df::proto::function_argument::ArgType;
+    use substrait::substrait_proto_df::proto::r#type::Kind;
+    use substrait::substrait_proto_df::proto::{r#type, FunctionArgument, Type};
 
     use super::*;
     #[test]
@@ -801,5 +825,38 @@ mod test {
         let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
         let res = expr.permute_map(&permute_map);
         assert!(matches!(res, Err(Error::InvalidQuery { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_df_scalar_function() {
+        let raw_scalar_func = ScalarFunction {
+            function_reference: 0,
+            arguments: vec![FunctionArgument {
+                arg_type: Some(ArgType::Value(Expression {
+                    rex_type: Some(RexType::Literal(Literal {
+                        nullable: false,
+                        type_variation_reference: 0,
+                        literal_type: Some(LiteralType::I64(-1)),
+                    })),
+                })),
+            }],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationDesc::try_new(
+            RelationType::new(vec![ColumnType::new_nullable(
+                ConcreteDataType::null_datatype(),
+            )]),
+            vec!["null_column".to_string()],
+        )
+        .unwrap();
+        let extensions = FunctionExtensions::from_iter(vec![(0, "abs")]);
+        let raw_fn = RawDfScalarFn::from_proto(&raw_scalar_func, input_schema, extensions).unwrap();
+        let fn_impl = raw_fn.get_fn_impl().unwrap();
+        let df_func = DfScalarFunction::new(raw_fn, fn_impl).unwrap();
+        let as_str = serde_json::to_string(&df_func).unwrap();
+        let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
+        assert_eq!(df_func, from_str);
+        assert_eq!(df_func.eval(&[Value::Null]).unwrap(), Value::Int64(1));
     }
 }

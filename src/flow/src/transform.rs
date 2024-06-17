@@ -79,9 +79,9 @@ pub struct FunctionExtensions {
 }
 
 impl FunctionExtensions {
-    pub fn from_iter(inner: impl IntoIterator<Item = (u32, String)>) -> Self {
+    pub fn from_iter(inner: impl IntoIterator<Item = (u32, impl ToString)>) -> Self {
         Self {
-            anchor_to_name: inner.into_iter().collect(),
+            anchor_to_name: inner.into_iter().map(|(k, s)| (k, s.to_string())).collect(),
         }
     }
 
