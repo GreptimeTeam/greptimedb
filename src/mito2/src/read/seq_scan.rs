@@ -21,10 +21,12 @@ use std::time::Instant;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::util::AggregatedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::debug;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
+use futures::StreamExt;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
@@ -72,8 +74,16 @@ impl SeqScan {
     }
 
     /// Builds a stream for the query.
+    ///
+    /// The returned stream is not partitioned and will contains all the data. If want
+    /// partitioned scan, use [`RegionScanner::scan_partition`].
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_opt(None)
+        let streams = (0..self.properties.ranges.len())
+            .map(|partition| self.scan_partition(partition))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let aggr_stream = AggregatedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
+        Ok(Box::pin(aggr_stream))
     }
 
     /// Builds a [BoxedBatchReader] from sequential scan for compaction.
@@ -203,7 +213,7 @@ impl SeqScan {
         }
     }
 
-    /// Scans one partition or all partitions.
+    /// Scans the given partition, or all partitions if `partition` is `None`.
     fn scan_partition_opt(
         &self,
         partition: Option<usize>,
