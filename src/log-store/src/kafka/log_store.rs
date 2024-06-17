@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -143,57 +143,55 @@ impl LogStore for KafkaLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        let mut region_grouped_records: HashMap<RegionId, Vec<_>> = HashMap::new();
-        let mut region_producers: HashMap<RegionId, OrderedBatchProducerRef> = HashMap::new();
+        let mut region_ids = HashSet::new();
+        for entry in &entries {
+            region_ids.insert(entry.region_id());
+        }
+
+        let mut region_grouped_records: HashMap<RegionId, (OrderedBatchProducerRef, Vec<_>)> =
+            HashMap::with_capacity(region_ids.len());
         for entry in entries {
-            let provider = entry
-                .provider()
-                .as_kafka_provider()
-                .context(error::InvalidProviderSnafu {
+            let provider = entry.provider().as_kafka_provider().with_context(|| {
+                error::InvalidProviderSnafu {
                     expected: KafkaProvider::type_name(),
                     actual: entry.provider().type_name(),
-                })?
-                .clone();
+                }
+            })?;
 
             let region_id = entry.region_id();
-
-            if let hash_map::Entry::Vacant(e) = region_producers.entry(region_id) {
-                let producer = self
-                    .client_manager
-                    .get_or_insert(&provider)
-                    .await?
-                    .producer()
-                    .clone();
-                e.insert(producer);
-            };
+            let producer = self
+                .client_manager
+                .get_or_insert(provider)
+                .await?
+                .producer()
+                .clone();
             region_grouped_records
                 .entry(region_id)
-                .or_default()
+                .or_insert((producer, vec![]))
+                .1
                 .extend(convert_to_kafka_records(entry)?);
         }
 
-        let mut region_ids = Vec::with_capacity(region_grouped_records.keys().len());
-        let mut region_grouped_result_receivers =
-            Vec::with_capacity(region_grouped_records.keys().len());
-        for (region_id, records) in region_grouped_records {
-            region_ids.push(region_id);
-            let producer = region_producers.get(&region_id).unwrap();
+        let mut ordered_region_ids = Vec::with_capacity(region_ids.len());
+        let mut region_grouped_result_receivers = Vec::with_capacity(region_ids.len());
+        for (region_id, (producer, records)) in region_grouped_records {
+            ordered_region_ids.push(region_id);
             // Safety: `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
             region_grouped_result_receivers.push(producer.produce(records).await?)
         }
 
-        let region_grouped_offsets = try_join_all(
+        let region_grouped_max_offset = try_join_all(
             region_grouped_result_receivers
                 .into_iter()
-                .map(|handle| handle.wait()),
+                .map(|receiver| receiver.wait()),
         )
         .await?;
 
-        let region_grouped_max_offset = region_grouped_offsets
+        let region_grouped_max_offset = region_grouped_max_offset
             .into_iter()
-            .map(|offsets| offsets.into_iter().max().unwrap() as u64);
+            .map(|offset| offset as u64);
 
-        let last_entry_ids = region_ids
+        let last_entry_ids = ordered_region_ids
             .into_iter()
             .zip(region_grouped_max_offset)
             .collect::<HashMap<_, _>>();

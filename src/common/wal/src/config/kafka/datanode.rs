@@ -30,6 +30,7 @@ pub struct DatanodeKafkaConfig {
     /// The compression algorithm used to compress kafka records.
     #[serde(skip)]
     pub compression: Compression,
+    /// TODO(weny): Remove the alias once we release v0.9.
     /// The max size of a single producer batch.
     #[serde(alias = "max_batch_size")]
     pub max_batch_bytes: ReadableSize,

@@ -41,7 +41,7 @@ impl ProduceResultReceiver {
         self.receivers.push(receiver)
     }
 
-    async fn wait(self) -> Result<Vec<i64>> {
+    async fn wait(self) -> Result<i64> {
         Ok(try_join_all(self.receivers)
             .await
             .into_iter()
@@ -49,7 +49,8 @@ impl ProduceResultReceiver {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
-            .collect::<Vec<_>>())
+            .max()
+            .unwrap())
     }
 }
 
@@ -152,25 +153,24 @@ impl BackgroundProducerWorker {
                 for req in self.pending_requests.drain(..) {
                     do_flush(&self.client, req, self.compression).await
                 }
-            } else {
-                match self.receiver.recv().await {
-                    Some(req) => {
-                        buffer.clear();
-                        buffer.push(req);
-                        for _ in 1..self.request_batch_size {
-                            match self.receiver.try_recv() {
-                                Ok(req) => buffer.push(req),
-                                Err(_) => break,
-                            }
+            }
+            match self.receiver.recv().await {
+                Some(req) => {
+                    buffer.clear();
+                    buffer.push(req);
+                    for _ in 1..self.request_batch_size {
+                        match self.receiver.try_recv() {
+                            Ok(req) => buffer.push(req),
+                            Err(_) => break,
                         }
-                        self.pending_requests =
-                            handle_produce_requests(&mut buffer, self.max_batch_bytes);
                     }
-                    None => {
-                        debug!("The sender is dropped, BackgroundProducerWorker exited");
-                        // Exits the loop if the `sender` is dropped.
-                        break;
-                    }
+                    self.pending_requests =
+                        handle_produce_requests(&mut buffer, self.max_batch_bytes);
+                }
+                None => {
+                    debug!("The sender is dropped, BackgroundProducerWorker exited");
+                    // Exits the loop if the `sender` is dropped.
+                    break;
                 }
             }
         }
@@ -201,9 +201,13 @@ pub(crate) struct ProduceResultHandle {
 
 impl ProduceResultHandle {
     /// Waits for the data has been committed to Kafka.
-    /// Returns the committed offsets.
-    pub(crate) async fn wait(self) -> Result<Vec<i64>> {
-        self.receiver.await.unwrap().wait().await
+    /// Returns the **max** committed offsets.
+    pub(crate) async fn wait(self) -> Result<i64> {
+        self.receiver
+            .await
+            .context(error::WaitProduceResultReceiverSnafu)?
+            .wait()
+            .await
     }
 }
 
@@ -351,7 +355,7 @@ mod tests {
             .produce(vec![record.clone(), record.clone(), record.clone()])
             .await
             .unwrap();
-        assert_eq!(handle.wait().await.unwrap(), vec![0, 1, 2]);
+        assert_eq!(handle.wait().await.unwrap(), 2);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1]);
 
         // Produces 2 records
@@ -359,12 +363,12 @@ mod tests {
             .produce(vec![record.clone(), record.clone()])
             .await
             .unwrap();
-        assert_eq!(handle.wait().await.unwrap(), vec![3, 4]);
+        assert_eq!(handle.wait().await.unwrap(), 4);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1, 2]);
 
         // Produces 1 records
         let handle = producer.produce(vec![record.clone()]).await.unwrap();
-        assert_eq!(handle.wait().await.unwrap(), vec![5]);
+        assert_eq!(handle.wait().await.unwrap(), 5);
         assert_eq!(client.batch_sizes.lock().unwrap().as_slice(), &[2, 1, 2, 1]);
     }
 

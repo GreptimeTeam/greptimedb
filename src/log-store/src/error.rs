@@ -261,12 +261,20 @@ pub enum Error {
         attempt_index: u64,
     },
 
-    #[snafu(display("Failed to send produce request",))]
+    #[snafu(display("Failed to send produce request"))]
     SendProduceRequest {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::sync::mpsc::error::SendError<ProduceRequest>,
+    },
+
+    #[snafu(display("Failed to send produce request"))]
+    WaitProduceResultReceiver {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
     },
 }
 

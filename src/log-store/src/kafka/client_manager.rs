@@ -19,13 +19,13 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::ClientBuilder;
 use rskafka::BackoffConfig;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 use super::producer::OrderedBatchProducer;
 use crate::error::{
-    self, BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
+    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
 };
 use crate::kafka::producer::OrderedBatchProducerRef;
 
@@ -42,8 +42,8 @@ const REQUEST_BATCH_SIZE: usize = 64;
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
 
-#[derive(Debug, Clone)]
 /// Topic client.
+#[derive(Debug, Clone)]
 pub(crate) struct Client {
     client: Arc<PartitionClient>,
     producer: OrderedBatchProducerRef,
@@ -59,27 +59,18 @@ impl Client {
     }
 }
 
-#[derive(Debug, Clone)]
-enum ClientInstance {
-    Initializing(Arc<Notify>),
-    Ready(Client),
-}
-
 /// Manages client construction and accesses.
 #[derive(Debug)]
 pub(crate) struct ClientManager {
     client: rskafka::client::Client,
-    clients: RwLock<HashMap<Arc<KafkaProvider>, ClientInstance>>,
+    /// Used to initialize a new [Client].
+    mutex: Mutex<()>,
+    instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
 
     producer_channel_size: usize,
     producer_request_batch_size: usize,
     flush_batch_size: usize,
     compression: Compression,
-}
-
-enum Role {
-    Creator(Arc<Notify>),
-    Waiter(Arc<Notify>),
 }
 
 impl ClientManager {
@@ -105,7 +96,8 @@ impl ClientManager {
 
         Ok(Self {
             client,
-            clients: RwLock::new(HashMap::new()),
+            mutex: Mutex::new(()),
+            instances: RwLock::new(HashMap::new()),
             producer_channel_size: CHANNEL_SIZE,
             producer_request_batch_size: REQUEST_BATCH_SIZE,
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
@@ -113,69 +105,31 @@ impl ClientManager {
         })
     }
 
-    async fn wait(&self, provider: &Arc<KafkaProvider>, notify: Arc<Notify>) -> Result<Client> {
-        notify.notified().await;
-        match self
-            .clients
-            .read()
-            .await
-            .get(provider)
-            .cloned()
-            .context(error::ClientNotFountSnafu)?
-        {
-            ClientInstance::Initializing(_) => unreachable!(),
-            ClientInstance::Ready(client) => Ok(client),
-        }
-    }
-
     async fn try_insert(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
-        let role = {
-            let mut clients = self.clients.write().await;
-            match clients.get(provider).cloned() {
-                Some(client) => match client {
-                    ClientInstance::Initializing(notify) => Role::Waiter(notify),
-                    ClientInstance::Ready(client) => return Ok(client),
-                },
-                None => {
-                    let notify = Arc::new(Notify::new());
-                    clients.insert(
-                        provider.clone(),
-                        ClientInstance::Initializing(notify.clone()),
-                    );
-                    Role::Creator(notify)
-                }
-            }
-        };
+        let _guard = self.mutex.lock().await;
 
-        match role {
-            Role::Creator(notify) => {
+        let client = self.instances.read().await.get(provider).cloned();
+        match client {
+            Some(client) => Ok(client),
+            None => {
                 let client = self.try_create_client(provider).await?;
-                self.clients
+                self.instances
                     .write()
                     .await
-                    .insert(provider.clone(), ClientInstance::Ready(client.clone()));
-                notify.notify_waiters();
+                    .insert(provider.clone(), client.clone());
                 Ok(client)
             }
-            Role::Waiter(notify) => self.wait(provider, notify).await,
         }
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
     pub(crate) async fn get_or_insert(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
-        let instance = {
-            let client_pool = self.clients.read().await;
-            client_pool.get(provider).cloned()
-        };
-
-        if let Some(instance) = instance {
-            return match instance {
-                ClientInstance::Initializing(notify) => self.wait(provider, notify).await,
-                ClientInstance::Ready(client) => Ok(client),
-            };
-        };
-        self.try_insert(provider).await
+        let client = self.instances.read().await.get(provider).cloned();
+        match client {
+            Some(client) => Ok(client),
+            None => self.try_insert(provider).await,
+        }
     }
 
     async fn try_create_client(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
@@ -281,7 +235,7 @@ mod tests {
                 }
 
                 // Ensures all clients exist.
-                let client_pool = manager.clients.read().await;
+                let client_pool = manager.instances.read().await;
                 let all_exist = topics.iter().all(|topic| {
                     let provider = Arc::new(KafkaProvider::new(topic.to_string()));
                     client_pool.contains_key(&provider)
@@ -322,7 +276,7 @@ mod tests {
                 futures::future::try_join_all(tasks).await.unwrap();
 
                 // Ensures all clients exist.
-                let client_pool = manager.clients.read().await;
+                let client_pool = manager.instances.read().await;
                 let all_exist = topics.iter().all(|topic| {
                     let provider = Arc::new(KafkaProvider::new(topic.to_string()));
                     client_pool.contains_key(&provider)
