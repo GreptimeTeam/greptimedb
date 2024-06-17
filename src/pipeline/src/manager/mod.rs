@@ -12,11 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! manifest storage
-
-pub mod action;
-mod checkpointer;
-pub mod manager;
-pub mod storage;
-#[cfg(test)]
-mod tests;
+pub mod error;
+pub mod pipeline_operator;
+pub mod table;

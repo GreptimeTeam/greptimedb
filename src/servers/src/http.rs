@@ -67,12 +67,13 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
-    PromStoreProtocolHandlerRef, ScriptHandlerRef,
+    InfluxdbLineProtocolHandlerRef, LogHandlerRef, OpenTelemetryProtocolHandlerRef,
+    OpentsdbProtocolHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
 };
 use crate::server::Server;
 
 pub mod authorize;
+pub mod event;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
@@ -587,6 +588,16 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_log_ingest_handler(self, handler: LogHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/events"),
+                HttpServer::route_log(handler),
+            ),
+            ..self
+        }
+    }
+
     pub fn with_plugins(self, plugins: Plugins) -> Self {
         Self { plugins, ..self }
     }
@@ -697,6 +708,21 @@ impl HttpServer {
         Router::new()
             .route("/metrics", routing::get(handler::metrics))
             .with_state(metrics_handler)
+    }
+
+    fn route_log<S>(log_handler: LogHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::post(event::log_ingester))
+            .route(
+                "/pipelines/:pipeline_name",
+                routing::post(event::add_pipeline),
+            )
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
+            .with_state(log_handler)
     }
 
     fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {

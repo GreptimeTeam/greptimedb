@@ -14,6 +14,7 @@
 
 use std::assert_matches::assert_matches;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
 use store_api::storage::RegionId;
@@ -113,6 +114,10 @@ async fn manager_with_checkpoint_distance_1() {
     // apply 10 actions
     for _ in 0..10 {
         manager.update(nop_action()).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     // has checkpoint
@@ -126,9 +131,8 @@ async fn manager_with_checkpoint_distance_1() {
     // check files
     let mut expected = vec![
         "00000000000000000009.checkpoint",
+        "00000000000000000010.checkpoint",
         "00000000000000000010.json",
-        "00000000000000000008.checkpoint",
-        "00000000000000000009.json",
         "_last_checkpoint",
     ];
     expected.sort_unstable();
@@ -148,7 +152,7 @@ async fn manager_with_checkpoint_distance_1() {
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
     let expected_json =
-        "{\"size\":846,\"version\":9,\"checksum\":1218259706,\"extend_metadata\":{}}";
+        "{\"size\":848,\"version\":10,\"checksum\":4186457347,\"extend_metadata\":{}}";
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager
@@ -241,6 +245,10 @@ async fn generate_checkpoint_with_compression_types(
 
     for action in actions {
         manager.update(action).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     RegionManifestManager::last_checkpoint(&mut manager.store())

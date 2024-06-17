@@ -530,6 +530,6 @@ where
 }
 
 /// Returns the directory to the manifest files.
-fn new_manifest_dir(region_dir: &str) -> String {
+pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
     join_dir(region_dir, "manifest")
 }
