@@ -134,14 +134,6 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## **It's only used when the provider is `kafka`**.
 max_batch_bytes = "1MB"
 
-## Request channel size of each `OrderedBatchProducer`.
-## **It's only used when the provider is `kafka`**.
-producer_channel_size = 128
-
-## Max batch size for a `OrderedBatchProducer` to handle requests.
-## **It's only used when the provider is `kafka`**.
-producer_request_batch_size = 64
-
 ## The consumer wait timeout.
 ## **It's only used when the provider is `kafka`**.
 consumer_wait_timeout = "100ms"
