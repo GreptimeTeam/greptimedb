@@ -262,8 +262,9 @@ impl RegionScanner for SeqScan {
         self.scan_partition_opt(Some(partition))
     }
 
-    fn prepare(&mut self, _ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
-        todo!()
+    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        self.properties.ranges = ranges;
+        Ok(())
     }
 }
 

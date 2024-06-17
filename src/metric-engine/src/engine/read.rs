@@ -15,13 +15,12 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info, tracing};
 use datafusion::logical_expr::{self, Expr};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::engine::MetricEngineInner;
@@ -37,7 +36,7 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<RegionScannerRef> {
         let is_reading_physical_region = self.is_physical_region(region_id);
 
         if is_reading_physical_region {
@@ -55,13 +54,13 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<RegionScannerRef> {
         let _timer = MITO_OPERATION_ELAPSED
             .with_label_values(&["read_physical"])
             .start_timer();
 
         self.mito
-            .scan_to_stream(region_id, request)
+            .handle_query(region_id, request)
             .await
             .context(MitoReadOperationSnafu)
     }
@@ -70,7 +69,7 @@ impl MetricEngineInner {
         &self,
         logical_region_id: RegionId,
         request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<RegionScannerRef> {
         let _timer = MITO_OPERATION_ELAPSED
             .with_label_values(&["read"])
             .start_timer();
@@ -81,7 +80,7 @@ impl MetricEngineInner {
             .transform_request(physical_region_id, logical_region_id, request)
             .await?;
         self.mito
-            .scan_to_stream(data_region_id, request)
+            .handle_query(data_region_id, request)
             .await
             .context(MitoReadOperationSnafu)
     }
