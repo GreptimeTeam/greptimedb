@@ -615,6 +615,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
@@ -633,6 +634,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
@@ -672,6 +674,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         // Should schedule 1 compaction.
         assert_eq!(1, scheduler.region_status.len());
@@ -700,6 +703,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
@@ -711,7 +715,9 @@ mod tests {
             .is_some());
 
         // On compaction finished and schedule next compaction.
-        scheduler.on_compaction_finished(region_id, &manifest_ctx);
+        scheduler
+            .on_compaction_finished(region_id, &manifest_ctx)
+            .await;
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
         // 5 files for next compaction.
@@ -731,6 +737,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());
         assert!(scheduler
