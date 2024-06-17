@@ -17,14 +17,13 @@ use regex::Regex;
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::{
     yaml_bool, yaml_field, yaml_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::{Array, Map, Value};
 
 pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 
 const REPLACEMENT_NAME: &str = "replacement";
-const PATTERN_NAME: &str = "pattern";
 
 /// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
 #[derive(Debug, Default)]
