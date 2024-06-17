@@ -24,57 +24,60 @@ use crate::read::{Batch, BatchReader};
 
 /// A reader that dedup sorted batches from a source based on the
 /// dedup strategy.
-pub(crate) struct DedupReader<R> {
+pub(crate) struct DedupReader<R, S> {
     source: R,
-    strategy: Box<dyn DedupStrategy>,
+    strategy: S,
+    metrics: DedupMetrics,
 }
 
-impl<R> DedupReader<R> {
+impl<R, S> DedupReader<R, S> {
     /// Creates a new dedup reader.
-    pub(crate) fn new(source: R, strategy: Box<dyn DedupStrategy>) -> Self {
-        Self { source, strategy }
+    pub(crate) fn new(source: R, strategy: S) -> Self {
+        Self {
+            source,
+            strategy,
+            metrics: DedupMetrics::default(),
+        }
     }
 }
 
-impl<R: BatchReader> DedupReader<R> {
+impl<R: BatchReader, S: DedupStrategy> DedupReader<R, S> {
     /// Returns the next deduplicated batch.
     async fn fetch_next_batch(&mut self) -> Result<Option<Batch>> {
         while let Some(batch) = self.source.next_batch().await? {
-            if let Some(batch) = self.strategy.push_batch(batch)? {
+            if let Some(batch) = self.strategy.push_batch(batch, &mut self.metrics)? {
                 return Ok(Some(batch));
             }
         }
 
-        self.strategy.finish()
+        self.strategy.finish(&mut self.metrics)
     }
 }
 
 #[async_trait]
-impl<R: BatchReader> BatchReader for DedupReader<R> {
+impl<R: BatchReader, S: DedupStrategy> BatchReader for DedupReader<R, S> {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         self.fetch_next_batch().await
     }
 }
 
-impl<R> Drop for DedupReader<R> {
+impl<R, S> Drop for DedupReader<R, S> {
     fn drop(&mut self) {
-        let metrics = self.strategy.metrics();
-
-        debug!("Dedup reader finished, metrics: {:?}", metrics);
+        debug!("Dedup reader finished, metrics: {:?}", self.metrics);
 
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["dedup"])
-            .inc_by(metrics.num_unselected_rows as u64);
+            .inc_by(self.metrics.num_unselected_rows as u64);
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["delete"])
-            .inc_by(metrics.num_unselected_rows as u64);
+            .inc_by(self.metrics.num_unselected_rows as u64);
     }
 }
 
 #[cfg(test)]
-impl<R> DedupReader<R> {
+impl<R, S> DedupReader<R, S> {
     fn metrics(&self) -> &DedupMetrics {
-        self.strategy.metrics()
+        &self.metrics
     }
 }
 
@@ -82,16 +85,13 @@ impl<R> DedupReader<R> {
 pub(crate) trait DedupStrategy: Send {
     /// Pushes a batch to the dedup strategy.
     /// Returns the deduplicated batch.
-    fn push_batch(&mut self, batch: Batch) -> Result<Option<Batch>>;
+    fn push_batch(&mut self, batch: Batch, metrics: &mut DedupMetrics) -> Result<Option<Batch>>;
 
     /// Finishes the deduplication and resets the strategy.
     ///
     /// Users must ensure that `push_batch` is called for all batches before
     /// calling this method.
-    fn finish(&mut self) -> Result<Option<Batch>>;
-
-    /// Returns the metrics of the deduplication.
-    fn metrics(&self) -> &DedupMetrics;
+    fn finish(&mut self, metrics: &mut DedupMetrics) -> Result<Option<Batch>>;
 }
 
 /// State of the last row in a batch for dedup.
@@ -115,7 +115,6 @@ pub(crate) struct LastRow {
     prev_batch: Option<BatchLastRow>,
     /// Filter deleted rows.
     filter_deleted: bool,
-    metrics: DedupMetrics,
 }
 
 impl LastRow {
@@ -124,13 +123,16 @@ impl LastRow {
         Self {
             prev_batch: None,
             filter_deleted,
-            metrics: DedupMetrics::default(),
         }
     }
 }
 
 impl DedupStrategy for LastRow {
-    fn push_batch(&mut self, mut batch: Batch) -> Result<Option<Batch>> {
+    fn push_batch(
+        &mut self,
+        mut batch: Batch,
+        metrics: &mut DedupMetrics,
+    ) -> Result<Option<Batch>> {
         if batch.is_empty() {
             return Ok(None);
         }
@@ -148,7 +150,7 @@ impl DedupStrategy for LastRow {
             None => None,
         };
         if batch.first_timestamp() == prev_timestamp {
-            self.metrics.num_unselected_rows += 1;
+            metrics.num_unselected_rows += 1;
             // This batch contains a duplicate row, skip it.
             if batch.num_rows() == 1 {
                 // We don't need to update `prev_batch` because they have the same
@@ -183,8 +185,8 @@ impl DedupStrategy for LastRow {
             batch.filter_deleted()?;
             let num_rows_after_filter = batch.num_rows();
             let num_deleted = num_rows - num_rows_after_filter;
-            self.metrics.num_deleted_rows += num_deleted;
-            self.metrics.num_unselected_rows += num_deleted;
+            metrics.num_deleted_rows += num_deleted;
+            metrics.num_unselected_rows += num_deleted;
         }
 
         // The batch can become empty if all rows are deleted.
@@ -195,12 +197,8 @@ impl DedupStrategy for LastRow {
         }
     }
 
-    fn finish(&mut self) -> Result<Option<Batch>> {
+    fn finish(&mut self, _metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
         Ok(None)
-    }
-
-    fn metrics(&self) -> &DedupMetrics {
-        &self.metrics
     }
 }
 
@@ -240,7 +238,7 @@ mod tests {
             ),
         ];
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, Box::new(LastRow::new(true)));
+        let mut reader = DedupReader::new(reader, LastRow::new(true));
         check_reader_result(&mut reader, &input).await;
         assert_eq!(0, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
@@ -281,7 +279,7 @@ mod tests {
         ];
         let reader = VecBatchReader::new(&input);
         // Filter deleted.
-        let mut reader = DedupReader::new(reader, Box::new(LastRow::new(true)));
+        let mut reader = DedupReader::new(reader, LastRow::new(true));
         check_reader_result(
             &mut reader,
             &[
@@ -303,7 +301,7 @@ mod tests {
 
         // Does not filter deleted.
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, Box::new(LastRow::new(false)));
+        let mut reader = DedupReader::new(reader, LastRow::new(false));
         check_reader_result(
             &mut reader,
             &[

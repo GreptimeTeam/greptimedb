@@ -192,8 +192,10 @@ impl SeqScan {
 
         let dedup = !stream_ctx.input.append_mode;
         if dedup {
-            let dedup_strategy = Box::new(LastRow::new(stream_ctx.input.filter_deleted));
-            let reader = Box::new(DedupReader::new(reader, dedup_strategy));
+            let reader = Box::new(DedupReader::new(
+                reader,
+                LastRow::new(stream_ctx.input.filter_deleted),
+            ));
             Ok(Some(reader))
         } else {
             let reader = Box::new(reader);
