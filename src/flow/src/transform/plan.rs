@@ -64,7 +64,7 @@ impl TypedPlan {
     }
 
     /// Convert Substrait Rel into Flow's TypedPlan
-    /// TODO: SELECT DISTINCT(does it get compile with something else?)
+    /// TODO(discord9): SELECT DISTINCT(does it get compile with something else?)
     pub fn from_substrait_rel(
         ctx: &mut FlownodeContext,
         rel: &Rel,
@@ -213,7 +213,7 @@ fn rewrite_projection_after_reduce(
     reduce_output_type: &RelationDesc,
     proj_exprs: &mut Vec<TypedExpr>,
 ) -> Result<(), Error> {
-    // TODO: get keys correctly
+    // TODO(discord9): get keys correctly
     let key_exprs = key_val_plan
         .key_plan
         .projection

@@ -37,7 +37,7 @@ use crate::expr::{
 use crate::repr::{ColumnType, RelationDesc};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
 use crate::transform::{substrait_proto, FunctionExtensions};
-// TODO: found proper place for this
+// TODO(discord9): found proper place for this
 /// ref to `arrow_schema::datatype` for type name
 fn typename_to_cdt(name: &str) -> CDT {
     match name {
@@ -59,7 +59,7 @@ fn typename_to_cdt(name: &str) -> CDT {
     }
 }
 
-/// Convert ScalarFunction to corresponding Datafusion's PhysicalExpr
+/// Convert [`ScalarFunction`] to corresponding Datafusion's [`PhysicalExpr`]
 pub(crate) fn from_scalar_fn_to_df_fn_impl(
     f: &ScalarFunction,
     input_schema: &RelationDesc,
@@ -70,26 +70,17 @@ pub(crate) fn from_scalar_fn_to_df_fn_impl(
     };
     let schema = input_schema.to_df_schema()?;
 
-    let handle = {
-        let e_inner = e.clone();
-        let schema_inner = schema.clone();
-        let extension_inner = extensions.clone();
-        std::thread::spawn(move || {
-            common_runtime::block_on_bg(async {
-                // FIXME(discord9): consider coloring everything async....
-                substrait::df_logical_plan::consumer::from_substrait_rex(
-                    &datafusion::prelude::SessionContext::new(),
-                    &e_inner,
-                    &schema_inner,
-                    &extension_inner.inner_ref(),
-                )
-                .await
-            })
-        })
-    }
-    .join()
-    .expect("Thread join error");
-    let expr = handle.map_err(|err| {
+    let df_expr = futures::executor::block_on(async {
+        // TODO(discord9): consider coloring everything async....
+        substrait::df_logical_plan::consumer::from_substrait_rex(
+            &datafusion::prelude::SessionContext::new(),
+            &e,
+            &schema,
+            &extensions.inner_ref(),
+        )
+        .await
+    });
+    let expr = df_expr.map_err(|err| {
         DatafusionSnafu {
             raw: err,
             context: "Failed to convert substrait scalar function to datafusion scalar function",
@@ -115,7 +106,7 @@ impl TypedExpr {
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let phy_expr = from_scalar_fn_to_df_fn_impl(f, input_schema, extensions)?;
-        let raw_fn = RawDfScalarFn::from_proto(f, input_schema, extensions)?;
+        let raw_fn = RawDfScalarFn::from_proto(f, input_schema.clone(), extensions.clone())?;
         let expr = DfScalarFunction::new(raw_fn, phy_expr)?;
         let expr = ScalarExpr::CallDf { df_scalar_fn: expr };
         // df already know it's own schema, so not providing here
@@ -255,7 +246,6 @@ impl TypedExpr {
                         extensions,
                     )?;
                     Ok(try_as_df)
-                    // not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
                 }
             }
         }

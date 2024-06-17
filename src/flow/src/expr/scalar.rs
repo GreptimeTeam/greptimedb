@@ -28,12 +28,15 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
+use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
+use substrait::substrait_proto_df::proto::Expression;
 
 use crate::adapter::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
-    ArrowSnafu, EvalError, ExternalSnafu, InvalidArgumentSnafu, OptimizeSnafu,
+    ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
+    InvalidArgumentSnafu, OptimizeSnafu,
 };
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
@@ -167,7 +170,7 @@ pub enum ScalarExpr {
     },
 }
 
-/// a way to represent a scalar function that is implemented in Data Fusion
+/// A way to represent a scalar function that is implemented in Datafusion
 #[derive(Debug, Clone, Serialize)]
 pub struct DfScalarFunction {
     raw_fn: RawDfScalarFn,
@@ -187,7 +190,7 @@ impl DfScalarFunction {
         })
     }
 
-    // TODO: add RecordBatch support
+    // TODO(discord9): add RecordBatch support
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         // TODO(discord9): make cols all array length of one
         let mut cols = vec![];
@@ -214,7 +217,7 @@ impl DfScalarFunction {
             .build()
         })?;
         let res = self.fn_impl.evaluate(&rb).map_err(|err| {
-            crate::expr::error::DatafusionSnafu {
+            EvalDatafusionSnafu {
                 raw: err,
                 context: "Failed to evaluate datafusion scalar function",
             }
@@ -256,8 +259,8 @@ pub struct RawDfScalarFn {
 impl RawDfScalarFn {
     pub fn from_proto(
         f: &substrait::substrait_proto_df::proto::expression::ScalarFunction,
-        input_schema: &RelationDesc,
-        extensions: &FunctionExtensions,
+        input_schema: RelationDesc,
+        extensions: FunctionExtensions,
     ) -> Result<Self, Error> {
         let mut buf = BytesMut::new();
         f.encode(&mut buf)
@@ -266,13 +269,11 @@ impl RawDfScalarFn {
             .context(crate::adapter::error::ExternalSnafu)?;
         Ok(Self {
             f: buf,
-            input_schema: input_schema.clone(),
-            extensions: extensions.clone(),
+            input_schema,
+            extensions,
         })
     }
-    fn get_fn_impl(&self) -> crate::adapter::error::Result<Arc<dyn PhysicalExpr>> {
-        use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
-        use substrait::substrait_proto_df::proto::Expression;
+    fn get_fn_impl(&self) -> Result<Arc<dyn PhysicalExpr>, Error> {
         let f = ScalarFunction::decode(&mut self.f.as_ref())
             .context(DecodeRelSnafu)
             .map_err(BoxedError::new)
@@ -291,6 +292,7 @@ impl std::cmp::PartialEq for DfScalarFunction {
     }
 }
 
+// can't derive Eq because of Arc<dyn PhysicalExpr> not eq, so implement it manually
 impl std::cmp::Eq for DfScalarFunction {}
 
 impl std::cmp::PartialOrd for DfScalarFunction {
@@ -675,7 +677,7 @@ impl ScalarExpr {
             return unsupported_err("Not a binary expression");
         };
 
-        // TODO: support simple transform like `now() + a < b` to `now() < b - a`
+        // TODO(discord9): support simple transform like `now() + a < b` to `now() < b - a`
 
         let expr1_is_now = *expr1 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
         let expr2_is_now = *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);

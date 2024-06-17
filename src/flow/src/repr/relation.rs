@@ -364,7 +364,7 @@ impl RelationDesc {
 
     /// apply mfp, and also project col names for the projected columns
     pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
-        // TODO: find a way to deduce name at best effect
+        // TODO(discord9): find a way to deduce name at best effect
         let names = {
             let mfp = &mfp.mfp;
             let mut names = self.names.clone();

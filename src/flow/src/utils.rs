@@ -177,7 +177,7 @@ pub struct Arrangement {
     ///
     /// Since updates typically occur as a delete followed by an insert, a small vector of size 2 is used to store updates for efficiency.
     ///
-    /// TODO: Consider balancing the batch size?
+    /// TODO(discord9): Consider balancing the batch size?
     spine: Spine,
 
     /// Indicates whether the arrangement maintains a complete history of updates.
