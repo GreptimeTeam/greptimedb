@@ -19,13 +19,14 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use pipeline::table::PipelineVersion;
 use pipeline::{GreptimeTransformer, Pipeline};
 use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use super::Instance;
+use crate::instance::Instance;
 
 #[async_trait]
 impl LogHandler for Instance {
@@ -46,7 +47,7 @@ impl LogHandler for Instance {
     async fn get_pipeline(
         &self,
         name: &str,
-        version: Option<String>,
+        version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> ServerResult<Arc<Pipeline<GreptimeTransformer>>> {
         self.pipeline_operator

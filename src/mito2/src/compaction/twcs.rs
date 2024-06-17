@@ -25,7 +25,7 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{get_expired_ssts, CompactionOutput, CompactionRequest};
-use crate::sst::file::{FileHandle, FileId};
+use crate::sst::file::{overlaps, FileHandle, FileId};
 use crate::sst::version::LevelMeta;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
@@ -269,15 +269,6 @@ fn assign_to_windows<'a>(
     }
 
     windows.into_iter().map(|w| (w.time_window, w)).collect()
-}
-
-/// Checks if two inclusive timestamp ranges overlap with each other.
-fn overlaps(l: &(Timestamp, Timestamp), r: &(Timestamp, Timestamp)) -> bool {
-    let (l, r) = if l.0 <= r.0 { (l, r) } else { (r, l) };
-    let (_, l_end) = l;
-    let (r_start, _) = r;
-
-    r_start <= l_end
 }
 
 /// Finds the latest active writing window among all files.

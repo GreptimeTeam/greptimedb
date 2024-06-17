@@ -252,7 +252,7 @@ mod test {
             .unwrap();
 
         let bundle = ctx
-            .render_mfp(Box::new(input_plan.with_types(typ)), mfp)
+            .render_mfp(Box::new(input_plan.with_types(typ.into_unnamed())), mfp)
             .unwrap();
         let output = get_output_handle(&mut ctx, bundle);
         // drop ctx here to simulate actual process of compile first, run later scenario
@@ -312,7 +312,7 @@ mod test {
             )])
             .unwrap();
         let bundle = ctx
-            .render_mfp(Box::new(input_plan.with_types(typ)), mfp)
+            .render_mfp(Box::new(input_plan.with_types(typ.into_unnamed())), mfp)
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);
@@ -348,7 +348,7 @@ mod test {
             )])
             .unwrap();
         let bundle = ctx
-            .render_mfp(Box::new(input_plan.with_types(typ)), mfp)
+            .render_mfp(Box::new(input_plan.with_types(typ.into_unnamed())), mfp)
             .unwrap();
 
         let output = get_output_handle(&mut ctx, bundle);

@@ -27,7 +27,7 @@ use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
-use crate::repr::{DiffRow, RelationDesc, RelationType, BROADCAST_CAP};
+use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Default, Debug)]
@@ -36,6 +36,7 @@ pub struct FlownodeContext {
     pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
     /// mapping from task to sink table, useful for sending data back to the client when a task is done running
     pub flow_to_sink: BTreeMap<FlowId, TableName>,
+    pub sink_to_flow: BTreeMap<TableName, FlowId>,
     /// broadcast sender for source table, any incoming write request will be sent to the source table's corresponding sender
     ///
     /// Note that we are getting insert requests with table id, so we should use table id as the key
@@ -184,7 +185,21 @@ impl FlownodeContext {
         }
 
         self.add_sink_receiver(sink_table_name.clone());
-        self.flow_to_sink.insert(task_id, sink_table_name);
+        self.flow_to_sink.insert(task_id, sink_table_name.clone());
+        self.sink_to_flow.insert(sink_table_name, task_id);
+    }
+
+    /// remove flow from worker context
+    pub fn remove_flow(&mut self, task_id: FlowId) {
+        if let Some(sink_table_name) = self.flow_to_sink.remove(&task_id) {
+            self.sink_to_flow.remove(&sink_table_name);
+        }
+        for (source_table_id, tasks) in self.source_to_tasks.iter_mut() {
+            tasks.remove(&task_id);
+            if tasks.is_empty() {
+                self.source_sender.remove(source_table_id);
+            }
+        }
     }
 
     /// try add source sender, if already exist, do nothing
@@ -307,14 +322,14 @@ impl FlownodeContext {
     pub fn assign_table_schema(
         &mut self,
         table_name: &TableName,
-        schema: RelationType,
+        schema: RelationDesc,
     ) -> Result<(), Error> {
         let gid = self
             .table_repr
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
             .unwrap();
-        self.schema.insert(gid, schema.into_unnamed());
+        self.schema.insert(gid, schema);
         Ok(())
     }
 

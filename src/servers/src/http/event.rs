@@ -24,8 +24,11 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
+use common_time::Timestamp;
+use datatypes::timestamp::TimestampNanosecond;
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
+use pipeline::table::PipelineVersion;
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -155,10 +158,12 @@ pub async fn delete_pipeline(
 
 /// Transform NDJSON array into a single array
 fn transform_ndjson_array_factory(
+    values: impl IntoIterator<Item = StdResult<Value, serde_json::Error>>,
     ignore_error: bool,
-) -> impl FnMut(Result<Value>, std::result::Result<Value, serde_json::Error>) -> Result<Value> {
-    move |acc, item| {
-        acc.and_then(|acc| match acc {
+) -> Result<Value> {
+    values.into_iter().try_fold(
+        Value::Array(Vec::with_capacity(100)),
+        |acc, item| match acc {
             Value::Array(mut acc_array) => {
                 if let Ok(item_value) = item {
                     match item_value {
@@ -171,10 +176,10 @@ fn transform_ndjson_array_factory(
                         _ => {
                             if !ignore_error {
                                 warn!("invalid item in array: {:?}", item_value);
-                                return Err(InvalidParameterSnafu {
+                                return InvalidParameterSnafu {
                                     reason: format!("invalid item:{} in array", item_value),
                                 }
-                                .build());
+                                .fail();
                             }
                         }
                     }
@@ -187,8 +192,8 @@ fn transform_ndjson_array_factory(
                 }
             }
             _ => unreachable!("invalid acc: {:?}", acc),
-        })
-    }
+        },
+    )
 }
 
 #[axum_macros::debug_handler]
@@ -214,14 +219,26 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let version = query_params.version;
+    let version = match query_params.version {
+        Some(version) => {
+            let ts = Timestamp::from_str_utc(&version).map_err(|e| {
+                InvalidParameterSnafu {
+                    reason: format!("invalid pipeline version: {} with error: {}", &version, e),
+                }
+                .build()
+            })?;
+            Some(TimestampNanosecond(ts))
+        }
+        None => None,
+    };
+
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
     let m: mime::Mime = content_type.clone().into();
     let value = match m.subtype() {
-        mime::JSON => Deserializer::from_str(&payload).into_iter::<Value>().fold(
-            Ok(Value::Array(Vec::with_capacity(100))),
-            transform_ndjson_array_factory(ignore_errors),
+        mime::JSON => transform_ndjson_array_factory(
+            Deserializer::from_str(&payload).into_iter(),
+            ignore_errors,
         )?,
         // add more content type support
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
@@ -241,7 +258,7 @@ pub async fn log_ingester(
 async fn ingest_logs_inner(
     state: LogHandlerRef,
     pipeline_name: String,
-    version: Option<String>,
+    version: PipelineVersion,
     table_name: String,
     payload: Value,
     query_ctx: QueryContextRef,

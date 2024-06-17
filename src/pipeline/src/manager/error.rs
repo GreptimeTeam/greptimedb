@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::timestamp::TimestampNanosecond;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -50,10 +51,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.clone().unwrap_or("latest".to_string())))]
+    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.map(|ts| ts.0.to_iso8601_string()).unwrap_or("latest".to_string())))]
     PipelineNotFound {
         name: String,
-        version: Option<String>,
+        version: Option<TimestampNanosecond>,
         #[snafu(implicit)]
         location: Location,
     },

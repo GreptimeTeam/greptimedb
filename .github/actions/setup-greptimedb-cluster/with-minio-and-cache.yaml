@@ -1,0 +1,38 @@
+meta:
+  config: |-
+    [runtime]
+    read_rt_size = 8
+    write_rt_size = 8
+    bg_rt_size = 8
+    
+    [datanode]
+    [datanode.client]
+    timeout = "60s"
+datanode:
+  config: |-
+    [runtime]
+    read_rt_size = 8
+    write_rt_size = 8
+    bg_rt_size = 8
+    
+    [storage]
+    cache_path = "/data/greptimedb/s3cache"
+    cache_capacity = "256MB"
+frontend:
+  config: |-
+    [runtime]
+    read_rt_size = 8
+    write_rt_size = 8
+    bg_rt_size = 8
+
+    [meta_client]
+    ddl_timeout = "60s"
+objectStorage:
+  s3:
+    bucket: default
+    region: us-west-2
+    root: test-root
+    endpoint: http://minio.minio.svc.cluster.local 
+  credentials:
+    accessKeyId: rootuser
+    secretAccessKey: rootpass123

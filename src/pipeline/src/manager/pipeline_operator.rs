@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
-use crate::table::{PipelineTable, PipelineTableRef};
+use crate::table::{PipelineTable, PipelineTableRef, PipelineVersion};
 use crate::{GreptimeTransformer, Pipeline};
 
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -131,8 +131,9 @@ impl PipelineOperator {
             .context(PipelineTableNotFoundSnafu)?;
 
         info!(
-            "Created pipelines table {}.",
-            table.table_info().full_table_name()
+            "Created pipelines table {} with table id {}.",
+            table.table_info().full_table_name(),
+            table.table_info().table_id()
         );
 
         // put to cache
@@ -189,7 +190,7 @@ impl PipelineOperator {
         &self,
         query_ctx: QueryContextRef,
         name: &str,
-        version: Option<String>,
+        version: PipelineVersion,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;

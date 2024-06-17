@@ -26,6 +26,7 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
+use crate::adapter::error::InternalSnafu;
 use crate::adapter::FlownodeManager;
 use crate::repr::{self, DiffRow};
 
@@ -126,6 +127,16 @@ impl Flownode for FlownodeManager {
                     .context(UnexpectedSnafu {
                         err_msg: format!("Table not found: {}", table_id),
                     })?;
+                let table_col_names = table_col_names
+                    .iter().enumerate()
+                    .map(|(idx,name)| match name {
+                        Some(name) => Ok(name.clone()),
+                        None => InternalSnafu {
+                            reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
+                        }
+                        .fail().map_err(BoxedError::new).context(ExternalSnafu),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let name_to_col = HashMap::<_, _>::from_iter(
                     insert_schema
                         .iter()
