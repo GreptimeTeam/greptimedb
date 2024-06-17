@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::region::compact_request;
+use common_base::Plugins;
 use common_telemetry::{debug, error, info};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -101,9 +102,8 @@ pub(crate) struct CompactionScheduler {
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
     listener: WorkerListener,
-
-    /// Remote job scheduler to schedule remote compaction jobs.
-    remote_job_scheduler: Option<RemoteJobSchedulerRef>,
+    /// Plugins for the compaction scheduler.
+    plugins: Plugins,
 }
 
 impl CompactionScheduler {
@@ -113,6 +113,7 @@ impl CompactionScheduler {
         cache_manager: CacheManagerRef,
         engine_config: Arc<MitoConfig>,
         listener: WorkerListener,
+        plugins: Plugins,
     ) -> Self {
         Self {
             scheduler,
@@ -121,9 +122,7 @@ impl CompactionScheduler {
             cache_manager,
             engine_config,
             listener,
-
-            // TODO(zyy17): The RemoteJobSchedulerRef can be injected by plugin system.
-            remote_job_scheduler: None,
+            plugins,
         }
     }
 
@@ -282,7 +281,7 @@ impl CompactionScheduler {
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
         if let compact_request::Options::Remote(_) = &options {
-            if let Some(remote_job_scheduler) = &self.remote_job_scheduler {
+            if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
                     picker_output: picker_output.clone(),
