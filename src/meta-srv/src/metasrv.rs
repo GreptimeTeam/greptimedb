@@ -483,7 +483,6 @@ impl Metasrv {
         .await
     }
 
-    #[inline]
     pub fn options(&self) -> &MetasrvOptions {
         &self.options
     }

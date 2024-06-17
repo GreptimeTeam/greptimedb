@@ -140,7 +140,6 @@ mod tests {
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: 0,
-                approximate_rows: 0,
                 engine: default_engine().to_string(),
                 role: RegionRole::Follower,
             }

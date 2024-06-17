@@ -331,7 +331,6 @@ impl HeartbeatTask {
                 // TODO(ruihang): scratch more info
                 rcus: 0,
                 wcus: 0,
-                approximate_rows: 0,
             };
             region_stats.push(region_stat);
         }
