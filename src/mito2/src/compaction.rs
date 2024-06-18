@@ -57,7 +57,9 @@ use crate::read::BoxedBatchReader;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
-use crate::schedule::remote_job_scheduler::{CompactionJob, RemoteJob, RemoteJobSchedulerRef};
+use crate::schedule::remote_job_scheduler::{
+    CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
+};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::version::LevelMeta;
@@ -288,7 +290,12 @@ impl CompactionScheduler {
                 };
 
                 let result = remote_job_scheduler
-                    .schedule(RemoteJob::CompactionJob(remote_compaction_job))
+                    .schedule(
+                        RemoteJob::CompactionJob(remote_compaction_job),
+                        Box::new(DefaultNotifier {
+                            request_sender: request_sender.clone(),
+                        }),
+                    )
                     .await;
 
                 if let Ok(job_id) = result {
