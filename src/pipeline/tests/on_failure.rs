@@ -14,7 +14,8 @@
 
 use greptime_proto::v1::value::ValueData::{U16Value, U8Value};
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
+
+mod common;
 
 #[test]
 fn test_on_failure_with_ignore() {
@@ -25,10 +26,6 @@ fn test_on_failure_with_ignore() {
       }
     ]
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
 
     let pipeline_yaml = r#"
 ---
@@ -40,11 +37,7 @@ transform:
     type: uint8
     on_failure: ignore
 "#;
-
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
         ColumnSchema {
@@ -74,10 +67,6 @@ fn test_on_failure_with_default() {
       }
     ]
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
 
     let pipeline_yaml = r#"
 ---
@@ -91,10 +80,7 @@ transform:
     on_failure: default
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
         ColumnSchema {
@@ -120,10 +106,6 @@ fn test_default() {
     let input_value_str = r#"
     [{}]
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
 
     let pipeline_yaml = r#"
 ---
@@ -136,10 +118,7 @@ transform:
     default: 0
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
         ColumnSchema {
@@ -170,10 +149,6 @@ fn test_multiple_on_failure() {
       }
     ]
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
 
     let pipeline_yaml = r#"
 ---
@@ -192,10 +167,7 @@ transform:
     on_failure: default
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![
         ColumnSchema {
