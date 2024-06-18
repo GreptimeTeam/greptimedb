@@ -23,8 +23,8 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::storage::RegionId;
 
 use crate::error::{
-    DecodeJsonSnafu, EncodeJsonSnafu, IllegalSequenceSnafu, MissingKeySnafu, MissingValueSnafu,
-    Result,
+    DecodeJsonSnafu, EncodeJsonSnafu, IllegalSequenceSnafu, MetaLengthExceededLimitSnafu,
+    MissingKeySnafu, MissingValueSnafu, Result,
 };
 use crate::kafka::{EntryId, NamespaceImpl};
 
@@ -90,6 +90,13 @@ impl TryFrom<Record> for KafkaRecord {
 
     fn try_from(record: Record) -> Result<Self> {
         let key = serde_json::to_vec(&record.meta).context(EncodeJsonSnafu)?;
+        ensure!(
+            key.len() < ESTIMATED_META_SIZE,
+            MetaLengthExceededLimitSnafu {
+                limit: ESTIMATED_META_SIZE,
+                actual: key.len()
+            }
+        );
         Ok(KafkaRecord {
             key: Some(key),
             value: Some(record.data),

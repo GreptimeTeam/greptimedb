@@ -276,6 +276,18 @@ pub enum Error {
         #[snafu(source)]
         error: tokio::sync::oneshot::error::RecvError,
     },
+
+    #[snafu(display(
+        "The length of meta if exceeded the limit: {}, actual: {}",
+        limit,
+        actual
+    ))]
+    MetaLengthExceededLimit {
+        #[snafu(implicit)]
+        location: Location,
+        limit: usize,
+        actual: usize,
+    },
 }
 
 impl ErrorExt for Error {
