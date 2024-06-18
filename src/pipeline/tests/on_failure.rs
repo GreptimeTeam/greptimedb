@@ -14,7 +14,6 @@
 
 use greptime_proto::v1::value::ValueData::{U16Value, U8Value};
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
 
 mod common;
 
