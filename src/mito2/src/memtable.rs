@@ -34,7 +34,10 @@ use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::region::options::MemtableOptions;
+use crate::row_converter::McmpRowCodec;
 use crate::sst::parquet::file_range::RangeBase;
+use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::reader::SimpleFilterContext;
 
 pub mod key_values;
 pub mod partition_tree;
@@ -111,12 +114,14 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator>;
 
+    // TODO(yingwen): Shared the predicate by Arc.
+    // TODO(yingwen): Should we pass Vec as argument?
     /// Returns the ranges in the memtable.
     fn ranges(
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> Result<Vec<MemRange>> {
+    ) -> Vec<MemRange> {
         // FIXME(yingwen): remove the default implementaton.
         todo!()
     }
@@ -290,7 +295,7 @@ impl MemtableBuilderProvider {
 }
 
 /// Builder to build an iterator to read the range.
-pub trait IterBuilder: Send {
+pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
     fn build(&self) -> Result<BoxedBatchIterator>;
 }
@@ -299,6 +304,8 @@ pub type BoxedIterBuilder = Box<dyn IterBuilder>;
 
 /// Context shared by ranges of the same memtable.
 pub(crate) struct MemRangeContext {
+    /// Id of the memtable.
+    id: MemtableId,
     /// Iterator builder.
     builder: BoxedIterBuilder,
     /// Base of the context.
@@ -307,12 +314,51 @@ pub(crate) struct MemRangeContext {
 
 pub(crate) type MemRangeContextRef = Arc<MemRangeContext>;
 
+impl MemRangeContext {
+    /// Creates a new [MemRangeContext].
+    pub(crate) fn new(
+        id: MemtableId,
+        builder: BoxedIterBuilder,
+        filters: Vec<SimpleFilterContext>,
+        read_format: ReadFormat,
+        codec: McmpRowCodec,
+    ) -> Self {
+        Self {
+            id,
+            builder,
+            base: RangeBase {
+                filters,
+                read_format,
+                codec,
+                compat_batch: None,
+            },
+        }
+    }
+}
+
 /// A range in the memtable.
 #[derive(Clone)]
 pub struct MemRange {
     /// Shared context.
     context: MemRangeContextRef,
     // TODO(yingwen): Id to identify the range in the memtable.
+}
+
+impl MemRange {
+    /// Creates a new range from context.
+    pub(crate) fn new(context: MemRangeContextRef) -> Self {
+        Self { context }
+    }
+
+    /// Returns the id of the memtable to read.
+    pub(crate) fn id(&self) -> MemtableId {
+        self.context.id
+    }
+
+    /// Builds an iterator to read the range.
+    pub(crate) fn build_iter(&self) -> Result<BoxedBatchIterator> {
+        self.context.builder.build()
+    }
 }
 
 #[cfg(test)]
