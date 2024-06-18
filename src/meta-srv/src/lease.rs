@@ -21,7 +21,7 @@ use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::Result;
-use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
+use crate::key::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
 
 fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseKey, &LeaseValue) -> bool {
     move |_: &LeaseKey, v: &LeaseValue| {

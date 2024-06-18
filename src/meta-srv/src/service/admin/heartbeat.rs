@@ -20,7 +20,7 @@ use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
-use crate::keys::StatValue;
+use crate::key::StatValue;
 use crate::service::admin::{util, HttpHandler};
 
 #[derive(Clone)]
@@ -86,7 +86,7 @@ fn filter_by_addr(stat_vals: Vec<StatValue>, addr: &str) -> Vec<StatValue> {
 #[cfg(test)]
 mod tests {
     use crate::handler::node_stat::Stat;
-    use crate::keys::StatValue;
+    use crate::key::StatValue;
     use crate::service::admin::heartbeat::filter_by_addr;
 
     #[tokio::test]

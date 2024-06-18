@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 use crate::handler::node_stat::Stat;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
-use crate::keys::{StatKey, StatValue};
+use crate::key::{StatKey, StatValue};
 use crate::metasrv::Context;
 
 const MAX_CACHED_STATS_PER_KEY: usize = 10;
@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::keys::StatKey;
+    use crate::key::StatKey;
     use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
     #[tokio::test]

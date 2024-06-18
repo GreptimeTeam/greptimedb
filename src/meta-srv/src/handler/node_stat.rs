@@ -22,7 +22,7 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
-use crate::keys::StatKey;
+use crate::key::StatKey;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {

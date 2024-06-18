@@ -34,7 +34,7 @@ use table::requests::TableOptions;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::handler::{HeartbeatMailbox, Pushers};
-use crate::keys::{LeaseKey, LeaseValue};
+use crate::key::{LeaseKey, LeaseValue};
 use crate::lock::memory::MemLock;
 use crate::metasrv::SelectorContext;
 use crate::procedure::region_failover::RegionFailoverManager;

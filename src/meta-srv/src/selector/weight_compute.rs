@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use common_meta::peer::Peer;
 use itertools::{Itertools, MinMaxResult};
 
-use crate::keys::{StatKey, StatValue};
+use crate::key::{StatKey, StatValue};
 use crate::selector::weighted_choose::WeightedItem;
 
 /// The [`WeightCompute`] trait is used to compute the weight array by heartbeats.
@@ -98,7 +98,7 @@ mod tests {
 
     use super::{RegionNumsBasedWeightCompute, WeightCompute};
     use crate::handler::node_stat::{RegionStat, Stat};
-    use crate::keys::{StatKey, StatValue};
+    use crate::key::{StatKey, StatValue};
 
     #[test]
     fn test_weight_compute() {

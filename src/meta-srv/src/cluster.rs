@@ -37,7 +37,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{match_for_io_error, Result};
-use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
+use crate::key::{StatKey, StatValue, DN_STAT_PREFIX};
 use crate::metasrv::ElectionRef;
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;
@@ -358,7 +358,7 @@ mod tests {
     use super::{check_resp_header, to_stat_kv_map, Context};
     use crate::error;
     use crate::handler::node_stat::Stat;
-    use crate::keys::{StatKey, StatValue};
+    use crate::key::{StatKey, StatValue};
 
     #[test]
     fn test_to_stat_kv_map() {

@@ -19,7 +19,7 @@ use common_time::util as time_util;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
-use crate::keys::{LeaseKey, LeaseValue};
+use crate::key::{LeaseKey, LeaseValue};
 use crate::metasrv::Context;
 
 /// Keeps [Datanode] leases
