@@ -34,7 +34,7 @@ use table::requests::TableOptions;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::handler::{HeartbeatMailbox, Pushers};
-use crate::key::{LeaseKey, LeaseValue};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lock::memory::MemLock;
 use crate::metasrv::SelectorContext;
 use crate::procedure::region_failover::RegionFailoverManager;
@@ -175,7 +175,7 @@ pub(crate) async fn put_datanodes(
 ) {
     let backend = meta_peer_client.memory_backend();
     for datanode in datanodes {
-        let lease_key = LeaseKey {
+        let lease_key = DatanodeLeaseKey {
             cluster_id,
             node_id: datanode.id,
         };

@@ -20,7 +20,7 @@ use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
-use crate::key::StatValue;
+use crate::key::DatanodeStatValue;
 use crate::service::admin::{util, HttpHandler};
 
 #[derive(Clone)]
@@ -46,7 +46,7 @@ impl HttpHandler for HeartBeatHandler {
         }
 
         let stat_kvs = self.meta_peer_client.get_all_dn_stat_kvs().await?;
-        let mut stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
+        let mut stat_vals: Vec<DatanodeStatValue> = stat_kvs.into_values().collect();
 
         if let Some(addr) = params.get("addr") {
             stat_vals = filter_by_addr(stat_vals, addr);
@@ -63,7 +63,7 @@ impl HttpHandler for HeartBeatHandler {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StatValues {
-    pub stat_vals: Vec<StatValue>,
+    pub stat_vals: Vec<DatanodeStatValue>,
 }
 
 impl TryFrom<StatValues> for String {
@@ -76,7 +76,7 @@ impl TryFrom<StatValues> for String {
     }
 }
 
-fn filter_by_addr(stat_vals: Vec<StatValue>, addr: &str) -> Vec<StatValue> {
+fn filter_by_addr(stat_vals: Vec<DatanodeStatValue>, addr: &str) -> Vec<DatanodeStatValue> {
     stat_vals
         .into_iter()
         .filter(|stat_val| stat_val.stats.iter().any(|stat| stat.addr == addr))
@@ -86,12 +86,12 @@ fn filter_by_addr(stat_vals: Vec<StatValue>, addr: &str) -> Vec<StatValue> {
 #[cfg(test)]
 mod tests {
     use crate::handler::node_stat::Stat;
-    use crate::key::StatValue;
+    use crate::key::DatanodeStatValue;
     use crate::service::admin::heartbeat::filter_by_addr;
 
     #[tokio::test]
     async fn test_filter_by_addr() {
-        let stat_value1 = StatValue {
+        let stat_value1 = DatanodeStatValue {
             stats: vec![
                 Stat {
                     addr: "127.0.0.1:3001".to_string(),
@@ -106,7 +106,7 @@ mod tests {
             ],
         };
 
-        let stat_value2 = StatValue {
+        let stat_value2 = DatanodeStatValue {
             stats: vec![
                 Stat {
                     addr: "127.0.0.1:3002".to_string(),

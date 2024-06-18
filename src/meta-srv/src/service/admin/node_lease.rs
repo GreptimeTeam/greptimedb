@@ -20,7 +20,7 @@ use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
-use crate::key::{LeaseKey, LeaseValue};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::service::admin::{util, HttpHandler};
 
@@ -59,7 +59,7 @@ impl HttpHandler for NodeLeaseHandler {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HumanLease {
-    pub name: LeaseKey,
+    pub name: DatanodeLeaseKey,
     pub human_time: String,
     pub lease: LeaseValue,
 }

@@ -21,10 +21,10 @@ use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::Result;
-use crate::key::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 
-fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseKey, &LeaseValue) -> bool {
-    move |_: &LeaseKey, v: &LeaseValue| {
+fn build_lease_filter(lease_secs: u64) -> impl Fn(&DatanodeLeaseKey, &LeaseValue) -> bool {
+    move |_: &DatanodeLeaseKey, v: &LeaseValue| {
         ((time_util::current_time_millis() - v.timestamp_millis) as u64) < lease_secs * 1000
     }
 }
@@ -36,7 +36,7 @@ pub async fn lookup_alive_datanode_peer(
     lease_secs: u64,
 ) -> Result<Option<Peer>> {
     let lease_filter = build_lease_filter(lease_secs);
-    let lease_key = LeaseKey {
+    let lease_key = DatanodeLeaseKey {
         cluster_id,
         node_id: datanode_id,
     };
@@ -59,7 +59,7 @@ pub async fn alive_datanodes(
     cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
-) -> Result<HashMap<LeaseKey, LeaseValue>> {
+) -> Result<HashMap<DatanodeLeaseKey, LeaseValue>> {
     let lease_filter = build_lease_filter(lease_secs);
 
     filter_datanodes(cluster_id, meta_peer_client, lease_filter).await
@@ -69,11 +69,11 @@ pub async fn filter_datanodes<P>(
     cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     predicate: P,
-) -> Result<HashMap<LeaseKey, LeaseValue>>
+) -> Result<HashMap<DatanodeLeaseKey, LeaseValue>>
 where
-    P: Fn(&LeaseKey, &LeaseValue) -> bool,
+    P: Fn(&DatanodeLeaseKey, &LeaseValue) -> bool,
 {
-    let key = get_lease_prefix(cluster_id);
+    let key = DatanodeLeaseKey::prefix_key_by_cluster(cluster_id);
     let range_end = util::get_prefix_end_key(&key);
 
     let range_req = common_meta::rpc::store::RangeRequest {
@@ -85,7 +85,7 @@ where
     let kvs = meta_peer_client.range(range_req).await?.kvs;
     let mut lease_kvs = HashMap::new();
     for kv in kvs {
-        let lease_key: LeaseKey = kv.key.try_into()?;
+        let lease_key: DatanodeLeaseKey = kv.key.try_into()?;
         let lease_value: LeaseValue = kv.value.try_into()?;
         if !predicate(&lease_key, &lease_value) {
             continue;
@@ -94,9 +94,4 @@ where
     }
 
     Ok(lease_kvs)
-}
-
-#[inline]
-pub fn get_lease_prefix(cluster_id: u64) -> Vec<u8> {
-    format!("{DN_LEASE_PREFIX}-{cluster_id}").into_bytes()
 }

@@ -22,7 +22,7 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
-use crate::key::StatKey;
+use crate::key::DatanodeStatKey;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
@@ -65,8 +65,8 @@ impl Stat {
         self.region_stats.is_empty()
     }
 
-    pub fn stat_key(&self) -> StatKey {
-        StatKey {
+    pub fn stat_key(&self) -> DatanodeStatKey {
+        DatanodeStatKey {
             cluster_id: self.cluster_id,
             node_id: self.id,
         }

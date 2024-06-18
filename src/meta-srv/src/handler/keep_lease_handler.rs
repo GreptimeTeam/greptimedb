@@ -19,7 +19,7 @@ use common_time::util as time_util;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
-use crate::key::{LeaseKey, LeaseValue};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::metasrv::Context;
 
 /// Keeps [Datanode] leases
@@ -45,7 +45,7 @@ impl HeartbeatHandler for KeepLeaseHandler {
             return Ok(HandleControl::Continue);
         };
 
-        let key = LeaseKey {
+        let key = DatanodeLeaseKey {
             cluster_id: header.cluster_id,
             node_id: peer.id,
         };
