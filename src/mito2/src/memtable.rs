@@ -110,6 +110,13 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator>;
 
+    /// Returns the ranges in the memtable.
+    fn ranges(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Vec<MemtableRange>;
+
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
 
@@ -275,6 +282,57 @@ impl MemtableBuilderProvider {
                 dedup,
             )),
         }
+    }
+}
+
+/// Builder to build an iterator to read the range.
+/// The builder should know the projection and the predicate to build the iterator.
+pub trait IterBuilder: Send + Sync {
+    /// Returns the iterator to read the range.
+    fn build(&self) -> Result<BoxedBatchIterator>;
+}
+
+pub type BoxedIterBuilder = Box<dyn IterBuilder>;
+
+/// Context shared by ranges of the same memtable.
+pub struct MemtableRangeContext {
+    /// Id of the memtable.
+    id: MemtableId,
+    /// Iterator builder.
+    builder: BoxedIterBuilder,
+}
+
+pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
+
+impl MemtableRangeContext {
+    /// Creates a new [MemtableRangeContext].
+    pub fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
+        Self { id, builder }
+    }
+}
+
+/// A range in the memtable.
+#[derive(Clone)]
+pub struct MemtableRange {
+    /// Shared context.
+    context: MemtableRangeContextRef,
+    // TODO(yingwen): Id to identify the range in the memtable.
+}
+
+impl MemtableRange {
+    /// Creates a new range from context.
+    pub fn new(context: MemtableRangeContextRef) -> Self {
+        Self { context }
+    }
+
+    /// Returns the id of the memtable to read.
+    pub fn id(&self) -> MemtableId {
+        self.context.id
+    }
+
+    /// Builds an iterator to read the range.
+    pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
+        self.context.builder.build()
     }
 }
 

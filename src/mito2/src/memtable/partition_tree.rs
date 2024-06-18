@@ -40,8 +40,8 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
-    MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
@@ -105,7 +105,7 @@ impl Default for PartitionTreeConfig {
 /// Memtable based on a partition tree.
 pub struct PartitionTreeMemtable {
     id: MemtableId,
-    tree: PartitionTree,
+    tree: Arc<PartitionTree>,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
@@ -154,6 +154,22 @@ impl Memtable for PartitionTreeMemtable {
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate)
+    }
+
+    fn ranges(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Vec<MemtableRange> {
+        let projection = projection.map(|ids| ids.to_vec());
+        let builder = Box::new(PartitionTreeIterBuilder {
+            tree: self.tree.clone(),
+            projection,
+            predicate,
+        });
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder));
+
+        vec![MemtableRange::new(context)]
     }
 
     fn is_empty(&self) -> bool {
@@ -224,7 +240,7 @@ impl PartitionTreeMemtable {
 
         Self {
             id,
-            tree,
+            tree: Arc::new(tree),
             alloc_tracker,
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
@@ -306,6 +322,19 @@ impl MemtableBuilder for PartitionTreeMemtableBuilder {
             self.write_buffer_manager.clone(),
             &self.config,
         ))
+    }
+}
+
+struct PartitionTreeIterBuilder {
+    tree: Arc<PartitionTree>,
+    projection: Option<Vec<ColumnId>>,
+    predicate: Option<Predicate>,
+}
+
+impl IterBuilder for PartitionTreeIterBuilder {
+    fn build(&self) -> Result<BoxedBatchIterator> {
+        self.tree
+            .read(self.projection.as_deref(), self.predicate.clone())
     }
 }
 
