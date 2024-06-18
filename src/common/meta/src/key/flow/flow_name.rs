@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use api::v1::flow::flow_server::Flow;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -23,9 +20,7 @@ use snafu::OptionExt;
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{
-    txn_helper, DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN,
-};
+use crate::key::{DeserializedValueWithBytes, FlowId, MetaKey, TableMetaValue, NAME_PATTERN};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 
@@ -50,11 +45,13 @@ impl<'a> FlowNameKey<'a> {
         FlowNameKey(FlowScoped::new(inner))
     }
 
+    #[cfg(test)]
     /// Returns the catalog.
     pub fn catalog(&self) -> &str {
         self.0.catalog_name
     }
 
+    #[cfg(test)]
     /// Return the `flow_name`
     pub fn flow_name(&self) -> &str {
         self.0.flow_name
@@ -142,8 +139,6 @@ impl FlowNameValue {
         self.flow_id
     }
 }
-
-pub type FlowNameManagerRef = Arc<FlowNameManager>;
 
 /// The manager of [FlowNameKey].
 pub struct FlowNameManager {

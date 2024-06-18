@@ -83,15 +83,11 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
-/// TODO(weny):removes id.
-#[allow(unused)]
 pub mod flow;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
 pub mod view_info;
-// TODO(weny): removes it.
-#[allow(deprecated)]
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
