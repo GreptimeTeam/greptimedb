@@ -3809,7 +3809,9 @@ name = "flow"
 version = "0.8.2"
 dependencies = [
  "api",
+ "arrow-schema",
  "async-trait",
+ "bytes",
  "catalog",
  "common-base",
  "common-catalog",
@@ -3824,8 +3826,10 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "datafusion 38.0.0",
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
+ "datafusion-physical-expr 38.0.0",
  "datatypes",
  "enum-as-inner",
  "enum_dispatch",

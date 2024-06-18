@@ -16,12 +16,15 @@
 
 use std::any::Any;
 
+use arrow_schema::ArrowError;
+use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
+use datafusion_common::DataFusionError;
 use datatypes::data_type::ConcreteDataType;
 use serde::{Deserialize, Serialize};
-use snafu::{Location, Snafu};
+use snafu::{Location, ResultExt, Snafu};
 
 fn is_send_sync() {
     fn check<T: Send + Sync>() {}
@@ -106,5 +109,28 @@ pub enum EvalError {
         expired_by: i64,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Arrow error: {raw:?}, context: {context}"))]
+    Arrow {
+        raw: ArrowError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("DataFusion error: {raw:?}, context: {context}"))]
+    Datafusion {
+        raw: DataFusionError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("External error"))]
+    External {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
     },
 }
