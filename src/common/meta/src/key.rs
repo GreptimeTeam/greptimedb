@@ -52,6 +52,9 @@
 //!     - The value is a [ViewInfoValue] struct; it contains the encoded logical plan.
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
+//! 11. Flownode address key: `__flow/addr/{flownode_id}`
+//!     - The value is a [FlownodeAddrValue] struct; it contains the address of the flownode.
+//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -82,8 +85,8 @@
 //!            {partition_id}
 //!   
 //!   addr/
-//!     {flownode_id}/
-//!       {flownode_addr}
+//!     {flownode_id}
+//!
 
 pub mod catalog_name;
 pub mod datanode_table;
@@ -134,6 +137,7 @@ use self::table_route::{TableRouteManager, TableRouteValue};
 use self::tombstone::TombstoneManager;
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
+use crate::key::flow::flownode_addr::FlownodeAddrValue;
 use crate::key::table_route::TableRouteKey;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp};
@@ -1193,7 +1197,8 @@ impl_table_meta_value! {
     ViewInfoValue,
     DatanodeTableValue,
     FlowInfoValue,
-    FlowNameValue
+    FlowNameValue,
+    FlownodeAddrValue
 }
 
 impl_optional_meta_value! {

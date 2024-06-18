@@ -134,7 +134,6 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        // TODO(discord9): better place for dataflow to run per second
         let manager_ref = self.flow_service.manager.clone();
         let _handle = manager_ref.clone().run_background();
 

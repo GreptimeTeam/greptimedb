@@ -14,6 +14,7 @@
 
 pub mod flow_info;
 pub(crate) mod flow_name;
+pub(crate) mod flownode_addr;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
 
