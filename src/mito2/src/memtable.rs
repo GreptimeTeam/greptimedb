@@ -110,8 +110,6 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator>;
 
-    // TODO(yingwen): Shared the predicate by Arc.
-    // TODO(yingwen): Should we pass Vec as argument?
     /// Returns the ranges in the memtable.
     fn ranges(
         &self,
