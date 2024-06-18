@@ -115,7 +115,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemRange>;
+    ) -> Vec<MemtableRange>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
@@ -295,17 +295,17 @@ pub trait IterBuilder: Send + Sync {
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
 
 /// Context shared by ranges of the same memtable.
-pub struct MemRangeContext {
+pub struct MemtableRangeContext {
     /// Id of the memtable.
     id: MemtableId,
     /// Iterator builder.
     builder: BoxedIterBuilder,
 }
 
-pub type MemRangeContextRef = Arc<MemRangeContext>;
+pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
 
-impl MemRangeContext {
-    /// Creates a new [MemRangeContext].
+impl MemtableRangeContext {
+    /// Creates a new [MemtableRangeContext].
     pub fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
         Self { id, builder }
     }
@@ -313,15 +313,15 @@ impl MemRangeContext {
 
 /// A range in the memtable.
 #[derive(Clone)]
-pub struct MemRange {
+pub struct MemtableRange {
     /// Shared context.
-    context: MemRangeContextRef,
+    context: MemtableRangeContextRef,
     // TODO(yingwen): Id to identify the range in the memtable.
 }
 
-impl MemRange {
+impl MemtableRange {
     /// Creates a new range from context.
-    pub fn new(context: MemRangeContextRef) -> Self {
+    pub fn new(context: MemtableRangeContextRef) -> Self {
         Self { context }
     }
 

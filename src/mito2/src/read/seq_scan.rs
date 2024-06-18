@@ -92,9 +92,9 @@ impl SeqScan {
 
     /// Builds sources from a [ScanPart].
     fn build_part_sources(part: &ScanPart, sources: &mut Vec<Source>) -> Result<()> {
-        sources.reserve(part.mem_ranges.len() + part.file_ranges.len());
+        sources.reserve(part.memtable_ranges.len() + part.file_ranges.len());
         // Read memtables.
-        for mem in &part.mem_ranges {
+        for mem in &part.memtable_ranges {
             let iter = mem.build_iter()?;
             sources.push(Source::Iter(iter));
         }
@@ -323,7 +323,7 @@ impl FileRangeCollector for SeqDistributor {
             return;
         }
         let part = ScanPart {
-            mem_ranges: Vec::new(),
+            memtable_ranges: Vec::new(),
             file_ranges: smallvec![ranges],
             time_range: Some(file_meta.time_range),
         };
@@ -346,7 +346,7 @@ impl SeqDistributor {
                 continue;
             }
             let part = ScanPart {
-                mem_ranges,
+                memtable_ranges: mem_ranges,
                 file_ranges: smallvec![],
                 time_range: stats.time_range(),
             };
@@ -354,7 +354,7 @@ impl SeqDistributor {
         }
     }
 
-    /// Groups file ranges and mem ranges by time ranges.
+    /// Groups file ranges and memtable ranges by time ranges.
     /// The output number of parts may be `<= parallelism`. If `parallelism` is 0, it will be set to 1.
     ///
     /// Output parts have non-overlapping time ranges.
@@ -417,9 +417,9 @@ fn maybe_merge_parts(mut parts: Vec<ScanPart>, parallelism: usize) -> Vec<ScanPa
 
     // Sort parts by number of memtables and ranges in reverse order.
     parts.sort_unstable_by(|a, b| {
-        a.mem_ranges
+        a.memtable_ranges
             .len()
-            .cmp(&b.mem_ranges.len())
+            .cmp(&b.memtable_ranges.len())
             .then_with(|| {
                 let a_ranges_len = a
                     .file_ranges
@@ -482,7 +482,7 @@ fn maybe_split_parts(mut parts: Vec<ScanPart>, parallelism: usize) -> Vec<ScanPa
         assert!(ranges_per_part > 0);
         for ranges in part.file_ranges[0].chunks(ranges_per_part) {
             let new_part = ScanPart {
-                mem_ranges: Vec::new(),
+                memtable_ranges: Vec::new(),
                 file_ranges: smallvec![ranges.to_vec()],
                 time_range: part.time_range,
             };
@@ -522,7 +522,7 @@ mod tests {
                     Timestamp::new(*end, TimeUnit::Second),
                 );
                 ScanPart {
-                    mem_ranges: vec![mem_range_for_test(*id)],
+                    memtable_ranges: vec![mem_range_for_test(*id)],
                     file_ranges: smallvec![],
                     time_range: Some(range),
                 }
@@ -532,7 +532,7 @@ mod tests {
         let actual: Vec<_> = output
             .iter()
             .map(|part| {
-                let ids: Vec<_> = part.mem_ranges.iter().map(|mem| mem.id()).collect();
+                let ids: Vec<_> = part.memtable_ranges.iter().map(|mem| mem.id()).collect();
                 let range = part.time_range.unwrap();
                 (ids, range.0.value(), range.1.value())
             })

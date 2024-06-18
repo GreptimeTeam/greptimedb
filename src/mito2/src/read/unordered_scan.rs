@@ -34,7 +34,7 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
-use crate::memtable::{MemRange, MemtableRef};
+use crate::memtable::{MemtableRange, MemtableRef};
 use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{
@@ -153,7 +153,7 @@ impl RegionScanner for UnorderedScan {
 
             let mapper = &stream_ctx.input.mapper;
             let memtable_sources = part
-                .mem_ranges
+                .memtable_ranges
                 .iter()
                 .map(|mem| {
                     let iter = mem.build_iter()?;
@@ -256,7 +256,7 @@ async fn maybe_init_parts(
 /// is no output ordering guarantee of each partition.
 #[derive(Default)]
 struct UnorderedDistributor {
-    mem_ranges: Vec<MemRange>,
+    mem_ranges: Vec<MemtableRange>,
     file_ranges: Vec<FileRange>,
 }
 
@@ -295,7 +295,7 @@ impl UnorderedDistributor {
         if parallelism <= 1 {
             // Returns a single part.
             let part = ScanPart {
-                mem_ranges: self.mem_ranges.clone(),
+                memtable_ranges: self.mem_ranges.clone(),
                 file_ranges: smallvec![self.file_ranges],
                 time_range: None,
             };
@@ -316,7 +316,7 @@ impl UnorderedDistributor {
             .mem_ranges
             .chunks(mems_per_part)
             .map(|mems| ScanPart {
-                mem_ranges: mems.to_vec(),
+                memtable_ranges: mems.to_vec(),
                 file_ranges: smallvec![Vec::new()], // Ensures there is always one group.
                 time_range: None,
             })
@@ -324,7 +324,7 @@ impl UnorderedDistributor {
         for (i, ranges) in self.file_ranges.chunks(ranges_per_part).enumerate() {
             if i == scan_parts.len() {
                 scan_parts.push(ScanPart {
-                    mem_ranges: Vec::new(),
+                    memtable_ranges: Vec::new(),
                     file_ranges: smallvec![ranges.to_vec()],
                     time_range: None,
                 });

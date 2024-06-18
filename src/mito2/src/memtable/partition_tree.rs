@@ -40,8 +40,8 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemRange, MemRangeContext, Memtable,
-    MemtableBuilder, MemtableId, MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
@@ -160,16 +160,16 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemRange> {
+    ) -> Vec<MemtableRange> {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
             projection,
             predicate,
         });
-        let context = Arc::new(MemRangeContext::new(self.id, builder));
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        vec![MemRange::new(context)]
+        vec![MemtableRange::new(context)]
     }
 
     fn is_empty(&self) -> bool {

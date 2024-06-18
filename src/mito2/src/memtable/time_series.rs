@@ -40,8 +40,8 @@ use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismat
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemRange, MemRangeContext, Memtable,
-    MemtableBuilder, MemtableId, MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -248,7 +248,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Vec<MemRange> {
+    ) -> Vec<MemtableRange> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -263,9 +263,9 @@ impl Memtable for TimeSeriesMemtable {
             predicate,
             dedup: self.dedup,
         });
-        let context = Arc::new(MemRangeContext::new(self.id, builder));
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        vec![MemRange::new(context)]
+        vec![MemtableRange::new(context)]
     }
 
     fn is_empty(&self) -> bool {
