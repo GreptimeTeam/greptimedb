@@ -297,18 +297,18 @@ pub trait IterBuilder: Send + Sync {
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
 
 /// Context shared by ranges of the same memtable.
-pub(crate) struct MemRangeContext {
+pub struct MemRangeContext {
     /// Id of the memtable.
     id: MemtableId,
     /// Iterator builder.
     builder: BoxedIterBuilder,
 }
 
-pub(crate) type MemRangeContextRef = Arc<MemRangeContext>;
+pub type MemRangeContextRef = Arc<MemRangeContext>;
 
 impl MemRangeContext {
     /// Creates a new [MemRangeContext].
-    pub(crate) fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
+    pub fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
         Self { id, builder }
     }
 }
@@ -323,17 +323,17 @@ pub struct MemRange {
 
 impl MemRange {
     /// Creates a new range from context.
-    pub(crate) fn new(context: MemRangeContextRef) -> Self {
+    pub fn new(context: MemRangeContextRef) -> Self {
         Self { context }
     }
 
     /// Returns the id of the memtable to read.
-    pub(crate) fn id(&self) -> MemtableId {
+    pub fn id(&self) -> MemtableId {
         self.context.id
     }
 
     /// Builds an iterator to read the range.
-    pub(crate) fn build_iter(&self) -> Result<BoxedBatchIterator> {
+    pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
         self.context.builder.build()
     }
 }

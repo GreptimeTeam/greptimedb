@@ -91,12 +91,7 @@ impl SeqScan {
     }
 
     /// Builds sources from a [ScanPart].
-    fn build_part_sources(
-        part: &ScanPart,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<&Predicate>,
-        sources: &mut Vec<Source>,
-    ) -> Result<()> {
+    fn build_part_sources(part: &ScanPart, sources: &mut Vec<Source>) -> Result<()> {
         sources.reserve(part.mem_ranges.len() + part.file_ranges.len());
         // Read memtables.
         for mem in &part.mem_ranges {
@@ -154,28 +149,17 @@ impl SeqScan {
         let mut parts = stream_ctx.parts.lock().await;
         maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
 
-        let input = &stream_ctx.input;
         let mut sources = Vec::new();
         if let Some(index) = partition {
             let Some(part) = parts.get_part(index) else {
                 return Ok(None);
             };
 
-            Self::build_part_sources(
-                part,
-                Some(input.mapper.column_ids()),
-                input.predicate.as_ref(),
-                &mut sources,
-            )?;
+            Self::build_part_sources(part, &mut sources)?;
         } else {
             // Safety: We initialized parts before.
             for part in parts.0.as_ref().unwrap() {
-                Self::build_part_sources(
-                    part,
-                    Some(input.mapper.column_ids()),
-                    input.predicate.as_ref(),
-                    &mut sources,
-                )?;
+                Self::build_part_sources(part, &mut sources)?;
             }
         }
 
