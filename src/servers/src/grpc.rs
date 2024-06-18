@@ -56,9 +56,9 @@ type TonicResult<T> = std::result::Result<T, Status>;
 pub struct GrpcOptions {
     pub addr: String,
     pub hostname: String,
-    // Max gRPC receiving(decoding) message size
+    /// Max gRPC receiving(decoding) message size
     pub max_recv_message_size: ReadableSize,
-    // Max gRPC sending(encoding) message size
+    /// Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
