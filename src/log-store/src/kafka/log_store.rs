@@ -178,7 +178,8 @@ impl LogStore for KafkaLogStore {
         let mut region_grouped_result_receivers = Vec::with_capacity(region_ids.len());
         for (region_id, (producer, records)) in region_grouped_records {
             ordered_region_ids.push(region_id);
-            // Safety: `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
+            // Safety: `KafkaLogStore::entry` will ensure that the
+            // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
             region_grouped_result_receivers.push(producer.produce(records).await?)
         }
 
@@ -188,10 +189,6 @@ impl LogStore for KafkaLogStore {
                 .map(|receiver| receiver.wait()),
         )
         .await?;
-
-        let region_grouped_max_offset = region_grouped_max_offset
-            .into_iter()
-            .map(|offset| offset as u64);
 
         let last_entry_ids = ordered_region_ids
             .into_iter()

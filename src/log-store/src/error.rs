@@ -288,6 +288,12 @@ pub enum Error {
         limit: usize,
         actual: usize,
     },
+
+    #[snafu(display("No max value"))]
+    NoMaxValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

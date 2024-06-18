@@ -20,11 +20,11 @@ use futures::future::try_join_all;
 use rskafka::client::partition::Compression;
 use rskafka::client::producer::ProducerClient;
 use rskafka::record::Record;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 
-use crate::error::{self, Result};
+use crate::error::{self, NoMaxValueSnafu, Result};
 
 pub struct ProduceRequest {
     batch: Vec<Record>,
@@ -41,7 +41,7 @@ impl ProduceResultReceiver {
         self.receivers.push(receiver)
     }
 
-    async fn wait(self) -> Result<i64> {
+    async fn wait(self) -> Result<u64> {
         Ok(try_join_all(self.receivers)
             .await
             .into_iter()
@@ -50,7 +50,7 @@ impl ProduceResultReceiver {
             .into_iter()
             .flatten()
             .max()
-            .unwrap())
+            .context(NoMaxValueSnafu)? as u64)
     }
 }
 
@@ -202,7 +202,7 @@ pub(crate) struct ProduceResultHandle {
 impl ProduceResultHandle {
     /// Waits for the data has been committed to Kafka.
     /// Returns the **max** committed offsets.
-    pub(crate) async fn wait(self) -> Result<i64> {
+    pub(crate) async fn wait(self) -> Result<u64> {
         self.receiver
             .await
             .context(error::WaitProduceResultReceiverSnafu)?
