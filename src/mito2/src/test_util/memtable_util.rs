@@ -364,16 +364,7 @@ pub(crate) fn collect_iter_timestamps(iter: BoxedBatchIterator) -> Vec<i64> {
 /// Builds a memtable range for test.
 pub(crate) fn mem_range_for_test(id: MemtableId) -> MemRange {
     let builder = Box::new(EmptyIterBuilder::default());
-    let metadata = metadata_for_test();
-    let read_format = ReadFormat::new(metadata.clone(), 0..5);
-    let codec = McmpRowCodec::new(
-        read_format
-            .metadata()
-            .primary_key_columns()
-            .map(|c| SortField::new(c.column_schema.data_type.clone()))
-            .collect(),
-    );
 
-    let context = MemRangeContext::new(id, builder, vec![], read_format, codec);
-    MemRange::new(Arc::new(context))
+    let context = Arc::new(MemRangeContext::new(id, builder));
+    MemRange::new(context)
 }

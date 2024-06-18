@@ -34,10 +34,6 @@ use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::region::options::MemtableOptions;
-use crate::row_converter::McmpRowCodec;
-use crate::sst::parquet::file_range::RangeBase;
-use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::SimpleFilterContext;
 
 pub mod key_values;
 pub mod partition_tree;
@@ -295,6 +291,7 @@ impl MemtableBuilderProvider {
 }
 
 /// Builder to build an iterator to read the range.
+/// The builder should know the projection and the predicate to build the iterator.
 pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
     fn build(&self) -> Result<BoxedBatchIterator>;
@@ -308,31 +305,14 @@ pub(crate) struct MemRangeContext {
     id: MemtableId,
     /// Iterator builder.
     builder: BoxedIterBuilder,
-    /// Base of the context.
-    base: RangeBase,
 }
 
 pub(crate) type MemRangeContextRef = Arc<MemRangeContext>;
 
 impl MemRangeContext {
     /// Creates a new [MemRangeContext].
-    pub(crate) fn new(
-        id: MemtableId,
-        builder: BoxedIterBuilder,
-        filters: Vec<SimpleFilterContext>,
-        read_format: ReadFormat,
-        codec: McmpRowCodec,
-    ) -> Self {
-        Self {
-            id,
-            builder,
-            base: RangeBase {
-                filters,
-                read_format,
-                codec,
-                compat_batch: None,
-            },
-        }
+    pub(crate) fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
+        Self { id, builder }
     }
 }
 
