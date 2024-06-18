@@ -40,8 +40,8 @@ use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismat
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
-    MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemRange, MemRangeContext, Memtable,
+    MemtableBuilder, MemtableId, MemtableRef, MemtableStats,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -244,6 +244,30 @@ impl Memtable for TimeSeriesMemtable {
         Ok(Box::new(iter))
     }
 
+    fn ranges(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Vec<MemRange> {
+        let projection = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            self.region_metadata
+                .field_columns()
+                .map(|c| c.column_id)
+                .collect()
+        };
+        let builder = Box::new(TimeSeriesIterBuilder {
+            series_set: self.series_set.clone(),
+            projection,
+            predicate,
+            dedup: self.dedup,
+        });
+        let context = Arc::new(MemRangeContext::new(self.id, builder));
+
+        vec![MemRange::new(context)]
+    }
+
     fn is_empty(&self) -> bool {
         self.series_set.series.read().unwrap().is_empty()
     }
@@ -308,6 +332,7 @@ impl Default for LocalStats {
 
 type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 
+#[derive(Clone)]
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
@@ -813,6 +838,24 @@ impl From<ValueBuilder> for Values {
             op_type,
             fields,
         }
+    }
+}
+
+struct TimeSeriesIterBuilder {
+    series_set: SeriesSet,
+    projection: HashSet<ColumnId>,
+    predicate: Option<Predicate>,
+    dedup: bool,
+}
+
+impl IterBuilder for TimeSeriesIterBuilder {
+    fn build(&self) -> Result<BoxedBatchIterator> {
+        let iter = self.series_set.iter_series(
+            self.projection.clone(),
+            self.predicate.clone(),
+            self.dedup,
+        )?;
+        Ok(Box::new(iter))
     }
 }
 

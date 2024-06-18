@@ -115,12 +115,9 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the ranges in the memtable.
     fn ranges(
         &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
-    ) -> Vec<MemRange> {
-        // FIXME(yingwen): remove the default implementaton.
-        todo!()
-    }
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Vec<MemRange>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;

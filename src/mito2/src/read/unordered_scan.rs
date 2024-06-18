@@ -280,6 +280,9 @@ impl UnorderedDistributor {
     ) {
         for mem in memtables {
             let mut mem_ranges = mem.ranges(projection, predicate.clone());
+            if mem_ranges.is_empty() {
+                continue;
+            }
             self.mem_ranges.append(&mut mem_ranges);
         }
     }

@@ -358,6 +358,9 @@ impl SeqDistributor {
         for mem in memtables {
             let stats = mem.stats();
             let mem_ranges = mem.ranges(projection, predicate.clone());
+            if mem_ranges.is_empty() {
+                continue;
+            }
             let part = ScanPart {
                 mem_ranges,
                 file_ranges: smallvec![],
