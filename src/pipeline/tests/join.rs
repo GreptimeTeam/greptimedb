@@ -14,23 +14,11 @@
 
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
+use lazy_static::lazy_static;
 
-#[test]
-fn test_simple_join() {
-    let input_value_str = r#"
-    [
-      {
-        "join_test": ["a", "b", "c"]
-      }
-    ]
-"#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
+mod common;
 
-    let pipeline_yaml = r#"
+const PIPELINE_YAML: &str = r#"
 ---
 processors:
   - join:
@@ -42,13 +30,8 @@ transform:
     type: string
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
-
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
-
-    let expected_schema = vec![
+lazy_static! {
+    pub static ref EXPECTED_SCHEMA: Vec<ColumnSchema> = vec![
         ColumnSchema {
             column_name: "join_test".to_string(),
             datatype: ColumnDataType::String.into(),
@@ -62,10 +45,77 @@ transform:
             datatype_extension: None,
         },
     ];
+}
 
-    assert_eq!(output.schema, expected_schema);
+#[test]
+fn test_simple_join() {
+    let input_value_str = r#"
+    [
+      {
+        "join_test": ["a", "b", "c"]
+      }
+    ]
+"#;
+
+    let output = common::parse_and_exec(input_value_str, PIPELINE_YAML);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
     assert_eq!(
         output.rows[0].values[0].value_data,
         Some(StringValue("a-b-c".to_string()))
+    );
+}
+
+#[test]
+fn test_integer_join() {
+    let input_value_str = r#"
+    [
+      {
+        "join_test": [1, 2, 3]
+      }
+    ]
+"#;
+    let output = common::parse_and_exec(input_value_str, PIPELINE_YAML);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
+    assert_eq!(
+        output.rows[0].values[0].value_data,
+        Some(StringValue("1-2-3".to_string()))
+    );
+}
+
+#[test]
+fn test_boolean() {
+    let input_value_str = r#"
+    [
+      {
+        "join_test": [true, false, true]
+      }
+    ]
+"#;
+    let output = common::parse_and_exec(input_value_str, PIPELINE_YAML);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
+    assert_eq!(
+        output.rows[0].values[0].value_data,
+        Some(StringValue("true-false-true".to_string()))
+    );
+}
+
+#[test]
+fn test_float() {
+    let input_value_str = r#"
+    [
+      {
+        "join_test": [1.1, 1.2, 1.3]
+      }
+    ]
+"#;
+    let output = common::parse_and_exec(input_value_str, PIPELINE_YAML);
+
+    assert_eq!(output.schema, *EXPECTED_SCHEMA);
+    assert_eq!(
+        output.rows[0].values[0].value_data,
+        Some(StringValue("1.1-1.2-1.3".to_string()))
     );
 }

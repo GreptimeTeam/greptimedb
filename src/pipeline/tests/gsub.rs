@@ -14,7 +14,8 @@
 
 use greptime_proto::v1::value::ValueData::TimestampMillisecondValue;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Value};
+
+mod common;
 
 #[test]
 fn test_gsub() {
@@ -25,10 +26,6 @@ fn test_gsub() {
       }
     ]
 "#;
-    let input_value: Value = serde_json::from_str::<serde_json::Value>(input_value_str)
-        .expect("failed to parse input value")
-        .try_into()
-        .expect("failed to convert input value");
 
     let pipeline_yaml = r#"
 ---
@@ -50,10 +47,7 @@ transform:
     index: timestamp
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
-    let output = pipeline.exec(input_value).expect("failed to exec pipeline");
+    let output = common::parse_and_exec(input_value_str, pipeline_yaml);
 
     let expected_schema = vec![ColumnSchema {
         column_name: "reqTimeSec".to_string(),
