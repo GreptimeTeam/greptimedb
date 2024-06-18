@@ -36,6 +36,11 @@ impl JobId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    /// Construct a new [JobId] from u64.
+    pub const fn from_u64(id: u64) -> JobId {
+        JobId(id)
+    }
 }
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
