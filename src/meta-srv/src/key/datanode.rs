@@ -100,43 +100,6 @@ impl TryFrom<DatanodeLeaseKey> for Vec<u8> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LeaseValue {
-    // last activity
-    pub timestamp_millis: i64,
-    pub node_addr: String,
-}
-
-impl FromStr for LeaseValue {
-    type Err = error::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        serde_json::from_str(value).context(error::DeserializeFromJsonSnafu { input: value })
-    }
-}
-
-impl TryFrom<Vec<u8>> for LeaseValue {
-    type Error = error::Error;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self> {
-        String::from_utf8(bytes)
-            .context(error::LeaseValueFromUtf8Snafu {})
-            .map(|x| x.parse())?
-    }
-}
-
-impl TryFrom<LeaseValue> for Vec<u8> {
-    type Error = error::Error;
-
-    fn try_from(dn_value: LeaseValue) -> Result<Self> {
-        Ok(serde_json::to_string(&dn_value)
-            .context(error::SerializeToJsonSnafu {
-                input: format!("{dn_value:?}"),
-            })?
-            .into_bytes())
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct DatanodeStatKey {
     pub cluster_id: ClusterId,
@@ -372,19 +335,6 @@ mod tests {
         let new_key: DatanodeLeaseKey = key_bytes.try_into().unwrap();
 
         assert_eq!(new_key, key);
-    }
-
-    #[test]
-    fn test_lease_value_round_trip() {
-        let value = LeaseValue {
-            timestamp_millis: 111,
-            node_addr: "127.0.0.1:3002".to_string(),
-        };
-
-        let value_bytes: Vec<u8> = value.clone().try_into().unwrap();
-        let new_value: LeaseValue = value_bytes.try_into().unwrap();
-
-        assert_eq!(new_value, value);
     }
 
     #[test]
