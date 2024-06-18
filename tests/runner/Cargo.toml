@@ -17,7 +17,7 @@ common-recordbatch.workspace = true
 common-time.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlness = { version = "0.5" }
+sqlness = { version = "0.6" }
 tempfile.workspace = true
 tinytemplate = "1.2"
 tokio.workspace = true

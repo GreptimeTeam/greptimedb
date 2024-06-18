@@ -262,3 +262,7 @@ strip = true
 [profile.dev.package.tests-fuzz]
 debug = false
 strip = true
+
+# use sqlness with the latest changes which support SLEEP, will remove this after sqlness with the changes is released
+[patch.crates-io]
+sqlness = { git = "https://github.com/CeresDB/sqlness.git", rev = "5469532cdaf87791b3af5d7e2918e92725f8dfc5" }
