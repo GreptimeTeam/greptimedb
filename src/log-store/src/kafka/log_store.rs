@@ -143,11 +143,10 @@ impl LogStore for KafkaLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        let mut region_ids = HashSet::new();
-        for entry in &entries {
-            region_ids.insert(entry.region_id());
-        }
-
+        let region_ids = entries
+            .iter()
+            .map(|entry| entry.region_id())
+            .collect::<HashSet<_>>();
         let mut region_grouped_records: HashMap<RegionId, (OrderedBatchProducerRef, Vec<_>)> =
             HashMap::with_capacity(region_ids.len());
         for entry in entries {
@@ -157,19 +156,22 @@ impl LogStore for KafkaLogStore {
                     actual: entry.provider().type_name(),
                 }
             })?;
-
             let region_id = entry.region_id();
-            let producer = self
-                .client_manager
-                .get_or_insert(provider)
-                .await?
-                .producer()
-                .clone();
-            region_grouped_records
-                .entry(region_id)
-                .or_insert((producer, vec![]))
-                .1
-                .extend(convert_to_kafka_records(entry)?);
+            match region_grouped_records.entry(region_id) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    slot.get_mut().1.extend(convert_to_kafka_records(entry)?);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let producer = self
+                        .client_manager
+                        .get_or_insert(provider)
+                        .await?
+                        .producer()
+                        .clone();
+
+                    slot.insert((producer, convert_to_kafka_records(entry)?));
+                }
+            }
         }
 
         let mut ordered_region_ids = Vec::with_capacity(region_ids.len());
