@@ -37,11 +37,10 @@ use crate::memtable::{
     MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
-use crate::sst::parquet::format::ReadFormat;
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
-pub(crate) struct EmptyMemtable {
+pub struct EmptyMemtable {
     /// Id of this memtable.
     id: MemtableId,
     /// Time range to return.
@@ -50,7 +49,7 @@ pub(crate) struct EmptyMemtable {
 
 impl EmptyMemtable {
     /// Returns a new memtable with specific `id`.
-    pub(crate) fn new(id: MemtableId) -> EmptyMemtable {
+    pub fn new(id: MemtableId) -> EmptyMemtable {
         EmptyMemtable {
             id,
             time_range: None,
@@ -58,10 +57,7 @@ impl EmptyMemtable {
     }
 
     /// Attaches the time range to the memtable.
-    pub(crate) fn with_time_range(
-        mut self,
-        time_range: Option<(Timestamp, Timestamp)>,
-    ) -> EmptyMemtable {
+    pub fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> EmptyMemtable {
         self.time_range = time_range;
         self
     }
