@@ -22,6 +22,7 @@ use crate::etl::value::{Array, Map, Value};
 pub(crate) const PROCESSOR_JOIN: &str = "join";
 
 /// only support string array value
+/// A processor to join each element of an array into a single string using a separator string between each element
 #[derive(Debug, Default)]
 pub struct JoinProcessor {
     fields: Fields,
