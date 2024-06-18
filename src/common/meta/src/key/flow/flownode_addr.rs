@@ -135,4 +135,30 @@ impl FlownodeAddrManager {
             .map(|x| FlownodeAddrValue::try_from_raw_value(&x.value))
             .transpose()
     }
+
+    pub(crate) fn build_register_txn(
+        &self,
+        flownode_id: FlownodeId,
+        value: FlownodeAddrValue,
+    ) -> Result<Txn> {
+        let key = FlownodeAddrKey::new(flownode_id).to_bytes();
+        Ok(Txn::put_if_not_exists(
+            key.clone(),
+            value.try_as_raw_value()?,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_serde() {
+        let flownode_addr_key = FlownodeAddrKey::new(1);
+        let expected = b"__flow/addr/1".to_vec();
+        assert_eq!(expected, flownode_addr_key.to_bytes());
+        let de = FlownodeAddrKey::from_bytes(&expected).unwrap();
+        assert_eq!(flownode_addr_key.flownode_id(), de.flownode_id());
+    }
 }
