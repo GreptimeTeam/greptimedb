@@ -31,7 +31,7 @@ pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 #[async_trait::async_trait]
 pub trait RemoteJobScheduler: Send + Sync + 'static {
     /// Sends a job to the scheduler and returns a unique identifier for the job.
-    async fn schedule(&self, job: RemoteJob, notifier: Box<dyn Notifier>) -> Result<JobId>;
+    async fn schedule(&self, job: RemoteJob, notifier: Arc<dyn Notifier>) -> Result<JobId>;
 }
 
 /// Notifier is used to notify the mito engine when a remote job is completed.

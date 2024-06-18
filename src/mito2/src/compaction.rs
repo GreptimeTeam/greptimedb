@@ -292,7 +292,7 @@ impl CompactionScheduler {
                 let result = remote_job_scheduler
                     .schedule(
                         RemoteJob::CompactionJob(remote_compaction_job),
-                        Box::new(DefaultNotifier {
+                        Arc::new(DefaultNotifier {
                             request_sender: request_sender.clone(),
                         }),
                     )
