@@ -55,7 +55,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             start_time_ms: info.start_time_ms,
         };
 
-        save_to_mem_store(key, value, ctx).await?;
+        put_into_memory_store(ctx, key, value).await?;
 
         Ok(HandleControl::Continue)
     }
@@ -88,7 +88,7 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             start_time_ms: info.start_time_ms,
         };
 
-        save_to_mem_store(key, value, ctx).await?;
+        put_into_memory_store(ctx, key, value).await?;
 
         Ok(HandleControl::Continue)
     }
@@ -138,7 +138,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             start_time_ms: info.start_time_ms,
         };
 
-        save_to_mem_store(key, value, ctx).await?;
+        put_into_memory_store(ctx, key, value).await?;
 
         Ok(HandleControl::Continue)
     }
@@ -176,7 +176,7 @@ fn extract_base_info(
     ))
 }
 
-async fn save_to_mem_store(key: NodeInfoKey, value: NodeInfo, ctx: &mut Context) -> Result<()> {
+async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeInfo) -> Result<()> {
     let key = key.into();
     let value = value.try_into().context(InvalidClusterInfoFormatSnafu)?;
     let put_req = PutRequest {

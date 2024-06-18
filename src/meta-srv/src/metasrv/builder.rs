@@ -50,7 +50,7 @@ use crate::handler::collect_cluster_info_handler::{
 use crate::handler::collect_stats_handler::CollectStatsHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
-use crate::handler::keep_lease_handler::KeepLeaseHandler;
+use crate::handler::keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
 use crate::handler::persist_stats_handler::PersistStatsHandler;
@@ -334,7 +334,8 @@ impl MetasrvBuilder {
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                group.add_handler(KeepLeaseHandler).await;
+                group.add_handler(DatanodeKeepLeaseHandler).await;
+                group.add_handler(FlownodeKeepLeaseHandler).await;
                 group.add_handler(CheckLeaderHandler).await;
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
