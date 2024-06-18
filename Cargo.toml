@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "benchmarks",
     "src/api",
     "src/auth",
     "src/catalog",

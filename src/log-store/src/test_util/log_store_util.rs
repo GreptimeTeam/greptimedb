@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::path::Path;
-use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_wal::config::kafka::DatanodeKafkaConfig;
@@ -36,7 +35,6 @@ pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEng
 pub async fn create_kafka_log_store(broker_endpoints: Vec<String>) -> KafkaLogStore {
     KafkaLogStore::try_new(&DatanodeKafkaConfig {
         broker_endpoints,
-        linger: Duration::from_millis(1),
         ..Default::default()
     })
     .await

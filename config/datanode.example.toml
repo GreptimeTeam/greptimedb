@@ -132,11 +132,7 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
 ## **It's only used when the provider is `kafka`**.
-max_batch_size = "1MB"
-
-## The linger duration of a kafka batch producer.
-## **It's only used when the provider is `kafka`**.
-linger = "200ms"
+max_batch_bytes = "1MB"
 
 ## The consumer wait timeout.
 ## **It's only used when the provider is `kafka`**.
