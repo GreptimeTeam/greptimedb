@@ -745,6 +745,13 @@ pub enum Error {
         location: Location,
         source: Arc<Error>,
     },
+
+    #[snafu(display("Internal error occurred in remote job scheduler"))]
+    RemoteJobScheduler {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -862,6 +869,7 @@ impl ErrorExt for Error {
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
+            RemoteJobScheduler { .. } => StatusCode::Internal,
         }
     }
 
