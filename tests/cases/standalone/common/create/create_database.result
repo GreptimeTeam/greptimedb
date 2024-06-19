@@ -10,10 +10,6 @@ create database 'illegal-database';
 
 Affected Rows: 1
 
-create database mydb with (ttl = '1h');
-
-Affected Rows: 1
-
 show databases;
 
 +--------------------+
@@ -22,15 +18,10 @@ show databases;
 | greptime_private   |
 | illegal-database   |
 | information_schema |
-| mydb               |
 | public             |
 +--------------------+
 
 drop database 'illegal-database';
-
-Affected Rows: 0
-
-drop database mydb;
 
 Affected Rows: 0
 

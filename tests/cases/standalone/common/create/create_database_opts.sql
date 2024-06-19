@@ -1,0 +1,15 @@
+CREATE DATABASE mydb WITH (ttl = '1h');
+
+SHOW DATABASES;
+
+USE mydb;
+
+CREATE TABLE test(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
+
+SHOW CREATE TABLE test;
+
+USe public;
+
+DROP DATABASE mydb;
+
+SHOW DATABASES;
