@@ -38,8 +38,7 @@ impl HttpHandler for NodeLeaseHandler {
     ) -> Result<http::Response<String>> {
         let cluster_id = util::extract_cluster_id(params)?;
 
-        let leases =
-            lease::filter_datanodes(cluster_id, &self.meta_peer_client, |_, _| true).await?;
+        let leases = lease::alive_datanodes(cluster_id, &self.meta_peer_client, u64::MAX).await?;
         let leases = leases
             .into_iter()
             .map(|(k, v)| HumanLease {

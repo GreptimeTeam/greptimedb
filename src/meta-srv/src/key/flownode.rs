@@ -38,7 +38,7 @@ pub struct FlownodeLeaseKey {
 
 impl FlownodeLeaseKey {
     pub fn prefix_key_by_cluster(cluster_id: ClusterId) -> Vec<u8> {
-        format!("{FLOWNODE_LEASE_PREFIX}-{cluster_id}").into_bytes()
+        format!("{FLOWNODE_LEASE_PREFIX}-{cluster_id}-").into_bytes()
     }
 }
 

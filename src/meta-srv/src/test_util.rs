@@ -71,6 +71,7 @@ pub(crate) fn create_selector_context() -> SelectorContext {
 
     SelectorContext {
         datanode_lease_secs: 10,
+        flownode_lease_secs: 10,
         server_addr: "127.0.0.1:3002".to_string(),
         kv_backend: in_memory,
         meta_peer_client,

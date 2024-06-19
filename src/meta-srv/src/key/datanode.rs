@@ -48,7 +48,7 @@ pub struct DatanodeLeaseKey {
 
 impl DatanodeLeaseKey {
     pub fn prefix_key_by_cluster(cluster_id: ClusterId) -> Vec<u8> {
-        format!("{DATANODE_LEASE_PREFIX}-{cluster_id}").into_bytes()
+        format!("{DATANODE_LEASE_PREFIX}-{cluster_id}-").into_bytes()
     }
 }
 

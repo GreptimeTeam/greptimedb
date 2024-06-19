@@ -19,7 +19,7 @@ use snafu::ensure;
 
 use crate::error::{NoEnoughAvailableDatanodeSnafu, Result};
 use crate::lease;
-use crate::metasrv::SelectorContext;
+use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
@@ -29,9 +29,75 @@ use crate::selector::{Namespace, Selector, SelectorOptions};
 /// all datanodes. But **it's not recommended** to use this selector in serious
 /// production environments because it doesn't take into account the load of
 /// each datanode.
-#[derive(Default)]
 pub struct RoundRobinSelector {
+    select_target: SelectTarget,
     counter: AtomicUsize,
+}
+
+impl Default for RoundRobinSelector {
+    fn default() -> Self {
+        Self {
+            select_target: SelectTarget::Datanode,
+            counter: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl RoundRobinSelector {
+    pub fn new(select_target: SelectTarget) -> Self {
+        Self {
+            select_target,
+            ..Default::default()
+        }
+    }
+
+    async fn get_peers(
+        &self,
+        ns: Namespace,
+        min_required_items: usize,
+        ctx: &SelectorContext,
+    ) -> Result<Vec<Peer>> {
+        let peers = match self.select_target {
+            SelectTarget::Datanode => {
+                // 1. get alive datanodes.
+                let lease_kvs =
+                    lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs)
+                        .await?;
+
+                // 2. map into peers and sort on node id
+                let mut peers: Vec<Peer> = lease_kvs
+                    .into_iter()
+                    .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
+                    .collect();
+                peers.sort_by_key(|p| p.id);
+                peers
+            }
+            SelectTarget::Flownode => {
+                // 1. get alive flownodes.
+                let lease_kvs =
+                    lease::alive_flownodes(ns, &ctx.meta_peer_client, ctx.flownode_lease_secs)
+                        .await?;
+
+                // 2. map into peers and sort on node id
+                let mut peers: Vec<Peer> = lease_kvs
+                    .into_iter()
+                    .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
+                    .collect();
+                peers.sort_by_key(|p| p.id);
+                peers
+            }
+        };
+
+        ensure!(
+            !peers.is_empty(),
+            NoEnoughAvailableDatanodeSnafu {
+                required: min_required_items,
+                available: 0usize,
+            }
+        );
+
+        Ok(peers)
+    }
 }
 
 #[async_trait::async_trait]
@@ -45,25 +111,8 @@ impl Selector for RoundRobinSelector {
         ctx: &Self::Context,
         opts: SelectorOptions,
     ) -> Result<Vec<Peer>> {
-        // 1. get alive datanodes.
-        let lease_kvs =
-            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
-
-        // 2. map into peers and sort on node id
-        let mut peers: Vec<Peer> = lease_kvs
-            .into_iter()
-            .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
-            .collect();
-        peers.sort_by_key(|p| p.id);
-        ensure!(
-            !peers.is_empty(),
-            NoEnoughAvailableDatanodeSnafu {
-                required: opts.min_required_items,
-                available: 0usize,
-            }
-        );
-
-        // 3. choose peers
+        let peers = self.get_peers(ns, opts.min_required_items, ctx).await?;
+        // choose peers
         let mut selected = Vec::with_capacity(opts.min_required_items);
         for _ in 0..opts.min_required_items {
             let idx = self
