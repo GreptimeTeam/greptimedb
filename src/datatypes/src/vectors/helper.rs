@@ -234,12 +234,7 @@ impl Helper {
                 let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
                 ConstantVector::new(Arc::new(vector), length)
             }
-            ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_)
-            | ScalarValue::FixedSizeList(_)
-            | ScalarValue::LargeList(_)
-            | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Union(_, _, _) => {
+            _ => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }

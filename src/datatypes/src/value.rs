@@ -877,12 +877,7 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Decimal128(v, p, s) => v
                 .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
                 .unwrap_or(Value::Null),
-            ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_)
-            | ScalarValue::FixedSizeList(_)
-            | ScalarValue::LargeList(_)
-            | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Union(_, _, _) => {
+            _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }
