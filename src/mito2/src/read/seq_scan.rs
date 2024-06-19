@@ -26,7 +26,6 @@ use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::debug;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
-use futures::StreamExt;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
@@ -160,7 +159,7 @@ impl SeqScan {
     ) -> Result<Option<BoxedBatchReader>> {
         // initialize parts list
         let mut parts = stream_ctx.parts.lock().await;
-        maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+        Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
         let parts_len = parts.len();
 
         let input = &stream_ctx.input;
@@ -191,7 +190,7 @@ impl SeqScan {
         metrics: &mut ScannerMetrics,
     ) -> Result<Option<BoxedBatchReader>> {
         let mut parts = stream_ctx.parts.lock().await;
-        maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+        Self::maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
 
         let input = &stream_ctx.input;
         let mut sources = Vec::new();
@@ -238,7 +237,10 @@ impl SeqScan {
         }
     }
 
-    /// Scans the given partition
+    /// Scans the given partition when the part list is set properly.
+    /// Otherwise the returned stream might not contains any data.
+    // TODO: refactor out `uncached_scan_part_impl`.
+    #[allow(dead_code)]
     fn scan_partition_impl(
         &self,
         partition: usize,
@@ -310,6 +312,9 @@ impl SeqScan {
         Ok(stream)
     }
 
+    /// Scans the given partition when the part list is not set.
+    /// This method will do a lazy initialize of part list and
+    /// ignores the partition settings in `properties`.
     fn uncached_scan_part_impl(
         &self,
         partition: usize,
@@ -336,7 +341,7 @@ impl SeqScan {
             // init parts
             let parts_len = {
                 let mut parts = stream_ctx.parts.lock().await;
-                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics).await
+                Self::maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics).await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
                 parts.len()
@@ -395,19 +400,23 @@ impl SeqScan {
         Ok(stream)
     }
 
-    fn load_parts_from_cache(input: &ScanInput) -> Vec<ScanPart> {
-        let mut parts = Vec::new();
-        for mem in &input.memtables {
-            let stats = mem.stats();
-            let part = ScanPart {
-                memtables: vec![mem.clone()],
-                file_ranges: smallvec![],
-                time_range: stats.time_range(),
-            };
-            parts.push(part);
-        }
+    /// Initializes parts if they are not built yet.
+    async fn maybe_init_parts(
+        input: &ScanInput,
+        part_list: &mut ScanPartList,
+        metrics: &mut ScannerMetrics,
+    ) -> Result<()> {
+        if part_list.is_none() {
+            let now = Instant::now();
+            let mut distributor = SeqDistributor::default();
+            input.prune_file_ranges(&mut distributor).await?;
+            part_list.set_parts(
+                distributor.build_parts(&input.memtables, input.parallelism.parallelism),
+            );
 
-        parts
+            metrics.observe_init_part(now.elapsed());
+        }
+        Ok(())
     }
 }
 
@@ -453,24 +462,6 @@ impl SeqScan {
     pub(crate) fn input(&self) -> &ScanInput {
         &self.stream_ctx.input
     }
-}
-
-/// Initializes parts if they are not built yet.
-async fn maybe_init_parts(
-    input: &ScanInput,
-    part_list: &mut ScanPartList,
-    metrics: &mut ScannerMetrics,
-) -> Result<()> {
-    if part_list.is_none() {
-        let now = Instant::now();
-        let mut distributor = SeqDistributor::default();
-        input.prune_file_ranges(&mut distributor).await?;
-        part_list
-            .set_parts(distributor.build_parts(&input.memtables, input.parallelism.parallelism));
-
-        metrics.observe_init_part(now.elapsed());
-    }
-    Ok(())
 }
 
 /// Builds [ScanPart]s that preserves order.

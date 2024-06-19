@@ -272,6 +272,21 @@ impl MetricEngine {
     }
 }
 
+#[cfg(test)]
+impl MetricEngine {
+    pub async fn scan_to_stream(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
+        self.inner
+            .mito
+            .scan_to_stream(region_id, request)
+            .await
+            .map_err(BoxedError::new)
+    }
+}
+
 struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
