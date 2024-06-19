@@ -84,8 +84,8 @@ impl HeartbeatTask {
             node_id: opts.node_id.unwrap_or(0),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
-            server_addr: opts.rpc_addr.clone(),
-            server_hostname: opts.rpc_hostname.clone(),
+            server_addr: opts.grpc.addr.clone(),
+            server_hostname: Some(opts.grpc.hostname.clone()),
             running: Arc::new(AtomicBool::new(false)),
             meta_client: Arc::new(meta_client),
             region_server,
@@ -108,7 +108,7 @@ impl HeartbeatTask {
 
         let mut last_received_lease = Instant::now();
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_hb(async move {
             while let Some(res) = rx.message().await.unwrap_or_else(|e| {
                 error!(e; "Error while reading heartbeat response");
                 None
@@ -215,7 +215,7 @@ impl HeartbeatTask {
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
             loop {
@@ -331,7 +331,6 @@ impl HeartbeatTask {
                 // TODO(ruihang): scratch more info
                 rcus: 0,
                 wcus: 0,
-                approximate_rows: 0,
             };
             region_stats.push(region_stat);
         }

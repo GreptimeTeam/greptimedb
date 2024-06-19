@@ -315,7 +315,7 @@ impl DatanodeBuilder {
 
         let runtime = Arc::new(
             Runtime::builder()
-                .worker_threads(opts.rpc_runtime_size)
+                .worker_threads(opts.grpc.runtime_size)
                 .thread_name("io-handlers")
                 .build()
                 .context(RuntimeResourceSnafu)?,

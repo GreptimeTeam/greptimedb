@@ -877,39 +877,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "benchmarks"
-version = "0.8.2"
-dependencies = [
- "api",
- "arrow",
- "chrono",
- "clap 4.5.4",
- "common-base",
- "common-telemetry",
- "common-wal",
- "dotenv",
- "futures",
- "futures-util",
- "humantime",
- "humantime-serde",
- "indicatif",
- "itertools 0.10.5",
- "lazy_static",
- "log-store",
- "mito2",
- "num_cpus",
- "parquet",
- "prometheus",
- "rand",
- "rskafka",
- "serde",
- "store-api",
- "tokio",
- "toml 0.8.13",
- "uuid",
-]
-
-[[package]]
 name = "bigdecimal"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3842,7 +3809,9 @@ name = "flow"
 version = "0.8.2"
 dependencies = [
  "api",
+ "arrow-schema",
  "async-trait",
+ "bytes",
  "catalog",
  "common-base",
  "common-catalog",
@@ -3857,8 +3826,10 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "datafusion 38.0.0",
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",
+ "datafusion-physical-expr 38.0.0",
  "datatypes",
  "enum-as-inner",
  "enum_dispatch",
@@ -4237,7 +4208,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/zyy17/greptime-proto.git?rev=6b12c79facb3d7f8dae89f1b1cc8b0ac05a1d169#6b12c79facb3d7f8dae89f1b1cc8b0ac05a1d169"
+source = "git+https://github.com/zyy17/greptime-proto.git?rev=1803bf8c64b43bd34dd2fa743fbc22d957953bcb#1803bf8c64b43bd34dd2fa743fbc22d957953bcb"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -4848,19 +4819,6 @@ dependencies = [
  "equivalent",
  "hashbrown 0.14.5",
  "serde",
-]
-
-[[package]]
-name = "indicatif"
-version = "0.17.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "763a5a8f45087d6bcea4222e7b72c291a054edf80e4ef6efd2a4979878c7bea3"
-dependencies = [
- "console",
- "instant",
- "number_prefix",
- "portable-atomic",
- "unicode-width",
 ]
 
 [[package]]
@@ -5901,6 +5859,7 @@ dependencies = [
  "rskafka",
  "rstest",
  "rstest_reuse",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_with",
@@ -6465,12 +6424,6 @@ checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "objc"

@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "benchmarks",
     "src/api",
     "src/auth",
     "src/catalog",
@@ -121,7 +120,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/zyy17/greptime-proto.git", rev = "6b12c79facb3d7f8dae89f1b1cc8b0ac05a1d169" }
+greptime-proto = { git = "https://github.com/zyy17/greptime-proto.git", rev = "1803bf8c64b43bd34dd2fa743fbc22d957953bcb" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"

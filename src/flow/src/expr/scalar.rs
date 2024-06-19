@@ -15,19 +15,33 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
+use common_error::ext::BoxedError;
+use common_recordbatch::DfRecordBatch;
+use datafusion_physical_expr::PhysicalExpr;
+use datatypes::arrow_array;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
+use prost::Message;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
+use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
+use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
+use substrait::substrait_proto_df::proto::Expression;
 
 use crate::adapter::error::{
-    Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
+    DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
-use crate::expr::error::{EvalError, InvalidArgumentSnafu, OptimizeSnafu};
+use crate::expr::error::{
+    ArrowSnafu, DatafusionSnafu as EvalDatafusionSnafu, EvalError, ExternalSnafu,
+    InvalidArgumentSnafu, OptimizeSnafu,
+};
 use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc};
-use crate::repr::{ColumnType, RelationType};
-
+use crate::repr::{ColumnType, RelationDesc, RelationType};
+use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
 /// A scalar expression with a known type.
 #[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct TypedExpr {
@@ -47,6 +61,8 @@ impl TypedExpr {
     /// expand multi-value expression to multiple expressions with new indices
     ///
     /// Currently it just mean expand `TumbleWindow` to `TumbleWindowFloor` and `TumbleWindowCeiling`
+    ///
+    /// TODO(discord9): test if nested reduce combine with df scalar function would cause problem
     pub fn expand_multi_value(
         input_typ: &RelationType,
         exprs: &[TypedExpr],
@@ -138,6 +154,10 @@ pub enum ScalarExpr {
         func: VariadicFunc,
         exprs: Vec<ScalarExpr>,
     },
+    CallDf {
+        // TODO(discord9): support shuffle
+        df_scalar_fn: DfScalarFunction,
+    },
     /// Conditionally evaluated expressions.
     ///
     /// It is important that `then` and `els` only be evaluated if
@@ -149,6 +169,161 @@ pub enum ScalarExpr {
         then: Box<ScalarExpr>,
         els: Box<ScalarExpr>,
     },
+}
+
+/// A way to represent a scalar function that is implemented in Datafusion
+#[derive(Debug, Clone)]
+pub struct DfScalarFunction {
+    raw_fn: RawDfScalarFn,
+    // TODO(discord9): directly from datafusion expr
+    fn_impl: Arc<dyn PhysicalExpr>,
+    df_schema: Arc<datafusion_common::DFSchema>,
+}
+
+impl DfScalarFunction {
+    pub fn new(raw_fn: RawDfScalarFn, fn_impl: Arc<dyn PhysicalExpr>) -> Result<Self, Error> {
+        Ok(Self {
+            df_schema: Arc::new(raw_fn.input_schema.to_df_schema()?),
+            raw_fn,
+            fn_impl,
+        })
+    }
+
+    // TODO(discord9): add RecordBatch support
+    pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+        if values.is_empty() {
+            return InvalidArgumentSnafu {
+                reason: "values is empty".to_string(),
+            }
+            .fail();
+        }
+        // TODO(discord9): make cols all array length of one
+        let mut cols = vec![];
+        for (idx, typ) in self
+            .raw_fn
+            .input_schema
+            .typ()
+            .column_types
+            .iter()
+            .enumerate()
+        {
+            let typ = typ.scalar_type();
+            let mut array = typ.create_mutable_vector(1);
+            array.push_value_ref(values[idx].as_value_ref());
+            cols.push(array.to_vector().to_arrow_array());
+        }
+        let schema = self.df_schema.inner().clone();
+        let rb = DfRecordBatch::try_new(schema, cols).map_err(|err| {
+            ArrowSnafu {
+                raw: err,
+                context:
+                    "Failed to create RecordBatch from values when eval datafusion scalar function",
+            }
+            .build()
+        })?;
+        let res = self.fn_impl.evaluate(&rb).map_err(|err| {
+            EvalDatafusionSnafu {
+                raw: err,
+                context: "Failed to evaluate datafusion scalar function",
+            }
+            .build()
+        })?;
+        let res = common_query::columnar_value::ColumnarValue::try_from(&res)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let res_vec = res
+            .try_into_vector(1)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let res_val = res_vec
+            .try_get(0)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(res_val)
+    }
+}
+
+// simply serialize the raw_fn instead of derive to avoid complex deserialize of struct
+impl Serialize for DfScalarFunction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.raw_fn.serialize(serializer)
+    }
+}
+
+impl<'de> serde::de::Deserialize<'de> for DfScalarFunction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
+        let fn_impl = raw_fn.get_fn_impl().map_err(serde::de::Error::custom)?;
+        DfScalarFunction::new(raw_fn, fn_impl).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawDfScalarFn {
+    f: bytes::BytesMut,
+    input_schema: RelationDesc,
+    extensions: FunctionExtensions,
+}
+
+impl RawDfScalarFn {
+    pub fn from_proto(
+        f: &substrait::substrait_proto_df::proto::expression::ScalarFunction,
+        input_schema: RelationDesc,
+        extensions: FunctionExtensions,
+    ) -> Result<Self, Error> {
+        let mut buf = BytesMut::new();
+        f.encode(&mut buf)
+            .context(EncodeRelSnafu)
+            .map_err(BoxedError::new)
+            .context(crate::adapter::error::ExternalSnafu)?;
+        Ok(Self {
+            f: buf,
+            input_schema,
+            extensions,
+        })
+    }
+    fn get_fn_impl(&self) -> Result<Arc<dyn PhysicalExpr>, Error> {
+        let f = ScalarFunction::decode(&mut self.f.as_ref())
+            .context(DecodeRelSnafu)
+            .map_err(BoxedError::new)
+            .context(crate::adapter::error::ExternalSnafu)?;
+
+        let input_schema = &self.input_schema;
+        let extensions = &self.extensions;
+
+        from_scalar_fn_to_df_fn_impl(&f, input_schema, extensions)
+    }
+}
+
+impl std::cmp::PartialEq for DfScalarFunction {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw_fn.eq(&other.raw_fn)
+    }
+}
+
+// can't derive Eq because of Arc<dyn PhysicalExpr> not eq, so implement it manually
+impl std::cmp::Eq for DfScalarFunction {}
+
+impl std::cmp::PartialOrd for DfScalarFunction {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl std::cmp::Ord for DfScalarFunction {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw_fn.cmp(&other.raw_fn)
+    }
+}
+impl std::hash::Hash for DfScalarFunction {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw_fn.hash(state);
+    }
 }
 
 impl ScalarExpr {
@@ -179,6 +354,23 @@ impl ScalarExpr {
                 Ok(ColumnType::new_nullable(func.signature().output))
             }
             ScalarExpr::If { then, .. } => then.typ(context),
+            ScalarExpr::CallDf { df_scalar_fn } => {
+                let arrow_typ = df_scalar_fn
+                    .fn_impl
+                    // TODO(discord9): get scheme from args instead?
+                    .data_type(df_scalar_fn.df_schema.as_arrow())
+                    .map_err(|err| {
+                        DatafusionSnafu {
+                            raw: err,
+                            context: "Failed to get data type from datafusion scalar function",
+                        }
+                        .build()
+                    })?;
+                let typ = ConcreteDataType::try_from(&arrow_typ)
+                    .map_err(BoxedError::new)
+                    .context(crate::adapter::error::ExternalSnafu)?;
+                Ok(ColumnType::new_nullable(typ))
+            }
         }
     }
 }
@@ -253,6 +445,7 @@ impl ScalarExpr {
                 }
                 .fail(),
             },
+            ScalarExpr::CallDf { df_scalar_fn } => df_scalar_fn.eval(values),
         }
     }
 
@@ -421,6 +614,7 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
+            _ => Ok(()),
         }
     }
 
@@ -456,6 +650,7 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
+            _ => Ok(()),
         }
     }
 }
@@ -497,7 +692,7 @@ impl ScalarExpr {
             return unsupported_err("Not a binary expression");
         };
 
-        // TODO: support simple transform like `now() + a < b` to `now() < b - a`
+        // TODO(discord9): support simple transform like `now() + a < b` to `now() < b - a`
 
         let expr1_is_now = *expr1 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
         let expr2_is_now = *expr2 == ScalarExpr::CallUnmaterializable(UnmaterializableFunc::Now);
@@ -531,6 +726,15 @@ impl ScalarExpr {
 #[cfg(test)]
 mod test {
     use datatypes::arrow::array::Scalar;
+    use query::parser::QueryLanguageParser;
+    use query::QueryEngine;
+    use session::context::QueryContext;
+    use substrait::extension_serializer;
+    use substrait::substrait_proto_df::proto::expression::literal::LiteralType;
+    use substrait::substrait_proto_df::proto::expression::Literal;
+    use substrait::substrait_proto_df::proto::function_argument::ArgType;
+    use substrait::substrait_proto_df::proto::r#type::Kind;
+    use substrait::substrait_proto_df::proto::{r#type, FunctionArgument, Type};
 
     use super::*;
     #[test]
@@ -621,5 +825,38 @@ mod test {
         let permute_map = BTreeMap::from([(1, 2), (3, 4)]);
         let res = expr.permute_map(&permute_map);
         assert!(matches!(res, Err(Error::InvalidQuery { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_df_scalar_function() {
+        let raw_scalar_func = ScalarFunction {
+            function_reference: 0,
+            arguments: vec![FunctionArgument {
+                arg_type: Some(ArgType::Value(Expression {
+                    rex_type: Some(RexType::Literal(Literal {
+                        nullable: false,
+                        type_variation_reference: 0,
+                        literal_type: Some(LiteralType::I64(-1)),
+                    })),
+                })),
+            }],
+            output_type: None,
+            ..Default::default()
+        };
+        let input_schema = RelationDesc::try_new(
+            RelationType::new(vec![ColumnType::new_nullable(
+                ConcreteDataType::null_datatype(),
+            )]),
+            vec!["null_column".to_string()],
+        )
+        .unwrap();
+        let extensions = FunctionExtensions::from_iter(vec![(0, "abs")]);
+        let raw_fn = RawDfScalarFn::from_proto(&raw_scalar_func, input_schema, extensions).unwrap();
+        let fn_impl = raw_fn.get_fn_impl().unwrap();
+        let df_func = DfScalarFunction::new(raw_fn, fn_impl).unwrap();
+        let as_str = serde_json::to_string(&df_func).unwrap();
+        let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
+        assert_eq!(df_func, from_str);
+        assert_eq!(df_func.eval(&[Value::Null]).unwrap(), Value::Int64(1));
     }
 }

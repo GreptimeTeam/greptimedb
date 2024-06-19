@@ -64,12 +64,12 @@ mod table_source;
 
 use error::Error;
 
-// TODO: replace this with `GREPTIME_TIMESTAMP` before v0.9
+// TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
 pub const UPDATE_AT_TS_COL: &str = "update_at";
 
-// TODO: refactor common types for flow to a separate module
+// TODO(discord9): refactor common types for flow to a separate module
 /// FlowId is a unique identifier for a flow task
 pub type FlowId = u64;
 pub type TableName = [String; 3];

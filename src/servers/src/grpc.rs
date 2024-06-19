@@ -27,11 +27,13 @@ use std::net::SocketAddr;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 use async_trait::async_trait;
+use common_base::readable_size::ReadableSize;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
 use common_telemetry::{error, info, warn};
 use futures::FutureExt;
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -49,6 +51,39 @@ use crate::server::Server;
 use crate::tls::TlsOption;
 
 type TonicResult<T> = std::result::Result<T, Status>;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrpcOptions {
+    pub addr: String,
+    pub hostname: String,
+    /// Max gRPC receiving(decoding) message size
+    pub max_recv_message_size: ReadableSize,
+    /// Max gRPC sending(encoding) message size
+    pub max_send_message_size: ReadableSize,
+    pub runtime_size: usize,
+    #[serde(default = "Default::default")]
+    pub tls: TlsOption,
+}
+
+impl Default for GrpcOptions {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4001".to_string(),
+            hostname: "127.0.0.1".to_string(),
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            runtime_size: 8,
+            tls: TlsOption::default(),
+        }
+    }
+}
+
+impl GrpcOptions {
+    pub fn with_addr(mut self, addr: &str) -> Self {
+        self.addr = addr.to_string();
+        self
+    }
+}
 
 pub struct GrpcServer {
     // states
