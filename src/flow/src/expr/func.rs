@@ -814,7 +814,7 @@ impl VariadicFunc {
         name: &str,
         arg_types: &[Option<ConcreteDataType>],
     ) -> Result<Self, Error> {
-        // TODO: future variadic funcs to be added might need to check arg_types
+        // TODO(discord9): future variadic funcs to be added might need to check arg_types
         let _ = arg_types;
         match name {
             "and" => Ok(Self::And),

@@ -33,14 +33,14 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
-    BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
-    MemtableStats,
+    BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder, MemtableId,
+    MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
-pub(crate) struct EmptyMemtable {
+pub struct EmptyMemtable {
     /// Id of this memtable.
     id: MemtableId,
     /// Time range to return.
@@ -49,7 +49,7 @@ pub(crate) struct EmptyMemtable {
 
 impl EmptyMemtable {
     /// Returns a new memtable with specific `id`.
-    pub(crate) fn new(id: MemtableId) -> EmptyMemtable {
+    pub fn new(id: MemtableId) -> EmptyMemtable {
         EmptyMemtable {
             id,
             time_range: None,
@@ -57,10 +57,7 @@ impl EmptyMemtable {
     }
 
     /// Attaches the time range to the memtable.
-    pub(crate) fn with_time_range(
-        mut self,
-        time_range: Option<(Timestamp, Timestamp)>,
-    ) -> EmptyMemtable {
+    pub fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> EmptyMemtable {
         self.time_range = time_range;
         self
     }
@@ -87,6 +84,14 @@ impl Memtable for EmptyMemtable {
         Ok(Box::new(std::iter::empty()))
     }
 
+    fn ranges(
+        &self,
+        _projection: Option<&[ColumnId]>,
+        _predicate: Option<Predicate>,
+    ) -> Vec<MemtableRange> {
+        vec![]
+    }
+
     fn is_empty(&self) -> bool {
         true
     }
@@ -111,6 +116,16 @@ pub(crate) struct EmptyMemtableBuilder {}
 impl MemtableBuilder for EmptyMemtableBuilder {
     fn build(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(EmptyMemtable::new(id))
+    }
+}
+
+/// Empty iterator builder.
+#[derive(Default)]
+pub(crate) struct EmptyIterBuilder {}
+
+impl IterBuilder for EmptyIterBuilder {
+    fn build(&self) -> Result<BoxedBatchIterator> {
+        Ok(Box::new(std::iter::empty()))
     }
 }
 
@@ -340,4 +355,12 @@ pub(crate) fn collect_iter_timestamps(iter: BoxedBatchIterator) -> Vec<i64> {
     })
     .map(|v| v.unwrap().0.value())
     .collect()
+}
+
+/// Builds a memtable range for test.
+pub(crate) fn mem_range_for_test(id: MemtableId) -> MemtableRange {
+    let builder = Box::new(EmptyIterBuilder::default());
+
+    let context = Arc::new(MemtableRangeContext::new(id, builder));
+    MemtableRange::new(context)
 }

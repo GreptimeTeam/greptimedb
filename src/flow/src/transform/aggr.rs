@@ -24,9 +24,10 @@ use hydroflow::futures::future::Map;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use substrait::variation_const::{
-    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
-    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
-    UNSIGNED_INTEGER_TYPE_REF,
+    DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
+    TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
+    TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
+    UNSIGNED_INTEGER_TYPE_VARIATION_REF,
 };
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
@@ -53,14 +54,14 @@ use crate::expr::{
     TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, ColumnType, RelationType};
+use crate::repr::{self, ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
     fn from_substrait_agg_grouping(
         ctx: &mut FlownodeContext,
         groupings: &[Grouping],
-        typ: &RelationType,
+        typ: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<Vec<TypedExpr>, Error> {
         let _ = ctx;
@@ -89,7 +90,7 @@ impl AggregateExpr {
     fn from_substrait_agg_measures(
         ctx: &mut FlownodeContext,
         measures: &[Measure],
-        typ: &RelationType,
+        typ: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<(Vec<AggregateExpr>, MapFilterProject), Error> {
         let _ = ctx;
@@ -143,7 +144,7 @@ impl AggregateExpr {
     /// since aggr functions like `avg` need to be transform to `sum(x)/cast(count(x) as x_type)`
     pub fn from_substrait_agg_func(
         f: &proto::AggregateFunction,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
         filter: &Option<TypedExpr>,
         order_by: &Option<Vec<TypedExpr>>,
@@ -320,7 +321,7 @@ impl TypedPlan {
             let group_exprs = TypedExpr::from_substrait_agg_grouping(
                 ctx,
                 &agg.groupings,
-                &input.schema.typ,
+                &input.schema,
                 extensions,
             )?;
 
@@ -332,7 +333,7 @@ impl TypedPlan {
         let (mut aggr_exprs, post_mfp) = AggregateExpr::from_substrait_agg_measures(
             ctx,
             &agg.measures,
-            &input.schema.typ,
+            &input.schema,
             extensions,
         )?;
 

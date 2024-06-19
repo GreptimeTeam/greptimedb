@@ -882,7 +882,8 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Union(_, _, _) => {
+            | ScalarValue::Union(_, _, _)
+            | ScalarValue::Float16(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }

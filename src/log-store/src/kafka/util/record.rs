@@ -23,23 +23,17 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::storage::RegionId;
 
 use crate::error::{
-    DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu, IllegalSequenceSnafu,
-    MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
+    DecodeJsonSnafu, EncodeJsonSnafu, IllegalSequenceSnafu, MetaLengthExceededLimitSnafu,
+    MissingKeySnafu, MissingValueSnafu, Result,
 };
-use crate::kafka::client_manager::ClientManagerRef;
-use crate::kafka::util::offset::Offset;
 use crate::kafka::{EntryId, NamespaceImpl};
-use crate::metrics;
 
 /// The current version of Record.
 pub(crate) const VERSION: u32 = 0;
 
 /// The estimated size in bytes of a serialized RecordMeta.
-/// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_size - ESTIMATED_META_SIZE.
+/// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_byte - ESTIMATED_META_SIZE.
 pub(crate) const ESTIMATED_META_SIZE: usize = 256;
-
-/// The minimum batch size
-pub(crate) const MIN_BATCH_SIZE: usize = 4 * 1024;
 
 /// The type of a record.
 ///
@@ -96,6 +90,13 @@ impl TryFrom<Record> for KafkaRecord {
 
     fn try_from(record: Record) -> Result<Self> {
         let key = serde_json::to_vec(&record.meta).context(EncodeJsonSnafu)?;
+        ensure!(
+            key.len() < ESTIMATED_META_SIZE,
+            MetaLengthExceededLimitSnafu {
+                limit: ESTIMATED_META_SIZE,
+                actual: key.len()
+            }
+        );
         Ok(KafkaRecord {
             key: Some(key),
             value: Some(record.data),
@@ -117,77 +118,9 @@ impl TryFrom<KafkaRecord> for Record {
     }
 }
 
-/// Produces a record to a kafka topic.
-pub(crate) struct RecordProducer {
-    /// The provide of the entries.
-    provider: Arc<KafkaProvider>,
-    /// Entries are buffered before being built into a record.
-    entries: Vec<Entry>,
-}
-
-impl RecordProducer {
-    /// Creates a new producer for producing entries with the given namespace.
-    pub(crate) fn new(provider: Arc<KafkaProvider>) -> Self {
-        Self {
-            provider,
-            entries: Vec::new(),
-        }
-    }
-
-    /// Pushes an entry into the entry buffer.
-    pub(crate) fn push(&mut self, entry: Entry) {
-        self.entries.push(entry);
-    }
-
-    /// Produces the buffered entries to Kafka sever. Those entries may span several Kafka records.
-    /// Returns the offset of the last successfully produced record.
-    // TODO(niebayes): maybe requires more fine-grained metrics to measure stages of writing to kafka.
-    pub(crate) async fn produce(self, client_manager: &ClientManagerRef) -> Result<Offset> {
-        ensure!(!self.entries.is_empty(), EmptyEntriesSnafu);
-
-        // Gets the producer in which a record buffer is maintained.
-        let producer = client_manager
-            .get_or_insert(&self.provider.topic)
-            .await
-            .map_err(|e| {
-                GetClientSnafu {
-                    topic: &self.provider.topic,
-                    error: e.to_string(),
-                }
-                .build()
-            })?
-            .producer;
-
-        // Stores the offset of the last successfully produced record.
-        let mut last_offset = None;
-        for entry in self.entries {
-            for record in convert_to_records(entry) {
-                let kafka_record = KafkaRecord::try_from(record)?;
-
-                metrics::METRIC_KAFKA_PRODUCE_RECORD_COUNTS.inc();
-                metrics::METRIC_KAFKA_PRODUCE_RECORD_BYTES_TOTAL
-                    .inc_by(kafka_record.approximate_size() as u64);
-
-                // Records of a certain region cannot be produced in parallel since their order must be static.
-                let offset = producer
-                    .produce(kafka_record.clone())
-                    .await
-                    .map(Offset)
-                    .with_context(|_| ProduceRecordSnafu {
-                        topic: &self.provider.topic,
-                        size: kafka_record.approximate_size(),
-                    })?;
-                last_offset = Some(offset);
-            }
-        }
-        // Safety: there must be at least one record produced when the entries are guaranteed not empty.
-        Ok(last_offset.unwrap())
-    }
-}
-
-fn convert_to_records(entry: Entry) -> Vec<Record> {
+pub(crate) fn convert_to_kafka_records(entry: Entry) -> Result<Vec<KafkaRecord>> {
     match entry {
-        Entry::Naive(entry) => vec![Record {
+        Entry::Naive(entry) => Ok(vec![KafkaRecord::try_from(Record {
             meta: RecordMeta {
                 version: VERSION,
                 tp: RecordType::Full,
@@ -200,7 +133,7 @@ fn convert_to_records(entry: Entry) -> Vec<Record> {
                 },
             },
             data: entry.data,
-        }],
+        })?]),
         Entry::MultiplePart(entry) => {
             let mut entries = Vec::with_capacity(entry.parts.len());
 
@@ -210,7 +143,7 @@ fn convert_to_records(entry: Entry) -> Vec<Record> {
                     MultiplePartHeader::Middle(i) => RecordType::Middle(i),
                     MultiplePartHeader::Last => RecordType::Last,
                 };
-                entries.push(Record {
+                entries.push(KafkaRecord::try_from(Record {
                     meta: RecordMeta {
                         version: VERSION,
                         tp,
@@ -222,9 +155,9 @@ fn convert_to_records(entry: Entry) -> Vec<Record> {
                         },
                     },
                     data: part,
-                })
+                })?)
             }
-            entries
+            Ok(entries)
         }
     }
 }
@@ -510,5 +443,21 @@ mod tests {
         let record = new_test_record(RecordType::Middle(3), 1, region_id.as_u64(), vec![2; 100]);
         let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
         assert_matches!(err, error::Error::IllegalSequence { .. });
+    }
+
+    #[test]
+    fn test_meta_size() {
+        let meta = RecordMeta {
+            version: VERSION,
+            tp: RecordType::Middle(usize::MAX),
+            entry_id: u64::MAX,
+            ns: NamespaceImpl {
+                region_id: RegionId::new(u32::MAX, u32::MAX).as_u64(),
+                topic: format!("greptime_kafka_cluster/1024/2048/{}", uuid::Uuid::new_v4()),
+            },
+        };
+        let serialized = serde_json::to_vec(&meta).unwrap();
+        // The len of serialized data is 202.
+        assert!(serialized.len() < ESTIMATED_META_SIZE);
     }
 }

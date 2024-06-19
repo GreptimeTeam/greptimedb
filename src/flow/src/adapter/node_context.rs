@@ -79,7 +79,6 @@ impl Default for SourceSender {
     }
 }
 
-// TODO: make all send operation immut
 impl SourceSender {
     pub fn get_receiver(&self) -> broadcast::Receiver<DiffRow> {
         self.sender.subscribe()

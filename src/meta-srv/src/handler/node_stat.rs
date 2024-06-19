@@ -53,8 +53,6 @@ pub struct RegionStat {
     pub wcus: i64,
     /// Approximate bytes of this region
     pub approximate_bytes: i64,
-    /// Approximate number of rows in this region
-    pub approximate_rows: i64,
     /// The engine name.
     pub engine: String,
     /// The region role.
@@ -142,7 +140,6 @@ impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
-            approximate_rows: value.approximate_rows,
             engine: value.engine.to_string(),
             role: RegionRole::from(value.role()),
         })
