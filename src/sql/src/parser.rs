@@ -180,12 +180,7 @@ impl<'a> ParserContext<'a> {
         sql: &'a str,
         dialect: &dyn Dialect,
     ) -> Result<(String, String)> {
-        let parser = Parser::new(dialect)
-            .with_options(ParserOptions::new().with_trailing_commas(true))
-            .try_with_sql(sql)
-            .context(SyntaxSnafu)?;
-
-        ParserContext { parser, sql }.parse_mysql_prepare()
+        ParserContext::new(dialect, sql)?.parse_mysql_prepare()
     }
 
     /// Parses MySQL style 'EXECUTE stmt_name USING param_list' into a stmt_name string and a list of parameters.
@@ -193,12 +188,12 @@ impl<'a> ParserContext<'a> {
         sql: &'a str,
         dialect: &dyn Dialect,
     ) -> Result<(String, Vec<Expr>)> {
-        let parser = Parser::new(dialect)
-            .with_options(ParserOptions::new().with_trailing_commas(true))
-            .try_with_sql(sql)
-            .context(SyntaxSnafu)?;
+        ParserContext::new(dialect, sql)?.parse_mysql_execute()
+    }
 
-        ParserContext { parser, sql }.parse_mysql_execute()
+    /// Parses MySQL style 'DEALLOCATE stmt_name' into a stmt_name string.
+    pub fn parse_mysql_deallocate_stmt(sql: &'a str, dialect: &dyn Dialect) -> Result<String> {
+        ParserContext::new(dialect, sql)?.parse_deallocate()
     }
 
     /// Raises an "unsupported statement" error.
@@ -419,5 +414,16 @@ mod tests {
         assert_eq!(params[1].to_string(), "'hello'");
         assert_eq!(params[2].to_string(), "\"2003-03-1\"");
         assert_eq!(params[3].to_string(), "NULL");
+    }
+
+    #[test]
+    pub fn test_parse_mysql_deallocate_stmt() {
+        let sql = "DEALLOCATE stmt1;";
+        let stmt_name = ParserContext::parse_mysql_deallocate_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt1");
+
+        let sql = "DEALLOCATE stmt2";
+        let stmt_name = ParserContext::parse_mysql_deallocate_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt2");
     }
 }

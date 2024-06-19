@@ -211,6 +211,12 @@ impl MysqlInstanceShim {
 
         Ok((params, columns))
     }
+
+    /// Remove the prepared statement by a given statement key
+    fn do_close(&mut self, stmt_key: String) {
+        let mut guard = self.prepared_stmts.write();
+        let _ = guard.remove(&stmt_key);
+    }
 }
 
 #[async_trait]
@@ -371,8 +377,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         W: 'async_trait,
     {
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
-        let mut guard = self.prepared_stmts.write();
-        let _ = guard.remove(&stmt_key);
+        self.do_close(stmt_key);
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "mysql"))]
@@ -484,6 +489,21 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             return Ok(());
                         }
                     };
+                    writer::write_output(writer, query_ctx, outputs).await?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    writer
+                        .error(ErrorKind::ER_PARSE_ERROR, e.output_msg().as_bytes())
+                        .await?;
+                    return Ok(());
+                }
+            }
+        } else if query_upcase.starts_with("DEALLOCATE ") {
+            match ParserContext::parse_mysql_deallocate_stmt(query, query_ctx.sql_dialect()) {
+                Ok(stmt_name) => {
+                    self.do_close(stmt_name);
+                    let outputs = vec![Ok(Output::new_with_affected_rows(0))];
                     writer::write_output(writer, query_ctx, outputs).await?;
                     return Ok(());
                 }
