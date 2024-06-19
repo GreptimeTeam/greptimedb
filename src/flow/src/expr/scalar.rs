@@ -191,6 +191,14 @@ impl DfScalarFunction {
         })
     }
 
+    pub fn try_from_raw_fn(raw_fn: RawDfScalarFn) -> Result<Self, Error> {
+        Ok(Self {
+            fn_impl: raw_fn.get_fn_impl()?,
+            df_schema: Arc::new(raw_fn.input_schema.to_df_schema()?),
+            raw_fn,
+        })
+    }
+
     // TODO(discord9): add RecordBatch support
     pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
         // first eval exprs to construct values to feed to datafusion
@@ -267,16 +275,18 @@ impl<'de> serde::de::Deserialize<'de> for DfScalarFunction {
         D: serde::de::Deserializer<'de>,
     {
         let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
-        let fn_impl = raw_fn.get_fn_impl().map_err(serde::de::Error::custom)?;
-        DfScalarFunction::new(raw_fn, fn_impl).map_err(serde::de::Error::custom)
+        DfScalarFunction::try_from_raw_fn(raw_fn).map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawDfScalarFn {
-    f: bytes::BytesMut,
-    input_schema: RelationDesc,
-    extensions: FunctionExtensions,
+    /// The raw bytes encoded datafusion scalar function
+    pub(crate) f: bytes::BytesMut,
+    /// The input schema of the function
+    pub(crate) input_schema: RelationDesc,
+    /// Extension contains mapping from function reference to function name
+    pub(crate) extensions: FunctionExtensions,
 }
 
 impl RawDfScalarFn {
@@ -879,8 +889,7 @@ mod test {
         .unwrap();
         let extensions = FunctionExtensions::from_iter(vec![(0, "abs")]);
         let raw_fn = RawDfScalarFn::from_proto(&raw_scalar_func, input_schema, extensions).unwrap();
-        let fn_impl = raw_fn.get_fn_impl().unwrap();
-        let df_func = DfScalarFunction::new(raw_fn, fn_impl).unwrap();
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn).unwrap();
         let as_str = serde_json::to_string(&df_func).unwrap();
         let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
         assert_eq!(df_func, from_str);

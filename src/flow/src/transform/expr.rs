@@ -142,11 +142,9 @@ impl TypedExpr {
             *raw_expr = proto_col(idx);
         }
         let input_schema = RelationType::new(arg_types).into_unnamed();
-        dbg!(&input_schema, &f_rewrite, &extensions);
-        let phy_expr = from_scalar_fn_to_df_fn_impl(&f_rewrite, &input_schema, extensions)?;
         let raw_fn =
             RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
-        let df_func = DfScalarFunction::new(raw_fn, phy_expr)?;
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn)?;
         let expr = ScalarExpr::CallDf {
             df_scalar_fn: df_func,
             exprs: arg_exprs,
@@ -282,7 +280,6 @@ impl TypedExpr {
                         ret_type,
                     ))
                 } else {
-                    dbg!(&fn_name, &arg_typed_exprs, &input_schema);
                     let try_as_df = Self::from_substrait_to_datafusion_scalar_func(
                         f,
                         arg_typed_exprs,
@@ -438,29 +435,6 @@ mod test {
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
-
-    #[tokio::test]
-    async fn test_df_func_basic() {
-        let engine = create_test_query_engine();
-        let sql = "SELECT sum(abs(number)) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');";
-        let plan = sql_to_substrait(engine.clone(), sql).await;
-
-        let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_df_func_expr_tree() {
-        let engine = create_test_query_engine();
-        let sql = "SELECT abs(sum(number)) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');";
-        let plan = sql_to_substrait(engine.clone(), sql).await;
-
-        println!("{:#?}", plan);
-        let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
-
-        println!("{:#?}", flow_plan);
-    }
 
     /// test if `WHERE` condition can be converted to Flow's ScalarExpr in mfp's filter
     #[tokio::test]
