@@ -53,7 +53,7 @@ pub fn meta_client(catalog_manager: &Weak<dyn CatalogManager>) -> Result<Option<
     Ok(meta_client)
 }
 
-/// Try to get the `[MetaClient]` from `[CatalogManager]` weak reference.
+/// Try to get the `[TableMetadataManagerRef]` from `[CatalogManager]` weak reference.
 pub fn table_meta_manager(
     catalog_manager: &Weak<dyn CatalogManager>,
 ) -> Result<Option<TableMetadataManagerRef>> {
