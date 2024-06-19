@@ -104,18 +104,16 @@ impl Notifier for DefaultNotifier {
                             region_id: result.region_id,
                             err: Arc::new(err),
                         })
+                    } else if let Some(region_edit) = result.region_edit {
+                        BackgroundNotify::CompactionFinished(CompactionFinished {
+                            region_id: result.region_id,
+                            senders: None,
+                            start_time: result.start_time,
+                            edit: region_edit,
+                        })
                     } else {
-                        if let Some(region_edit) = result.region_edit {
-                            BackgroundNotify::CompactionFinished(CompactionFinished {
-                                region_id: result.region_id,
-                                senders: None,
-                                start_time: result.start_time,
-                                edit: region_edit,
-                            })
-                        } else {
-                            // Do nothing if region_edit is None and there is no error.
-                            return;
-                        }
+                        // Do nothing if region_edit is None and there is no error.
+                        return;
                     }
                 };
 
