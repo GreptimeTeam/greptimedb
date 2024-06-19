@@ -548,6 +548,18 @@ impl RegionServerInner {
                 },
                 None => return error::RegionNotFoundSnafu { region_id }.fail(),
             },
+            RegionChange::Catchup => match current_region_status {
+                Some(status) => match status.clone() {
+                    RegionEngineWithStatus::Registering(_) => {
+                        return error::RegionNotReadySnafu { region_id }.fail()
+                    }
+                    RegionEngineWithStatus::Deregistering(_) => {
+                        return error::RegionNotFoundSnafu { region_id }.fail()
+                    }
+                    RegionEngineWithStatus::Ready(engine) => engine,
+                },
+                None => return error::RegionNotFoundSnafu { region_id }.fail(),
+            },
         };
 
         Ok(CurrentEngine::Engine(engine))
@@ -685,8 +697,8 @@ impl RegionServerInner {
             | RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
-            | RegionRequest::Truncate(_)
-            | RegionRequest::Catchup(_) => RegionChange::None,
+            | RegionRequest::Truncate(_) => RegionChange::None,
+            RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
         let engine = match self.get_engine(region_id, &region_change)? {
@@ -748,6 +760,7 @@ impl RegionServerInner {
             RegionChange::Register(_) | RegionChange::Deregisters => {
                 self.region_map.remove(&region_id);
             }
+            RegionChange::Catchup => {}
         }
     }
 
@@ -789,6 +802,12 @@ impl RegionServerInner {
                     .remove(&region_id)
                     .map(|(id, engine)| engine.set_writable(id, false));
                 self.event_listener.on_region_deregistered(region_id);
+            }
+            RegionChange::Catchup => {
+                if is_metric_engine(engine.name()) {
+                    // Registers the logical regions belong to the physical region (`region_id`).
+                    self.register_logical_regions(&engine, region_id).await?;
+                }
             }
         }
         Ok(())
@@ -891,6 +910,11 @@ enum RegionChange {
     None,
     Register(RegionAttribute),
     Deregisters,
+    Catchup,
+}
+
+fn is_metric_engine(engine: &str) -> bool {
+    engine == METRIC_ENGINE_NAME
 }
 
 fn parse_region_attribute(
