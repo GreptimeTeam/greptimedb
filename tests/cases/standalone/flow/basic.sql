@@ -25,3 +25,7 @@ VALUES
 
 -- SQLNESS SLEEP 2s
 SELECT col_0, window_start, window_end FROM out_num_cnt;
+
+DROP FLOW test_numbers;
+DROP TABLE numbers_input;
+DROP TABLE out_num_cnt;

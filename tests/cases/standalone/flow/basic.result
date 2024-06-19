@@ -47,3 +47,15 @@ SELECT col_0, window_start, window_end FROM out_num_cnt;
 | 47    | 2021-07-01T00:00:01 | 2021-07-01T00:00:02 |
 +-------+---------------------+---------------------+
 
+DROP FLOW test_numbers;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt;
+
+Affected Rows: 0
+
