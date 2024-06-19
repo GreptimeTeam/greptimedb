@@ -13,6 +13,17 @@ SHOW DATABASES;
 | public             |
 +--------------------+
 
+SHOW FULL DATABASES;
+
++--------------------+----------+
+| Database           | Options  |
++--------------------+----------+
+| greptime_private   |          |
+| information_schema |          |
+| mydb               | ttl='1h' |
+| public             |          |
++--------------------+----------+
+
 USE mydb;
 
 Affected Rows: 0

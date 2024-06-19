@@ -57,6 +57,17 @@ pub struct SchemaNameValue {
     pub ttl: Option<Duration>,
 }
 
+impl Display for SchemaNameValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(ttl) = self.ttl {
+            let ttl = humantime::format_duration(ttl);
+            write!(f, "ttl='{ttl}'",)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
     type Error = Error;
 
@@ -232,6 +243,17 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[test]
+    fn test_display_schema_value() {
+        let schema_value = SchemaNameValue { ttl: None };
+        assert_eq!("", schema_value.to_string());
+
+        let schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(9)),
+        };
+        assert_eq!("ttl='9s'", schema_value.to_string());
+    }
 
     #[test]
     fn test_serialization() {

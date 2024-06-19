@@ -17,6 +17,7 @@ use std::sync::{Arc, Weak};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_SCHEMATA_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
@@ -32,15 +33,18 @@ use store_api::storage::{ScanRequest, TableId};
 
 use super::SCHEMATA;
 use crate::error::{
-    CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, InternalSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu,
+    UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::{InformationTable, Predicates};
+use crate::information_schema::{utils, InformationTable, Predicates};
 use crate::CatalogManager;
 
 pub const CATALOG_NAME: &str = "catalog_name";
 pub const SCHEMA_NAME: &str = "schema_name";
 const DEFAULT_CHARACTER_SET_NAME: &str = "default_character_set_name";
 const DEFAULT_COLLATION_NAME: &str = "default_collation_name";
+/// The database options
+pub const SCHEMA_OPTS: &str = "options";
 const INIT_CAPACITY: usize = 42;
 
 /// The `information_schema.schemata` table implementation.
@@ -74,6 +78,7 @@ impl InformationSchemaSchemata {
                 false,
             ),
             ColumnSchema::new("sql_path", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(SCHEMA_OPTS, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -133,6 +138,7 @@ struct InformationSchemaSchemataBuilder {
     charset_names: StringVectorBuilder,
     collation_names: StringVectorBuilder,
     sql_paths: StringVectorBuilder,
+    schema_options: StringVectorBuilder,
 }
 
 impl InformationSchemaSchemataBuilder {
@@ -150,6 +156,7 @@ impl InformationSchemaSchemataBuilder {
             charset_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             collation_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             sql_paths: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            schema_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -160,21 +167,49 @@ impl InformationSchemaSchemataBuilder {
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let table_metadata_manager = utils::table_meta_manager(&self.catalog_manager)?;
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            self.add_schema(&predicates, &catalog_name, &schema_name);
+            let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
+                let schema = table_metadata_manager
+                    .schema_manager()
+                    .get(SchemaNameKey::new(&catalog_name, &schema_name))
+                    .await
+                    .context(TableMetadataManagerSnafu)?;
+
+                let Some(schema_opts) = schema else {
+                    return SchemaNotFoundSnafu {
+                        catalog: &catalog_name,
+                        schema: &schema_name,
+                    }
+                    .fail();
+                };
+
+                format!("{schema_opts}")
+            } else {
+                "".to_string()
+            };
+
+            self.add_schema(&predicates, &catalog_name, &schema_name, opts);
         }
 
         self.finish()
     }
 
-    fn add_schema(&mut self, predicates: &Predicates, catalog_name: &str, schema_name: &str) {
+    fn add_schema(
+        &mut self,
+        predicates: &Predicates,
+        catalog_name: &str,
+        schema_name: &str,
+        schema_options: String,
+    ) {
         let row = [
             (CATALOG_NAME, &Value::from(catalog_name)),
             (SCHEMA_NAME, &Value::from(schema_name)),
             (DEFAULT_CHARACTER_SET_NAME, &Value::from("utf8")),
             (DEFAULT_COLLATION_NAME, &Value::from("utf8_bin")),
+            (SCHEMA_OPTS, &Value::from(schema_options.as_str())),
         ];
 
         if !predicates.eval(&row) {
@@ -186,6 +221,7 @@ impl InformationSchemaSchemataBuilder {
         self.charset_names.push(Some("utf8"));
         self.collation_names.push(Some("utf8_bin"));
         self.sql_paths.push(None);
+        self.schema_options.push(Some(&schema_options));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -195,6 +231,7 @@ impl InformationSchemaSchemataBuilder {
             Arc::new(self.charset_names.finish()),
             Arc::new(self.collation_names.finish()),
             Arc::new(self.sql_paths.finish()),
+            Arc::new(self.schema_options.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

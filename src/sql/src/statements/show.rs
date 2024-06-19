@@ -40,6 +40,7 @@ impl Display for ShowKind {
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowDatabases {
     pub kind: ShowKind,
+    pub full: bool,
 }
 
 /// The SQL `SHOW COLUMNS` statement
@@ -85,15 +86,20 @@ impl Display for ShowIndex {
 
 impl ShowDatabases {
     /// Creates a statement for `SHOW DATABASES`
-    pub fn new(kind: ShowKind) -> Self {
-        ShowDatabases { kind }
+    pub fn new(kind: ShowKind, full: bool) -> Self {
+        ShowDatabases { kind, full }
     }
 }
 
 impl Display for ShowDatabases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = &self.kind;
-        write!(f, r#"SHOW DATABASES {kind}"#)
+
+        if self.full {
+            write!(f, r#"SHOW FULL DATABASES {kind}"#)
+        } else {
+            write!(f, r#"SHOW DATABASES {kind}"#)
+        }
     }
 }
 
