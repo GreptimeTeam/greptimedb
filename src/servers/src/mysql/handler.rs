@@ -134,13 +134,13 @@ impl MysqlInstanceShim {
         self.query_handler.do_describe(statement, query_ctx).await
     }
 
-    /// Save query and logical plan, return the unique key
+    /// Save query and logical plan with a given statement key
     fn save_plan(&self, plan: SqlPlan, stmt_key: String) {
         let mut prepared_stmts = self.prepared_stmts.write();
         let _ = prepared_stmts.insert(stmt_key, plan);
     }
 
-    /// Retrieve the query and logical plan by id
+    /// Retrieve the query and logical plan by a given statement key
     fn plan(&self, stmt_key: String) -> Option<SqlPlan> {
         let guard = self.prepared_stmts.read();
         guard.get(&stmt_key).cloned()
@@ -394,14 +394,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let query_upcase = query.to_uppercase();
         if query_upcase.starts_with("PREPARE ") {
-            let mut outputs = vec![];
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
                 Ok((stmt_name, stmt)) => {
                     let prepare_results =
                         self.do_prepare(&stmt, query_ctx.clone(), stmt_name).await;
                     match prepare_results {
                         Ok(_) => {
-                            outputs.push(Ok(Output::new_with_affected_rows(0)));
+                            let outputs = vec![Ok(Output::new_with_affected_rows(0))];
                             writer::write_output(writer, query_ctx, outputs).await?;
                             return Ok(());
                         }
@@ -434,7 +433,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                                 .await?;
                             return Ok(());
                         }
-                        Some(sql_plan) => sql_plan.clone(),
+                        Some(sql_plan) => sql_plan,
                     };
 
                     let outputs = match sql_plan.plan {
