@@ -155,8 +155,10 @@ pub enum ScalarExpr {
         exprs: Vec<ScalarExpr>,
     },
     CallDf {
-        // TODO(discord9): support shuffle
+        /// invariant: the input args set insidet this [`DfScalarFunction`] is
+        /// always col(0) to col(n-1) where n is the length of `expr`
         df_scalar_fn: DfScalarFunction,
+        exprs: Vec<ScalarExpr>,
     },
     /// Conditionally evaluated expressions.
     ///
@@ -190,7 +192,13 @@ impl DfScalarFunction {
     }
 
     // TODO(discord9): add RecordBatch support
-    pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+    pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
+        // first eval exprs to construct values to feed to datafusion
+        let values: Vec<_> = exprs
+            .iter()
+            .map(|expr| expr.eval(values))
+            .collect::<Result<_, _>>()?;
+
         if values.is_empty() {
             return InvalidArgumentSnafu {
                 reason: "values is empty".to_string(),
@@ -354,7 +362,7 @@ impl ScalarExpr {
                 Ok(ColumnType::new_nullable(func.signature().output))
             }
             ScalarExpr::If { then, .. } => then.typ(context),
-            ScalarExpr::CallDf { df_scalar_fn } => {
+            ScalarExpr::CallDf { df_scalar_fn, .. } => {
                 let arrow_typ = df_scalar_fn
                     .fn_impl
                     // TODO(discord9): get scheme from args instead?
@@ -445,7 +453,10 @@ impl ScalarExpr {
                 }
                 .fail(),
             },
-            ScalarExpr::CallDf { df_scalar_fn } => df_scalar_fn.eval(values),
+            ScalarExpr::CallDf {
+                df_scalar_fn,
+                exprs,
+            } => df_scalar_fn.eval(values, exprs),
         }
     }
 
@@ -614,7 +625,15 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
-            _ => Ok(()),
+            ScalarExpr::CallDf {
+                df_scalar_fn: _,
+                exprs,
+            } => {
+                for expr in exprs {
+                    f(expr)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -650,7 +669,15 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
-            _ => Ok(()),
+            ScalarExpr::CallDf {
+                df_scalar_fn: _,
+                exprs,
+            } => {
+                for expr in exprs {
+                    f(expr)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -857,6 +884,11 @@ mod test {
         let as_str = serde_json::to_string(&df_func).unwrap();
         let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
         assert_eq!(df_func, from_str);
-        assert_eq!(df_func.eval(&[Value::Null]).unwrap(), Value::Int64(1));
+        assert_eq!(
+            df_func
+                .eval(&[Value::Null], &[ScalarExpr::Column(0)])
+                .unwrap(),
+            Value::Int64(1)
+        );
     }
 }

@@ -348,8 +348,10 @@ impl TypedPlan {
             let mut output_types = Vec::new();
             // give best effort to get column name
             let mut output_names = Vec::new();
+            // mark all auto added cols
+            let mut auto_cols = vec![];
             // first append group_expr as key, then aggr_expr as value
-            for expr in &group_exprs {
+            for (idx, expr) in group_exprs.iter().enumerate() {
                 output_types.push(expr.typ.clone());
                 let col_name = match &expr.expr {
                     ScalarExpr::CallUnary {
@@ -359,7 +361,10 @@ impl TypedPlan {
                     ScalarExpr::CallUnary {
                         func: UnaryFunc::TumbleWindowCeiling { .. },
                         ..
-                    } => Some("window_end".to_string()),
+                    } => {
+                        auto_cols.push(idx);
+                        Some("window_end".to_string())
+                    }
                     ScalarExpr::Column(col) => input.schema.get_name(*col).clone(),
                     _ => None,
                 };
@@ -380,6 +385,7 @@ impl TypedPlan {
                 RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
             }
             .with_time_index(time_index)
+            .with_autos(&auto_cols)
             .into_named(output_names)
         };
 
@@ -581,6 +587,7 @@ mod test {
                         ])
                         .with_key(vec![1, 2])
                         .with_time_index(Some(0))
+                        .with_autos(&[1])
                         .into_named(vec![
                             Some("window_start".to_string()),
                             Some("window_end".to_string()),
@@ -610,6 +617,7 @@ mod test {
             ])
             .with_key(vec![0, 3])
             .with_time_index(Some(2))
+            .with_autos(&[3])
             .into_named(vec![
                 Some("number".to_string()),
                 None,
@@ -642,6 +650,7 @@ mod test {
             ])
             .with_key(vec![2])
             .with_time_index(Some(1))
+            .with_autos(&[2])
             .into_named(vec![
                 None,
                 Some("window_start".to_string()),
@@ -716,6 +725,7 @@ mod test {
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))
+                        .with_autos(&[1])
                         .into_named(vec![
                             Some("window_start".to_string()),
                             Some("window_end".to_string()),
@@ -760,6 +770,7 @@ mod test {
             ])
             .with_key(vec![2])
             .with_time_index(Some(1))
+            .with_autos(&[2])
             .into_named(vec![
                 None,
                 Some("window_start".to_string()),
@@ -830,6 +841,7 @@ mod test {
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))
+                        .with_autos(&[1])
                         .into_named(vec![
                             Some("window_start".to_string()),
                             Some("window_end".to_string()),

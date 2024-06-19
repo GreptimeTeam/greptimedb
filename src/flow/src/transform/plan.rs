@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -79,8 +79,23 @@ impl TypedPlan {
                 };
 
                 let mut exprs: Vec<TypedExpr> = vec![];
+                // because this `input.schema` is incorrect for pre-expand substrait plan, so we have to use schema before expand multi-value
+                // function to correctly transform it, and late rewrite it
+                let schema_before_expand = {
+                    let input_schema = input.schema.clone();
+                    let auto_columns: HashSet<usize> =
+                        HashSet::from_iter(input_schema.typ().auto_columns.clone());
+                    let not_auto_added_columns = (0..input_schema.len()?)
+                        .filter(|i| !auto_columns.contains(i))
+                        .collect_vec();
+                    let mfp = MapFilterProject::new(input_schema.len()?)
+                        .project(not_auto_added_columns)?
+                        .into_safe();
+
+                    input_schema.apply_mfp(&mfp)?
+                };
                 for e in &p.expressions {
-                    let expr = TypedExpr::from_substrait_rex(e, &input.schema, extensions)?;
+                    let expr = TypedExpr::from_substrait_rex(e, &schema_before_expand, extensions)?;
                     exprs.push(expr);
                 }
                 let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
