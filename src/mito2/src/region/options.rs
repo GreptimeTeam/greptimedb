@@ -146,6 +146,7 @@ pub struct TwcsOptions {
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
     /// Whether to use remote compaction.
+    #[serde_as(as = "DisplayFromStr")]
     pub remote_compaction: bool,
 }
 
