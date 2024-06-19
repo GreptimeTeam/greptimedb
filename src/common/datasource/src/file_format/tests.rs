@@ -19,7 +19,6 @@ use std::vec;
 
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
-use datafusion::config::TableParquetOptions;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -167,8 +166,9 @@ async fn test_parquet_exec() {
         .to_string();
     let base_config = scan_config(schema.clone(), None, path);
 
-    let exec = ParquetExec::new(base_config, None, None, TableParquetOptions::default())
-        .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(store)));
+    let exec = ParquetExec::builder(base_config)
+        .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(store)))
+        .build();
 
     let ctx = SessionContext::new();
 

@@ -14,7 +14,9 @@
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster;
-use common_meta::cluster::{DatanodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
+use common_meta::cluster::{
+    DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
+};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
 use snafu::ResultExt;
@@ -48,6 +50,39 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             peer,
             last_activity_ts: common_time::util::current_time_millis(),
             status: NodeStatus::Frontend(FrontendStatus {}),
+            version: info.version,
+            git_commit: info.git_commit,
+            start_time_ms: info.start_time_ms,
+        };
+
+        save_to_mem_store(key, value, ctx).await?;
+
+        Ok(HandleControl::Continue)
+    }
+}
+
+/// The handler to collect cluster info from the heartbeat request of flownode.
+pub struct CollectFlownodeClusterInfoHandler;
+#[async_trait::async_trait]
+impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
+    fn is_acceptable(&self, role: Role) -> bool {
+        role == Role::Flownode
+    }
+
+    async fn handle(
+        &self,
+        req: &HeartbeatRequest,
+        ctx: &mut Context,
+        _acc: &mut HeartbeatAccumulator,
+    ) -> Result<HandleControl> {
+        let Some((key, peer, info)) = extract_base_info(req, Role::Flownode) else {
+            return Ok(HandleControl::Continue);
+        };
+
+        let value = NodeInfo {
+            peer,
+            last_activity_ts: common_time::util::current_time_millis(),
+            status: NodeStatus::Flownode(FlownodeStatus {}),
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
@@ -132,6 +167,7 @@ fn extract_base_info(
             role: match role {
                 Role::Datanode => cluster::Role::Datanode,
                 Role::Frontend => cluster::Role::Frontend,
+                Role::Flownode => cluster::Role::Flownode,
             },
             node_id: peer.id,
         },

@@ -25,7 +25,8 @@ use crate::{Builder, JoinHandle, Runtime};
 
 const READ_WORKERS: usize = 8;
 const WRITE_WORKERS: usize = 8;
-const BG_WORKERS: usize = 8;
+const BG_WORKERS: usize = 4;
+const HB_WORKERS: usize = 2;
 
 /// The options for the global runtimes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -44,7 +45,7 @@ impl Default for RuntimeOptions {
         Self {
             read_rt_size: cpus,
             write_rt_size: cpus,
-            bg_rt_size: cpus,
+            bg_rt_size: usize::max(cpus / 2, 1),
         }
     }
 }
@@ -63,6 +64,7 @@ struct GlobalRuntimes {
     read_runtime: Runtime,
     write_runtime: Runtime,
     bg_runtime: Runtime,
+    hb_runtime: Runtime,
 }
 
 macro_rules! define_spawn {
@@ -96,8 +98,14 @@ impl GlobalRuntimes {
     define_spawn!(read);
     define_spawn!(write);
     define_spawn!(bg);
+    define_spawn!(hb);
 
-    fn new(read: Option<Runtime>, write: Option<Runtime>, background: Option<Runtime>) -> Self {
+    fn new(
+        read: Option<Runtime>,
+        write: Option<Runtime>,
+        background: Option<Runtime>,
+        heartbeat: Option<Runtime>,
+    ) -> Self {
         Self {
             read_runtime: read
                 .unwrap_or_else(|| create_runtime("global-read", "read-worker", READ_WORKERS)),
@@ -105,6 +113,8 @@ impl GlobalRuntimes {
                 .unwrap_or_else(|| create_runtime("global-write", "write-worker", WRITE_WORKERS)),
             bg_runtime: background
                 .unwrap_or_else(|| create_runtime("global-bg", "bg-worker", BG_WORKERS)),
+            hb_runtime: heartbeat
+                .unwrap_or_else(|| create_runtime("global-hb", "hb-worker", HB_WORKERS)),
         }
     }
 }
@@ -114,6 +124,7 @@ struct ConfigRuntimes {
     read_runtime: Option<Runtime>,
     write_runtime: Option<Runtime>,
     bg_runtime: Option<Runtime>,
+    hb_runtime: Option<Runtime>,
     already_init: bool,
 }
 
@@ -122,9 +133,10 @@ static GLOBAL_RUNTIMES: Lazy<GlobalRuntimes> = Lazy::new(|| {
     let read = c.read_runtime.take();
     let write = c.write_runtime.take();
     let background = c.bg_runtime.take();
+    let heartbeat = c.hb_runtime.take();
     c.already_init = true;
 
-    GlobalRuntimes::new(read, write, background)
+    GlobalRuntimes::new(read, write, background, heartbeat)
 });
 
 static CONFIG_RUNTIMES: Lazy<Mutex<ConfigRuntimes>> =
@@ -155,6 +167,7 @@ pub fn init_global_runtimes(options: &RuntimeOptions) {
             "global-bg-worker",
             options.bg_rt_size,
         ));
+        c.hb_runtime = Some(create_runtime("global-hb", "global-hb-worker", HB_WORKERS));
     });
 }
 
@@ -195,6 +208,7 @@ macro_rules! define_global_runtime_spawn {
 define_global_runtime_spawn!(read);
 define_global_runtime_spawn!(write);
 define_global_runtime_spawn!(bg);
+define_global_runtime_spawn!(hb);
 
 #[cfg(test)]
 mod tests {
@@ -212,6 +226,9 @@ mod tests {
 
         let handle = spawn_bg(async { 3 + 3 });
         assert_eq!(6, block_on_bg(handle).unwrap());
+
+        let handle = spawn_bg(async { 4 + 4 });
+        assert_eq!(8, block_on_hb(handle).unwrap());
     }
 
     macro_rules! define_spawn_blocking_test {
@@ -239,4 +256,5 @@ mod tests {
     define_spawn_blocking_test!(read);
     define_spawn_blocking_test!(write);
     define_spawn_blocking_test!(bg);
+    define_spawn_blocking_test!(hb);
 }

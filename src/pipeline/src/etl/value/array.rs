@@ -45,6 +45,12 @@ impl std::ops::Deref for Array {
     }
 }
 
+impl std::ops::DerefMut for Array {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
 impl IntoIterator for Array {
     type Item = Value;
 
@@ -52,5 +58,11 @@ impl IntoIterator for Array {
 
     fn into_iter(self) -> Self::IntoIter {
         self.values.into_iter()
+    }
+}
+
+impl From<Vec<Value>> for Array {
+    fn from(values: Vec<Value>) -> Self {
+        Array { values }
     }
 }

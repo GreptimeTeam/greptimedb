@@ -21,7 +21,6 @@ use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
-use servers::tls::TlsOption;
 use snafu::ResultExt;
 
 use crate::config::DatanodeOptions;
@@ -67,8 +66,8 @@ impl<'a> DatanodeServiceBuilder<'a> {
         let handlers = ServerHandlers::default();
 
         if let Some(grpc_server) = self.grpc_server.take() {
-            let addr: SocketAddr = self.opts.rpc_addr.parse().context(ParseAddrSnafu {
-                addr: &self.opts.rpc_addr,
+            let addr: SocketAddr = self.opts.grpc.addr.parse().context(ParseAddrSnafu {
+                addr: &self.opts.grpc.addr,
             })?;
             let handler: ServerHandler = (Box::new(grpc_server), addr);
             handlers.insert(handler).await;
@@ -94,9 +93,9 @@ impl<'a> DatanodeServiceBuilder<'a> {
         region_server: &RegionServer,
     ) -> GrpcServerBuilder {
         let config = GrpcServerConfig {
-            max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
-            max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
-            tls: TlsOption::default(),
+            max_recv_message_size: opts.grpc.max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: opts.grpc.max_send_message_size.as_bytes() as usize,
+            tls: opts.grpc.tls.clone(),
         };
 
         GrpcServerBuilder::new(config, region_server.runtime())

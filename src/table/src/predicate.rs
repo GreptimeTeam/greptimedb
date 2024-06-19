@@ -50,10 +50,11 @@ macro_rules! return_none_if_utf8 {
     };
 }
 
+/// Reference-counted pointer to a list of logical exprs.
 #[derive(Debug, Clone)]
 pub struct Predicate {
     /// logical exprs
-    exprs: Vec<Expr>,
+    exprs: Arc<Vec<Expr>>,
 }
 
 impl Predicate {
@@ -61,7 +62,9 @@ impl Predicate {
     /// evaluated against record batches.
     /// Returns error when failed to convert exprs.
     pub fn new(exprs: Vec<Expr>) -> Self {
-        Self { exprs }
+        Self {
+            exprs: Arc::new(exprs),
+        }
     }
 
     /// Returns the logical exprs.
