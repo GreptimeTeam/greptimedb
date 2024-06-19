@@ -117,6 +117,12 @@ impl CompactionOptions {
             CompactionOptions::Twcs(opts) => opts.time_window,
         }
     }
+
+    pub(crate) fn remote_compaction(&self) -> bool {
+        match self {
+            CompactionOptions::Twcs(opts) => opts.remote_compaction,
+        }
+    }
 }
 
 impl Default for CompactionOptions {
@@ -139,6 +145,8 @@ pub struct TwcsOptions {
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
+    /// Whether to use remote compaction.
+    pub remote_compaction: bool,
 }
 
 with_prefix!(prefix_twcs "compaction.twcs.");
@@ -163,6 +171,7 @@ impl Default for TwcsOptions {
             max_active_window_files: 4,
             max_inactive_window_files: 1,
             time_window: None,
+            remote_compaction: false,
         }
     }
 }
@@ -508,6 +517,7 @@ mod tests {
                 max_active_window_files: 8,
                 max_inactive_window_files: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
             }),
             storage: Some("S3".to_string()),
             append_mode: true,

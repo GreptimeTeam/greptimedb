@@ -282,7 +282,7 @@ impl CompactionScheduler {
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
-        if let compact_request::Options::Remote(_) = &options {
+        if current_version.options.compaction.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
