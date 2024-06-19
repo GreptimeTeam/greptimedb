@@ -34,7 +34,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::sync::Semaphore;
 
-use crate::error::Result;
+use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::memtable::MemtableRef;
 use crate::read::dedup::{DedupReader, LastRow};
 use crate::read::merge::MergeReaderBuilder;
@@ -93,7 +93,7 @@ impl SeqScan {
             ..Default::default()
         };
         let maybe_reader =
-            Self::build_merge_reader(&self.stream_ctx, None, self.semaphore.clone(), &mut metrics)
+            Self::build_all_merge_reader(&self.stream_ctx, self.semaphore.clone(), &mut metrics)
                 .await?;
         // Safety: `build_merge_reader()` always returns a reader if partition is None.
         let reader = maybe_reader.unwrap();
@@ -152,22 +152,21 @@ impl SeqScan {
         Ok(())
     }
 
-    /// Builds a merge reader.
-    /// If `partition` is None, reads all partitions.
-    /// If the `partition` is out of bound, returns None.
-    async fn build_merge_reader(
+    /// Builds a merge reader that reads all data.
+    async fn build_all_merge_reader(
         stream_ctx: &StreamContext,
-        partition: Option<usize>,
         semaphore: Arc<Semaphore>,
         metrics: &mut ScannerMetrics,
     ) -> Result<Option<BoxedBatchReader>> {
+        // initialize parts list
         let mut parts = stream_ctx.parts.lock().await;
         maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+        let parts_len = parts.len();
 
         let input = &stream_ctx.input;
-        let mut sources = Vec::new();
-        if let Some(index) = partition {
-            let Some(part) = parts.get_part(index) else {
+        let mut sources = Vec::with_capacity(parts_len);
+        for id in 0..parts_len {
+            let Some(part) = parts.get_part(id) else {
                 return Ok(None);
             };
 
@@ -177,18 +176,44 @@ impl SeqScan {
                 input.predicate.as_ref(),
                 &mut sources,
             )?;
-        } else {
-            // Safety: We initialized parts before.
-            for part in parts.0.as_ref().unwrap() {
-                Self::build_part_sources(
-                    part,
-                    Some(input.mapper.column_ids()),
-                    input.predicate.as_ref(),
-                    &mut sources,
-                )?;
-            }
         }
 
+        Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
+    }
+
+    /// Builds a merge reader that reads data from one [`PartitionRange`].
+    ///
+    /// If the `range_id` is out of bound, returns None.
+    async fn build_merge_reader(
+        stream_ctx: &StreamContext,
+        range_id: usize,
+        semaphore: Arc<Semaphore>,
+        metrics: &mut ScannerMetrics,
+    ) -> Result<Option<BoxedBatchReader>> {
+        let mut parts = stream_ctx.parts.lock().await;
+        maybe_init_parts(&stream_ctx.input, &mut parts, metrics).await?;
+
+        let input = &stream_ctx.input;
+        let mut sources = Vec::new();
+        let Some(part) = parts.get_part(range_id) else {
+            return Ok(None);
+        };
+
+        Self::build_part_sources(
+            part,
+            Some(input.mapper.column_ids()),
+            input.predicate.as_ref(),
+            &mut sources,
+        )?;
+
+        Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
+    }
+
+    async fn build_reader_from_sources(
+        stream_ctx: &StreamContext,
+        mut sources: Vec<Source>,
+        semaphore: Arc<Semaphore>,
+    ) -> Result<Option<BoxedBatchReader>> {
         if stream_ctx.input.parallelism.parallelism > 1 {
             // Read sources in parallel. We always spawn a task so we can control the parallelism
             // by the semaphore.
@@ -213,52 +238,68 @@ impl SeqScan {
         }
     }
 
-    /// Scans the given partition, or all partitions if `partition` is `None`.
-    fn scan_partition_opt(
+    /// Scans the given partition
+    fn scan_partition_impl(
         &self,
-        partition: Option<usize>,
+        partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
+        if partition >= self.properties.ranges.len() {
+            return Err(BoxedError::new(
+                PartitionOutOfRangeSnafu {
+                    given: partition,
+                    all: self.properties.ranges.len(),
+                }
+                .build(),
+            ));
+        }
+
         let mut metrics = ScannerMetrics {
             prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.semaphore.clone();
+        let partition_ranges = self.properties.ranges[partition].clone();
         let stream = try_stream! {
-            let maybe_reader = Self::build_merge_reader(&stream_ctx, partition, semaphore, &mut metrics)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let Some(mut reader) = maybe_reader else {
-                return;
-            };
-            let cache = stream_ctx.input.cache_manager.as_deref();
-            let mut fetch_start = Instant::now();
-            while let Some(batch) = reader
-                .next_batch()
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-            {
+            for partition_range in partition_ranges {
+                let maybe_reader =
+                    Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                let Some(mut reader) = maybe_reader else {
+                    return;
+                };
+                let cache = stream_ctx.input.cache_manager.as_deref();
+                let mut fetch_start = Instant::now();
+                while let Some(batch) = reader
+                    .next_batch()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?
+                {
+                    metrics.scan_cost += fetch_start.elapsed();
+                    metrics.num_batches += 1;
+                    metrics.num_rows += batch.num_rows();
+
+                    let convert_start = Instant::now();
+                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
+                    metrics.convert_cost += convert_start.elapsed();
+                    yield record_batch;
+
+                    fetch_start = Instant::now();
+                }
                 metrics.scan_cost += fetch_start.elapsed();
-                metrics.num_batches += 1;
-                metrics.num_rows += batch.num_rows();
+                metrics.total_cost = stream_ctx.query_start.elapsed();
+                metrics.observe_metrics_on_finish();
 
-                let convert_start = Instant::now();
-                let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
-                metrics.convert_cost += convert_start.elapsed();
-                yield record_batch;
-
-                fetch_start = Instant::now();
+                debug!(
+                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}",
+                    stream_ctx.input.mapper.metadata().region_id,
+                    partition,
+                    metrics,
+                );
             }
-            metrics.scan_cost += fetch_start.elapsed();
-            metrics.total_cost = stream_ctx.query_start.elapsed();
-            metrics.observe_metrics_on_finish();
-
-            debug!(
-                "Seq scan finished, region_id: {:?}, partition: {:?}, metrics: {:?}",
-                stream_ctx.input.mapper.metadata().region_id, partition, metrics,
-            );
         };
 
         let stream = Box::pin(RecordBatchStreamWrapper::new(
@@ -267,6 +308,106 @@ impl SeqScan {
         ));
 
         Ok(stream)
+    }
+
+    fn uncached_scan_part_impl(
+        &self,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        let num_partitions = self.properties.ranges.len();
+        if partition >= num_partitions {
+            return Err(BoxedError::new(
+                PartitionOutOfRangeSnafu {
+                    given: partition,
+                    all: self.properties.ranges.len(),
+                }
+                .build(),
+            ));
+        }
+        let mut metrics = ScannerMetrics {
+            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            ..Default::default()
+        };
+        let stream_ctx = self.stream_ctx.clone();
+        let semaphore = self.semaphore.clone();
+
+        // build stream
+        let stream = try_stream! {
+            // init parts
+            let parts_len = {
+                let mut parts = stream_ctx.parts.lock().await;
+                maybe_init_parts(&stream_ctx.input, &mut parts, &mut metrics).await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                parts.len()
+            };
+
+            for id in (0..parts_len).skip(partition).step_by(num_partitions) {
+                let maybe_reader = Self::build_merge_reader(
+                    &stream_ctx,
+                    id,
+                    semaphore.clone(),
+                    &mut metrics,
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+                let Some(mut reader) = maybe_reader else {
+                    return;
+                };
+                let cache = stream_ctx.input.cache_manager.as_deref();
+                let mut fetch_start = Instant::now();
+                while let Some(batch) = reader
+                    .next_batch()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?
+                {
+                    metrics.scan_cost += fetch_start.elapsed();
+                    metrics.num_batches += 1;
+                    metrics.num_rows += batch.num_rows();
+
+                    let convert_start = Instant::now();
+                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
+                    metrics.convert_cost += convert_start.elapsed();
+                    yield record_batch;
+
+                    fetch_start = Instant::now();
+                }
+                metrics.scan_cost += fetch_start.elapsed();
+                metrics.total_cost = stream_ctx.query_start.elapsed();
+                metrics.observe_metrics_on_finish();
+
+                debug!(
+                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}",
+                    stream_ctx.input.mapper.metadata().region_id,
+                    partition,
+                    metrics,
+                );
+            }
+        };
+
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.stream_ctx.input.mapper.output_schema(),
+            Box::pin(stream),
+        ));
+
+        Ok(stream)
+    }
+
+    fn load_parts_from_cache(input: &ScanInput) -> Vec<ScanPart> {
+        let mut parts = Vec::new();
+        for mem in &input.memtables {
+            let stats = mem.stats();
+            let part = ScanPart {
+                memtables: vec![mem.clone()],
+                file_ranges: smallvec![],
+                time_range: stats.time_range(),
+            };
+            parts.push(part);
+        }
+
+        parts
     }
 }
 
@@ -280,7 +421,8 @@ impl RegionScanner for SeqScan {
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_opt(Some(partition))
+        // self.scan_partition_impl(partition)
+        self.uncached_scan_part_impl(partition)
     }
 
     fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {

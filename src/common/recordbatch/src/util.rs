@@ -54,13 +54,13 @@ impl AggregatedRecordBatchStream {
 
         // check schema
         let first_schema = inputs[0].schema();
-        for i in 1..inputs.len() {
-            let incoming_schema = inputs[i].schema();
+        for input in inputs.iter().skip(1) {
+            let schema = input.schema();
             ensure!(
-                first_schema == incoming_schema,
+                first_schema == schema,
                 SchemaNotMatchSnafu {
                     left: first_schema,
-                    right: incoming_schema
+                    right: schema
                 }
             );
         }
