@@ -63,10 +63,10 @@ use crate::lock::DistLockRef;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
-use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublisherRef;
+use crate::region::supervisor::{RegionSupervisor, DEFAULT_TICK_INTERVAL};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
@@ -294,32 +294,28 @@ impl MetasrvBuilder {
         ));
         region_migration_manager.try_start()?;
 
+        let (region_failover_handler, region_supervisor_ticker) = if options.enable_region_failover
+        {
+            let region_supervisor = RegionSupervisor::new(
+                options.failure_detector,
+                DEFAULT_TICK_INTERVAL,
+                selector_ctx.clone(),
+                selector.clone(),
+                region_migration_manager.clone(),
+                leader_cached_kv_backend.clone() as _,
+            );
+            let region_supervisor_ticker = region_supervisor.ticker();
+            (
+                Some(RegionFailureHandler::new(region_supervisor)),
+                Some(region_supervisor_ticker),
+            )
+        } else {
+            (None, None)
+        };
+
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let region_failover_handler = if options.enable_region_failover {
-                    let region_failover_manager = Arc::new(RegionFailoverManager::new(
-                        distributed_time_constants::REGION_LEASE_SECS,
-                        in_memory.clone(),
-                        kv_backend.clone(),
-                        mailbox.clone(),
-                        procedure_manager.clone(),
-                        (selector.clone(), selector_ctx.clone()),
-                        lock.clone(),
-                        table_metadata_manager.clone(),
-                    ));
-                    Some(
-                        RegionFailureHandler::try_new(
-                            election.clone(),
-                            region_failover_manager,
-                            options.failure_detector.clone(),
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                };
-
                 let publish_heartbeat_handler = plugins
                     .clone()
                     .and_then(|plugins| plugins.get::<PublisherRef>())
@@ -389,6 +385,7 @@ impl MetasrvBuilder {
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper,
             region_migration_manager,
+            region_supervisor_ticker,
         })
     }
 }
