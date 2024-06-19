@@ -253,6 +253,37 @@ impl MetricEngineInner {
 }
 
 #[cfg(test)]
+impl MetricEngineInner {
+    pub async fn scan_to_stream(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream, common_error::ext::BoxedError> {
+        let is_reading_physical_region = self.is_physical_region(region_id);
+
+        if is_reading_physical_region {
+            self.mito
+                .scan_to_stream(region_id, request)
+                .await
+                .map_err(common_error::ext::BoxedError::new)
+        } else {
+            let physical_region_id = self
+                .get_physical_region_id(region_id)
+                .await
+                .map_err(common_error::ext::BoxedError::new)?;
+            let request = self
+                .transform_request(physical_region_id, region_id, request)
+                .await
+                .map_err(common_error::ext::BoxedError::new)?;
+            self.mito
+                .scan_to_stream(physical_region_id, request)
+                .await
+                .map_err(common_error::ext::BoxedError::new)
+        }
+    }
+}
+
+#[cfg(test)]
 mod test {
     use store_api::region_request::RegionRequest;
 

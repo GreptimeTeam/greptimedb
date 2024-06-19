@@ -279,11 +279,7 @@ impl MetricEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
-        self.inner
-            .mito
-            .scan_to_stream(region_id, request)
-            .await
-            .map_err(BoxedError::new)
+        self.inner.scan_to_stream(region_id, request).await
     }
 }
 
