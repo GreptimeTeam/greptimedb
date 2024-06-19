@@ -239,7 +239,8 @@ impl Helper {
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
-            | ScalarValue::Union(_, _, _) => {
+            | ScalarValue::Union(_, _, _)
+            | ScalarValue::Float16(_) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }

@@ -22,7 +22,6 @@ use common_datasource::file_format::Format;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::common::{Statistics, ToDFSchema};
-use datafusion::config::TableParquetOptions;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
@@ -198,10 +197,15 @@ fn new_parquet_stream_with_exec_plan(
 
     // TODO(ruihang): get this from upper layer
     let task_ctx = SessionContext::default().task_ctx();
-    let parquet_exec = ParquetExec::new(scan_config, filters, None, TableParquetOptions::default())
+    let mut builder = ParquetExec::builder(scan_config);
+    if let Some(filters) = filters {
+        builder = builder.with_predicate(filters);
+    }
+    let parquet_exec = builder
         .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(
             store.clone(),
-        )));
+        )))
+        .build();
     let stream = parquet_exec
         .execute(0, task_ctx)
         .context(error::ParquetScanPlanSnafu)?;

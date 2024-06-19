@@ -22,6 +22,7 @@ use common_query::prelude::GREPTIME_VALUE;
 use datafusion::common::{DFSchemaRef, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
+use datafusion::functions_aggregate::sum;
 use datafusion::logical_expr::expr::{
     AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
 };
@@ -1379,14 +1380,18 @@ impl PromPlanner {
         input_plan: &LogicalPlan,
     ) -> Result<Vec<DfExpr>> {
         let aggr = match op.id() {
-            token::T_SUM => AggregateFunctionEnum::Sum,
-            token::T_AVG => AggregateFunctionEnum::Avg,
-            token::T_COUNT => AggregateFunctionEnum::Count,
-            token::T_MIN => AggregateFunctionEnum::Min,
-            token::T_MAX => AggregateFunctionEnum::Max,
-            token::T_GROUP => AggregateFunctionEnum::Grouping,
-            token::T_STDDEV => AggregateFunctionEnum::StddevPop,
-            token::T_STDVAR => AggregateFunctionEnum::VariancePop,
+            token::T_SUM => AggregateFunctionDefinition::UDF(sum::sum_udaf()),
+            token::T_AVG => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Avg),
+            token::T_COUNT => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Count),
+            token::T_MIN => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Min),
+            token::T_MAX => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Max),
+            token::T_GROUP => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Grouping),
+            token::T_STDDEV => {
+                AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::StddevPop)
+            }
+            token::T_STDVAR => {
+                AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::VariancePop)
+            }
             token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES | token::T_QUANTILE => {
                 UnsupportedExprSnafu {
                     name: format!("{op:?}"),
@@ -1403,7 +1408,7 @@ impl PromPlanner {
             .iter()
             .map(|col| {
                 DfExpr::AggregateFunction(AggregateFunction {
-                    func_def: AggregateFunctionDefinition::BuiltIn(aggr.clone()),
+                    func_def: aggr.clone(),
                     args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,
