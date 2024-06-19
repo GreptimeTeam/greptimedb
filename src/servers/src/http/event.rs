@@ -25,7 +25,7 @@ use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
 use common_time::{Timestamp, Timezone};
 use datatypes::timestamp::TimestampNanosecond;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::table::PipelineVersion;
@@ -126,8 +126,10 @@ pub async fn add_pipeline(
 
     result
         .map(|pipeline| {
+            let json_header =
+                HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
             let mut headers = HeaderMap::new();
-            headers.append(CONTENT_TYPE, "application/json".parse().unwrap());
+            headers.append(CONTENT_TYPE, json_header);
             // Safety check: unwrap is safe here because we have checked the format of the timestamp
             let version = pipeline
                 .0
