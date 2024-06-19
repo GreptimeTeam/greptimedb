@@ -24,13 +24,13 @@ use crate::error;
 use crate::error::Result;
 use crate::handler::node_stat::Stat;
 
-const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
+pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
 const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
 
 lazy_static! {
-    static ref DATANODE_LEASE_KEY_PATTERN: Regex =
+    pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
@@ -49,54 +49,6 @@ pub struct DatanodeLeaseKey {
 impl DatanodeLeaseKey {
     pub fn prefix_key_by_cluster(cluster_id: ClusterId) -> Vec<u8> {
         format!("{DATANODE_LEASE_PREFIX}-{cluster_id}-").into_bytes()
-    }
-}
-
-impl FromStr for DatanodeLeaseKey {
-    type Err = error::Error;
-
-    fn from_str(key: &str) -> Result<Self> {
-        let caps = DATANODE_LEASE_KEY_PATTERN
-            .captures(key)
-            .context(error::InvalidLeaseKeySnafu { key })?;
-
-        ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
-
-        let cluster_id = caps[1].to_string();
-        let node_id = caps[2].to_string();
-        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
-        let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid node_id: {node_id}"),
-        })?;
-
-        Ok(Self {
-            cluster_id,
-            node_id,
-        })
-    }
-}
-
-impl TryFrom<Vec<u8>> for DatanodeLeaseKey {
-    type Error = error::Error;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self> {
-        String::from_utf8(bytes)
-            .context(error::LeaseKeyFromUtf8Snafu {})
-            .map(|x| x.parse())?
-    }
-}
-
-impl TryFrom<DatanodeLeaseKey> for Vec<u8> {
-    type Error = error::Error;
-
-    fn try_from(dn_key: DatanodeLeaseKey) -> Result<Self> {
-        Ok(format!(
-            "{}-{}-{}",
-            DATANODE_LEASE_PREFIX, dn_key.cluster_id, dn_key.node_id
-        )
-        .into_bytes())
     }
 }
 

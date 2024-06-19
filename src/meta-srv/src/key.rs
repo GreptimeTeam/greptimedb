@@ -20,9 +20,67 @@ use std::str::FromStr;
 pub use datanode::*;
 pub use flownode::*;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
+
+macro_rules! impl_from_str_lease_key {
+    ($key_type:ty, $pattern:expr) => {
+        impl FromStr for $key_type {
+            type Err = error::Error;
+
+            fn from_str(key: &str) -> error::Result<Self> {
+                let caps = $pattern
+                    .captures(key)
+                    .context(error::InvalidLeaseKeySnafu { key })?;
+
+                ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
+
+                let cluster_id = caps[1].to_string();
+                let node_id = caps[2].to_string();
+                let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
+                    err_msg: format!("invalid cluster_id: {cluster_id}"),
+                })?;
+                let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
+                    err_msg: format!("invalid node_id: {node_id}"),
+                })?;
+
+                Ok(Self {
+                    cluster_id,
+                    node_id,
+                })
+            }
+        }
+    };
+}
+
+impl_from_str_lease_key!(FlownodeLeaseKey, FLOWNODE_LEASE_KEY_PATTERN);
+impl_from_str_lease_key!(DatanodeLeaseKey, DATANODE_LEASE_KEY_PATTERN);
+
+macro_rules! impl_try_from_lease_key {
+    ($key_type:ty, $prefix:expr) => {
+        impl TryFrom<Vec<u8>> for $key_type {
+            type Error = error::Error;
+
+            fn try_from(bytes: Vec<u8>) -> error::Result<Self> {
+                String::from_utf8(bytes)
+                    .context(error::LeaseKeyFromUtf8Snafu {})
+                    .map(|x| x.parse())?
+            }
+        }
+
+        impl TryFrom<$key_type> for Vec<u8> {
+            type Error = error::Error;
+
+            fn try_from(key: $key_type) -> error::Result<Self> {
+                Ok(format!("{}-{}-{}", $prefix, key.cluster_id, key.node_id).into_bytes())
+            }
+        }
+    };
+}
+
+impl_try_from_lease_key!(FlownodeLeaseKey, FLOWNODE_LEASE_PREFIX);
+impl_try_from_lease_key!(DatanodeLeaseKey, DATANODE_LEASE_PREFIX);
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LeaseValue {
@@ -52,10 +110,10 @@ impl TryFrom<Vec<u8>> for LeaseValue {
 impl TryFrom<LeaseValue> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_from(dn_value: LeaseValue) -> crate::Result<Self> {
-        Ok(serde_json::to_string(&dn_value)
+    fn try_from(value: LeaseValue) -> crate::Result<Self> {
+        Ok(serde_json::to_string(&value)
             .context(error::SerializeToJsonSnafu {
-                input: format!("{dn_value:?}"),
+                input: format!("{value:?}"),
             })?
             .into_bytes())
     }

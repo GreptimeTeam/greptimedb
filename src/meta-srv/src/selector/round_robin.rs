@@ -57,20 +57,18 @@ impl RoundRobinSelector {
         min_required_items: usize,
         ctx: &SelectorContext,
     ) -> Result<Vec<Peer>> {
-        let peers = match self.select_target {
+        let mut peers = match self.select_target {
             SelectTarget::Datanode => {
                 // 1. get alive datanodes.
                 let lease_kvs =
                     lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs)
                         .await?;
 
-                // 2. map into peers and sort on node id
-                let mut peers: Vec<Peer> = lease_kvs
+                // 2. map into peers
+                lease_kvs
                     .into_iter()
                     .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
-                    .collect();
-                peers.sort_by_key(|p| p.id);
-                peers
+                    .collect::<Vec<_>>()
             }
             SelectTarget::Flownode => {
                 // 1. get alive flownodes.
@@ -78,13 +76,11 @@ impl RoundRobinSelector {
                     lease::alive_flownodes(ns, &ctx.meta_peer_client, ctx.flownode_lease_secs)
                         .await?;
 
-                // 2. map into peers and sort on node id
-                let mut peers: Vec<Peer> = lease_kvs
+                // 2. map into peers
+                lease_kvs
                     .into_iter()
                     .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
-                    .collect();
-                peers.sort_by_key(|p| p.id);
-                peers
+                    .collect::<Vec<_>>()
             }
         };
 
@@ -95,6 +91,9 @@ impl RoundRobinSelector {
                 available: 0usize,
             }
         );
+
+        // 3. sort by node id
+        peers.sort_by_key(|p| p.id);
 
         Ok(peers)
     }
