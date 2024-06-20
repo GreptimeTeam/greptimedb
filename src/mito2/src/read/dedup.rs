@@ -14,10 +14,12 @@
 
 //! Utilities to remove duplicate rows from a sorted batch.
 
+use api::v1::OpType;
 use async_trait::async_trait;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
+use datatypes::prelude::ScalarVector;
 use datatypes::value::Value;
 use datatypes::vectors::MutableVector;
 
@@ -184,12 +186,7 @@ impl DedupStrategy for LastRow {
 
         // Filters deleted rows.
         if self.filter_deleted {
-            let num_rows = batch.num_rows();
-            batch.filter_deleted()?;
-            let num_rows_after_filter = batch.num_rows();
-            let num_deleted = num_rows - num_rows_after_filter;
-            metrics.num_deleted_rows += num_deleted;
-            metrics.num_unselected_rows += num_deleted;
+            filter_deleted_from_batch(&mut batch, metrics)?;
         }
 
         // The batch can become empty if all rows are deleted.
@@ -203,6 +200,18 @@ impl DedupStrategy for LastRow {
     fn finish(&mut self, _metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
         Ok(None)
     }
+}
+
+/// Removes deleted rows from the batch and updates metrics.
+fn filter_deleted_from_batch(batch: &mut Batch, metrics: &mut DedupMetrics) -> Result<()> {
+    let num_rows = batch.num_rows();
+    batch.filter_deleted()?;
+    let num_rows_after_filter = batch.num_rows();
+    let num_deleted = num_rows - num_rows_after_filter;
+    metrics.num_deleted_rows += num_deleted;
+    metrics.num_unselected_rows += num_deleted;
+
+    Ok(())
 }
 
 /// Metrics for deduplication.
@@ -222,8 +231,10 @@ struct LastFieldsBuilder {
     builders: Vec<Box<dyn MutableVector>>,
     /// Last fields to merge, lazy initialized.
     last_fields: Vec<Value>,
-    /// Whether the last row has null.
+    /// Whether the last row (including `last_fields`) has null field.
     has_null: bool,
+    /// Whether the last row has delete op. If true, skips merging fields.
+    has_delete: bool,
     /// Whether the builder is initialized.
     initialized: bool,
 }
@@ -236,6 +247,7 @@ impl LastFieldsBuilder {
             builders: Vec::new(),
             last_fields: Vec::new(),
             has_null: false,
+            has_delete: false,
             initialized: false,
         }
     }
@@ -254,7 +266,11 @@ impl LastFieldsBuilder {
         let last_idx = batch.num_rows() - 1;
         let fields = batch.fields();
         self.has_null = fields.iter().any(|col| col.data.is_null(last_idx));
-        if !self.has_null {
+        // Safety: The last_idx is valid.
+        self.has_delete = batch.op_types().get_data(last_idx).unwrap() == OpType::Delete as u8;
+
+        if self.skip_merge() {
+            // No null field or the row has been deleted, no need to merge.
             return;
         }
         if self.builders.is_empty() {
@@ -266,19 +282,50 @@ impl LastFieldsBuilder {
         self.last_fields = fields.iter().map(|col| col.data.get(last_idx)).collect();
     }
 
-    /// Merges last fields, builds a new batch and resets the builder.
+    /// Returns true if the builder don't need to merge the rows.
+    fn skip_merge(&self) -> bool {
+        debug_assert!(self.initialized);
+
+        // No null field or the row has been deleted, no need to merge.
+        self.has_delete || !self.has_null
+    }
+
+    /// Pushes first row of a batch to the builder.
+    fn push_first_row(&mut self, batch: &Batch) {
+        debug_assert!(self.initialized);
+        debug_assert!(!batch.is_empty());
+
+        if self.skip_merge() {
+            // No remaining null field, skips this batch.
+            return;
+        }
+
+        let fields = batch.fields();
+        for (idx, value) in self.last_fields.iter_mut().enumerate() {
+            if value.is_null() && !fields[idx].data.is_null(0) {
+                // Updates the value.
+                *value = fields[idx].data.get(0);
+            }
+        }
+        // Updates the flag.
+        self.has_null = self.last_fields.iter().any(Value::is_null);
+    }
+
+    /// Merges last not null fields, builds a new batch and resets the builder.
     /// It may overwrites the last row of the `buffer`.
-    fn merge_last_fields(
+    fn merge_last_not_null(
         &mut self,
         buffer: Batch,
         metrics: &mut DedupMetrics,
     ) -> Result<Option<Batch>> {
-        // Initializes the builder if needed.
-        self.maybe_init(&buffer);
+        debug_assert!(self.initialized);
 
-        if !self.has_null {
-            debug_assert!(self.last_fields.is_empty());
+        if self.last_fields.is_empty() {
             // No need to overwrite the last row.
+            let mut buffer = buffer;
+            if self.filter_deleted {
+                filter_deleted_from_batch(&mut buffer, metrics)?;
+            }
             return Ok(Some(buffer));
         }
 
@@ -312,11 +359,7 @@ impl LastFieldsBuilder {
         };
 
         if self.filter_deleted {
-            let num_rows = merged.num_rows();
-            merged.filter_deleted()?;
-            let num_rows_after_filter = merged.num_rows();
-            let num_deleted = num_rows - num_rows_after_filter;
-            metrics.num_deleted_rows += num_deleted;
+            filter_deleted_from_batch(&mut merged, metrics)?;
         }
 
         if merged.is_empty() {
@@ -326,31 +369,11 @@ impl LastFieldsBuilder {
         }
     }
 
-    /// Pushes first row of a batch to the builder.
-    fn push_first_row(&mut self, batch: &Batch) {
-        debug_assert!(self.initialized);
-        debug_assert!(!batch.is_empty());
-
-        if !self.has_null {
-            // Skips this batch.
-            return;
-        }
-
-        let fields = batch.fields();
-        for (idx, value) in self.last_fields.iter_mut().enumerate() {
-            if value.is_null() && !fields[idx].data.is_null(0) {
-                // Updates the value.
-                *value = fields[idx].data.get(0);
-            }
-        }
-        // Updates the flag.
-        self.has_null = self.last_fields.iter().any(Value::is_null);
-    }
-
     /// Clears the builder.
     fn clear(&mut self) {
         self.last_fields.clear();
         self.has_null = false;
+        self.has_delete = false;
         self.initialized = false;
     }
 }
@@ -390,21 +413,25 @@ impl DedupStrategy for LastNotNull {
             return Ok(None);
         };
 
+        // Initializes last fields with the first buffer.
+        self.last_fields.maybe_init(buffer);
+
         if buffer.primary_key() != batch.primary_key() {
             // Next key is different.
             let buffer = std::mem::replace(buffer, batch);
-            let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+            let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
             return Ok(merged);
         }
 
         if buffer.last_timestamp() != batch.first_timestamp() {
             // The next batch has a different timestamp.
             let buffer = std::mem::replace(buffer, batch);
-            let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+            let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
             return Ok(merged);
         }
 
         // The next batch has the same key and timestamp.
+
         metrics.num_unselected_rows += 1;
         // We assumes each batch doesn't contain duplicate rows so we only need to check the first row.
         if batch.num_rows() == 1 {
@@ -419,7 +446,7 @@ impl DedupStrategy for LastNotNull {
         // Moves the remaining rows to the buffer.
         let batch = batch.slice(1, batch.num_rows() - 1);
         let buffer = std::mem::replace(buffer, batch);
-        let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+        let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
 
         Ok(merged)
     }
@@ -429,7 +456,7 @@ impl DedupStrategy for LastNotNull {
             return Ok(None);
         };
 
-        let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+        let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
 
         Ok(merged)
     }
@@ -437,9 +464,13 @@ impl DedupStrategy for LastNotNull {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::OpType;
+    use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 
     use super::*;
+    use crate::read::BatchBuilder;
     use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
 
     #[tokio::test]
@@ -510,8 +541,8 @@ mod tests {
             // is filtered out by the previous batch.
             new_batch(b"k3", &[2], &[19], &[OpType::Delete], &[0]),
         ];
-        let reader = VecBatchReader::new(&input);
         // Filter deleted.
+        let reader = VecBatchReader::new(&input);
         let mut reader = DedupReader::new(reader, LastRow::new(true));
         check_reader_result(
             &mut reader,
@@ -564,6 +595,163 @@ mod tests {
         )
         .await;
         assert_eq!(3, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
+    }
+
+    /// Returns a new [Batch] whose field has column id 1, 2.
+    fn new_batch_multi_fields(
+        primary_key: &[u8],
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        fields: &[(Option<u64>, Option<u64>)],
+    ) -> Batch {
+        let mut builder = BatchBuilder::new(primary_key.to_vec());
+        builder
+            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )))
+            .unwrap()
+            .sequences_array(Arc::new(UInt64Array::from_iter_values(
+                sequences.iter().copied(),
+            )))
+            .unwrap()
+            .op_types_array(Arc::new(UInt8Array::from_iter_values(
+                op_types.iter().map(|v| *v as u8),
+            )))
+            .unwrap()
+            .push_field_array(
+                1,
+                Arc::new(UInt64Array::from_iter(fields.iter().map(|field| field.0))),
+            )
+            .unwrap()
+            .push_field_array(
+                2,
+                Arc::new(UInt64Array::from_iter(fields.iter().map(|field| field.1))),
+            )
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_last_not_null_merge() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (None, None)],
+            ),
+            // empty batch.
+            new_batch_multi_fields(b"k1", &[], &[], &[], &[]),
+            // Duplicate with the previous batch.
+            new_batch_multi_fields(b"k1", &[2], &[10], &[OpType::Put], &[(Some(12), None)]),
+            new_batch_multi_fields(
+                b"k1",
+                &[2, 3, 4],
+                &[10, 13, 13],
+                &[OpType::Put, OpType::Put, OpType::Delete],
+                &[(Some(2), Some(22)), (Some(13), None), (None, Some(14))],
+            ),
+            new_batch_multi_fields(
+                b"k2",
+                &[1, 2],
+                &[20, 20],
+                &[OpType::Put, OpType::Delete],
+                &[(Some(101), Some(101)), (None, None)],
+            ),
+            new_batch_multi_fields(
+                b"k2",
+                &[2],
+                &[19],
+                &[OpType::Put],
+                &[(Some(102), Some(102))],
+            ),
+            new_batch_multi_fields(
+                b"k3",
+                &[2],
+                &[20],
+                &[OpType::Put],
+                &[(Some(202), Some(202))],
+            ),
+            // This batch won't increase the deleted rows count as it
+            // is filtered out by the previous batch. (All fields are null).
+            new_batch_multi_fields(b"k3", &[2], &[19], &[OpType::Delete], &[(None, None)]),
+        ];
+
+        // Filter deleted.
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_multi_fields(
+                    b"k1",
+                    &[1, 2],
+                    &[13, 11],
+                    &[OpType::Put, OpType::Put],
+                    &[(Some(11), Some(11)), (Some(12), Some(22))],
+                ),
+                new_batch_multi_fields(b"k1", &[3], &[13], &[OpType::Put], &[(Some(13), None)]),
+                new_batch_multi_fields(
+                    b"k2",
+                    &[1],
+                    &[20],
+                    &[OpType::Put],
+                    &[(Some(101), Some(101))],
+                ),
+                new_batch_multi_fields(
+                    b"k3",
+                    &[2],
+                    &[20],
+                    &[OpType::Put],
+                    &[(Some(202), Some(202))],
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(6, reader.metrics().num_unselected_rows);
+        assert_eq!(2, reader.metrics().num_deleted_rows);
+
+        // Does not filter deleted.
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(false));
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_multi_fields(
+                    b"k1",
+                    &[1, 2],
+                    &[13, 11],
+                    &[OpType::Put, OpType::Put],
+                    &[(Some(11), Some(11)), (Some(12), Some(22))],
+                ),
+                new_batch_multi_fields(
+                    b"k1",
+                    &[3, 4],
+                    &[13, 13],
+                    &[OpType::Put, OpType::Delete],
+                    &[(Some(13), None), (None, Some(14))],
+                ),
+                new_batch_multi_fields(
+                    b"k2",
+                    &[1, 2],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Delete],
+                    &[(Some(101), Some(101)), (None, None)],
+                ),
+                new_batch_multi_fields(
+                    b"k3",
+                    &[2],
+                    &[20],
+                    &[OpType::Put],
+                    &[(Some(202), Some(202))],
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(4, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
     }
 }
