@@ -110,8 +110,16 @@ pub struct FileMeta {
     /// Size of the index file.
     pub index_file_size: u64,
     /// Number of rows in the file.
+    ///
+    /// For historical reasons, this field might be missing in old files. Thus
+    /// the default value `0` doesn't means the file doesn't contains any rows,
+    /// but instead means the number of rows is unknown.
     pub num_rows: u64,
     /// Number of row groups in the file.
+    ///
+    /// For historical reasons, this field might be missing in old files. Thus
+    /// the default value `0` doesn't means the file doesn't contains any rows,
+    /// but instead means the number of rows is unknown.
     pub num_row_groups: u64,
 }
 
