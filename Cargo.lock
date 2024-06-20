@@ -1877,7 +1877,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
- "criterion",
+ "criterion 0.4.0",
  "dashmap",
  "datatypes",
  "flatbuffers",
@@ -2382,6 +2382,32 @@ dependencies = [
  "serde_json",
  "tinytemplate",
  "tokio",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap 4.5.7",
+ "criterion-plot",
+ "is-terminal",
+ "itertools 0.10.5",
+ "num-traits",
+ "once_cell",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
  "walkdir",
 ]
 
@@ -5973,7 +5999,7 @@ dependencies = [
  "common-time",
  "common-wal",
  "crc32fast",
- "criterion",
+ "criterion 0.4.0",
  "crossbeam-utils",
  "datafusion 38.0.0",
  "datafusion-common 38.0.0",
@@ -7633,6 +7659,7 @@ checksum = "ef5c97c51bd34c7e742402e216abdeb44d415fbe6ae41d56b114723e953711cb"
 dependencies = [
  "backtrace",
  "cfg-if",
+ "criterion 0.5.1",
  "findshlibs",
  "inferno",
  "libc",
@@ -9556,7 +9583,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "console",
- "criterion",
+ "criterion 0.4.0",
  "crossbeam-utils",
  "datafusion 38.0.0",
  "datafusion-common 38.0.0",
@@ -9844,7 +9871,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
- "criterion",
+ "criterion 0.5.1",
  "dashmap",
  "datafusion 38.0.0",
  "datafusion-common 38.0.0",
