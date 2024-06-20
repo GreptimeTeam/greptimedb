@@ -23,15 +23,16 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
-use common_time::Timestamp;
+use common_time::{Timestamp, Timezone};
 use datatypes::timestamp::TimestampNanosecond;
+use http::{HeaderMap, HeaderValue};
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::table::PipelineVersion;
 use pipeline::Value as PipelineValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Value};
+use serde_json::{json, Deserializer, Value};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
@@ -103,7 +104,7 @@ pub async fn add_pipeline(
     Path(pipeline_name): Path<String>,
     Extension(query_ctx): Extension<QueryContextRef>,
     PipelineContent(payload): PipelineContent,
-) -> Result<String> {
+) -> Result<impl IntoResponse> {
     if pipeline_name.is_empty() {
         return Err(InvalidParameterSnafu {
             reason: "pipeline_name is required in path",
@@ -123,10 +124,30 @@ pub async fn add_pipeline(
         .insert_pipeline(&pipeline_name, content_type, &payload, query_ctx)
         .await;
 
-    result.map(|_| "ok".to_string()).map_err(|e| {
-        error!(e; "failed to insert pipeline");
-        e
-    })
+    result
+        .map(|pipeline| {
+            let json_header =
+                HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
+            let mut headers = HeaderMap::new();
+            headers.append(CONTENT_TYPE, json_header);
+            // Safety check: unwrap is safe here because we have checked the format of the timestamp
+            let version = pipeline
+                .0
+                .as_formatted_string(
+                    "%Y-%m-%d %H:%M:%S%.fZ",
+                    // Safety check: unwrap is safe here because we have checked the format of the timezone
+                    Some(Timezone::from_tz_string("UTC").unwrap()).as_ref(),
+                )
+                .unwrap();
+            (
+                headers,
+                json!({"version": version, "name": pipeline_name}).to_string(),
+            )
+        })
+        .map_err(|e| {
+            error!(e; "failed to insert pipeline");
+            e
+        })
 }
 
 /// Transform NDJSON array into a single array
