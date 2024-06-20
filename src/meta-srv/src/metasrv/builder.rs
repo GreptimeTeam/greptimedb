@@ -68,7 +68,7 @@ use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublisherRef;
 use crate::selector::lease_based::LeaseBasedSelector;
-use crate::selector::round_robin::RoundRobinSelector;
+use crate::selector::round_robin::{FlowPeerAllocator, RoundRobinSelector};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
@@ -241,13 +241,26 @@ impl MetasrvBuilder {
             ))
         });
         // TODO(weny): use the real allocator.
-        let flow_metadata_allocator =
-            Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
+        let flow_metadata_allocator = {
+            // for now flownode just use round robin selector
+            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
+            let flow_selector_ctx = selector_ctx.clone();
+            let peer_allocator = Arc::new(FlowPeerAllocator::new(
+                flow_selector_ctx,
+                Arc::new(flow_selector),
+            ));
+            let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
-            )));
+            );
+
+            Arc::new(FlowMetadataAllocator::with_peer_allocator(
+                seq,
+                peer_allocator,
+            ))
+        };
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()

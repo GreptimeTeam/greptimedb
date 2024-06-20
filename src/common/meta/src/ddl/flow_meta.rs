@@ -42,6 +42,16 @@ impl FlowMetadataAllocator {
         }
     }
 
+    pub fn with_peer_allocator(
+        flow_id_sequence: SequenceRef,
+        peer_allocator: Arc<dyn PartitionPeerAllocator>,
+    ) -> Self {
+        Self {
+            flow_id_sequence,
+            partition_peer_allocator: peer_allocator,
+        }
+    }
+
     /// Allocates a the [FlowId].
     pub(crate) async fn allocate_flow_id(&self) -> Result<FlowId> {
         let flow_id = self.flow_id_sequence.next().await? as FlowId;
