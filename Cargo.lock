@@ -3595,7 +3595,7 @@ dependencies = [
  "serde",
  "thiserror",
  "time",
- "winnow 0.6.8",
+ "winnow 0.6.13",
 ]
 
 [[package]]
