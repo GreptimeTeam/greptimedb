@@ -125,7 +125,7 @@ impl FileMeta {
 }
 
 /// Handle to a SST file.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FileHandle {
     inner: Arc<FileHandleInner>,
 }
@@ -193,19 +193,25 @@ impl FileHandle {
 /// Inner data of [FileHandle].
 ///
 /// Contains meta of the file, and other mutable info like whether the file is compacting.
+#[derive(Serialize, Deserialize)]
 struct FileHandleInner {
     meta: FileMeta,
+    #[serde(skip)]
     compacting: AtomicBool,
+    #[serde(skip)]
     deleted: AtomicBool,
-    file_purger: FilePurgerRef,
+    #[serde(skip)]
+    file_purger: Option<FilePurgerRef>,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Relaxed) {
-            self.file_purger.send_request(PurgeRequest {
-                file_meta: self.meta.clone(),
-            });
+            if let Some(file_purger) = &self.file_purger {
+                file_purger.send_request(PurgeRequest {
+                    file_meta: self.meta.clone(),
+                });
+            }
         }
     }
 }
@@ -216,7 +222,7 @@ impl FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
-            file_purger,
+            file_purger: Some(file_purger),
         }
     }
 }
