@@ -416,7 +416,6 @@ impl RegionScanner for SeqScan {
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        // self.scan_partition_impl(partition)
         self.uncached_scan_part_impl(partition)
     }
 
