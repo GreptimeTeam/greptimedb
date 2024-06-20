@@ -171,6 +171,7 @@ impl InformationSchemaSchemataBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
+            let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
                 let schema_opts = table_metadata_manager
                     .schema_manager()
                     .get(SchemaNameKey::new(&catalog_name, &schema_name))
@@ -181,12 +182,17 @@ impl InformationSchemaSchemataBuilder {
                         schema: &schema_name,
                     })?;
 
-                format!("{schema_opts}")
+                Some(format!("{schema_opts}"))
             } else {
-                "".to_string()
+                None
             };
 
-            self.add_schema(&predicates, &catalog_name, &schema_name, opts);
+            self.add_schema(
+                &predicates,
+                &catalog_name,
+                &schema_name,
+                opts.as_deref().unwrap_or(""),
+            );
         }
 
         self.finish()
@@ -197,14 +203,14 @@ impl InformationSchemaSchemataBuilder {
         predicates: &Predicates,
         catalog_name: &str,
         schema_name: &str,
-        schema_options: String,
+        schema_options: &str,
     ) {
         let row = [
             (CATALOG_NAME, &Value::from(catalog_name)),
             (SCHEMA_NAME, &Value::from(schema_name)),
             (DEFAULT_CHARACTER_SET_NAME, &Value::from("utf8")),
             (DEFAULT_COLLATION_NAME, &Value::from("utf8_bin")),
-            (SCHEMA_OPTS, &Value::from(schema_options.as_str())),
+            (SCHEMA_OPTS, &Value::from(schema_options)),
         ];
 
         if !predicates.eval(&row) {
@@ -216,7 +222,7 @@ impl InformationSchemaSchemataBuilder {
         self.charset_names.push(Some("utf8"));
         self.collation_names.push(Some("utf8_bin"));
         self.sql_paths.push(None);
-        self.schema_options.push(Some(&schema_options));
+        self.schema_options.push(Some(schema_options));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {

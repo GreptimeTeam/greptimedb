@@ -10,7 +10,7 @@ CREATE TABLE test(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
 
 SHOW CREATE TABLE test;
 
-USe public;
+USE public;
 
 DROP DATABASE mydb;
 

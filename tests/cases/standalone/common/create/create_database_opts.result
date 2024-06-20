@@ -50,7 +50,7 @@ SHOW CREATE TABLE test;
 |       | )                                   |
 +-------+-------------------------------------+
 
-USe public;
+USE public;
 
 Affected Rows: 0
 
