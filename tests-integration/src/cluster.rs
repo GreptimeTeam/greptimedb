@@ -300,7 +300,7 @@ impl GreptimeDbClusterBuilder {
     ) {
         for _ in 0..10 {
             let alive_datanodes =
-                meta_srv::lease::filter_datanodes(1000, meta_peer_client, |_, _| true)
+                meta_srv::lease::alive_datanodes(1000, meta_peer_client, u64::MAX)
                     .await
                     .unwrap()
                     .len();

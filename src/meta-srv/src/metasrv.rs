@@ -241,10 +241,17 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum SelectTarget {
+    Datanode,
+    Flownode,
+}
+
 #[derive(Clone)]
 pub struct SelectorContext {
     pub server_addr: String,
     pub datanode_lease_secs: u64,
+    pub flownode_lease_secs: u64,
     pub kv_backend: KvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub table_id: Option<TableId>,
@@ -314,7 +321,10 @@ pub struct Metasrv {
     kv_backend: KvBackendRef,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     meta_peer_client: MetaPeerClientRef,
+    // The selector is used to select a target datanode.
     selector: SelectorRef,
+    // The flow selector is used to select a target flownode.
+    flow_selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
     election: Option<ElectionRef>,
     lock: DistLockRef,
@@ -501,6 +511,10 @@ impl Metasrv {
 
     pub fn selector(&self) -> &SelectorRef {
         &self.selector
+    }
+
+    pub fn flow_selector(&self) -> &SelectorRef {
+        &self.flow_selector
     }
 
     pub fn handler_group(&self) -> &HeartbeatHandlerGroup {

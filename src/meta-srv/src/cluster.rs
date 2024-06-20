@@ -37,7 +37,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::{match_for_io_error, Result};
-use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
+use crate::key::{DatanodeStatKey, DatanodeStatValue};
 use crate::metasrv::ElectionRef;
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;
@@ -154,13 +154,6 @@ impl KvBackend for MetaPeerClient {
         .fail()
     }
 
-    async fn compare_and_put(&self, _req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        error::UnsupportedSnafu {
-            operation: "compare and put".to_string(),
-        }
-        .fail()
-    }
-
     async fn delete_range(&self, _req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         error::UnsupportedSnafu {
             operation: "delete range".to_string(),
@@ -171,6 +164,13 @@ impl KvBackend for MetaPeerClient {
     async fn batch_delete(&self, _req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
         error::UnsupportedSnafu {
             operation: "batch delete".to_string(),
+        }
+        .fail()
+    }
+
+    async fn compare_and_put(&self, _req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        error::UnsupportedSnafu {
+            operation: "compare and put".to_string(),
         }
         .fail()
     }
@@ -197,7 +197,7 @@ impl KvBackend for MetaPeerClient {
 
 impl MetaPeerClient {
     async fn get_dn_key_value(&self, keys_only: bool) -> Result<Vec<KeyValue>> {
-        let key = format!("{DN_STAT_PREFIX}-").into_bytes();
+        let key = DatanodeStatKey::prefix_key();
         let range_end = util::get_prefix_end_key(&key);
         let range_request = RangeRequest {
             key,
@@ -209,7 +209,7 @@ impl MetaPeerClient {
     }
 
     // Get all datanode stat kvs from leader meta.
-    pub async fn get_all_dn_stat_kvs(&self) -> Result<HashMap<StatKey, StatValue>> {
+    pub async fn get_all_dn_stat_kvs(&self) -> Result<HashMap<DatanodeStatKey, DatanodeStatValue>> {
         let kvs = self.get_dn_key_value(false).await?;
         to_stat_kv_map(kvs)
     }
@@ -218,12 +218,15 @@ impl MetaPeerClient {
         let kvs = self.get_dn_key_value(true).await?;
         kvs.into_iter()
             .map(|kv| kv.key.try_into())
-            .collect::<Result<HashSet<StatKey>>>()
+            .collect::<Result<HashSet<DatanodeStatKey>>>()
             .map(|hash_set| hash_set.len() as i32)
     }
 
     // Get datanode stat kvs from leader meta by input keys.
-    pub async fn get_dn_stat_kvs(&self, keys: Vec<StatKey>) -> Result<HashMap<StatKey, StatValue>> {
+    pub async fn get_dn_stat_kvs(
+        &self,
+        keys: Vec<DatanodeStatKey>,
+    ) -> Result<HashMap<DatanodeStatKey, DatanodeStatValue>> {
         let stat_keys = keys.into_iter().map(|key| key.into()).collect();
         let batch_get_req = BatchGetRequest { keys: stat_keys };
 
@@ -313,7 +316,7 @@ impl MetaPeerClient {
     }
 }
 
-fn to_stat_kv_map(kvs: Vec<KeyValue>) -> Result<HashMap<StatKey, StatValue>> {
+fn to_stat_kv_map(kvs: Vec<KeyValue>) -> Result<HashMap<DatanodeStatKey, DatanodeStatValue>> {
     let mut map = HashMap::with_capacity(kvs.len());
     for kv in kvs {
         let _ = map.insert(kv.key.try_into()?, kv.value.try_into()?);
@@ -358,11 +361,11 @@ mod tests {
     use super::{check_resp_header, to_stat_kv_map, Context};
     use crate::error;
     use crate::handler::node_stat::Stat;
-    use crate::keys::{StatKey, StatValue};
+    use crate::key::{DatanodeStatKey, DatanodeStatValue};
 
     #[test]
     fn test_to_stat_kv_map() {
-        let stat_key = StatKey {
+        let stat_key = DatanodeStatKey {
             cluster_id: 0,
             node_id: 100,
         };
@@ -373,7 +376,7 @@ mod tests {
             addr: "127.0.0.1:3001".to_string(),
             ..Default::default()
         };
-        let stat_val = StatValue { stats: vec![stat] }.try_into().unwrap();
+        let stat_val = DatanodeStatValue { stats: vec![stat] }.try_into().unwrap();
 
         let kv = KeyValue {
             key: stat_key.into(),

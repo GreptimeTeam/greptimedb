@@ -38,7 +38,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
-use super::FLOW_ID_SEQ;
+use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
@@ -50,7 +50,7 @@ use crate::handler::collect_cluster_info_handler::{
 use crate::handler::collect_stats_handler::CollectStatsHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
-use crate::handler::keep_lease_handler::KeepLeaseHandler;
+use crate::handler::keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
 use crate::handler::persist_stats_handler::PersistStatsHandler;
@@ -68,6 +68,7 @@ use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublisherRef;
 use crate::selector::lease_based::LeaseBasedSelector;
+use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
@@ -212,6 +213,7 @@ impl MetasrvBuilder {
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
+            flownode_lease_secs: distributed_time_constants::FLOWNODE_LEASE_SECS,
             kv_backend: kv_backend.clone(),
             meta_peer_client: meta_peer_client.clone(),
             table_id: None,
@@ -334,7 +336,8 @@ impl MetasrvBuilder {
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                group.add_handler(KeepLeaseHandler).await;
+                group.add_handler(DatanodeKeepLeaseHandler).await;
+                group.add_handler(FlownodeKeepLeaseHandler).await;
                 group.add_handler(CheckLeaderHandler).await;
                 group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler).await;
@@ -367,6 +370,8 @@ impl MetasrvBuilder {
             leader_cached_kv_backend,
             meta_peer_client: meta_peer_client.clone(),
             selector,
+            // TODO(jeremy): We do not allow configuring the flow selector.
+            flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
             handler_group,
             election,
             lock,
