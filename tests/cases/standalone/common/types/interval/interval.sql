@@ -3,6 +3,8 @@ SELECT INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6 seconds 100 microsec
 
 SELECT INTERVAL '1.5 year';
 
+SELECT INTERVAL '55h';
+
 SELECT INTERVAL '-2 months';
 
 SELECT INTERVAL '1 year 2 months 3 days 4 hours' + INTERVAL '1 year';
