@@ -456,6 +456,9 @@ impl DedupStrategy for LastNotNull {
             return Ok(None);
         };
 
+        // Initializes last fields with the first buffer.
+        self.last_fields.maybe_init(&buffer);
+
         let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
 
         Ok(merged)
@@ -752,6 +755,113 @@ mod tests {
         )
         .await;
         assert_eq!(4, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
+    }
+
+    #[tokio::test]
+    async fn test_last_not_null_skip_merge_single() {
+        let input = [new_batch_multi_fields(
+            b"k1",
+            &[1, 2, 3],
+            &[13, 11, 13],
+            &[OpType::Put, OpType::Delete, OpType::Put],
+            &[(Some(11), Some(11)), (None, None), (Some(13), Some(13))],
+        )];
+
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        check_reader_result(
+            &mut reader,
+            &[new_batch_multi_fields(
+                b"k1",
+                &[1, 3],
+                &[13, 13],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (Some(13), Some(13))],
+            )],
+        )
+        .await;
+        assert_eq!(1, reader.metrics().num_unselected_rows);
+        assert_eq!(1, reader.metrics().num_deleted_rows);
+
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(false));
+        check_reader_result(&mut reader, &input).await;
+        assert_eq!(0, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
+    }
+
+    #[tokio::test]
+    async fn test_last_not_null_skip_merge_no_null() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (Some(12), Some(12))],
+            ),
+            new_batch_multi_fields(b"k1", &[2], &[10], &[OpType::Put], &[(None, Some(22))]),
+            new_batch_multi_fields(
+                b"k1",
+                &[2, 3],
+                &[9, 13],
+                &[OpType::Put, OpType::Put],
+                &[(Some(32), None), (Some(13), Some(13))],
+            ),
+        ];
+
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_multi_fields(
+                    b"k1",
+                    &[1, 2],
+                    &[13, 11],
+                    &[OpType::Put, OpType::Put],
+                    &[(Some(11), Some(11)), (Some(12), Some(12))],
+                ),
+                new_batch_multi_fields(b"k1", &[3], &[13], &[OpType::Put], &[(Some(13), Some(13))]),
+            ],
+        )
+        .await;
+        assert_eq!(2, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
+    }
+
+    #[tokio::test]
+    async fn test_last_not_null_merge_null() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (None, None)],
+            ),
+            new_batch_multi_fields(b"k1", &[2], &[10], &[OpType::Put], &[(None, Some(22))]),
+            new_batch_multi_fields(b"k1", &[3], &[13], &[OpType::Put], &[(Some(33), None)]),
+        ];
+
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_multi_fields(
+                    b"k1",
+                    &[1, 2],
+                    &[13, 11],
+                    &[OpType::Put, OpType::Put],
+                    &[(Some(11), Some(11)), (None, Some(22))],
+                ),
+                new_batch_multi_fields(b"k1", &[3], &[13], &[OpType::Put], &[(Some(33), None)]),
+            ],
+        )
+        .await;
+        assert_eq!(1, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
     }
 }
