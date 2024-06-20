@@ -17,10 +17,13 @@
 use async_trait::async_trait;
 use common_telemetry::debug;
 use common_time::Timestamp;
+use datatypes::data_type::DataType;
+use datatypes::value::Value;
+use datatypes::vectors::MutableVector;
 
 use crate::error::Result;
 use crate::metrics::MERGE_FILTER_ROWS_TOTAL;
-use crate::read::{Batch, BatchReader};
+use crate::read::{Batch, BatchColumn, BatchReader};
 
 /// A reader that dedup sorted batches from a source based on the
 /// dedup strategy.
@@ -211,6 +214,227 @@ pub(crate) struct DedupMetrics {
     pub(crate) num_deleted_rows: usize,
 }
 
+/// Buffer to store fields in the last row to merge.
+struct LastFieldsBuilder {
+    /// Filter deleted rows.
+    filter_deleted: bool,
+    /// Fields builders, lazy initialized.
+    builders: Vec<Box<dyn MutableVector>>,
+    /// Last fields to merge, lazy initialized.
+    last_fields: Vec<Value>,
+    /// Whether the last row has null.
+    has_null: bool,
+    /// Whether the builder is initialized.
+    initialized: bool,
+}
+
+impl LastFieldsBuilder {
+    /// Returns a new builder with the given `filter_deleted` flag.
+    fn new(filter_deleted: bool) -> Self {
+        Self {
+            filter_deleted,
+            builders: Vec::new(),
+            last_fields: Vec::new(),
+            has_null: false,
+            initialized: false,
+        }
+    }
+
+    /// Initializes the builders with the last row of the batch.
+    fn maybe_init(&mut self, batch: &Batch) {
+        debug_assert!(!batch.is_empty());
+
+        if self.initialized || batch.fields().is_empty() {
+            // Already initialized or no fields to merge.
+            return;
+        }
+
+        self.initialized = true;
+
+        let last_idx = batch.num_rows() - 1;
+        let fields = batch.fields();
+        self.has_null = fields.iter().any(|col| col.data.is_null(last_idx));
+        if !self.has_null {
+            return;
+        }
+        if self.builders.is_empty() {
+            self.builders = fields
+                .iter()
+                .map(|col| col.data.data_type().create_mutable_vector(1))
+                .collect();
+        }
+        self.last_fields = fields.iter().map(|col| col.data.get(last_idx)).collect();
+    }
+
+    /// Merges last fields, builds a new batch and resets the builder.
+    /// It may overwrites the last row of the `buffer`.
+    fn merge_last_fields(
+        &mut self,
+        buffer: Batch,
+        metrics: &mut DedupMetrics,
+    ) -> Result<Option<Batch>> {
+        // Initializes the builder if needed.
+        self.maybe_init(&buffer);
+
+        if !self.has_null {
+            debug_assert!(self.last_fields.is_empty());
+            // No need to overwrite the last row.
+            return Ok(Some(buffer));
+        }
+
+        // Builds last fields.
+        for (builder, value) in self.builders.iter_mut().zip(&self.last_fields) {
+            // Safety: Vectors of the batch has the same type.
+            builder.push_value_ref(value.as_value_ref());
+        }
+        let fields = self
+            .builders
+            .iter_mut()
+            .zip(buffer.fields())
+            .map(|(builder, col)| BatchColumn {
+                column_id: col.column_id,
+                data: builder.to_vector(),
+            })
+            .collect();
+
+        // Resets itself. `self.builders` already reset in `to_vector()`.
+        self.clear();
+
+        let mut merged = if buffer.num_rows() == 1 {
+            // Replaces the buffer directly if it only has one row.
+            buffer.with_fields(fields)?
+        } else {
+            // Replaces the last row of the buffer.
+            let front = buffer.slice(0, buffer.num_rows() - 1);
+            let last = buffer.slice(buffer.num_rows() - 1, 1);
+            let last = last.with_fields(fields)?;
+            Batch::concat(vec![front, last])?
+        };
+
+        if self.filter_deleted {
+            let num_rows = merged.num_rows();
+            merged.filter_deleted()?;
+            let num_rows_after_filter = merged.num_rows();
+            let num_deleted = num_rows - num_rows_after_filter;
+            metrics.num_deleted_rows += num_deleted;
+        }
+
+        if merged.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(merged))
+        }
+    }
+
+    /// Pushes first row of a batch to the builder.
+    fn push_first_row(&mut self, batch: &Batch) {
+        debug_assert!(self.initialized);
+        debug_assert!(!batch.is_empty());
+
+        if !self.has_null {
+            // Skips this batch.
+            return;
+        }
+
+        let fields = batch.fields();
+        for (idx, value) in self.last_fields.iter_mut().enumerate() {
+            if value.is_null() && !fields[idx].data.is_null(0) {
+                // Updates the value.
+                *value = fields[idx].data.get(0);
+            }
+        }
+        // Updates the flag.
+        self.has_null = self.last_fields.iter().any(Value::is_null);
+    }
+
+    /// Clears the builder.
+    fn clear(&mut self) {
+        self.last_fields.clear();
+        self.has_null = false;
+        self.initialized = false;
+    }
+}
+
+/// Dedup strategy that keeps the last not null field for the same key.
+///
+/// It assumes that batches from files and memtables don't contain duplicate rows
+/// and the merge reader never concatenates batches from different source.
+///
+/// We might implement a new strategy if we need to process files with duplicate rows.
+pub(crate) struct LastNotNull {
+    /// Buffered batch that fields in the last row may be updated.
+    buffer: Option<Batch>,
+    /// Fields that overlaps with the last row of the `buffer`.
+    last_fields: LastFieldsBuilder,
+}
+
+impl LastNotNull {
+    /// Creates a new strategy with the given `filter_deleted` flag.
+    pub(crate) fn new(filter_deleted: bool) -> Self {
+        Self {
+            buffer: None,
+            last_fields: LastFieldsBuilder::new(filter_deleted),
+        }
+    }
+}
+
+impl DedupStrategy for LastNotNull {
+    fn push_batch(&mut self, batch: Batch, metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
+        if batch.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(buffer) = self.buffer.as_mut() else {
+            // The buffer is empty, store the batch and return. We need to observe the next batch.
+            self.buffer = Some(batch);
+            return Ok(None);
+        };
+
+        if buffer.primary_key() != batch.primary_key() {
+            // Next key is different.
+            let buffer = std::mem::replace(buffer, batch);
+            let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+            return Ok(merged);
+        }
+
+        if buffer.last_timestamp() != batch.first_timestamp() {
+            // The next batch has a different timestamp.
+            let buffer = std::mem::replace(buffer, batch);
+            let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+            return Ok(merged);
+        }
+
+        // The next batch has the same key and timestamp.
+        metrics.num_unselected_rows += 1;
+        // We assumes each batch doesn't contain duplicate rows so we only need to check the first row.
+        if batch.num_rows() == 1 {
+            self.last_fields.push_first_row(&batch);
+            return Ok(None);
+        }
+
+        // The next batch has the same key and timestamp but contains multiple rows.
+        // We can merge the first row and buffer the remaining rows.
+        let first = batch.slice(0, 1);
+        self.last_fields.push_first_row(&first);
+        // Moves the remaining rows to the buffer.
+        let batch = batch.slice(1, batch.num_rows() - 1);
+        let buffer = std::mem::replace(buffer, batch);
+        let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+
+        Ok(merged)
+    }
+
+    fn finish(&mut self, metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
+        let Some(buffer) = self.buffer.take() else {
+            return Ok(None);
+        };
+
+        let merged = self.last_fields.merge_last_fields(buffer, metrics)?;
+
+        Ok(merged)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::OpType;
@@ -237,8 +461,17 @@ mod tests {
                 &[31, 32],
             ),
         ];
+
+        // Test last row.
         let reader = VecBatchReader::new(&input);
         let mut reader = DedupReader::new(reader, LastRow::new(true));
+        check_reader_result(&mut reader, &input).await;
+        assert_eq!(0, reader.metrics().num_unselected_rows);
+        assert_eq!(0, reader.metrics().num_deleted_rows);
+
+        // Test last not null.
+        let reader = VecBatchReader::new(&input);
+        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
         check_reader_result(&mut reader, &input).await;
         assert_eq!(0, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
