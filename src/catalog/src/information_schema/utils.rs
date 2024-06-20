@@ -15,6 +15,7 @@
 use std::sync::{Arc, Weak};
 
 use common_config::Mode;
+use common_meta::key::TableMetadataManagerRef;
 use meta_client::client::MetaClient;
 use snafu::OptionExt;
 
@@ -50,4 +51,18 @@ pub fn meta_client(catalog_manager: &Weak<dyn CatalogManager>) -> Result<Option<
     };
 
     Ok(meta_client)
+}
+
+/// Try to get the `[TableMetadataManagerRef]` from `[CatalogManager]` weak reference.
+pub fn table_meta_manager(
+    catalog_manager: &Weak<dyn CatalogManager>,
+) -> Result<Option<TableMetadataManagerRef>> {
+    let catalog_manager = catalog_manager
+        .upgrade()
+        .context(UpgradeWeakCatalogManagerRefSnafu)?;
+
+    Ok(catalog_manager
+        .as_any()
+        .downcast_ref::<KvBackendCatalogManager>()
+        .map(|manager| manager.table_metadata_manager_ref().clone()))
 }

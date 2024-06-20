@@ -1,7 +1,9 @@
-show databases;
+SHOW DATABASES;
 
-use information_schema;
+SHOW FULL DATABASES;
 
-show tables;
+USE information_schema;
 
-use public;
+SHOW TABLES;
+
+USE public;

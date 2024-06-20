@@ -66,6 +66,7 @@ use crate::planner::DfLogicalPlanner;
 use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Database";
+const OPTIONS_COLUMN: &str = "Options";
 const TABLES_COLUMN: &str = "Tables";
 const FIELD_COLUMN: &str = "Field";
 const TABLE_TYPE_COLUMN: &str = "Table_type";
@@ -155,7 +156,14 @@ pub async fn show_databases(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let projects = vec![(schemata::SCHEMA_NAME, SCHEMAS_COLUMN)];
+    let projects = if stmt.full {
+        vec![
+            (schemata::SCHEMA_NAME, SCHEMAS_COLUMN),
+            (schemata::SCHEMA_OPTS, OPTIONS_COLUMN),
+        ]
+    } else {
+        vec![(schemata::SCHEMA_NAME, SCHEMAS_COLUMN)]
+    };
 
     let filters = vec![col(schemata::CATALOG_NAME).eq(lit(query_ctx.current_catalog()))];
     let like_field = Some(schemata::SCHEMA_NAME);
