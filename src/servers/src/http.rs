@@ -221,7 +221,7 @@ impl HttpRecordsOutput {
 }
 
 impl HttpRecordsOutput {
-    pub(crate) fn try_new(
+    pub fn try_new(
         schema: SchemaRef,
         recordbatches: Vec<RecordBatch>,
     ) -> std::result::Result<HttpRecordsOutput, Error> {
