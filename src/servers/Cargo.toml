@@ -121,7 +121,6 @@ mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 permutation = "0.4"
-pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 rand.workspace = true
 script = { workspace = true, features = ["python"] }
 serde_json.workspace = true
@@ -132,9 +131,11 @@ tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"
 
+[target.'cfg(not(windows))'.dev-dependencies]
+pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+
 [build-dependencies]
 common-version.workspace = true
-
 
 [[bench]]
 name = "bench_prom"
