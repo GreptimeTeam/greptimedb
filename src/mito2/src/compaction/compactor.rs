@@ -313,6 +313,8 @@ impl Compactor for DefaultCompactor {
                             .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
                             .unwrap_or_default(),
                         index_file_size: sst_info.index_file_size,
+                        num_rows: sst_info.num_rows as u64,
+                        num_row_groups: sst_info.num_row_groups,
                     });
                 Ok(file_meta_opt)
             });
