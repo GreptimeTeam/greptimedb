@@ -171,20 +171,15 @@ impl InformationSchemaSchemataBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
-            let opts = if let Some(table_metadata_manager) = &table_metadata_manager {
-                let schema = table_metadata_manager
+                let schema_opts = table_metadata_manager
                     .schema_manager()
                     .get(SchemaNameKey::new(&catalog_name, &schema_name))
                     .await
-                    .context(TableMetadataManagerSnafu)?;
-
-                let Some(schema_opts) = schema else {
-                    return SchemaNotFoundSnafu {
+                    .context(TableMetadataManagerSnafu)?
+                    .context(SchemaNotFoundSnafu {
                         catalog: &catalog_name,
                         schema: &schema_name,
-                    }
-                    .fail();
-                };
+                    })?;
 
                 format!("{schema_opts}")
             } else {
