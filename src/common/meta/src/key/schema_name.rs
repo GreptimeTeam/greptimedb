@@ -61,7 +61,7 @@ impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ttl) = self.ttl {
             let ttl = humantime::format_duration(ttl);
-            write!(f, "ttl='{ttl}'",)?;
+            write!(f, "ttl='{ttl}'")?;
         }
 
         Ok(())
