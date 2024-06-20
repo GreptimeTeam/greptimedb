@@ -21,6 +21,7 @@ use common_recordbatch::RecordBatch;
 use criterion::{criterion_group, criterion_main, Criterion};
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::StringVector;
+use pprof::criterion::{Output, PProfProfiler};
 use servers::http::HttpRecordsOutput;
 
 fn mock_schema() -> SchemaRef {
@@ -70,5 +71,9 @@ fn bench_convert_record_batch_to_http_output(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_convert_record_batch_to_http_output,);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().with_profiler(PProfProfiler::new(101, Output::Flamegraph(None)));
+    targets = bench_convert_record_batch_to_http_output
+}
 criterion_main!(benches);

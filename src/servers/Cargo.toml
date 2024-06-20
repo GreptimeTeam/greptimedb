@@ -116,11 +116,12 @@ catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
-criterion = "0.4"
+criterion = "0.5"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 permutation = "0.4"
+pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 rand.workspace = true
 script = { workspace = true, features = ["python"] }
 serde_json.workspace = true
