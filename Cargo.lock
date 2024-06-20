@@ -3903,6 +3903,7 @@ dependencies = [
  "greptime-proto",
  "hydroflow",
  "itertools 0.10.5",
+ "meta-client",
  "minstant",
  "nom",
  "num-traits",
