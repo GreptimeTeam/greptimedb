@@ -242,7 +242,7 @@ impl HttpRecordsOutput {
             for recordbatch in recordbatches {
                 for col in recordbatch.columns() {
                     for row_idx in 0..recordbatch.num_rows() {
-                        let value = Value::try_from(col.get(row_idx)).context(ToJsonSnafu)?;
+                        let value = Value::try_from(col.get_ref(row_idx)).context(ToJsonSnafu)?;
                         rows[row_idx + finished_row_cursor].push(value);
                     }
                 }
