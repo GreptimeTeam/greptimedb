@@ -393,6 +393,7 @@ pub(crate) struct LastNotNull {
 
 impl LastNotNull {
     /// Creates a new strategy with the given `filter_deleted` flag.
+    #[allow(dead_code)]
     pub(crate) fn new(filter_deleted: bool) -> Self {
         Self {
             buffer: None,
