@@ -87,12 +87,12 @@ pub mod flow;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
-pub mod view_info;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
 mod tombstone;
 pub(crate) mod txn_helper;
+pub mod view_info;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
