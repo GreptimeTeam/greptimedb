@@ -230,8 +230,10 @@ struct LastFieldsBuilder {
     /// Fields builders, lazy initialized.
     builders: Vec<Box<dyn MutableVector>>,
     /// Last fields to merge, lazy initialized.
+    /// Only initializes this field when `skip_merge()` is false.
     last_fields: Vec<Value>,
     /// Whether the last row (including `last_fields`) has null field.
+    /// Only sets this field when `has_delete` is false.
     has_null: bool,
     /// Whether the last row has delete op. If true, skips merging fields.
     has_delete: bool,
@@ -265,9 +267,12 @@ impl LastFieldsBuilder {
 
         let last_idx = batch.num_rows() - 1;
         let fields = batch.fields();
-        self.has_null = fields.iter().any(|col| col.data.is_null(last_idx));
         // Safety: The last_idx is valid.
         self.has_delete = batch.op_types().get_data(last_idx).unwrap() == OpType::Delete as u8;
+        // If the row has been deleted, then we don't need to merge fields.
+        if !self.has_delete {
+            self.has_null = fields.iter().any(|col| col.data.is_null(last_idx));
+        }
 
         if self.skip_merge() {
             // No null field or the row has been deleted, no need to merge.
