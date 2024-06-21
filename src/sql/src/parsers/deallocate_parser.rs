@@ -12,21 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod alter_parser;
-pub(crate) mod copy_parser;
-pub(crate) mod create_parser;
-pub(crate) mod deallocate_parser;
-pub(crate) mod delete_parser;
-pub(crate) mod describe_parser;
-pub(crate) mod drop_parser;
-pub(crate) mod error;
-pub(crate) mod execute_parser;
-pub(crate) mod explain_parser;
-pub(crate) mod insert_parser;
-pub(crate) mod prepare_parser;
-pub(crate) mod query_parser;
-pub(crate) mod set_var_parser;
-pub(crate) mod show_parser;
-pub(crate) mod tql_parser;
-pub(crate) mod truncate_parser;
-pub(crate) mod utils;
+use snafu::ResultExt;
+use sqlparser::keywords::Keyword;
+
+use crate::error::{Result, SyntaxSnafu};
+use crate::parser::ParserContext;
+
+impl<'a> ParserContext<'a> {
+    /// Parses MySQL style 'PREPARE stmt_name' into a stmt_name string.
+    pub(crate) fn parse_deallocate(&mut self) -> Result<String> {
+        self.parser
+            .expect_keyword(Keyword::DEALLOCATE)
+            .context(SyntaxSnafu)?;
+        let stmt_name = self.parser.parse_identifier(false).context(SyntaxSnafu)?;
+        Ok(stmt_name.value)
+    }
+}
