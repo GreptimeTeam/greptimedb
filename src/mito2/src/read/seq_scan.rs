@@ -35,12 +35,13 @@ use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::memtable::MemtableRef;
-use crate::read::dedup::{DedupReader, LastRow};
+use crate::read::dedup::{DedupReader, LastNotNull, LastRow};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
 };
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
+use crate::region::options::UpdateMode;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
@@ -210,10 +211,16 @@ impl SeqScan {
 
         let dedup = !stream_ctx.input.append_mode;
         if dedup {
-            let reader = Box::new(DedupReader::new(
-                reader,
-                LastRow::new(stream_ctx.input.filter_deleted),
-            ));
+            let reader = match stream_ctx.input.update_mode {
+                UpdateMode::LastRow => Box::new(DedupReader::new(
+                    reader,
+                    LastRow::new(stream_ctx.input.filter_deleted),
+                )) as _,
+                UpdateMode::LastNotNull => Box::new(DedupReader::new(
+                    reader,
+                    LastNotNull::new(stream_ctx.input.filter_deleted),
+                )) as _,
+            };
             Ok(Some(reader))
         } else {
             let reader = Box::new(reader);

@@ -53,6 +53,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
+use crate::region::options::UpdateMode;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
@@ -441,31 +442,39 @@ pub struct CompactionOutput {
     pub output_time_range: Option<TimestampRange>,
 }
 
-/// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
-async fn build_sst_reader(
+/// Builders to create [BoxedBatchReader] for compaction.
+struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
     cache: Option<CacheManagerRef>,
-    inputs: &[FileHandle],
+    inputs: &'a [FileHandle],
     append_mode: bool,
     filter_deleted: bool,
     time_range: Option<TimestampRange>,
-) -> Result<BoxedBatchReader> {
-    let mut scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
-        .with_files(inputs.to_vec())
-        .with_append_mode(append_mode)
-        .with_cache(cache)
-        .with_filter_deleted(filter_deleted)
-        // We ignore file not found error during compaction.
-        .with_ignore_file_not_found(true);
+    update_mode: UpdateMode,
+}
 
-    // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
-    // by converting time ranges into predicate.
-    if let Some(time_range) = time_range {
-        scan_input = scan_input.with_predicate(time_range_to_predicate(time_range, &metadata)?);
+impl<'a> CompactionSstReaderBuilder<'a> {
+    /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
+    async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
+        let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
+            .with_files(self.inputs.to_vec())
+            .with_append_mode(self.append_mode)
+            .with_cache(self.cache)
+            .with_filter_deleted(self.filter_deleted)
+            // We ignore file not found error during compaction.
+            .with_ignore_file_not_found(true)
+            .with_update_mode(self.update_mode);
+
+        // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
+        // by converting time ranges into predicate.
+        if let Some(time_range) = self.time_range {
+            scan_input =
+                scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
+        }
+
+        SeqScan::new(scan_input).build_reader().await
     }
-
-    SeqScan::new(scan_input).build_reader().await
 }
 
 /// Converts time range to predicates so that rows outside the range will be filtered.

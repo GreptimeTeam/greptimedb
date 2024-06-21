@@ -27,8 +27,8 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
-use crate::compaction::build_sst_reader;
 use crate::compaction::picker::{new_picker, PickerOutput};
+use crate::compaction::CompactionSstReaderBuilder;
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -278,16 +278,19 @@ impl Compactor for DefaultCompactor {
                 .index_options
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
+            let update_mode = compaction_region.current_version.options.update_mode;
             futs.push(async move {
-                let reader = build_sst_reader(
-                    region_metadata.clone(),
-                    sst_layer.clone(),
-                    Some(cache_manager.clone()),
-                    &output.inputs,
+                let reader = CompactionSstReaderBuilder {
+                    metadata: region_metadata.clone(),
+                    sst_layer: sst_layer.clone(),
+                    cache: Some(cache_manager.clone()),
+                    inputs: &output.inputs,
                     append_mode,
-                    output.filter_deleted,
-                    output.output_time_range,
-                )
+                    filter_deleted: output.filter_deleted,
+                    time_range: output.output_time_range,
+                    update_mode,
+                }
+                .build_sst_reader()
                 .await?;
                 let file_meta_opt = sst_layer
                     .write_sst(

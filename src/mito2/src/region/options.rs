@@ -27,11 +27,24 @@ use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
 use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
+use strum::EnumString;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
+
+/// Mode to update duplicate rows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum UpdateMode {
+    /// Keeps the last row.
+    #[default]
+    LastRow,
+    /// Keeps the last non-null field for each row.
+    LastNotNull,
+}
 
 /// Options that affect the entire region.
 ///
@@ -54,6 +67,8 @@ pub struct RegionOptions {
     pub index_options: IndexOptions,
     /// Memtable options.
     pub memtable: Option<MemtableOptions>,
+    /// The mode to update duplicate rows.
+    pub update_mode: UpdateMode,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -97,6 +112,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             wal_options,
             index_options,
             memtable,
+            update_mode: options.update_mode,
         })
     }
 }
@@ -179,6 +195,8 @@ struct RegionOptionsWithoutEnum {
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
+    #[serde_as(as = "DisplayFromStr")]
+    update_mode: UpdateMode,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -188,6 +206,7 @@ impl Default for RegionOptionsWithoutEnum {
             ttl: options.ttl,
             storage: options.storage,
             append_mode: options.append_mode,
+            update_mode: options.update_mode,
         }
     }
 }
@@ -478,6 +497,21 @@ mod tests {
     }
 
     #[test]
+    fn test_with_update_mode() {
+        let map = make_map(&[("update_mode", "last_row")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(UpdateMode::LastRow, options.update_mode);
+
+        let map = make_map(&[("update_mode", "last_not_null")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(UpdateMode::LastNotNull, options.update_mode);
+
+        let map = make_map(&[("update_mode", "unknown")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
     fn test_with_all() {
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: "test_topic".to_string(),
@@ -500,6 +534,7 @@ mod tests {
             ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
             ("memtable.partition_tree.data_freeze_threshold", "2048"),
             ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
+            ("update_mode", "last_not_null"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -523,6 +558,7 @@ mod tests {
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
             })),
+            update_mode: UpdateMode::LastNotNull,
         };
         assert_eq!(expect, options);
     }
