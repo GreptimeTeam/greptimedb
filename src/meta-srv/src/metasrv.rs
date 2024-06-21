@@ -29,7 +29,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBac
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
-use common_meta::{distributed_time_constants, ClusterId};
+use common_meta::ClusterId;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -50,7 +50,7 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
-use crate::lease::lookup_alive_datanode_peer;
+use crate::lease::lookup_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
@@ -484,13 +484,7 @@ impl Metasrv {
         cluster_id: ClusterId,
         peer_id: u64,
     ) -> Result<Option<Peer>> {
-        lookup_alive_datanode_peer(
-            cluster_id,
-            peer_id,
-            &self.meta_peer_client,
-            distributed_time_constants::DATANODE_LEASE_SECS,
-        )
-        .await
+        lookup_datanode_peer(cluster_id, peer_id, &self.meta_peer_client).await
     }
 
     pub fn options(&self) -> &MetasrvOptions {
