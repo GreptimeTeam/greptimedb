@@ -31,6 +31,7 @@ use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::StandalonePeerLookupService;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
@@ -557,6 +558,7 @@ impl StartCommand {
                     table_metadata_allocator,
                     flow_metadata_manager,
                     flow_metadata_allocator,
+                    peer_lookup_service: Arc::new(StandalonePeerLookupService),
                 },
                 procedure_manager,
                 true,

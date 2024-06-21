@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use api::v1::meta::Peer as PbPeer;
 use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
+use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[derive(Debug, Default, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
@@ -62,5 +66,58 @@ impl Peer {
 impl Display for Peer {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "peer-{}({})", self.id, self.addr)
+    }
+}
+
+/// can query peer given a node id
+#[async_trait::async_trait]
+pub trait PeerLookupService {
+    async fn datanode(&self, cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>, Error>;
+    async fn flownode(&self, cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>, Error>;
+}
+
+pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;
+
+/// A dummy implementation of [PeerLookupService] for testing purpose.
+pub struct DummyPeerLookupService;
+
+#[async_trait::async_trait]
+impl PeerLookupService for DummyPeerLookupService {
+    async fn datanode(
+        &self,
+        _cluster_id: ClusterId,
+        _id: DatanodeId,
+    ) -> Result<Option<Peer>, Error> {
+        Ok(None)
+    }
+
+    async fn flownode(
+        &self,
+        _cluster_id: ClusterId,
+        _id: FlownodeId,
+    ) -> Result<Option<Peer>, Error> {
+        Ok(None)
+    }
+}
+
+/// always return `Peer::new(0, "")` for any query
+pub struct StandalonePeerLookupService;
+
+#[async_trait::async_trait]
+impl PeerLookupService for StandalonePeerLookupService {
+    async fn datanode(
+        &self,
+        _cluster_id: ClusterId,
+        _id: DatanodeId,
+    ) -> Result<Option<Peer>, Error> {
+        Ok(Some(Peer::new(0, "")))
+    }
+
+    async fn flownode(
+        &self,
+        _cluster_id: ClusterId,
+        _id: FlownodeId,
+    ) -> Result<Option<Peer>, Error> {
+        Ok(Some(Peer::new(0, "")))
     }
 }

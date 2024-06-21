@@ -58,6 +58,7 @@ use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::response_header_handler::ResponseHeaderHandler;
 use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
+use crate::lease::MetaPeerLookupService;
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metasrv::{
@@ -289,6 +290,9 @@ impl MetasrvBuilder {
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator: flow_metadata_allocator.clone(),
+                    peer_lookup_service: Arc::new(MetaPeerLookupService::new(
+                        meta_peer_client.clone(),
+                    )),
                 },
                 procedure_manager.clone(),
                 true,
