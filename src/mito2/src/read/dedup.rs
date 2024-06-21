@@ -468,6 +468,107 @@ impl DedupStrategy for LastNotNull {
     }
 }
 
+/// An iterator that dedup rows by `LastNotNull` strategy.
+/// The input iterator must returns sorted batches.
+pub(crate) struct LastNotNullIter<I> {
+    /// Inner iterator that returns sorted batches.
+    iter: Option<I>,
+    /// Dedup strategy.
+    strategy: LastNotNull,
+    /// Dedup metrics.
+    metrics: DedupMetrics,
+    /// The current batch returned by the iterator. If it is None, we need to
+    /// fetch a new batch.
+    /// The batch is always not empty.
+    current_batch: Option<Batch>,
+}
+
+impl<I> LastNotNullIter<I> {
+    /// Creates a new iterator with the given inner iterator.
+    pub(crate) fn new(iter: I) -> Self {
+        Self {
+            iter: Some(iter),
+            // We always filter deleted rows in the iterator as only memtables use it.
+            strategy: LastNotNull::new(true),
+            metrics: DedupMetrics::default(),
+            current_batch: None,
+        }
+    }
+
+    /// Finds the index of the first row that has the same timestamp with the next row.
+    /// If no duplicate rows, returns None.
+    fn find_split_index(batch: &Batch) -> Option<usize> {
+        let num_rows = batch.num_rows();
+        if num_rows < 2 {
+            return None;
+        }
+
+        // Safety: The batch is not empty.
+        let timestamps = batch.timestamps_native().unwrap();
+        for i in 0..timestamps.len() - 1 {
+            if timestamps[i] == timestamps[i + 1] {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+}
+
+impl<I: Iterator<Item = Result<Batch>>> LastNotNullIter<I> {
+    /// Fetches the next batch from the inner iterator. It will slice the batch if it
+    /// contains duplicate rows.
+    fn next_batch_for_merge(&mut self) -> Result<Option<Batch>> {
+        if self.current_batch.is_none() {
+            // No current batch. Fetches a new batch from the inner iterator.
+            let Some(iter) = self.iter.as_mut() else {
+                // The iterator is exhausted.
+                return Ok(None);
+            };
+
+            self.current_batch = iter.next().transpose()?;
+            if self.current_batch.is_none() {
+                // The iterator is exhausted.
+                self.iter = None;
+            }
+        }
+
+        if let Some(batch) = &self.current_batch {
+            let Some(index) = Self::find_split_index(batch) else {
+                // No duplicate rows in the current batch.
+                return Ok(self.current_batch.take());
+            };
+
+            let first = batch.slice(0, index + 1);
+            let batch = batch.slice(index, batch.num_rows() - index - 1);
+            // `index` is Some indicates that the batch has at least one row remaining.
+            debug_assert!(!batch.is_empty());
+            self.current_batch = Some(batch);
+            return Ok(Some(first));
+        }
+
+        Ok(None)
+    }
+
+    fn next_batch(&mut self) -> Result<Option<Batch>> {
+        while let Some(batch) = self.next_batch_for_merge()? {
+            if let Some(batch) = self.strategy.push_batch(batch, &mut self.metrics)? {
+                return Ok(Some(batch));
+            }
+        }
+
+        self.strategy.finish(&mut self.metrics)
+    }
+}
+
+impl<I: Iterator<Item = Result<Batch>>> Iterator for LastNotNullIter<I> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_batch().transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
