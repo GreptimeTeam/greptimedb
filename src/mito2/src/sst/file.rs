@@ -197,17 +197,15 @@ struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
     deleted: AtomicBool,
-    file_purger: Option<FilePurgerRef>,
+    file_purger: FilePurgerRef,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Relaxed) {
-            if let Some(file_purger) = &self.file_purger {
-                file_purger.send_request(PurgeRequest {
-                    file_meta: self.meta.clone(),
-                });
-            }
+            self.file_purger.send_request(PurgeRequest {
+                file_meta: self.meta.clone(),
+            });
         }
     }
 }
@@ -218,7 +216,7 @@ impl FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
-            file_purger: Some(file_purger),
+            file_purger,
         }
     }
 }
