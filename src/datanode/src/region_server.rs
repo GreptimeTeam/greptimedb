@@ -536,19 +536,7 @@ impl RegionServerInner {
                 },
                 None => return Ok(CurrentEngine::EarlyReturn(0)),
             },
-            RegionChange::None => match current_region_status {
-                Some(status) => match status.clone() {
-                    RegionEngineWithStatus::Registering(_) => {
-                        return error::RegionNotReadySnafu { region_id }.fail()
-                    }
-                    RegionEngineWithStatus::Deregistering(_) => {
-                        return error::RegionNotFoundSnafu { region_id }.fail()
-                    }
-                    RegionEngineWithStatus::Ready(engine) => engine,
-                },
-                None => return error::RegionNotFoundSnafu { region_id }.fail(),
-            },
-            RegionChange::Catchup => match current_region_status {
+            RegionChange::None | RegionChange::Catchup => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_) => {
                         return error::RegionNotReadySnafu { region_id }.fail()
