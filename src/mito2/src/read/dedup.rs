@@ -233,10 +233,10 @@ struct LastFieldsBuilder {
     /// Only initializes this field when `skip_merge()` is false.
     last_fields: Vec<Value>,
     /// Whether the last row (including `last_fields`) has null field.
-    /// Only sets this field when `has_delete` is false.
-    has_null: bool,
+    /// Only sets this field when `contains_deletion` is false.
+    contains_null: bool,
     /// Whether the last row has delete op. If true, skips merging fields.
-    has_delete: bool,
+    contains_deletion: bool,
     /// Whether the builder is initialized.
     initialized: bool,
 }
@@ -248,8 +248,8 @@ impl LastFieldsBuilder {
             filter_deleted,
             builders: Vec::new(),
             last_fields: Vec::new(),
-            has_null: false,
-            has_delete: false,
+            contains_null: false,
+            contains_deletion: false,
             initialized: false,
         }
     }
@@ -268,10 +268,11 @@ impl LastFieldsBuilder {
         let last_idx = batch.num_rows() - 1;
         let fields = batch.fields();
         // Safety: The last_idx is valid.
-        self.has_delete = batch.op_types().get_data(last_idx).unwrap() == OpType::Delete as u8;
+        self.contains_deletion =
+            batch.op_types().get_data(last_idx).unwrap() == OpType::Delete as u8;
         // If the row has been deleted, then we don't need to merge fields.
-        if !self.has_delete {
-            self.has_null = fields.iter().any(|col| col.data.is_null(last_idx));
+        if !self.contains_deletion {
+            self.contains_null = fields.iter().any(|col| col.data.is_null(last_idx));
         }
 
         if self.skip_merge() {
@@ -292,7 +293,7 @@ impl LastFieldsBuilder {
         debug_assert!(self.initialized);
 
         // No null field or the row has been deleted, no need to merge.
-        self.has_delete || !self.has_null
+        self.contains_deletion || !self.contains_null
     }
 
     /// Pushes first row of a batch to the builder.
@@ -313,7 +314,7 @@ impl LastFieldsBuilder {
             }
         }
         // Updates the flag.
-        self.has_null = self.last_fields.iter().any(Value::is_null);
+        self.contains_null = self.last_fields.iter().any(Value::is_null);
     }
 
     /// Merges last not null fields, builds a new batch and resets the builder.
@@ -377,8 +378,8 @@ impl LastFieldsBuilder {
     /// Clears the builder.
     fn clear(&mut self) {
         self.last_fields.clear();
-        self.has_null = false;
-        self.has_delete = false;
+        self.contains_null = false;
+        self.contains_deletion = false;
         self.initialized = false;
     }
 }
