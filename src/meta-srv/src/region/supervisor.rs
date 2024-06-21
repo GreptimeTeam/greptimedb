@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common_meta::key::MAINTENANCE_KEY;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef, MAINTENANCE_KEY};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::{ClusterId, DatanodeId};
@@ -151,6 +151,7 @@ pub struct RegionSupervisor {
     region_migration_manager: RegionMigrationManagerRef,
     // TODO(weny): find a better way
     kv_backend: KvBackendRef,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 pub(crate) struct HeartbeatSender {
@@ -191,6 +192,7 @@ impl RegionSupervisor {
             selector_context,
             selector,
             region_migration_manager,
+            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             kv_backend,
         }
     }
@@ -285,10 +287,22 @@ impl RegionSupervisor {
                 );
             }
             None => {
+                if self
+                    .table_metadata_manager
+                    .table_route_manager()
+                    .table_route_storage()
+                    .get(region_id.table_id())
+                    .await
+                    .context(error::TableMetadataManagerSnafu)?
+                    .is_none()
+                {
+                    return Ok(());
+                }
+
                 let mut peers = self
                     .selector
                     .select(
-                        0,
+                        cluster_id,
                         &self.selector_context,
                         SelectorOptions {
                             min_required_items: 1,
