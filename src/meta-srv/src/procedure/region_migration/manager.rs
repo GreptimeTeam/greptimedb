@@ -257,6 +257,10 @@ impl RegionMigrationManager {
         region_route: &RegionRoute,
         task: &RegionMigrationProcedureTask,
     ) -> Result<bool> {
+        if region_route.is_leader_downgraded() {
+            return Ok(false);
+        }
+
         let leader_peer = region_route
             .leader_peer
             .as_ref()
