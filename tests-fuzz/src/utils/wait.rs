@@ -12,5 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod common;
-pub mod pod;
+use std::time::Duration;
+
+use futures::future::BoxFuture;
+
+pub async fn wait_condition_fn<F, T, U>(
+    timeout: Duration,
+    check: F,
+    condition: U,
+    retry_interval: Duration,
+) where
+    F: Fn() -> BoxFuture<'static, T>,
+    U: Fn(T) -> bool,
+{
+    tokio::time::timeout(timeout, async move {
+        loop {
+            if condition(check().await) {
+                break;
+            }
+            tokio::time::sleep(retry_interval).await
+        }
+    })
+    .await
+    .unwrap();
+}

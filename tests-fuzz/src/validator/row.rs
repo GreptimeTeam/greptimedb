@@ -146,6 +146,27 @@ where
     Ok(())
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct ValueCount {
+    pub count: i64,
+}
+
+pub async fn count_values<'a, DB, E>(e: E, sql: &'a str) -> Result<ValueCount>
+where
+    DB: Database,
+    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
+    for<'c> E: 'a + Executor<'c, Database = DB>,
+    for<'c> i64: Decode<'c, DB> + Type<DB>,
+    for<'c> String: Encode<'c, DB> + Type<DB>,
+    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
+{
+    Ok(sqlx::query_as::<_, ValueCount>(sql)
+        .fetch_all(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?
+        .remove(0))
+}
+
 /// Returns all [RowEntry] of the `table_name`.
 pub async fn fetch_values<'a, DB, E>(e: E, sql: &'a str) -> Result<Vec<<DB as Database>::Row>>
 where

@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cluster_info;
 pub mod config;
 pub mod crd;
 pub mod health;
+pub mod partition;
 #[cfg(feature = "unstable")]
 pub mod process;
+pub mod wait;
 
 use std::env;
 
@@ -88,6 +91,9 @@ pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
         root_dir,
     }
 }
+
+pub const GT_FUZZ_CLUSTER_NAMESPACE: &str = "GT_FUZZ_CLUSTER_NAMESPACE";
+pub const GT_FUZZ_CLUSTER_NAME: &str = "GT_FUZZ_CLUSTER_NAME";
 
 /// Flushes memtable to SST file.
 pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
