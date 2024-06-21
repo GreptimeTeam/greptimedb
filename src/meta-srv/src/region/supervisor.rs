@@ -231,6 +231,9 @@ impl RegionSupervisor {
     }
 
     async fn handle_region_failures(&self, regions: Vec<(ClusterId, DatanodeId, RegionId)>) {
+        if regions.is_empty() {
+            return;
+        }
         match self.is_maintenance_mode().await {
             Ok(false) => {}
             Ok(true) => {
@@ -242,13 +245,20 @@ impl RegionSupervisor {
                 return;
             }
         }
-
+        warn!(
+            "Detects region failures: {:?}",
+            regions
+                .iter()
+                .map(|(_, datanode, region)| (datanode, region))
+                .collect::<Vec<_>>()
+        );
         for (cluster_id, datanode_id, region_id) in regions {
             if let Err(err) = self.do_failover(cluster_id, datanode_id, region_id).await {
                 error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
+            } else {
+                self.failure_detector
+                    .remove(&(cluster_id, datanode_id, region_id));
             }
-            self.failure_detector
-                .remove(&(cluster_id, datanode_id, region_id));
         }
     }
 
