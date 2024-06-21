@@ -39,15 +39,15 @@ pub async fn collect_batches(stream: SendableRecordBatchStream) -> Result<Record
     RecordBatches::try_new(schema, batches)
 }
 
-/// A stream that aggregates multiple streams into a single stream.
-pub struct AggregatedRecordBatchStream {
+/// A stream that chains multiple streams into a single stream.
+pub struct ChainedRecordBatchStream {
     inputs: Vec<SendableRecordBatchStream>,
     curr_index: usize,
     schema: SchemaRef,
     metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
 }
 
-impl AggregatedRecordBatchStream {
+impl ChainedRecordBatchStream {
     pub fn new(inputs: Vec<SendableRecordBatchStream>) -> Result<Self> {
         // check length
         ensure!(!inputs.is_empty(), EmptyStreamSnafu);
@@ -98,9 +98,9 @@ impl AggregatedRecordBatchStream {
     }
 }
 
-impl RecordBatchStream for AggregatedRecordBatchStream {
+impl RecordBatchStream for ChainedRecordBatchStream {
     fn name(&self) -> &str {
-        "AggregatedRecordBatchStream"
+        "ChainedRecordBatchStream"
     }
 
     fn schema(&self) -> SchemaRef {
@@ -116,7 +116,7 @@ impl RecordBatchStream for AggregatedRecordBatchStream {
     }
 }
 
-impl Stream for AggregatedRecordBatchStream {
+impl Stream for ChainedRecordBatchStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

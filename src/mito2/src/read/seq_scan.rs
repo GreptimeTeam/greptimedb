@@ -21,7 +21,7 @@ use std::time::Instant;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::util::AggregatedRecordBatchStream;
+use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::debug;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
@@ -47,7 +47,8 @@ use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
-/// The output order is always `order by primary keys, time index`.
+/// The output order is always `order by primary keys, time index` inside every
+/// [`PartitionRange`]. Each "partiton" may contains many [`PartitionRange`]s.
 pub struct SeqScan {
     /// Properties of the scanner.
     properties: ScannerProperties,
@@ -78,10 +79,10 @@ impl SeqScan {
     /// partitioned scan, use [`RegionScanner::scan_partition`].
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let streams = (0..self.properties.ranges.len())
-            .map(|partition| self.scan_partition(partition))
+            .map(|partition: usize| self.scan_partition(partition))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let aggr_stream = AggregatedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
+        let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
         Ok(Box::pin(aggr_stream))
     }
 
