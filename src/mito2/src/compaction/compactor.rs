@@ -53,7 +53,6 @@ use crate::sst::parquet::WriteOptions;
 #[derive(Clone)]
 pub struct CompactionRegion {
     pub region_id: RegionId,
-    pub region_dir: String,
     pub region_options: RegionOptions,
 
     pub(crate) engine_config: Arc<MitoConfig>,
@@ -164,11 +163,10 @@ pub async fn open_compaction_region(
     };
 
     Ok(CompactionRegion {
+        region_options: region_options.clone(),
         manifest_ctx,
         access_layer,
         current_version,
-        region_dir: req.region_dir.clone(),
-        region_options: region_options.clone(),
         region_id: req.region_id,
         cache_manager: Arc::new(CacheManager::default()),
         engine_config: Arc::new(mito_config.clone()),
