@@ -283,6 +283,7 @@ impl CompactionScheduler {
             cache_manager: cache_manager.clone(),
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
+            region_dir: access_layer.region_dir().to_string(),
         };
 
         let picker_output = {
