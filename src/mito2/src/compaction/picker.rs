@@ -16,7 +16,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use api::v1::region::compact_request;
-use serde::{Deserialize, Serialize};
 
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::twcs::TwcsPicker;
@@ -39,7 +38,7 @@ pub trait Picker: Debug + Send + Sync + 'static {
 
 /// PickerOutput is the output of a [`Picker`].
 /// It contains the outputs of the compaction and the expired SST files.
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug)]
 pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
