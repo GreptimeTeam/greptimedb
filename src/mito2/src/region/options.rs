@@ -68,6 +68,7 @@ pub struct RegionOptions {
     /// Memtable options.
     pub memtable: Option<MemtableOptions>,
     /// The mode to update duplicate rows.
+    /// Only takes effect when `append_mode` is `false`.
     pub update_mode: UpdateMode,
 }
 

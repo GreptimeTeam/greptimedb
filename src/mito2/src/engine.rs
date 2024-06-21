@@ -50,6 +50,8 @@ mod prune_test;
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
+#[cfg(test)]
+mod update_mode_test;
 
 use std::any::Any;
 use std::collections::HashMap;
