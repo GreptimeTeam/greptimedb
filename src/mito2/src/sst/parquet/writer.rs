@@ -163,6 +163,7 @@ where
             time_range,
             file_size,
             num_rows: stats.num_rows,
+            num_row_groups: parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(Arc::new(parquet_metadata)),
             inverted_index_available,
             index_file_size,

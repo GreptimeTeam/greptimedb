@@ -67,6 +67,8 @@ pub struct SstInfo {
     pub file_size: u64,
     /// Number of rows.
     pub num_rows: usize,
+    /// Number of row groups
+    pub num_row_groups: u64,
     /// File Meta Data
     pub file_metadata: Option<Arc<ParquetMetaData>>,
     /// Whether inverted index is available.
