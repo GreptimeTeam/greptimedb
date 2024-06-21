@@ -99,7 +99,7 @@ pub(crate) fn from_scalar_fn_to_df_fn_impl(
     Ok(phy_expr)
 }
 
-/// Return a [`Expression`](wrapped in a [`FunctionArgument`]) that references the i-th column of the input relation
+/// Return an [`Expression`](wrapped in a [`FunctionArgument`]) that references the i-th column of the input relation
 pub(crate) fn proto_col(i: usize) -> substrait_proto::proto::FunctionArgument {
     use substrait_proto::proto::expression;
     let expr = Expression {

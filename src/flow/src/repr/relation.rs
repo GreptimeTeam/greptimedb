@@ -98,7 +98,7 @@ pub struct RelationType {
     pub keys: Vec<Key>,
     /// optionally indicate the column that is TIME INDEX
     pub time_index: Option<usize>,
-    /// mark all the columns that are added automately by flow, but not present in original sql
+    /// mark all the columns that are added automatically by flow, but are not present in original sql
     pub auto_columns: Vec<usize>,
 }
 

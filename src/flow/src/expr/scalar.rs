@@ -155,7 +155,7 @@ pub enum ScalarExpr {
         exprs: Vec<ScalarExpr>,
     },
     CallDf {
-        /// invariant: the input args set insidet this [`DfScalarFunction`] is
+        /// invariant: the input args set inside this [`DfScalarFunction`] is
         /// always col(0) to col(n-1) where n is the length of `expr`
         df_scalar_fn: DfScalarFunction,
         exprs: Vec<ScalarExpr>,
