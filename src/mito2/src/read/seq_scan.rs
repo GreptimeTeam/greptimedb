@@ -78,7 +78,7 @@ impl SeqScan {
     /// The returned stream is not partitioned and will contains all the data. If want
     /// partitioned scan, use [`RegionScanner::scan_partition`].
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        let streams = (0..self.properties.ranges.len())
+        let streams = (0..self.properties.partitions.len())
             .map(|partition: usize| self.scan_partition(partition))
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -229,11 +229,11 @@ impl SeqScan {
         &self,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        if partition >= self.properties.ranges.len() {
+        if partition >= self.properties.partitions.len() {
             return Err(BoxedError::new(
                 PartitionOutOfRangeSnafu {
                     given: partition,
-                    all: self.properties.ranges.len(),
+                    all: self.properties.partitions.len(),
                 }
                 .build(),
             ));
@@ -245,7 +245,7 @@ impl SeqScan {
         };
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.semaphore.clone();
-        let partition_ranges = self.properties.ranges[partition].clone();
+        let partition_ranges = self.properties.partitions[partition].clone();
         let stream = try_stream! {
             for partition_range in partition_ranges {
                 let maybe_reader =
@@ -303,12 +303,12 @@ impl SeqScan {
         &self,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        let num_partitions = self.properties.ranges.len();
+        let num_partitions = self.properties.partitions.len();
         if partition >= num_partitions {
             return Err(BoxedError::new(
                 PartitionOutOfRangeSnafu {
                     given: partition,
-                    all: self.properties.ranges.len(),
+                    all: self.properties.partitions.len(),
                 }
                 .build(),
             ));
@@ -421,7 +421,7 @@ impl RegionScanner for SeqScan {
     }
 
     fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
-        self.properties.ranges = ranges;
+        self.properties.partitions = ranges;
         Ok(())
     }
 }

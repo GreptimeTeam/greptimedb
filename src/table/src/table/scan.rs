@@ -82,7 +82,7 @@ impl RegionScanExec {
     /// a single vector.
     pub fn get_partition_ranges(&self) -> Vec<PartitionRange> {
         let scanner = self.scanner.lock().unwrap();
-        let raw_ranges = &scanner.properties().ranges;
+        let raw_ranges = &scanner.properties().partitions;
 
         // collapse the ranges
         let mut ranges = Vec::with_capacity(raw_ranges.len());

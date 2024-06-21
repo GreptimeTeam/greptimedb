@@ -163,30 +163,30 @@ pub struct ScannerProperties {
     ///
     /// The first dim vector's length represents the output partition number. The second
     /// dim is ranges within one partition.
-    pub ranges: Vec<Vec<PartitionRange>>,
+    pub partitions: Vec<Vec<PartitionRange>>,
 }
 
 impl ScannerProperties {
-    /// Creates a new [ScannerProperties] with the given partitioning.
-    pub fn new(ranges: Vec<Vec<PartitionRange>>) -> Self {
-        Self { ranges }
+    /// Creates a new [`ScannerProperties`] with the given partitioning.
+    pub fn new(partitions: Vec<Vec<PartitionRange>>) -> Self {
+        Self { partitions }
     }
 
-    /// Creates a new [ScannerProperties] with the given number of partitions.
+    /// Creates a new [`ScannerProperties`] with the given number of partitions.
     pub fn new_with_partitions(partitions: usize) -> Self {
         Self {
-            ranges: vec![vec![]; partitions],
+            partitions: vec![vec![]; partitions],
         }
     }
 
     pub fn num_partitions(&self) -> usize {
-        self.ranges.len()
+        self.partitions.len()
     }
 }
 
 /// A scanner that provides a way to scan the region concurrently.
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
-/// You can use this trait to implement an [ExecutionPlan](datafusion_physical_plan::ExecutionPlan).
+/// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
@@ -194,9 +194,13 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the schema of the record batches.
     fn schema(&self) -> SchemaRef;
 
+    /// Prepares the scanner with the given partition ranges.
+    ///
+    /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
     fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError>;
 
     /// Scans the partition and returns a stream of record batches.
+    ///
     /// # Panics
     /// Panics if the `partition` is out of bound.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
