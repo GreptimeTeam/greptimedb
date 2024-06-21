@@ -10828,6 +10828,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-recordbatch",
+ "common-time",
  "common-wal",
  "datafusion-expr 38.0.0",
  "datafusion-physical-plan 38.0.0",
