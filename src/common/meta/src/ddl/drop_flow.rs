@@ -104,7 +104,6 @@ impl DropFlowProcedure {
         let mut drop_flow_tasks = Vec::with_capacity(flownode_ids.len());
 
         for flownode in flownode_ids.values() {
-            // TODO(weny): use the real peer.
             let peer = self
                 .context
                 .peer_lookup_service

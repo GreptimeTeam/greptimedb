@@ -75,14 +75,14 @@ pub async fn alive_datanodes(
 
 pub async fn lookup_alive_flownode_peer(
     cluster_id: ClusterId,
-    datanode_id: u64,
+    flownode_id: FlownodeId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
 ) -> Result<Option<Peer>> {
     let lease_filter = build_lease_filter(lease_secs);
     let lease_key = FlownodeLeaseKey {
         cluster_id,
-        node_id: datanode_id,
+        node_id: flownode_id,
     };
     let lease_key_bytes: Vec<u8> = lease_key.clone().try_into()?;
     let Some(kv) = meta_peer_client.get(&lease_key_bytes).await? else {

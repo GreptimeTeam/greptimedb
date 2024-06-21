@@ -42,6 +42,7 @@ use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
+use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_cluster_info_handler::{
@@ -69,7 +70,7 @@ use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublisherRef;
 use crate::selector::lease_based::LeaseBasedSelector;
-use crate::selector::round_robin::{FlowPeerAllocator, RoundRobinSelector};
+use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
@@ -241,7 +242,6 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
-        // TODO(weny): use the real allocator.
         let flow_metadata_allocator = {
             // for now flownode just use round robin selector
             let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);

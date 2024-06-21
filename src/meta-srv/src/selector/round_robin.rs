@@ -14,14 +14,12 @@
 
 use std::sync::atomic::AtomicUsize;
 
-use common_error::ext::BoxedError;
-use common_meta::ddl::flow_meta::PartitionPeerAllocator;
 use common_meta::peer::Peer;
-use snafu::{ensure, ResultExt};
+use snafu::ensure;
 
 use crate::error::{NoEnoughAvailableDatanodeSnafu, Result};
 use crate::lease;
-use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
+use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
@@ -124,35 +122,6 @@ impl Selector for RoundRobinSelector {
         }
 
         Ok(selected)
-    }
-}
-
-pub struct FlowPeerAllocator {
-    ctx: SelectorContext,
-    selector: SelectorRef,
-}
-
-impl FlowPeerAllocator {
-    pub fn new(ctx: SelectorContext, selector: SelectorRef) -> Self {
-        Self { ctx, selector }
-    }
-}
-
-#[async_trait::async_trait]
-impl PartitionPeerAllocator for FlowPeerAllocator {
-    async fn alloc(&self, partitions: usize) -> common_meta::error::Result<Vec<Peer>> {
-        self.selector
-            .select(
-                0, // TODO(discord9): cluster id set to 0 for now
-                &self.ctx,
-                SelectorOptions {
-                    min_required_items: partitions,
-                    allow_duplication: true,
-                },
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
     }
 }
 

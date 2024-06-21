@@ -20,6 +20,7 @@ use crate::error::Result;
 use crate::key::FlowId;
 use crate::peer::Peer;
 use crate::sequence::SequenceRef;
+use crate::ClusterId;
 
 /// The reference of [FlowMetadataAllocator].
 pub type FlowMetadataAllocatorRef = Arc<FlowMetadataAllocator>;
@@ -59,9 +60,16 @@ impl FlowMetadataAllocator {
     }
 
     /// Allocates the [FlowId] and [Peer]s.
-    pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
+    pub async fn create(
+        &self,
+        cluster_id: ClusterId,
+        partitions: usize,
+    ) -> Result<(FlowId, Vec<Peer>)> {
         let flow_id = self.allocate_flow_id().await?;
-        let peers = self.partition_peer_allocator.alloc(partitions).await?;
+        let peers = self
+            .partition_peer_allocator
+            .alloc(cluster_id, partitions)
+            .await?;
 
         Ok((flow_id, peers))
     }
@@ -71,7 +79,7 @@ impl FlowMetadataAllocator {
 #[async_trait]
 pub trait PartitionPeerAllocator: Send + Sync {
     /// Allocates [Peer] nodes for storing partitions.
-    async fn alloc(&self, partitions: usize) -> Result<Vec<Peer>>;
+    async fn alloc(&self, cluster_id: ClusterId, partitions: usize) -> Result<Vec<Peer>>;
 }
 
 /// [PartitionPeerAllocatorRef] allocates [Peer]s for partitions.
@@ -81,7 +89,7 @@ struct NoopPartitionPeerAllocator;
 
 #[async_trait]
 impl PartitionPeerAllocator for NoopPartitionPeerAllocator {
-    async fn alloc(&self, partitions: usize) -> Result<Vec<Peer>> {
+    async fn alloc(&self, _cluster_id: ClusterId, partitions: usize) -> Result<Vec<Peer>> {
         Ok(vec![Peer::default(); partitions])
     }
 }
