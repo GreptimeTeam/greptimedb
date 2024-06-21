@@ -39,8 +39,8 @@ pub struct HeartbeatTask {
     node_id: u64,
     server_addr: String,
     meta_client: Arc<MetaClient>,
-    report_interval: u64,
-    retry_interval: u64,
+    report_interval: Duration,
+    retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
 }
 
@@ -55,8 +55,8 @@ impl HeartbeatTask {
             node_id: opts.node_id.unwrap_or(0),
             server_addr: opts.grpc.addr.clone(),
             meta_client,
-            report_interval: heartbeat_opts.interval.as_millis() as u64,
-            retry_interval: heartbeat_opts.retry_interval.as_millis() as u64,
+            report_interval: heartbeat_opts.interval,
+            retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
         }
     }
@@ -88,7 +88,6 @@ impl HeartbeatTask {
     ) {
         let report_interval = self.report_interval;
         let self_peer = Some(Peer {
-            // The peer id doesn't make sense for frontend, so we just set it 0.
             id: self.node_id,
             addr: self.server_addr.clone(),
         });
@@ -96,7 +95,7 @@ impl HeartbeatTask {
         common_runtime::spawn_hb(async move {
             // note that using interval will cause it to first immediately send
             // a heartbeat
-            let mut interval = tokio::time::interval(Duration::from_millis(report_interval));
+            let mut interval = tokio::time::interval(report_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
             loop {
@@ -161,9 +160,7 @@ impl HeartbeatTask {
                     Ok(None) => break,
                     Err(e) => {
                         error!(e; "Occur error while reading heartbeat response");
-                        capture_self
-                            .start_with_retry(Duration::from_millis(retry_interval))
-                            .await;
+                        capture_self.start_with_retry(retry_interval).await;
 
                         break;
                     }

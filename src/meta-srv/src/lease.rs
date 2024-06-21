@@ -18,7 +18,7 @@ use std::hash::Hash;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackend;
 use common_meta::peer::{Peer, PeerLookupService};
-use common_meta::{util, ClusterId, DatanodeId, FlownodeId};
+use common_meta::{distributed_time_constants, util, ClusterId, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use snafu::ResultExt;
 
@@ -33,11 +33,14 @@ fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
     }
 }
 
+/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], if `lease_secs`` is `Some`, will only return if it's alive
 pub async fn lookup_datanode_peer(
     cluster_id: ClusterId,
-    datanode_id: u64,
+    datanode_id: DatanodeId,
     meta_peer_client: &MetaPeerClientRef,
+    lease_secs: Option<u64>,
 ) -> Result<Option<Peer>> {
+    let lease_filter = lease_secs.map(build_lease_filter);
     let lease_key = DatanodeLeaseKey {
         cluster_id,
         node_id: datanode_id,
@@ -47,13 +50,18 @@ pub async fn lookup_datanode_peer(
         return Ok(None);
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
-
-    Ok(Some(Peer {
-        id: lease_key.node_id,
-        addr: lease_value.node_addr,
-    }))
+    let is_alive = lease_filter.map(|f| f(&lease_value)).unwrap_or(true);
+    if is_alive {
+        Ok(Some(Peer {
+            id: lease_key.node_id,
+            addr: lease_value.node_addr,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
+/// Find all alive datanodes
 pub async fn alive_datanodes(
     cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
@@ -68,11 +76,14 @@ pub async fn alive_datanodes(
     .await
 }
 
+/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`]
 pub async fn lookup_flownode_peer(
     cluster_id: ClusterId,
     flownode_id: FlownodeId,
     meta_peer_client: &MetaPeerClientRef,
+    lease_secs: Option<u64>,
 ) -> Result<Option<Peer>> {
+    let lease_filter = lease_secs.map(build_lease_filter);
     let lease_key = FlownodeLeaseKey {
         cluster_id,
         node_id: flownode_id,
@@ -83,12 +94,18 @@ pub async fn lookup_flownode_peer(
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
 
-    Ok(Some(Peer {
-        id: lease_key.node_id,
-        addr: lease_value.node_addr,
-    }))
+    let is_alive = lease_filter.map(|f| f(&lease_value)).unwrap_or(true);
+    if is_alive {
+        Ok(Some(Peer {
+            id: lease_key.node_id,
+            addr: lease_value.node_addr,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
+/// Find all alive flownodes
 pub async fn alive_flownodes(
     cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
@@ -151,17 +168,22 @@ impl PeerLookupService for MetaPeerLookupService {
         cluster_id: ClusterId,
         id: DatanodeId,
     ) -> common_meta::error::Result<Option<Peer>> {
-        lookup_datanode_peer(cluster_id, id, &self.meta_peer_client)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
+        lookup_datanode_peer(
+            cluster_id,
+            id,
+            &self.meta_peer_client,
+            Some(distributed_time_constants::DATANODE_LEASE_SECS),
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu)
     }
     async fn flownode(
         &self,
         cluster_id: ClusterId,
         id: FlownodeId,
     ) -> common_meta::error::Result<Option<Peer>> {
-        lookup_flownode_peer(cluster_id, id, &self.meta_peer_client)
+        lookup_flownode_peer(cluster_id, id, &self.meta_peer_client, None)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)

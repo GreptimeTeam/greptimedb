@@ -29,7 +29,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBac
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
-use common_meta::ClusterId;
+use common_meta::{distributed_time_constants, ClusterId};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -484,7 +484,13 @@ impl Metasrv {
         cluster_id: ClusterId,
         peer_id: u64,
     ) -> Result<Option<Peer>> {
-        lookup_datanode_peer(cluster_id, peer_id, &self.meta_peer_client).await
+        lookup_datanode_peer(
+            cluster_id,
+            peer_id,
+            &self.meta_peer_client,
+            Some(distributed_time_constants::DATANODE_LEASE_SECS),
+        )
+        .await
     }
 
     pub fn options(&self) -> &MetasrvOptions {
