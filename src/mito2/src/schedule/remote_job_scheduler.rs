@@ -70,6 +70,7 @@ pub enum RemoteJob {
 pub struct CompactionJob {
     pub compaction_region: CompactionRegion,
     pub picker_output: PickerOutput,
+    pub start_time: Instant,
 }
 
 /// RemoteJobResult is the result of a remote job.

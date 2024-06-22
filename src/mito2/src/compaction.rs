@@ -287,6 +287,7 @@ impl CompactionScheduler {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
                     picker_output: picker_output.clone(),
+                    start_time,
                 };
 
                 let result = remote_job_scheduler
