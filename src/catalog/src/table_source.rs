@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use common_catalog::format_full_table_name;
-use common_query::logical_plan::SubstraitPlanDecoderRef;
+use common_query::logical_plan::{rename_logical_plan_columns, SubstraitPlanDecoderRef};
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{provider_as_source, TableProvider};
@@ -43,6 +43,7 @@ pub struct DfTableSourceProvider {
     default_catalog: String,
     default_schema: String,
     plan_decoder: SubstraitPlanDecoderRef,
+    enable_ident_normalization: bool,
 }
 
 impl DfTableSourceProvider {
@@ -51,6 +52,7 @@ impl DfTableSourceProvider {
         disallow_cross_catalog_query: bool,
         query_ctx: &QueryContext,
         plan_decoder: SubstraitPlanDecoderRef,
+        enable_ident_normalization: bool,
     ) -> Self {
         Self {
             catalog_manager,
@@ -59,6 +61,7 @@ impl DfTableSourceProvider {
             default_catalog: query_ctx.current_catalog().to_owned(),
             default_schema: query_ctx.current_schema(),
             plan_decoder,
+            enable_ident_normalization,
         }
     }
 
@@ -133,6 +136,29 @@ impl DfTableSourceProvider {
                     name: &table.table_info().name,
                 })?;
 
+            let columns: Vec<_> = view_info.columns.iter().map(|c| c.as_str()).collect();
+
+            let plan_columns: Vec<_> = logical_plan
+                .schema()
+                .columns()
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+
+            // We have to do `columns` projection here, because
+            // substrait doesn't include aliases neither for tables nor for columns:
+            // https://github.com/apache/datafusion/issues/10815#issuecomment-2158666881
+            let logical_plan = rename_logical_plan_columns(
+                self.enable_ident_normalization,
+                logical_plan,
+                plan_columns
+                    .iter()
+                    .map(|c| c.as_str())
+                    .zip(columns.into_iter())
+                    .collect(),
+            )
+            .context(DatafusionSnafu)?;
+
             Arc::new(
                 ViewTable::try_new(logical_plan, Some(view_info.definition.to_string()))
                     .context(DatafusionSnafu)?,
@@ -165,6 +191,7 @@ mod tests {
             true,
             query_ctx,
             DummyDecoder::arc(),
+            true,
         );
 
         let table_ref = TableReference::bare("table_name");
@@ -284,13 +311,14 @@ mod tests {
                 view_info.clone().into(),
                 logical_plan,
                 HashSet::new(),
+                vec!["id".to_string(), "name".to_string()],
                 "definition".to_string(),
             )
             .await
             .unwrap();
 
         let mut table_provider =
-            DfTableSourceProvider::new(catalog_manager, true, query_ctx, MockDecoder::arc());
+            DfTableSourceProvider::new(catalog_manager, true, query_ctx, MockDecoder::arc(), true);
 
         // View not found
         let table_ref = TableReference::bare("not_exists_view");
@@ -298,6 +326,12 @@ mod tests {
 
         let table_ref = TableReference::bare(view_info.name);
         let source = table_provider.resolve_table(table_ref).await.unwrap();
-        assert_eq!(*source.get_logical_plan().unwrap(), mock_plan());
+        assert_eq!(
+            r#"
+Projection: person.id AS id, person.name AS name
+  Filter: person.id > Int32(500)
+    TableScan: person"#,
+            format!("\n{:?}", source.get_logical_plan().unwrap())
+        );
     }
 }

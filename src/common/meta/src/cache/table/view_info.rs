@@ -119,6 +119,7 @@ mod tests {
                 task.view_info.clone(),
                 task.create_view.logical_plan.clone(),
                 table_names,
+                vec!["a".to_string()],
                 definition.to_string(),
             )
             .await

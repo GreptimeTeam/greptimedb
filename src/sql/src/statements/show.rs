@@ -187,6 +187,19 @@ impl Display for ShowCreateFlow {
     }
 }
 
+/// SQL structure for `SHOW CREATE VIEW`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowCreateView {
+    pub view_name: ObjectName,
+}
+
+impl Display for ShowCreateView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let view_name = &self.view_name;
+        write!(f, "SHOW CREATE VIEW {view_name}")
+    }
+}
+
 /// SQL structure for `SHOW VARIABLES xxx`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowVariables {

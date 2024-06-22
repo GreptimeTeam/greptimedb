@@ -2337,6 +2337,7 @@ mod test {
             false,
             QueryContext::arc().as_ref(),
             DummyDecoder::arc(),
+            true,
         )
     }
 
@@ -3176,6 +3177,7 @@ mod test {
                 false,
                 QueryContext::arc().as_ref(),
                 DummyDecoder::arc(),
+                true,
             ),
             EvalStmt {
                 expr: parser::parse("metrics{tag = \"1\"}").unwrap(),
@@ -3205,6 +3207,7 @@ mod test {
                 false,
                 QueryContext::arc().as_ref(),
                 DummyDecoder::arc(),
+                true,
             ),
             EvalStmt {
                 expr: parser::parse("avg_over_time(metrics{tag = \"1\"}[5s])").unwrap(),
