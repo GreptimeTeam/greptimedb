@@ -516,6 +516,7 @@ pub fn to_create_view_expr(
     stmt: CreateView,
     logical_plan: Vec<u8>,
     table_names: Vec<TableName>,
+    columns: Vec<String>,
     definition: String,
     query_ctx: QueryContextRef,
 ) -> Result<CreateViewExpr> {
@@ -531,6 +532,7 @@ pub fn to_create_view_expr(
         create_if_not_exists: stmt.if_not_exists,
         or_replace: stmt.or_replace,
         table_names,
+        columns,
         definition,
     };
 
@@ -819,11 +821,13 @@ mod tests {
 
         let logical_plan = vec![1, 2, 3];
         let table_names = new_test_table_names();
+        let columns = vec!["a".to_string()];
 
         let expr = to_create_view_expr(
             stmt,
             logical_plan.clone(),
             table_names.clone(),
+            columns.clone(),
             sql.to_string(),
             QueryContext::arc(),
         )
@@ -837,6 +841,7 @@ mod tests {
         assert_eq!(logical_plan, expr.logical_plan);
         assert_eq!(table_names, expr.table_names);
         assert_eq!(sql, expr.definition);
+        assert_eq!(columns, expr.columns);
     }
 
     #[test]
@@ -854,11 +859,13 @@ mod tests {
 
         let logical_plan = vec![1, 2, 3];
         let table_names = new_test_table_names();
+        let columns = vec!["a".to_string()];
 
         let expr = to_create_view_expr(
             stmt,
             logical_plan.clone(),
             table_names.clone(),
+            columns.clone(),
             sql.to_string(),
             QueryContext::arc(),
         )
@@ -872,5 +879,6 @@ mod tests {
         assert_eq!(logical_plan, expr.logical_plan);
         assert_eq!(table_names, expr.table_names);
         assert_eq!(sql, expr.definition);
+        assert_eq!(columns, expr.columns);
     }
 }

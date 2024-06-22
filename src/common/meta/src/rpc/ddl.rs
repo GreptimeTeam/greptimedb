@@ -336,6 +336,10 @@ impl CreateViewTask {
             .map(|t| t.clone().into())
             .collect()
     }
+
+    pub fn columns(&self) -> &Vec<String> {
+        &self.create_view.columns
+    }
 }
 
 impl TryFrom<PbCreateViewTask> for CreateViewTask {

@@ -197,6 +197,7 @@ impl CreateViewProcedure {
                 })?;
             let new_logical_plan = self.data.task.raw_logical_plan().clone();
             let table_names = self.data.task.table_names();
+            let columns = self.data.task.columns().clone();
             let new_view_definition = self.data.task.view_definition().to_string();
 
             manager
@@ -205,6 +206,7 @@ impl CreateViewProcedure {
                     &current_view_info,
                     new_logical_plan,
                     table_names,
+                    columns,
                     new_view_definition,
                 )
                 .await?;
@@ -217,6 +219,7 @@ impl CreateViewProcedure {
                     raw_view_info,
                     self.data.task.raw_logical_plan().clone(),
                     self.data.task.table_names(),
+                    self.data.task.columns().clone(),
                     self.data.task.view_definition().to_string(),
                 )
                 .await?;

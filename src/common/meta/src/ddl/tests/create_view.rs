@@ -69,6 +69,7 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
         create_if_not_exists: false,
         logical_plan: vec![1, 2, 3],
         table_names,
+        columns: vec!["a".to_string()],
         definition: "CREATE VIEW test AS SELECT * FROM numbers".to_string(),
     };
 
@@ -105,6 +106,7 @@ async fn test_on_prepare_view_exists_err() {
             task.view_info.clone(),
             task.create_view.logical_plan.clone(),
             test_table_names(),
+            vec!["a".to_string()],
             "the definition".to_string(),
         )
         .await
@@ -130,6 +132,7 @@ async fn test_on_prepare_with_create_if_view_exists() {
             task.view_info.clone(),
             task.create_view.logical_plan.clone(),
             test_table_names(),
+            vec!["a".to_string()],
             "the definition".to_string(),
         )
         .await

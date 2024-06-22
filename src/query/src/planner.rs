@@ -73,6 +73,10 @@ impl DfLogicalPlanner {
                 self.session_state.clone(),
                 &query_ctx,
             )?),
+            self.session_state
+                .config_options()
+                .sql_parser
+                .enable_ident_normalization,
         );
 
         let context_provider = DfContextProviderAdapter::try_new(
@@ -148,6 +152,10 @@ impl DfLogicalPlanner {
                 self.session_state.clone(),
                 &query_ctx,
             )?),
+            self.session_state
+                .config_options()
+                .sql_parser
+                .enable_ident_normalization,
         );
         PromPlanner::stmt_to_plan(table_provider, stmt, &self.session_state)
             .await

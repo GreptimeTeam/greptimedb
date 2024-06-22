@@ -21,8 +21,8 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowDatabases, ShowIndex, ShowKind, ShowStatus,
-    ShowTables, ShowVariables,
+    ShowColumns, ShowCreateFlow, ShowCreateTable, ShowCreateView, ShowDatabases, ShowIndex,
+    ShowKind, ShowStatus, ShowTables, ShowVariables,
 };
 use crate::statements::statement::Statement;
 
@@ -66,6 +66,8 @@ impl<'a> ParserContext<'a> {
                 self.parse_show_create_table()
             } else if self.consume_token("FLOW") {
                 self.parse_show_create_flow()
+            } else if self.consume_token("VIEW") {
+                self.parse_show_create_view()
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
@@ -131,6 +133,24 @@ impl<'a> ParserContext<'a> {
             }
         );
         Ok(Statement::ShowCreateFlow(ShowCreateFlow { flow_name }))
+    }
+
+    fn parse_show_create_view(&mut self) -> Result<Statement> {
+        let raw_view_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a view name",
+                actual: self.peek_token_as_string(),
+            })?;
+        let view_name = Self::canonicalize_object_name(raw_view_name);
+        ensure!(
+            !view_name.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: view_name.to_string(),
+            }
+        );
+        Ok(Statement::ShowCreateView(ShowCreateView { view_name }))
     }
 
     fn parse_show_table_name(&mut self) -> Result<String> {
@@ -834,5 +854,21 @@ mod tests {
             result.unwrap()[0],
             Statement::ShowCharset(ShowKind::Like(_))
         ));
+    }
+
+    #[test]
+    pub fn test_show_create_view() {
+        let sql = "SHOW CREATE VIEW test";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowCreateView(ShowCreateView {
+                view_name: ObjectName(vec![Ident::new("test")]),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
     }
 }

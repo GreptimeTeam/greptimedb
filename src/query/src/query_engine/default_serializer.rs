@@ -110,12 +110,16 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         catalog_list: Arc<dyn CatalogProviderList>,
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
+        println!("{:?}", message);
+
         // The session_state already has the `DefaultSerialzier` as `SerializerRegistry`.
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, catalog_list.clone(), self.session_state.clone())
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;
+
+        println!("{:?}", logical_plan);
 
         if optimize {
             self.session_state
