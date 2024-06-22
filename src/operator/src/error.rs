@@ -148,8 +148,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Expect {expected} columns for view, but actual: {actual}"))]
+    #[snafu(display("Expect {expected} columns for view {view_name}, but found {actual}"))]
     ViewColumnsMismatch {
+        view_name: String,
         expected: usize,
         actual: usize,
         #[snafu(implicit)]

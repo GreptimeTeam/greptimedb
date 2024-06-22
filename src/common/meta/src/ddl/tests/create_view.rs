@@ -245,6 +245,8 @@ async fn test_replace_view_metadata() {
 
     assert_eq!(current_view_info.view_info, vec![4, 5, 6]);
     assert_eq!(current_view_info.definition, "new_definition");
+    assert_eq!(current_view_info.columns, vec!["a".to_string()]);
+    assert_eq!(current_view_info.plan_columns, vec!["number".to_string()]);
 }
 
 #[tokio::test]

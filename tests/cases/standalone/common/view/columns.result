@@ -16,7 +16,7 @@ Affected Rows: 10
 
 CREATE VIEW IF NOT EXISTS v1 (a) AS SELECT * FROM t1;
 
-Error: 1004(InvalidArguments), Expect 2 columns for view, but actual: 1
+Error: 1004(InvalidArguments), Expect 2 columns for view v1, but found 1
 
 CREATE VIEW IF NOT EXISTS v1 (a) AS SELECT n FROM t1;
 

@@ -82,15 +82,15 @@ impl<'a> MetaKey<'a, ViewInfoKey> for ViewInfoKey {
 /// The VIEW info value that keeps the metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewInfoValue {
-    /// The encoded logical plan
+    // The encoded logical plan
     pub view_info: RawViewLogicalPlan,
-    /// The resolved fully table names in logical plan
+    // The resolved fully table names in logical plan
     pub table_names: HashSet<TableName>,
-    /// The view columns
+    // The view columns
     pub columns: Vec<String>,
-    /// The plan columns
+    // The original plan columns
     pub plan_columns: Vec<String>,
-    /// The SQL to create the view
+    // The SQL to create the view
     pub definition: String,
     version: u64,
 }
