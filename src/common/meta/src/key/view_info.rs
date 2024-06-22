@@ -88,6 +88,8 @@ pub struct ViewInfoValue {
     pub table_names: HashSet<TableName>,
     /// The view columns
     pub columns: Vec<String>,
+    /// The plan columns
+    pub plan_columns: Vec<String>,
     /// The SQL to create the view
     pub definition: String,
     version: u64,
@@ -98,12 +100,14 @@ impl ViewInfoValue {
         view_info: RawViewLogicalPlan,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
+        plan_columns: Vec<String>,
         definition: String,
     ) -> Self {
         Self {
             view_info,
             table_names,
             columns,
+            plan_columns,
             definition,
             version: 0,
         }
@@ -114,12 +118,14 @@ impl ViewInfoValue {
         new_view_info: RawViewLogicalPlan,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
+        plan_columns: Vec<String>,
         definition: String,
     ) -> Self {
         Self {
             view_info: new_view_info,
             table_names,
             columns,
+            plan_columns,
             definition,
             version: self.version + 1,
         }
@@ -302,6 +308,7 @@ mod tests {
             version: 1,
             table_names,
             columns: vec!["a".to_string()],
+            plan_columns: vec!["number".to_string()],
             definition: "CREATE VIEW test AS SELECT * FROM numbers".to_string(),
         };
         let serialized = value.try_as_raw_value().unwrap();

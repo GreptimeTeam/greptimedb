@@ -22,16 +22,19 @@ use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::logical_expr::TableSource;
+use itertools::Itertools;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 mod dummy_catalog;
 use dummy_catalog::DummyCatalogList;
+use table::TableRef;
 
 use crate::error::{
-    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, QueryAccessDeniedSnafu,
-    Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
+    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
+    QueryAccessDeniedSnafu, Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
+    ViewPlanColumnsChangedSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::CatalogManagerRef;
@@ -111,58 +114,7 @@ impl DfTableSourceProvider {
             })?;
 
         let provider: Arc<dyn TableProvider> = if table.table_info().table_type == TableType::View {
-            let catalog_manager = self
-                .catalog_manager
-                .as_any()
-                .downcast_ref::<KvBackendCatalogManager>()
-                .context(CastManagerSnafu)?;
-
-            let view_info = catalog_manager
-                .view_info_cache()?
-                .get(table.table_info().ident.table_id)
-                .await
-                .context(GetViewCacheSnafu)?
-                .context(ViewInfoNotFoundSnafu {
-                    name: &table.table_info().name,
-                })?;
-
-            // Build the catalog list provider for deserialization.
-            let catalog_list = Arc::new(DummyCatalogList::new(self.catalog_manager.clone()));
-            let logical_plan = self
-                .plan_decoder
-                .decode(Bytes::from(view_info.view_info.clone()), catalog_list, true)
-                .await
-                .context(DecodePlanSnafu {
-                    name: &table.table_info().name,
-                })?;
-
-            let columns: Vec<_> = view_info.columns.iter().map(|c| c.as_str()).collect();
-
-            let plan_columns: Vec<_> = logical_plan
-                .schema()
-                .columns()
-                .into_iter()
-                .map(|c| c.name)
-                .collect();
-
-            // We have to do `columns` projection here, because
-            // substrait doesn't include aliases neither for tables nor for columns:
-            // https://github.com/apache/datafusion/issues/10815#issuecomment-2158666881
-            let logical_plan = rename_logical_plan_columns(
-                self.enable_ident_normalization,
-                logical_plan,
-                plan_columns
-                    .iter()
-                    .map(|c| c.as_str())
-                    .zip(columns.into_iter())
-                    .collect(),
-            )
-            .context(DatafusionSnafu)?;
-
-            Arc::new(
-                ViewTable::try_new(logical_plan, Some(view_info.definition.to_string()))
-                    .context(DatafusionSnafu)?,
-            )
+            self.create_view_provider(&table).await?
         } else {
             Arc::new(DfTableProviderAdapter::new(table))
         };
@@ -171,6 +123,80 @@ impl DfTableSourceProvider {
 
         let _ = self.resolved_tables.insert(resolved_name, source.clone());
         Ok(source)
+    }
+
+    async fn create_view_provider(&self, table: &TableRef) -> Result<Arc<dyn TableProvider>> {
+        let catalog_manager = self
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()
+            .context(CastManagerSnafu)?;
+
+        let view_info = catalog_manager
+            .view_info_cache()?
+            .get(table.table_info().ident.table_id)
+            .await
+            .context(GetViewCacheSnafu)?
+            .context(ViewInfoNotFoundSnafu {
+                name: &table.table_info().name,
+            })?;
+
+        // Build the catalog list provider for deserialization.
+        let catalog_list = Arc::new(DummyCatalogList::new(self.catalog_manager.clone()));
+        let logical_plan = self
+            .plan_decoder
+            .decode(Bytes::from(view_info.view_info.clone()), catalog_list, true)
+            .await
+            .context(DecodePlanSnafu {
+                name: &table.table_info().name,
+            })?;
+
+        let columns: Vec<_> = view_info.columns.iter().map(|c| c.as_str()).collect();
+
+        let origin_plan_columns: Vec<_> =
+            view_info.plan_columns.iter().map(|c| c.as_str()).collect();
+
+        let plan_columns: Vec<_> = logical_plan
+            .schema()
+            .columns()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+
+        // Only check columns number, because substrait doesn't include aliases currently.
+        // See https://github.com/apache/datafusion/issues/10815#issuecomment-2158666881
+        // and https://github.com/apache/datafusion/issues/6489
+        // TODO(dennis): check column names
+        ensure!(
+            origin_plan_columns.len() == plan_columns.len(),
+            ViewPlanColumnsChangedSnafu {
+                origin_names: origin_plan_columns.iter().join(","),
+                actual_names: plan_columns.iter().join(","),
+            }
+        );
+
+        // We have to do `columns` projection here, because
+        // substrait doesn't include aliases neither for tables nor for columns:
+        // https://github.com/apache/datafusion/issues/10815#issuecomment-2158666881
+        let logical_plan = if !columns.is_empty() {
+            rename_logical_plan_columns(
+                self.enable_ident_normalization,
+                logical_plan,
+                plan_columns
+                    .iter()
+                    .map(|c| c.as_str())
+                    .zip(columns.into_iter())
+                    .collect(),
+            )
+            .context(ProjectViewColumnsSnafu)?
+        } else {
+            logical_plan
+        };
+
+        Ok(Arc::new(
+            ViewTable::try_new(logical_plan, Some(view_info.definition.to_string()))
+                .context(DatafusionSnafu)?,
+        ))
     }
 }
 
@@ -311,6 +337,7 @@ mod tests {
                 view_info.clone().into(),
                 logical_plan,
                 HashSet::new(),
+                vec!["a".to_string(), "b".to_string()],
                 vec!["id".to_string(), "name".to_string()],
                 "definition".to_string(),
             )
@@ -328,7 +355,7 @@ mod tests {
         let source = table_provider.resolve_table(table_ref).await.unwrap();
         assert_eq!(
             r#"
-Projection: person.id AS id, person.name AS name
+Projection: person.id AS a, person.name AS b
   Filter: person.id > Int32(500)
     TableScan: person"#,
             format!("\n{:?}", source.get_logical_plan().unwrap())

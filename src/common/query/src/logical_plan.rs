@@ -22,7 +22,7 @@ use std::sync::Arc;
 use datafusion::catalog::CatalogProviderList;
 use datafusion::error::Result as DatafusionResult;
 use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder};
-use datafusion_common::{Column, DataFusionError, SchemaError};
+use datafusion_common::Column;
 use datafusion_expr::col;
 use datatypes::prelude::ConcreteDataType;
 pub use expr::build_filter_from_timestamp;
@@ -74,7 +74,7 @@ pub fn create_aggregate_function(
     )
 }
 
-/// Rename columns by applying a new projection. This is a no-op if the column to be
+/// Rename columns by applying a new projection. Returns an error if the column to be
 /// renamed does not exist. The `renames` parameter is a `Vector` with elements
 /// in the form of `(old_name, new_name)`.
 pub fn rename_logical_plan_columns(
@@ -94,8 +94,6 @@ pub fn rename_logical_plan_columns(
         let (qualifier_rename, field_rename) =
             match plan.schema().qualified_field_from_column(&old_column) {
                 Ok(qualifier_and_field) => qualifier_and_field,
-                // no-op if field not found
-                Err(DataFusionError::SchemaError(SchemaError::FieldNotFound { .. }, _)) => continue,
                 Err(err) => return Err(err),
             };
 

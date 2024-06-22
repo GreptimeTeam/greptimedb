@@ -114,6 +114,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "View plan columns changed from: {} to: {}",
+        origin_names,
+        actual_names
+    ))]
+    ViewPlanColumnsChanged {
+        origin_names: String,
+        actual_names: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table partitions"))]
     FindPartitions { source: partition::error::Error },
 
@@ -173,6 +185,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to project view columns"))]
+    ProjectViewColumns {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
@@ -208,6 +228,21 @@ pub enum Error {
     },
 }
 
+impl Error {
+    pub fn should_fail(&self) -> bool {
+        use Error::*;
+
+        matches!(
+            self,
+            GetViewCache { .. }
+                | ViewInfoNotFound { .. }
+                | DecodePlan { .. }
+                | ViewPlanColumnsChanged { .. }
+                | ProjectViewColumns { .. }
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
@@ -218,6 +253,7 @@ impl ErrorExt for Error {
             | Error::FindPartitions { .. }
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
+            | Error::ViewPlanColumnsChanged { .. }
             | Error::CastManager { .. } => StatusCode::Unexpected,
 
             Error::ViewInfoNotFound { .. } => StatusCode::TableNotFound,
@@ -245,7 +281,9 @@ impl ErrorExt for Error {
             }
 
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
-            Error::Datafusion { .. } => StatusCode::EngineExecuteQuery,
+            Error::ProjectViewColumns { .. } | Error::Datafusion { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
