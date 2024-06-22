@@ -153,7 +153,7 @@ impl DfTableSourceProvider {
 
         let columns: Vec<_> = view_info.columns.iter().map(|c| c.as_str()).collect();
 
-        let origin_plan_columns: Vec<_> =
+        let original_plan_columns: Vec<_> =
             view_info.plan_columns.iter().map(|c| c.as_str()).collect();
 
         let plan_columns: Vec<_> = logical_plan
@@ -168,9 +168,9 @@ impl DfTableSourceProvider {
         // and https://github.com/apache/datafusion/issues/6489
         // TODO(dennis): check column names
         ensure!(
-            origin_plan_columns.len() == plan_columns.len(),
+            original_plan_columns.len() == plan_columns.len(),
             ViewPlanColumnsChangedSnafu {
-                origin_names: origin_plan_columns.iter().join(","),
+                origin_names: original_plan_columns.iter().join(","),
                 actual_names: plan_columns.iter().join(","),
             }
         );

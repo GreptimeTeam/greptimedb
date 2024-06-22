@@ -430,7 +430,7 @@ impl StatementExecutor {
             );
         }
 
-        // Extract the table names from the origin plan
+        // Extract the table names from the original plan
         // and rewrite them as fully qualified names.
         let (table_names, plan) =
             extract_and_rewrite_full_table_names(logical_plan.unwrap_df_plan(), ctx.clone())
