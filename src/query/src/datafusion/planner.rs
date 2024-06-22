@@ -95,10 +95,18 @@ async fn resolve_tables(
 
         if let Entry::Vacant(v) = tables.entry(resolved_name.to_string()) {
             // Try our best to resolve the tables here, but we don't return an error if table is not found,
-            // because the table name may be a temporary name of CTE or view, they can't be found until plan
+            // because the table name may be a temporary name of CTE, they can't be found until plan
             // execution.
-            if let Ok(table) = table_provider.resolve_table(table_name).await {
-                let _ = v.insert(table);
+            match table_provider.resolve_table(table_name).await {
+                Ok(table) => {
+                    let _ = v.insert(table);
+                }
+                Err(e) if e.should_fail() => {
+                    return Err(e).context(CatalogSnafu);
+                }
+                _ => {
+                    // ignore
+                }
             }
         }
     }

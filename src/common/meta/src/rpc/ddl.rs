@@ -340,6 +340,10 @@ impl CreateViewTask {
     pub fn columns(&self) -> &Vec<String> {
         &self.create_view.columns
     }
+
+    pub fn plan_columns(&self) -> &Vec<String> {
+        &self.create_view.plan_columns
+    }
 }
 
 impl TryFrom<PbCreateViewTask> for CreateViewTask {

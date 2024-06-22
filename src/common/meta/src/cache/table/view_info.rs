@@ -63,8 +63,8 @@ fn invalidator<'a>(
     ident: &'a CacheIdent,
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableId(table_id) = ident {
-            cache.invalidate(table_id).await
+        if let CacheIdent::TableId(view_id) = ident {
+            cache.invalidate(view_id).await
         }
         Ok(())
     })
@@ -120,6 +120,7 @@ mod tests {
                 task.create_view.logical_plan.clone(),
                 table_names,
                 vec!["a".to_string()],
+                vec!["number".to_string()],
                 definition.to_string(),
             )
             .await

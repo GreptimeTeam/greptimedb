@@ -397,7 +397,8 @@ impl StatementExecutor {
         //Save the definition for `show create view`.
         let definition = create_view.to_string();
 
-        // Validate columns
+        // Save the columns in plan, it may changed when the schemas of tables in plan
+        // are altered.
         let plan_columns: Vec<_> = logical_plan
             .schema()
             .context(error::GetSchemaSnafu)?
@@ -412,7 +413,8 @@ impl StatementExecutor {
             .map(|ident| ident.to_string())
             .collect();
 
-        let columns = if !columns.is_empty() {
+        // Validate columns
+        if !columns.is_empty() {
             ensure!(
                 columns.len() == plan_columns.len(),
                 error::ViewColumnsMismatchSnafu {
@@ -420,12 +422,7 @@ impl StatementExecutor {
                     actual: columns.len(),
                 }
             );
-            columns
-        } else {
-            // Save the columns in plan, it may changed when the schemas of tables in plan
-            // are altered.
-            plan_columns
-        };
+        }
 
         // Extract the table names from the origin plan
         // and rewrite them as fully qualified names.
@@ -450,6 +447,7 @@ impl StatementExecutor {
             encoded_plan.to_vec(),
             table_names,
             columns,
+            plan_columns,
             definition,
             ctx.clone(),
         )?;
@@ -567,6 +565,12 @@ impl StatementExecutor {
             })?;
         info!("Successfully created view '{view_name}' with view id {view_id}");
 
+        view_info.ident.table_id = view_id;
+
+        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
+
+        let table = DistTable::table(view_info);
+
         // Invalidates local cache ASAP.
         self.cache_invalidator
             .invalidate(
@@ -578,12 +582,6 @@ impl StatementExecutor {
             )
             .await
             .context(error::InvalidateTableCacheSnafu)?;
-
-        view_info.ident.table_id = view_id;
-
-        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
-
-        let table = DistTable::table(view_info);
 
         Ok(table)
     }

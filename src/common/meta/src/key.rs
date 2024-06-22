@@ -489,6 +489,7 @@ impl TableMetadataManager {
         raw_logical_plan: Vec<u8>,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
+        plan_columns: Vec<String>,
         definition: String,
     ) -> Result<()> {
         let view_id = view_info.ident.table_id;
@@ -511,8 +512,13 @@ impl TableMetadataManager {
             .build_create_txn(view_id, &table_info_value)?;
 
         // Creates view info
-        let view_info_value =
-            ViewInfoValue::new(raw_logical_plan, table_names, columns, definition);
+        let view_info_value = ViewInfoValue::new(
+            raw_logical_plan,
+            table_names,
+            columns,
+            plan_columns,
+            definition,
+        );
         let (create_view_info_txn, on_create_view_info_failure) = self
             .view_info_manager()
             .build_create_txn(view_id, &view_info_value)?;
@@ -925,6 +931,7 @@ impl TableMetadataManager {
     }
 
     /// Updates view info and returns an error if different metadata exists.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_view_info(
         &self,
         view_id: TableId,
@@ -932,10 +939,16 @@ impl TableMetadataManager {
         new_view_info: Vec<u8>,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
+        plan_columns: Vec<String>,
         definition: String,
     ) -> Result<()> {
-        let new_view_info_value =
-            current_view_info_value.update(new_view_info, table_names, columns, definition);
+        let new_view_info_value = current_view_info_value.update(
+            new_view_info,
+            table_names,
+            columns,
+            plan_columns,
+            definition,
+        );
 
         // Updates view info.
         let (update_view_info_txn, on_update_view_info_failure) = self
@@ -2007,6 +2020,7 @@ mod tests {
 
         let logical_plan: Vec<u8> = vec![1, 2, 3];
         let columns = vec!["a".to_string()];
+        let plan_columns = vec!["number".to_string()];
         let table_names = new_test_table_names();
         let definition = "CREATE VIEW test AS SELECT * FROM numbers";
 
@@ -2017,6 +2031,7 @@ mod tests {
                 logical_plan.clone(),
                 table_names.clone(),
                 columns.clone(),
+                plan_columns.clone(),
                 definition.to_string(),
             )
             .await
@@ -2035,6 +2050,7 @@ mod tests {
             assert_eq!(current_view_info.table_names, table_names);
             assert_eq!(current_view_info.definition, definition);
             assert_eq!(current_view_info.columns, columns);
+            assert_eq!(current_view_info.plan_columns, plan_columns);
             // assert table info
             let current_table_info = table_metadata_manager
                 .table_info_manager()
@@ -2062,12 +2078,14 @@ mod tests {
             set
         };
         let new_columns = vec!["b".to_string()];
+        let new_plan_columns = vec!["number2".to_string()];
         let new_definition = "CREATE VIEW test AS SELECT * FROM b_table join c_table";
 
         let current_view_info_value = DeserializedValueWithBytes::from_inner(ViewInfoValue::new(
             logical_plan.clone(),
             table_names,
             columns,
+            plan_columns,
             definition.to_string(),
         ));
         // should be ok.
@@ -2078,6 +2096,7 @@ mod tests {
                 new_logical_plan.clone(),
                 new_table_names.clone(),
                 new_columns.clone(),
+                new_plan_columns.clone(),
                 new_definition.to_string(),
             )
             .await
@@ -2090,6 +2109,7 @@ mod tests {
                 new_logical_plan.clone(),
                 new_table_names.clone(),
                 new_columns.clone(),
+                new_plan_columns.clone(),
                 new_definition.to_string(),
             )
             .await
@@ -2107,6 +2127,7 @@ mod tests {
         assert_eq!(updated_view_info.table_names, new_table_names);
         assert_eq!(updated_view_info.definition, new_definition);
         assert_eq!(updated_view_info.columns, new_columns);
+        assert_eq!(updated_view_info.plan_columns, new_plan_columns);
 
         let wrong_view_info = logical_plan.clone();
         let wrong_definition = "wrong_definition";
@@ -2115,6 +2136,7 @@ mod tests {
                 wrong_view_info,
                 new_table_names.clone(),
                 new_columns.clone(),
+                new_plan_columns.clone(),
                 wrong_definition.to_string(),
             ));
         // if the current_view_info_value is wrong, it should return an error.
@@ -2125,7 +2147,8 @@ mod tests {
                 &wrong_view_info_value,
                 new_logical_plan.clone(),
                 new_table_names.clone(),
-                new_columns.clone(),
+                vec!["c".to_string()],
+                vec!["number3".to_string()],
                 wrong_definition.to_string(),
             )
             .await
@@ -2143,5 +2166,6 @@ mod tests {
         assert_eq!(current_view_info.table_names, new_table_names);
         assert_eq!(current_view_info.definition, new_definition);
         assert_eq!(current_view_info.columns, new_columns);
+        assert_eq!(current_view_info.plan_columns, new_plan_columns);
     }
 }
