@@ -137,6 +137,8 @@ mod tests {
                 .collect::<HashSet<_>>()
         );
         assert_eq!(view_info.definition, task.create_view.definition);
+        assert_eq!(view_info.columns, task.create_view.columns);
+        assert_eq!(view_info.plan_columns, task.create_view.plan_columns);
 
         assert!(cache.contains_key(&1024));
         cache

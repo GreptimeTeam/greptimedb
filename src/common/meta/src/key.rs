@@ -487,6 +487,13 @@ impl TableMetadataManager {
 
     /// Creates metadata for view and returns an error if different metadata exists.
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
+    /// Parameters include:
+    /// - `view_info`: the encoded logical plan
+    /// - `table_names`: the resolved fully table names in logical plan
+    /// - `columns`: the view columns
+    /// - `plan_columns`: the original plan columns
+    /// - `definition`: The SQL to create the view
+    ///
     pub async fn create_view_metadata(
         &self,
         view_info: RawTableInfo,
@@ -935,6 +942,15 @@ impl TableMetadataManager {
     }
 
     /// Updates view info and returns an error if different metadata exists.
+    /// Parameters include:
+    /// - `view_id`: the view id
+    /// - `current_view_info_value`: the current view info for CAS checking
+    /// - `new_view_info`: the encoded logical plan
+    /// - `table_names`: the resolved fully table names in logical plan
+    /// - `columns`: the view columns
+    /// - `plan_columns`: the original plan columns
+    /// - `definition`: The SQL to create the view
+    ///
     #[allow(clippy::too_many_arguments)]
     pub async fn update_view_info(
         &self,

@@ -424,6 +424,7 @@ impl StatementExecutor {
             ensure!(
                 columns.len() == plan_columns.len(),
                 error::ViewColumnsMismatchSnafu {
+                    view_name: create_view.name.to_string(),
                     expected: plan_columns.len(),
                     actual: columns.len(),
                 }
