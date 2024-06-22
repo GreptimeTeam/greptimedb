@@ -2,7 +2,7 @@
 
 Thanks a lot for considering contributing to GreptimeDB. We believe people like you would make GreptimeDB a great product. We intend to build a community where individuals can have open talks, show respect for one another, and speak with true ❤️. Meanwhile, we are to keep transparency and make your effort count here.
 
-You can find our contributors at https://github.com/GreptimeTeam/greptimedb/graphs/contributors. When you dedicate to GreptimeDB for a few months and keep bringing high quality contributions (code, docs, advocate, etc.), you will be a candidate of a committer.
+You can find our contributors at https://github.com/GreptimeTeam/greptimedb/graphs/contributors. When you dedicate to GreptimeDB for a few months and keep bringing high-quality contributions (code, docs, advocate, etc.), you will be a candidate of a committer.
 
 A committer will be granted both read & write access to GreptimeDB repos. Here is a list of current committers except GreptimeDB team members:
 
