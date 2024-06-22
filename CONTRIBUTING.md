@@ -9,7 +9,7 @@ A committer will be granted both read & write access to GreptimeDB repos. Here i
 * [Eugene Tolbakov](https://github.com/etolbakov): PromQL support, SQL engine, InfluxDB APIs, and more.
 * [@NiwakaDev](https://github.com/NiwakaDev): SQL engine and storage layer.
 
-Please read the guidelines, and they can help you get started. Communicate with respect to developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
+Please read the guidelines, and they can help you get started. Communicate respectfully with the developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
 
 Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get the whole picture of the project. To learn about the design of GreptimeDB, please refer to the [design docs](https://github.com/GrepTimeTeam/docs).
 
