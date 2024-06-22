@@ -68,8 +68,8 @@ impl Scanner {
     /// Returns a [RegionScanner] to scan the region.
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
-            Scanner::Seq(seq_scan) => Ok(Arc::new(seq_scan)),
-            Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
+            Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
+            Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),
         }
     }
 }

@@ -110,7 +110,7 @@ impl TableProvider for DfTableProviderAdapter {
                 .collect::<Vec<_>>()
         });
 
-        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        let scanner = Box::new(SinglePartitionScanner::new(stream));
         let mut plan = RegionScanExec::new(scanner);
         if let Some(sort_expr) = sort_expr {
             plan = plan.with_output_ordering(sort_expr);

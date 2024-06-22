@@ -32,14 +32,11 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
-use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse, SinglePartitionScanner,
-};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScannerRef, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -174,9 +171,7 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        let stream = self.handle_query(region_id, request).await?;
-        let scanner = Arc::new(SinglePartitionScanner::new(stream));
-        Ok(scanner)
+        self.handle_query(region_id, request).await
     }
 
     /// Retrieves region's metadata.
@@ -269,11 +264,22 @@ impl MetricEngine {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
+    ) -> Result<RegionScannerRef, BoxedError> {
         self.inner
             .read_region(region_id, request)
             .await
             .map_err(BoxedError::new)
+    }
+}
+
+#[cfg(test)]
+impl MetricEngine {
+    pub async fn scan_to_stream(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
+        self.inner.scan_to_stream(region_id, request).await
     }
 }
 
