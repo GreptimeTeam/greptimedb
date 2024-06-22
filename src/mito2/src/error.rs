@@ -746,11 +746,11 @@ pub enum Error {
         source: Arc<Error>,
     },
 
-    #[snafu(display("Internal error occurred in remote job scheduler"))]
+    #[snafu(display("Internal error occurred in remote job scheduler: {}", reason))]
     RemoteJobScheduler {
         #[snafu(implicit)]
         location: Location,
-        source: BoxedError,
+        reason: String,
     },
 }
 
