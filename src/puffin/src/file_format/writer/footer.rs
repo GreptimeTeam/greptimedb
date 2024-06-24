@@ -81,6 +81,8 @@ impl FooterWriter {
         let mut flags = Flags::DEFAULT;
         if self.lz4_compressed {
             flags |= Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4;
+        } else {
+            flags &= !Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4;
         }
 
         buf.extend_from_slice(&flags.bits().to_le_bytes());
@@ -96,12 +98,7 @@ impl FooterWriter {
         if self.lz4_compressed {
             let mut buf = vec![];
             let mut encoder = lz4_flex::frame::FrameEncoder::new(&mut buf);
-
-            let serialized = serde_json::to_vec(&file_metadata).context(SerializeJsonSnafu)?;
-            encoder
-                .write_all(&serialized)
-                .context(Lz4CompressionSnafu)?;
-
+            serde_json::to_writer(&mut encoder, &file_metadata).context(SerializeJsonSnafu)?;
             encoder.flush().context(Lz4CompressionSnafu)?;
             Ok(buf)
         } else {
