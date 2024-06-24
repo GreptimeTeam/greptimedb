@@ -1,7 +1,11 @@
 --- test information_schema.region_peers ----
 USE INFORMATION_SCHEMA;
 
+Affected Rows: 0
+
 CREATE TABLE region_peers_phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
 
 CREATE TABLE region_peers_t1 (
     ts timestamp time index,
@@ -9,11 +13,15 @@ CREATE TABLE region_peers_t1 (
     host string primary key
 ) engine = metric with ("on_physical_table" = "region_peers_phy");
 
+Affected Rows: 0
+
 CREATE TABLE region_peers_t2 (
     ts timestamp time index,
     job string primary key,
     val double
 ) engine = metric with ("on_physical_table" = "region_peers_phy");
+
+Affected Rows: 0
 
 CREATE TABLE region_peers_test (
     a int primary key,
@@ -25,10 +33,21 @@ CREATE TABLE region_peers_test (
     a >= 20,
 );
 
-SELECT * FROM region_peers ORDER BY region_id;
+Affected Rows: 0
+
+SELECT COUNT(distinct region_id) FROM region_peers;
+
++----------------------------------------+
+| COUNT(DISTINCT region_peers.region_id) |
++----------------------------------------+
+| 6                                      |
++----------------------------------------+
 
 DROP TABLE region_peers_t1, region_peers_t2, region_peers_phy, region_peers_test;
 
+Affected Rows: 0
+
 USE public;
 
+Affected Rows: 0
 

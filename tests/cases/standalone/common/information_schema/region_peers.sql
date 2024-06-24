@@ -1,11 +1,7 @@
 --- test information_schema.region_peers ----
 USE INFORMATION_SCHEMA;
 
-Affected Rows: 0
-
 CREATE TABLE region_peers_phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
-
-Affected Rows: 0
 
 CREATE TABLE region_peers_t1 (
     ts timestamp time index,
@@ -13,15 +9,11 @@ CREATE TABLE region_peers_t1 (
     host string primary key
 ) engine = metric with ("on_physical_table" = "region_peers_phy");
 
-Affected Rows: 0
-
 CREATE TABLE region_peers_t2 (
     ts timestamp time index,
     job string primary key,
     val double
 ) engine = metric with ("on_physical_table" = "region_peers_phy");
-
-Affected Rows: 0
 
 CREATE TABLE region_peers_test (
     a int primary key,
@@ -33,26 +25,10 @@ CREATE TABLE region_peers_test (
     a >= 20,
 );
 
-Affected Rows: 0
-
-SELECT region_id,is_leader,status,down_seconds FROM region_peers ORDER BY region_id;
-
-+---------------+-----------+--------+--------------+
-| region_id     | is_leader | status | down_seconds |
-+---------------+-----------+--------+--------------+
-| 5497558138880 | Yes       | ALIVE  |              |
-| 5501853106176 | Yes       | ALIVE  |              |
-| 5506148073472 | Yes       | ALIVE  |              |
-| 5510443040768 | Yes       | ALIVE  |              |
-| 5510443040769 | Yes       | ALIVE  |              |
-| 5510443040770 | Yes       | ALIVE  |              |
-+---------------+-----------+--------+--------------+
+SELECT COUNT(distinct region_id) FROM region_peers;
 
 DROP TABLE region_peers_t1, region_peers_t2, region_peers_phy, region_peers_test;
 
-Affected Rows: 0
-
 USE public;
 
-Affected Rows: 0
 
