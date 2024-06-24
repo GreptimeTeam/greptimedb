@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use itertools::Itertools;
 use snafu::OptionExt;
+use substrait::substrait_proto_df::proto::{FilterRel, ReadRel};
 use substrait_proto::proto::expression::MaskExpression;
 use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
-use substrait_proto::proto::{plan_rel, Plan as SubPlan, Rel};
+use substrait_proto::proto::{plan_rel, Plan as SubPlan, ProjectRel, Rel};
 
 use crate::adapter::error::{
     Error, InternalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
@@ -63,6 +64,152 @@ impl TypedPlan {
     }
     }
 
+    pub fn from_substrait_project(
+        ctx: &mut FlownodeContext,
+        p: &ProjectRel,
+        extensions: &FunctionExtensions,
+    ) -> Result<TypedPlan, Error> {
+        let input = if let Some(input) = p.input.as_ref() {
+            TypedPlan::from_substrait_rel(ctx, input, extensions)?
+        } else {
+            return not_impl_err!("Projection without an input is not supported");
+        };
+
+        // because this `input.schema` is incorrect for pre-expand substrait plan, so we have to use schema before expand multi-value
+        // function to correctly transform it, and late rewrite it
+        let schema_before_expand = {
+            let input_schema = input.schema.clone();
+            let auto_columns: HashSet<usize> =
+                HashSet::from_iter(input_schema.typ().auto_columns.clone());
+            let not_auto_added_columns = (0..input_schema.len()?)
+                .filter(|i| !auto_columns.contains(i))
+                .collect_vec();
+            let mfp = MapFilterProject::new(input_schema.len()?)
+                .project(not_auto_added_columns)?
+                .into_safe();
+
+            input_schema.apply_mfp(&mfp)?
+        };
+
+        let mut exprs: Vec<TypedExpr> = Vec::with_capacity(p.expressions.len());
+        for e in &p.expressions {
+            let expr = TypedExpr::from_substrait_rex(e, &schema_before_expand, extensions)?;
+            exprs.push(expr);
+        }
+        let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
+        if is_literal {
+            let (literals, lit_types): (Vec<_>, Vec<_>) = exprs
+                .into_iter()
+                .map(|TypedExpr { expr, typ }| (expr, typ))
+                .unzip();
+            let typ = RelationType::new(lit_types);
+            let row = literals
+                .into_iter()
+                .map(|lit| lit.as_literal().expect("A literal"))
+                .collect_vec();
+            let row = repr::Row::new(row);
+            let plan = Plan::Constant {
+                rows: vec![(row, repr::Timestamp::MIN, 1)],
+            };
+            Ok(TypedPlan {
+                schema: typ.into_unnamed(),
+                plan,
+            })
+        } else {
+            match input.plan.clone() {
+                Plan::Reduce { key_val_plan, .. } => {
+                    rewrite_projection_after_reduce(key_val_plan, &input.schema, &mut exprs)?;
+                }
+                Plan::Mfp { input, mfp: _ } => {
+                    if let Plan::Reduce { key_val_plan, .. } = input.plan {
+                        rewrite_projection_after_reduce(key_val_plan, &input.schema, &mut exprs)?;
+                    }
+                }
+                _ => (),
+            }
+            input.projection(exprs)
+        }
+    }
+
+    pub fn from_substrait_filter(
+        ctx: &mut FlownodeContext,
+        filter: &FilterRel,
+        extensions: &FunctionExtensions,
+    ) -> Result<TypedPlan, Error> {
+        let input = if let Some(input) = filter.input.as_ref() {
+            TypedPlan::from_substrait_rel(ctx, input, extensions)?
+        } else {
+            return not_impl_err!("Filter without an input is not supported");
+        };
+
+        let expr = if let Some(condition) = filter.condition.as_ref() {
+            TypedExpr::from_substrait_rex(condition, &input.schema, extensions)?
+        } else {
+            return not_impl_err!("Filter without an condition is not valid");
+        };
+        input.filter(expr)
+    }
+
+    pub fn from_substrait_read(
+        ctx: &mut FlownodeContext,
+        read: &ReadRel,
+        _extensions: &FunctionExtensions,
+    ) -> Result<TypedPlan, Error> {
+        if let Some(ReadType::NamedTable(nt)) = &read.read_type {
+            let query_ctx = ctx.query_context.clone().context(UnexpectedSnafu {
+                reason: "Query context not found",
+            })?;
+            let table_reference = match nt.names.len() {
+                1 => [
+                    query_ctx.current_catalog().to_string(),
+                    query_ctx.current_schema().to_string(),
+                    nt.names[0].clone(),
+                ],
+                2 => [
+                    query_ctx.current_catalog().to_string(),
+                    nt.names[0].clone(),
+                    nt.names[1].clone(),
+                ],
+                3 => [
+                    nt.names[0].clone(),
+                    nt.names[1].clone(),
+                    nt.names[2].clone(),
+                ],
+                _ => InvalidQuerySnafu {
+                    reason: "Expect table to have name",
+                }
+                .fail()?,
+            };
+            let table = ctx.table(&table_reference)?;
+            let get_table = Plan::Get {
+                id: crate::expr::Id::Global(table.0),
+            };
+            let get_table = TypedPlan {
+                schema: table.1,
+                plan: get_table,
+            };
+
+            if let Some(MaskExpression {
+                select: Some(projection),
+                ..
+            }) = &read.projection
+            {
+                let column_indices: Vec<usize> = projection
+                    .struct_items
+                    .iter()
+                    .map(|item| item.field as usize)
+                    .collect();
+                let input_arity = get_table.schema.typ().column_types.len();
+                let mfp = MapFilterProject::new(input_arity).project(column_indices.clone())?;
+                get_table.mfp(mfp.into_safe())
+            } else {
+                Ok(get_table)
+            }
+        } else {
+            not_impl_err!("Only NamedTable reads are supported")
+        }
+    }
+
     /// Convert Substrait Rel into Flow's TypedPlan
     /// TODO(discord9): SELECT DISTINCT(does it get compile with something else?)
     pub fn from_substrait_rel(
@@ -71,133 +218,10 @@ impl TypedPlan {
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
         match &rel.rel_type {
-            Some(RelType::Project(p)) => {
-                let input = if let Some(input) = p.input.as_ref() {
-                    TypedPlan::from_substrait_rel(ctx, input, extensions)?
-                } else {
-                    return not_impl_err!("Projection without an input is not supported");
-                };
-
-                let mut exprs: Vec<TypedExpr> = vec![];
-                for e in &p.expressions {
-                    let expr = TypedExpr::from_substrait_rex(e, &input.schema, extensions)?;
-                    exprs.push(expr);
-                }
-                let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
-                if is_literal {
-                    let (literals, lit_types): (Vec<_>, Vec<_>) = exprs
-                        .into_iter()
-                        .map(|TypedExpr { expr, typ }| (expr, typ))
-                        .unzip();
-                    let typ = RelationType::new(lit_types);
-                    let row = literals
-                        .into_iter()
-                        .map(|lit| lit.as_literal().expect("A literal"))
-                        .collect_vec();
-                    let row = repr::Row::new(row);
-                    let plan = Plan::Constant {
-                        rows: vec![(row, repr::Timestamp::MIN, 1)],
-                    };
-                    Ok(TypedPlan {
-                        schema: typ.into_unnamed(),
-                        plan,
-                    })
-                } else {
-                    match input.plan.clone() {
-                        Plan::Reduce { key_val_plan, .. } => {
-                            rewrite_projection_after_reduce(
-                                key_val_plan,
-                                &input.schema,
-                                &mut exprs,
-                            )?;
-                        }
-                        Plan::Mfp { input, mfp: _ } => {
-                            if let Plan::Reduce { key_val_plan, .. } = input.plan {
-                                rewrite_projection_after_reduce(
-                                    key_val_plan,
-                                    &input.schema,
-                                    &mut exprs,
-                                )?;
-                            }
-                        }
-                        _ => (),
-                    }
-                    input.projection(exprs)
-                }
-            }
-            Some(RelType::Filter(filter)) => {
-                let input = if let Some(input) = filter.input.as_ref() {
-                    TypedPlan::from_substrait_rel(ctx, input, extensions)?
-                } else {
-                    return not_impl_err!("Filter without an input is not supported");
-                };
-
-                let expr = if let Some(condition) = filter.condition.as_ref() {
-                    TypedExpr::from_substrait_rex(condition, &input.schema, extensions)?
-                } else {
-                    return not_impl_err!("Filter without an condition is not valid");
-                };
-                input.filter(expr)
-            }
-            Some(RelType::Read(read)) => {
-                if let Some(ReadType::NamedTable(nt)) = &read.as_ref().read_type {
-                    let query_ctx = ctx.query_context.clone().context(UnexpectedSnafu {
-                        reason: "Query context not found",
-                    })?;
-                    let table_reference = match nt.names.len() {
-                        1 => [
-                            query_ctx.current_catalog().to_string(),
-                            query_ctx.current_schema().to_string(),
-                            nt.names[0].clone(),
-                        ],
-                        2 => [
-                            query_ctx.current_catalog().to_string(),
-                            nt.names[0].clone(),
-                            nt.names[1].clone(),
-                        ],
-                        3 => [
-                            nt.names[0].clone(),
-                            nt.names[1].clone(),
-                            nt.names[2].clone(),
-                        ],
-                        _ => InvalidQuerySnafu {
-                            reason: "Expect table to have name",
-                        }
-                        .fail()?,
-                    };
-                    let table = ctx.table(&table_reference)?;
-                    let get_table = Plan::Get {
-                        id: crate::expr::Id::Global(table.0),
-                    };
-                    let get_table = TypedPlan {
-                        schema: table.1,
-                        plan: get_table,
-                    };
-
-                    if let Some(MaskExpression {
-                        select: Some(projection),
-                        ..
-                    }) = &read.projection
-                    {
-                        let column_indices: Vec<usize> = projection
-                            .struct_items
-                            .iter()
-                            .map(|item| item.field as usize)
-                            .collect();
-                        let input_arity = get_table.schema.typ().column_types.len();
-                        let mfp =
-                            MapFilterProject::new(input_arity).project(column_indices.clone())?;
-                        get_table.mfp(mfp.into_safe())
-                    } else {
-                        Ok(get_table)
-                    }
-                } else {
-                    not_impl_err!("Only NamedTable reads are supported")
-                }
-            }
-            Some(RelType::Aggregate(agg)) => {
-                TypedPlan::from_substrait_agg_rel(ctx, agg, extensions)
-            }
+            Some(RelType::Project(p)) => Self::from_substrait_project(ctx, p.as_ref(), extensions),
+            Some(RelType::Filter(filter)) => Self::from_substrait_filter(ctx, filter, extensions),
+            Some(RelType::Read(read)) => Self::from_substrait_read(ctx, read, extensions),
+            Some(RelType::Aggregate(agg)) => Self::from_substrait_agg_rel(ctx, agg, extensions),
             _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
         }
     }
