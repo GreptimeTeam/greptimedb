@@ -41,6 +41,9 @@ pub trait PuffinSyncWriter {
     /// Set the properties of the Puffin file
     fn set_properties(&mut self, properties: HashMap<String, String>);
 
+    /// Sets whether the footer payload should be LZ4 compressed.
+    fn set_footer_lz4_compressed(&mut self, lz4_compressed: bool);
+
     /// Add a blob to the Puffin file
     fn add_blob<R: std::io::Read>(&mut self, blob: Blob<R>) -> Result<()>;
 
@@ -53,6 +56,9 @@ pub trait PuffinSyncWriter {
 pub trait PuffinAsyncWriter {
     /// Set the properties of the Puffin file
     fn set_properties(&mut self, properties: HashMap<String, String>);
+
+    /// Sets whether the footer payload should be LZ4 compressed.
+    fn set_footer_lz4_compressed(&mut self, lz4_compressed: bool);
 
     /// Add a blob to the Puffin file
     async fn add_blob<R: futures::AsyncRead + Send>(&mut self, blob: Blob<R>) -> Result<()>;

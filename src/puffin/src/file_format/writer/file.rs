@@ -27,17 +27,20 @@ use crate::file_format::MAGIC;
 
 /// Puffin file writer, implements both [`PuffinSyncWriter`] and [`PuffinAsyncWriter`]
 pub struct PuffinFileWriter<W> {
-    /// The writer to write to
+    /// The writer to write to.
     writer: W,
 
-    /// The properties of the file
+    /// The properties of the file.
     properties: HashMap<String, String>,
 
-    /// The metadata of the blobs
+    /// The metadata of the blobs.
     blob_metadata: Vec<BlobMetadata>,
 
-    /// The number of bytes written
+    /// The number of bytes written.
     written_bytes: u64,
+
+    /// Whether the footer payload should be LZ4 compressed.
+    footer_lz4_compressed: bool,
 }
 
 impl<W> PuffinFileWriter<W> {
@@ -47,6 +50,7 @@ impl<W> PuffinFileWriter<W> {
             properties: HashMap::new(),
             blob_metadata: Vec::new(),
             written_bytes: 0,
+            footer_lz4_compressed: false,
         }
     }
 
@@ -83,6 +87,10 @@ impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
         Ok(())
     }
 
+    fn set_footer_lz4_compressed(&mut self, lz4_compressed: bool) {
+        self.footer_lz4_compressed = lz4_compressed;
+    }
+
     fn finish(&mut self) -> Result<usize> {
         self.write_header_if_needed_sync()?;
         self.write_footer_sync()?;
@@ -112,6 +120,10 @@ impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
         Ok(())
     }
 
+    fn set_footer_lz4_compressed(&mut self, lz4_compressed: bool) {
+        self.footer_lz4_compressed = lz4_compressed;
+    }
+
     async fn finish(&mut self) -> Result<usize> {
         self.write_header_if_needed_async().await?;
         self.write_footer_async().await?;
@@ -135,6 +147,7 @@ impl<W: io::Write> PuffinFileWriter<W> {
         let bytes = FooterWriter::new(
             mem::take(&mut self.blob_metadata),
             mem::take(&mut self.properties),
+            self.footer_lz4_compressed,
         )
         .into_footer_bytes()?;
 
@@ -157,6 +170,7 @@ impl<W: AsyncWrite + Unpin> PuffinFileWriter<W> {
         let bytes = FooterWriter::new(
             mem::take(&mut self.blob_metadata),
             mem::take(&mut self.properties),
+            self.footer_lz4_compressed,
         )
         .into_footer_bytes()?;
 

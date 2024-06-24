@@ -141,6 +141,24 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to compress lz4"))]
+    Lz4Compression {
+        #[snafu(source)]
+        error: std::io::Error,
+
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decompress lz4"))]
+    Lz4Decompression {
+        #[snafu(source)]
+        error: serde_json::Error,
+
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -160,7 +178,9 @@ impl ErrorExt for Error {
             | UnexpectedFooterPayloadSize { .. }
             | UnexpectedPuffinFileSize { .. }
             | InvalidBlobOffset { .. }
-            | InvalidBlobAreaEnd { .. } => StatusCode::Unexpected,
+            | InvalidBlobAreaEnd { .. }
+            | Lz4Compression { .. }
+            | Lz4Decompression { .. } => StatusCode::Unexpected,
 
             UnsupportedDecompression { .. } => StatusCode::Unsupported,
         }

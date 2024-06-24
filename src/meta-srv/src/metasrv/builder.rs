@@ -42,6 +42,7 @@ use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
+use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_cluster_info_handler::{
@@ -58,6 +59,7 @@ use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::response_header_handler::ResponseHeaderHandler;
 use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
+use crate::lease::MetaPeerLookupService;
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metasrv::{
@@ -240,14 +242,26 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
-        // TODO(weny): use the real allocator.
-        let flow_metadata_allocator =
-            Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
+        let flow_metadata_allocator = {
+            // for now flownode just use round robin selector
+            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
+            let flow_selector_ctx = selector_ctx.clone();
+            let peer_allocator = Arc::new(FlowPeerAllocator::new(
+                flow_selector_ctx,
+                Arc::new(flow_selector),
+            ));
+            let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
-            )));
+            );
+
+            Arc::new(FlowMetadataAllocator::with_peer_allocator(
+                seq,
+                peer_allocator,
+            ))
+        };
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
@@ -276,6 +290,9 @@ impl MetasrvBuilder {
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator: flow_metadata_allocator.clone(),
+                    peer_lookup_service: Arc::new(MetaPeerLookupService::new(
+                        meta_peer_client.clone(),
+                    )),
                 },
                 procedure_manager.clone(),
                 true,
