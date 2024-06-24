@@ -488,7 +488,7 @@ impl Metasrv {
             cluster_id,
             peer_id,
             &self.meta_peer_client,
-            Some(distributed_time_constants::DATANODE_LEASE_SECS),
+            distributed_time_constants::DATANODE_LEASE_SECS,
         )
         .await
     }

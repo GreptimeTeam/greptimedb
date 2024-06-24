@@ -558,7 +558,7 @@ impl StartCommand {
                     table_metadata_allocator,
                     flow_metadata_manager,
                     flow_metadata_allocator,
-                    peer_lookup_service: Arc::new(StandalonePeerLookupService),
+                    peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
                 },
                 procedure_manager,
                 true,

@@ -18,7 +18,7 @@ use std::hash::Hash;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackend;
 use common_meta::peer::{Peer, PeerLookupService};
-use common_meta::{distributed_time_constants, util, ClusterId, DatanodeId, FlownodeId};
+use common_meta::{util, ClusterId, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use snafu::ResultExt;
 
@@ -38,9 +38,9 @@ pub async fn lookup_datanode_peer(
     cluster_id: ClusterId,
     datanode_id: DatanodeId,
     meta_peer_client: &MetaPeerClientRef,
-    lease_secs: Option<u64>,
+    lease_secs: u64,
 ) -> Result<Option<Peer>> {
-    let lease_filter = lease_secs.map(build_lease_filter);
+    let lease_filter = build_lease_filter(lease_secs);
     let lease_key = DatanodeLeaseKey {
         cluster_id,
         node_id: datanode_id,
@@ -50,7 +50,7 @@ pub async fn lookup_datanode_peer(
         return Ok(None);
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
-    let is_alive = lease_filter.map(|f| f(&lease_value)).unwrap_or(true);
+    let is_alive = lease_filter(&lease_value);
     if is_alive {
         Ok(Some(Peer {
             id: lease_key.node_id,
@@ -81,9 +81,9 @@ pub async fn lookup_flownode_peer(
     cluster_id: ClusterId,
     flownode_id: FlownodeId,
     meta_peer_client: &MetaPeerClientRef,
-    lease_secs: Option<u64>,
+    lease_secs: u64,
 ) -> Result<Option<Peer>> {
-    let lease_filter = lease_secs.map(build_lease_filter);
+    let lease_filter = build_lease_filter(lease_secs);
     let lease_key = FlownodeLeaseKey {
         cluster_id,
         node_id: flownode_id,
@@ -94,7 +94,7 @@ pub async fn lookup_flownode_peer(
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
 
-    let is_alive = lease_filter.map(|f| f(&lease_value)).unwrap_or(true);
+    let is_alive = lease_filter(&lease_value);
     if is_alive {
         Ok(Some(Peer {
             id: lease_key.node_id,
@@ -168,22 +168,17 @@ impl PeerLookupService for MetaPeerLookupService {
         cluster_id: ClusterId,
         id: DatanodeId,
     ) -> common_meta::error::Result<Option<Peer>> {
-        lookup_datanode_peer(
-            cluster_id,
-            id,
-            &self.meta_peer_client,
-            Some(distributed_time_constants::DATANODE_LEASE_SECS),
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(common_meta::error::ExternalSnafu)
+        lookup_datanode_peer(cluster_id, id, &self.meta_peer_client, u64::MAX)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
     }
     async fn flownode(
         &self,
         cluster_id: ClusterId,
         id: FlownodeId,
     ) -> common_meta::error::Result<Option<Peer>> {
-        lookup_flownode_peer(cluster_id, id, &self.meta_peer_client, None)
+        lookup_flownode_peer(cluster_id, id, &self.meta_peer_client, u64::MAX)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
