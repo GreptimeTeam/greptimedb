@@ -17,7 +17,8 @@ common-recordbatch.workspace = true
 common-time.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlness = { version = "0.5" }
+# sqlness 0.6.0 have a bug causing `cargo sqlness` to fail(see https://github.com/CeresDB/sqlness/issues/68) which is fixed in 0.6.1
+sqlness = "0.6.1"
 tempfile.workspace = true
 tinytemplate = "1.2"
 tokio.workspace = true
