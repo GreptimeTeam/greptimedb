@@ -20,8 +20,7 @@ INSERT INTO timestamp VALUES ('1900-1-1 59:59:23');
 
 INSERT INTO timestamp VALUES ('1900a01a01 00:00:00');
 
--- FIXME(discord9): a sqlness bug is causing this sql to fail to parse, see issue: https://github.com/CeresDB/sqlness/issues/68
--- INSERT INTO timestamp VALUES ('1900-1-1 00;00;00');
+INSERT INTO timestamp VALUES ('1900-1-1 00;00;00');
 
 INSERT INTO timestamp VALUES ('1900-1-1 00a00a00');
 

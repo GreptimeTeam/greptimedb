@@ -17,8 +17,7 @@ common-recordbatch.workspace = true
 common-time.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# use sqlness with the latest changes which support SLEEP, will remove this after sqlness with the changes is released
-sqlness = { git = "https://github.com/CeresDB/sqlness.git", rev = "5469532cdaf87791b3af5d7e2918e92725f8dfc5" }
+sqlness = "0.6.1"
 tempfile.workspace = true
 tinytemplate = "1.2"
 tokio.workspace = true
