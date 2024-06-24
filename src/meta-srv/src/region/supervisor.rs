@@ -20,11 +20,12 @@ use std::time::Duration;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef, MAINTENANCE_KEY};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
+use common_meta::rpc::router::RegionRoute;
 use common_meta::{ClusterId, DatanodeId};
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -256,25 +257,14 @@ impl RegionSupervisor {
             .into_iter()
             .collect::<Vec<_>>();
 
-        let table_ids = match self
+        let table_routes = match self
             .table_metadata_manager
             .table_route_manager()
-            .table_route_storage()
-            .batch_get(&table_ids)
+            .batch_get_physical_table_routes(&table_ids)
             .await
             .context(error::TableMetadataManagerSnafu)
         {
-            Ok(table_routes) => table_ids
-                .into_iter()
-                .zip(table_routes)
-                .flat_map(|(table_id, route)| {
-                    if route.is_some() {
-                        Some(table_id)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<HashSet<_>>(),
+            Ok(table_routes) => table_routes,
             Err(err) => {
                 error!(err; "Failed to retrieves table routes: {table_ids:?}");
                 return;
@@ -289,23 +279,69 @@ impl RegionSupervisor {
                 .collect::<Vec<_>>()
         );
         for (cluster_id, datanode_id, region_id) in regions {
-            if table_ids.contains(&region_id.table_id()) {
-                if let Err(err) = self.do_failover(cluster_id, datanode_id, region_id).await {
-                    error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
-                } else {
+            match table_routes.get(&region_id.table_id()) {
+                Some(route) => {
+                    match self
+                        .handle_region_failure(
+                            cluster_id,
+                            datanode_id,
+                            region_id,
+                            &route.region_routes,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            self.failure_detector
+                                .remove(&(cluster_id, datanode_id, region_id))
+                        }
+                        Err(err) => {
+                            error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
+                        }
+                    }
+                }
+                None => {
+                    info!(
+                        "Skipping to execute region failover for region: {}, target table: {} is not exists",
+                        region_id,
+                        region_id.table_id()
+                    );
                     self.failure_detector
                         .remove(&(cluster_id, datanode_id, region_id));
                 }
-            } else {
-                info!(
-                    "Skipping to execute region failover for region: {}, target table:{} is not exists",
-                    region_id,
-                    region_id.table_id()
-                );
-                self.failure_detector
-                    .remove(&(cluster_id, datanode_id, region_id));
             }
         }
+    }
+
+    async fn handle_region_failure(
+        &self,
+        cluster_id: ClusterId,
+        datanode_id: DatanodeId,
+        region_id: RegionId,
+        region_routes: &[RegionRoute],
+    ) -> Result<()> {
+        let region_leader_peer = region_routes
+            .iter()
+            .find_map(|region| {
+                if region.region.id == region_id {
+                    region.leader_peer.clone()
+                } else {
+                    None
+                }
+            })
+            .context(error::RegionLeaderNotFoundSnafu { region_id })?;
+        ensure!(
+            region_leader_peer.id == datanode_id,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Region leader peer is changed, expected: Datanode {}, actual: Datanode {}",
+                    datanode_id, region_leader_peer.id
+                )
+            }
+        );
+        self.do_failover(cluster_id, region_leader_peer, region_id)
+            .await?;
+
+        Ok(())
     }
 
     pub(crate) async fn is_maintenance_mode(&self) -> Result<bool> {
@@ -318,7 +354,7 @@ impl RegionSupervisor {
     async fn do_failover(
         &self,
         cluster_id: ClusterId,
-        datanode_id: DatanodeId,
+        from_peer: Peer,
         region_id: RegionId,
     ) -> Result<()> {
         let task = self.region_migration_manager.tracker().get(region_id);
@@ -345,8 +381,7 @@ impl RegionSupervisor {
                 let task = RegionMigrationProcedureTask {
                     cluster_id,
                     region_id,
-                    // TODO(weny): use real addr.
-                    from_peer: Peer::new(datanode_id, String::new()),
+                    from_peer,
                     to_peer,
                     replay_timeout: Duration::from_secs(60),
                 };

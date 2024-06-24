@@ -840,6 +840,13 @@ pub enum Error {
         #[snafu(source(from(common_config::error::Error, Box::new)))]
         source: Box<common_config::error::Error>,
     },
+
+    #[snafu(display("Region: {} leader peer is not found", region_id))]
+    RegionLeaderNotFound {
+        #[snafu(implicit)]
+        location: Location,
+        region_id: RegionId,
+    },
 }
 
 impl Error {
@@ -931,7 +938,8 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
-            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
+            | Error::MigrationRunning { .. }
+            | Error::RegionLeaderNotFound { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. } => source.status_code(),
