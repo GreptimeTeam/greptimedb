@@ -19,6 +19,7 @@ use std::time::Duration;
 use api::v1::region::compact_request;
 use common_telemetry::info;
 use object_store::manager::ObjectStoreManager;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -174,7 +175,7 @@ pub async fn open_compaction_region(
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct MergeOutput {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
