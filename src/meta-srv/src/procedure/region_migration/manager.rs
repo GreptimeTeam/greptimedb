@@ -55,7 +55,6 @@ impl RegionMigrationProcedureTracker {
         task: &RegionMigrationProcedureTask,
     ) -> Option<RegionMigrationProcedureGuard> {
         let mut procedures = self.running_procedures.write().unwrap();
-
         match procedures.entry(task.region_id) {
             Entry::Occupied(_) => None,
             Entry::Vacant(v) => {
@@ -352,16 +351,13 @@ impl RegionMigrationManager {
                 replay_timeout,
             },
             self.context_factory.clone(),
-            None,
+            Some(guard),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
-
         let procedure_manager = self.procedure_manager.clone();
-
         common_runtime::spawn_bg(async move {
-            let _ = guard;
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {
