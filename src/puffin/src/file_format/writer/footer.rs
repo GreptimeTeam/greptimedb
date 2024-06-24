@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::mem;
 
 use snafu::ResultExt;
 
 use crate::blob_metadata::BlobMetadata;
-use crate::error::{Result, SerializeJsonSnafu};
+use crate::error::{Lz4CompressionSnafu, Result, SerializeJsonSnafu};
 use crate::file_format::{Flags, MAGIC, MIN_FOOTER_SIZE};
 use crate::file_metadata::FileMetadataBuilder;
 
@@ -31,13 +32,19 @@ use crate::file_metadata::FileMetadataBuilder;
 pub struct FooterWriter {
     blob_metadata: Vec<BlobMetadata>,
     file_properties: HashMap<String, String>,
+    lz4_compressed: bool,
 }
 
 impl FooterWriter {
-    pub fn new(blob_metadata: Vec<BlobMetadata>, file_properties: HashMap<String, String>) -> Self {
+    pub fn new(
+        blob_metadata: Vec<BlobMetadata>,
+        file_properties: HashMap<String, String>,
+        lz4_compressed: bool,
+    ) -> Self {
         Self {
             blob_metadata,
             file_properties,
+            lz4_compressed,
         }
     }
 
@@ -70,10 +77,15 @@ impl FooterWriter {
     }
 
     /// Appends reserved flags (currently zero-initialized) to the given buffer.
-    ///
-    /// TODO(zhongzc): support compression
     fn write_flags(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&Flags::DEFAULT.bits().to_le_bytes());
+        let mut flags = Flags::DEFAULT;
+        if self.lz4_compressed {
+            flags |= Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4;
+        } else {
+            flags &= !Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4;
+        }
+
+        buf.extend_from_slice(&flags.bits().to_le_bytes());
     }
 
     fn footer_payload(&mut self) -> Result<Vec<u8>> {
@@ -83,6 +95,14 @@ impl FooterWriter {
             .build()
             .expect("Required fields are not set");
 
-        serde_json::to_vec(&file_metadata).context(SerializeJsonSnafu)
+        if self.lz4_compressed {
+            let mut buf = vec![];
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(&mut buf);
+            serde_json::to_writer(&mut encoder, &file_metadata).context(SerializeJsonSnafu)?;
+            encoder.flush().context(Lz4CompressionSnafu)?;
+            Ok(buf)
+        } else {
+            serde_json::to_vec(&file_metadata).context(SerializeJsonSnafu)
+        }
     }
 }

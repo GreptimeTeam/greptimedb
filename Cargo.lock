@@ -8382,6 +8382,7 @@ dependencies = [
  "common-macro",
  "derive_builder 0.12.0",
  "futures",
+ "lz4_flex 0.11.3",
  "pin-project",
  "serde",
  "serde_json",
