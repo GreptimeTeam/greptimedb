@@ -36,6 +36,7 @@ use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use common_telemetry::warn;
 use snafu::ResultExt;
 
 use super::{SelectTarget, FLOW_ID_SEQ};
@@ -223,6 +224,7 @@ impl MetasrvBuilder {
             options.wal.clone(),
             kv_backend.clone(),
         ));
+        let is_remote_wal = wal_options_allocator.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
                 SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -294,38 +296,42 @@ impl MetasrvBuilder {
         ));
         region_migration_manager.try_start()?;
 
-        let (region_failover_handler, region_supervisor_ticker) = if options.enable_region_failover
-        {
-            let region_supervisor = RegionSupervisor::new(
-                options.failure_detector,
-                DEFAULT_TICK_INTERVAL,
-                // Requires to select MUST alive nodes.
-                SelectorContext {
-                    server_addr: options.server_addr.clone(),
-                    datanode_lease_secs: Duration::from_millis(
-                        distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-                    )
-                    .as_secs(),
-                    flownode_lease_secs: Duration::from_millis(
-                        distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-                    )
-                    .as_secs(),
-                    kv_backend: kv_backend.clone(),
-                    meta_peer_client: meta_peer_client.clone(),
-                    table_id: None,
-                },
-                selector.clone(),
-                region_migration_manager.clone(),
-                leader_cached_kv_backend.clone() as _,
-            );
-            let region_supervisor_ticker = region_supervisor.ticker();
-            (
-                Some(RegionFailureHandler::new(region_supervisor)),
-                Some(region_supervisor_ticker),
-            )
-        } else {
-            (None, None)
-        };
+        if !is_remote_wal && options.enable_region_failover {
+            warn!("Region failover is not supported in the local WAL implementation!");
+        }
+
+        let (region_failover_handler, region_supervisor_ticker) =
+            if options.enable_region_failover && is_remote_wal {
+                let region_supervisor = RegionSupervisor::new(
+                    options.failure_detector,
+                    DEFAULT_TICK_INTERVAL,
+                    // Requires to select MUST alive nodes.
+                    SelectorContext {
+                        server_addr: options.server_addr.clone(),
+                        datanode_lease_secs: Duration::from_millis(
+                            distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
+                        )
+                        .as_secs(),
+                        flownode_lease_secs: Duration::from_millis(
+                            distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
+                        )
+                        .as_secs(),
+                        kv_backend: kv_backend.clone(),
+                        meta_peer_client: meta_peer_client.clone(),
+                        table_id: None,
+                    },
+                    selector.clone(),
+                    region_migration_manager.clone(),
+                    leader_cached_kv_backend.clone() as _,
+                );
+                let region_supervisor_ticker = region_supervisor.ticker();
+                (
+                    Some(RegionFailureHandler::new(region_supervisor)),
+                    Some(region_supervisor_ticker),
+                )
+            } else {
+                (None, None)
+            };
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,

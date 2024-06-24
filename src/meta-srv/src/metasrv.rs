@@ -272,7 +272,7 @@ pub struct MetaStateHandler {
 }
 
 impl MetaStateHandler {
-    pub async fn on_become_leader(&mut self) {
+    pub async fn on_become_leader(&self) {
         self.state.write().unwrap().next_state(become_leader(false));
 
         if let Err(e) = self.leader_cached_kv_backend.load().await {
@@ -296,7 +296,7 @@ impl MetaStateHandler {
         self.greptimedb_telemetry_task.should_report(true);
     }
 
-    pub async fn on_become_follower(&mut self) {
+    pub async fn on_become_follower(&self) {
         self.state.write().unwrap().next_state(become_follower());
 
         // Stops the procedures.
@@ -381,7 +381,7 @@ impl Metasrv {
                 .start()
                 .context(StartTelemetryTaskSnafu)?;
             let region_supervisor_ticker = self.region_supervisor_ticker.clone();
-            let mut state_handler = MetaStateHandler {
+            let state_handler = MetaStateHandler {
                 greptimedb_telemetry_task,
                 subscribe_manager,
                 procedure_manager,
