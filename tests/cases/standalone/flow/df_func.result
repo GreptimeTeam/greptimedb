@@ -22,7 +22,8 @@ VALUES
 
 Affected Rows: 2
 
--- SQLNESS SLEEP 2s
+-- sleep a little bit longer to make sure that table is created and data is inserted
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
 +-------+---------------------+---------------------+
@@ -84,7 +85,8 @@ VALUES
 
 Affected Rows: 2
 
--- SQLNESS SLEEP 2s
+-- sleep a little bit longer to make sure that table is created and data is inserted
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
 +-------+---------------------+---------------------+

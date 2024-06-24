@@ -16,7 +16,8 @@ VALUES
     (-20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
--- SQLNESS SLEEP 2s
+-- sleep a little bit longer to make sure that table is created and data is inserted
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
 INSERT INTO numbers_input_df_func 
@@ -49,7 +50,8 @@ VALUES
     (-20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
--- SQLNESS SLEEP 2s
+-- sleep a little bit longer to make sure that table is created and data is inserted
+-- SQLNESS SLEEP 3s
 SELECT col_0, window_start, window_end FROM out_num_cnt_df_func;
 
 INSERT INTO numbers_input_df_func 

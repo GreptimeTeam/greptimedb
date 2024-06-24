@@ -364,6 +364,7 @@ impl RelationDesc {
         );
         Ok(self.names.len())
     }
+
     pub fn to_df_schema(&self) -> Result<DFSchema> {
         let fields: Vec<_> = self
             .iter()
