@@ -61,6 +61,7 @@ pub struct CompactionRegion {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
+    pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
 }
 
 /// CompactorRequest represents the request to compact a region.
@@ -170,7 +171,14 @@ pub async fn open_compaction_region(
         access_layer,
         manifest_ctx,
         current_version,
+        file_purger: Some(file_purger),
     })
+}
+
+impl CompactionRegion {
+    pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
+        self.file_purger.clone()
+    }
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.

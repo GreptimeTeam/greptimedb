@@ -284,6 +284,7 @@ impl CompactionScheduler {
             cache_manager: cache_manager.clone(),
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
+            file_purger: None,
         };
 
         let picker_output = {
