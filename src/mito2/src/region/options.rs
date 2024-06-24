@@ -35,7 +35,7 @@ use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
 /// Mode to update duplicate rows.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, EnumString)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum UpdateMode {

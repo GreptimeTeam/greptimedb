@@ -261,6 +261,7 @@ impl MemtableBuilderProvider {
                         data_freeze_threshold: opts.data_freeze_threshold,
                         fork_dictionary_bytes: opts.fork_dictionary_bytes,
                         dedup,
+                        update_mode,
                     },
                     self.write_buffer_manager.clone(),
                 ))

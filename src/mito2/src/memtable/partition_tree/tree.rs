@@ -40,7 +40,9 @@ use crate::memtable::partition_tree::partition::{
 use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::read::dedup::LastNotNullIter;
 use crate::read::Batch;
+use crate::region::options::UpdateMode;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The partition tree.
@@ -237,7 +239,13 @@ impl PartitionTree {
         iter.fetch_next_partition(context)?;
 
         iter.metrics.iter_elapsed += start.elapsed();
-        Ok(Box::new(iter))
+
+        if self.config.update_mode == UpdateMode::LastNotNull {
+            let iter = LastNotNullIter::new(iter);
+            Ok(Box::new(iter))
+        } else {
+            Ok(Box::new(iter))
+        }
     }
 
     /// Returns true if the tree is empty.
