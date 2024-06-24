@@ -61,6 +61,10 @@ lazy_static! {
 pub(crate) struct ExpandIntervalTransformRule;
 
 impl TransformRule for ExpandIntervalTransformRule {
+    /// Applies transform rule for `Interval` type by extending the shortened version (e.g. '1h', '2d')
+    /// In case when `Interval` has `BinaryOp` value (e.g. query like `SELECT INTERVAL '2h' - INTERVAL '1h'`)
+    /// it's AST has `left` part of type `Value::SingleQuotedString` which needs to be handled specifically.
+    /// To handle the `right` part which is `Interval` no extra steps are needed.
     fn visit_expr(&self, expr: &mut Expr) -> ControlFlow<()> {
         if let Expr::Interval(interval) = expr {
             match *interval.value.clone() {
@@ -130,7 +134,14 @@ fn expand_interval_name(interval_str: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::statements::transform::expand_interval::expand_interval_name;
+    use std::ops::ControlFlow;
+
+    use sqlparser::ast::{BinaryOperator, Expr, Interval, Value};
+
+    use crate::statements::transform::expand_interval::{
+        expand_interval_name, single_quoted_string_expr, ExpandIntervalTransformRule,
+    };
+    use crate::statements::transform::TransformRule;
 
     #[test]
     fn test_transform_interval_conversions() {
@@ -158,5 +169,81 @@ mod tests {
         for input in test_cases {
             assert_eq!(expand_interval_name(input), None);
         }
+    }
+
+    #[test]
+    fn test_visit_expr_when_interval_is_single_quoted_string_expr() {
+        let interval_transformation_rule = ExpandIntervalTransformRule {};
+
+        let mut string_expr = Expr::Interval(Interval {
+            value: single_quoted_string_expr("5y".to_string()),
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        });
+
+        let control_flow = interval_transformation_rule.visit_expr(&mut string_expr);
+
+        assert_eq!(control_flow, ControlFlow::Continue(()));
+        assert_eq!(
+            string_expr,
+            Expr::Interval(Interval {
+                value: Box::new(Expr::Value(Value::SingleQuotedString(
+                    "5 years".to_string()
+                ))),
+                leading_field: None,
+                leading_precision: None,
+                last_field: None,
+                fractional_seconds_precision: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_visit_expr_when_interval_is_binary_op() {
+        let interval_transformation_rule = ExpandIntervalTransformRule {};
+
+        let mut binary_op_expr = Expr::Interval(Interval {
+            value: Box::new(Expr::BinaryOp {
+                left: single_quoted_string_expr("2d".to_string()),
+                op: BinaryOperator::Minus,
+                right: Box::new(Expr::Interval(Interval {
+                    value: single_quoted_string_expr("1d".to_string()),
+                    leading_field: None,
+                    leading_precision: None,
+                    last_field: None,
+                    fractional_seconds_precision: None,
+                })),
+            }),
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        });
+
+        let control_flow = interval_transformation_rule.visit_expr(&mut binary_op_expr);
+
+        assert_eq!(control_flow, ControlFlow::Continue(()));
+        assert_eq!(
+            binary_op_expr,
+            Expr::Interval(Interval {
+                value: Box::new(Expr::BinaryOp {
+                    left: single_quoted_string_expr("2 days".to_string()),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(Expr::Interval(Interval {
+                        value: single_quoted_string_expr("1d".to_string()),
+                        leading_field: None,
+                        leading_precision: None,
+                        last_field: None,
+                        fractional_seconds_precision: None,
+                    })),
+                }),
+                leading_field: None,
+                leading_precision: None,
+                last_field: None,
+                fractional_seconds_precision: None,
+            })
+        );
     }
 }
