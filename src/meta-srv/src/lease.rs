@@ -33,7 +33,7 @@ fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
     }
 }
 
-/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], if `lease_secs`` is `Some`, will only return if it's alive
+/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], will only return if it's alive under given `lease_secs`
 pub async fn lookup_datanode_peer(
     cluster_id: ClusterId,
     datanode_id: DatanodeId,
@@ -76,7 +76,7 @@ pub async fn alive_datanodes(
     .await
 }
 
-/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`]
+/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], only return if it's alive under given `lease_secs`
 pub async fn lookup_flownode_peer(
     cluster_id: ClusterId,
     flownode_id: FlownodeId,
