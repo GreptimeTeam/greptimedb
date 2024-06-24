@@ -20,6 +20,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::SchemaRef;
 use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -138,12 +139,28 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Cannot construct an empty stream"))]
+    EmptyStream {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Schema not match, left: {:?}, right: {:?}", left, right))]
+    SchemaNotMatch {
+        left: SchemaRef,
+        right: SchemaRef,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
+            Error::NewDfRecordBatch { .. }
+            | Error::EmptyStream { .. }
+            | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
 
             Error::DataTypes { .. }
             | Error::CreateRecordBatches { .. }

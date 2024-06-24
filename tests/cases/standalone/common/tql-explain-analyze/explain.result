@@ -137,6 +137,11 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
+| physical_plan after parallelize_scan_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]_|
+|_|_PromSeriesDivideExec: tags=["k"]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
 | physical_plan after OutputRequirements_| OutputRequirementExec_|
 |_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]_|
