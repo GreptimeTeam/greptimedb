@@ -540,7 +540,7 @@ impl<I: Iterator<Item = Result<Batch>>> LastNotNullIter<I> {
             };
 
             let first = batch.slice(0, index + 1);
-            let batch = batch.slice(index, batch.num_rows() - index - 1);
+            let batch = batch.slice(index + 1, batch.num_rows() - index - 1);
             // `index` is Some indicates that the batch has at least one row remaining.
             debug_assert!(!batch.is_empty());
             self.current_batch = Some(batch);
@@ -1082,5 +1082,24 @@ mod tests {
                 new_batch_multi_fields(b"k1", &[3], &[5], &[OpType::Put], &[(Some(13), Some(3))]),
             ],
         );
+    }
+
+    #[test]
+    fn test_last_not_null_iter() {
+        let input = [new_batch_multi_fields(
+            b"k1",
+            &[1, 1, 2],
+            &[13, 12, 13],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[(None, None), (Some(1), None), (Some(2), Some(22))],
+        )];
+        let iter = input.into_iter().map(|batch| Ok(batch));
+        let iter = LastNotNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [
+            new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+        ];
+        assert_eq!(&expect, &actual[..]);
     }
 }
