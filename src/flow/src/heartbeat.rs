@@ -122,7 +122,6 @@ impl HeartbeatTask {
                         }
                     }
                     _ = interval.tick() => {
-                        interval.reset();
                         let req = HeartbeatRequest {
                             peer: self_peer.clone(),
                             ..Default::default()
