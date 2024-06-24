@@ -85,9 +85,13 @@ impl PartitionTree {
                 .collect(),
         };
         let is_partitioned = Partition::has_multi_partitions(&metadata);
+        let mut config = config.clone();
+        if config.update_mode == UpdateMode::LastNotNull {
+            config.dedup = false;
+        }
 
         PartitionTree {
-            config: config.clone(),
+            config,
             metadata,
             row_codec: Arc::new(row_codec),
             partitions: Default::default(),

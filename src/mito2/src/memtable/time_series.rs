@@ -115,6 +115,11 @@ impl TimeSeriesMemtable {
                 .collect(),
         ));
         let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
+        let dedup = if update_mode == UpdateMode::LastNotNull {
+            false
+        } else {
+            dedup
+        };
         Self {
             id,
             region_metadata,
