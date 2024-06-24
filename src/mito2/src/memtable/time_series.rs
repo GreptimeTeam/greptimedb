@@ -44,7 +44,9 @@ use crate::memtable::{
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::read::dedup::LastNotNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
+use crate::region::options::UpdateMode;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Initial vector builder capacity.
@@ -55,14 +57,20 @@ const INITIAL_BUILDER_CAPACITY: usize = 0;
 pub struct TimeSeriesMemtableBuilder {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     dedup: bool,
+    update_mode: UpdateMode,
 }
 
 impl TimeSeriesMemtableBuilder {
     /// Creates a new builder with specific `write_buffer_manager`.
-    pub fn new(write_buffer_manager: Option<WriteBufferManagerRef>, dedup: bool) -> Self {
+    pub fn new(
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        dedup: bool,
+        update_mode: UpdateMode,
+    ) -> Self {
         Self {
             write_buffer_manager,
             dedup,
+            update_mode,
         }
     }
 }
@@ -74,6 +82,7 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
             id,
             self.write_buffer_manager.clone(),
             self.dedup,
+            self.update_mode,
         ))
     }
 }
@@ -88,6 +97,7 @@ pub struct TimeSeriesMemtable {
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     dedup: bool,
+    update_mode: UpdateMode,
 }
 
 impl TimeSeriesMemtable {
@@ -96,6 +106,7 @@ impl TimeSeriesMemtable {
         id: MemtableId,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         dedup: bool,
+        update_mode: UpdateMode,
     ) -> Self {
         let row_codec = Arc::new(McmpRowCodec::new(
             region_metadata
@@ -113,6 +124,7 @@ impl TimeSeriesMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             dedup,
+            update_mode,
         }
     }
 
@@ -241,7 +253,13 @@ impl Memtable for TimeSeriesMemtable {
         let iter = self
             .series_set
             .iter_series(projection, filters, self.dedup)?;
-        Ok(Box::new(iter))
+
+        if self.update_mode == UpdateMode::LastNotNull {
+            let iter = LastNotNullIter::new(iter);
+            Ok(Box::new(iter))
+        } else {
+            Ok(Box::new(iter))
+        }
     }
 
     fn ranges(
@@ -262,6 +280,7 @@ impl Memtable for TimeSeriesMemtable {
             projection,
             predicate,
             dedup: self.dedup,
+            update_mode: self.update_mode,
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
@@ -310,6 +329,7 @@ impl Memtable for TimeSeriesMemtable {
             id,
             self.alloc_tracker.write_buffer_manager(),
             self.dedup,
+            self.update_mode,
         ))
     }
 }
@@ -846,6 +866,7 @@ struct TimeSeriesIterBuilder {
     projection: HashSet<ColumnId>,
     predicate: Option<Predicate>,
     dedup: bool,
+    update_mode: UpdateMode,
 }
 
 impl IterBuilder for TimeSeriesIterBuilder {
@@ -855,7 +876,13 @@ impl IterBuilder for TimeSeriesIterBuilder {
             self.predicate.clone(),
             self.dedup,
         )?;
-        Ok(Box::new(iter))
+
+        if self.update_mode == UpdateMode::LastNotNull {
+            let iter = LastNotNullIter::new(iter);
+            Ok(Box::new(iter))
+        } else {
+            Ok(Box::new(iter))
+        }
     }
 }
 
@@ -1224,7 +1251,7 @@ mod tests {
     fn check_memtable_dedup(dedup: bool) {
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42, None, dedup);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None, dedup, UpdateMode::LastRow);
         memtable.write(&kvs).unwrap();
         memtable.write(&kvs).unwrap();
 
@@ -1273,7 +1300,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let schema = schema_for_test();
         let kvs = build_key_values(&schema, "hello".to_string(), 42, 100);
-        let memtable = TimeSeriesMemtable::new(schema, 42, None, true);
+        let memtable = TimeSeriesMemtable::new(schema, 42, None, true, UpdateMode::LastRow);
         memtable.write(&kvs).unwrap();
 
         let iter = memtable.iter(Some(&[3]), None).unwrap();

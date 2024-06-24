@@ -141,6 +141,7 @@ pub async fn open_compaction_region(
             .builder_for_options(
                 region_options.memtable.as_ref(),
                 !region_options.append_mode,
+                region_options.update_mode,
             );
 
         // Initial memtable id is 0.

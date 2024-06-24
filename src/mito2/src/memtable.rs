@@ -33,7 +33,7 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
-use crate::region::options::MemtableOptions;
+use crate::region::options::{MemtableOptions, UpdateMode};
 
 pub mod key_values;
 pub mod partition_tree;
@@ -246,11 +246,13 @@ impl MemtableBuilderProvider {
         &self,
         options: Option<&MemtableOptions>,
         dedup: bool,
+        update_mode: UpdateMode,
     ) -> MemtableBuilderRef {
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
+                update_mode,
             )),
             Some(MemtableOptions::PartitionTree(opts)) => {
                 Arc::new(PartitionTreeMemtableBuilder::new(
@@ -263,11 +265,11 @@ impl MemtableBuilderProvider {
                     self.write_buffer_manager.clone(),
                 ))
             }
-            None => self.default_memtable_builder(dedup),
+            None => self.default_memtable_builder(dedup, update_mode),
         }
     }
 
-    fn default_memtable_builder(&self, dedup: bool) -> MemtableBuilderRef {
+    fn default_memtable_builder(&self, dedup: bool, update_mode: UpdateMode) -> MemtableBuilderRef {
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();
@@ -280,6 +282,7 @@ impl MemtableBuilderProvider {
             MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
+                update_mode,
             )),
         }
     }
