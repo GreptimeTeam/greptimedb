@@ -62,6 +62,7 @@ impl HeartbeatTask {
     }
 
     pub async fn start(&self) -> Result<(), Error> {
+        info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
             .heartbeat()
@@ -79,6 +80,26 @@ impl HeartbeatTask {
         self.start_heartbeat_report(req_sender, outgoing_rx);
 
         Ok(())
+    }
+
+    fn create_heartbeat_request(
+        message: OutgoingMessage,
+        self_peer: &Option<Peer>,
+    ) -> Option<HeartbeatRequest> {
+        match outgoing_message_to_mailbox_message(message) {
+            Ok(message) => {
+                let req = HeartbeatRequest {
+                    mailbox_message: Some(message),
+                    peer: self_peer.clone(),
+                    ..Default::default()
+                };
+                Some(req)
+            }
+            Err(e) => {
+                error!(e; "Failed to encode mailbox messages");
+                None
+            }
+        }
     }
 
     fn start_heartbeat_report(
@@ -102,20 +123,7 @@ impl HeartbeatTask {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            match outgoing_message_to_mailbox_message(message) {
-                                Ok(message) => {
-                                    let req = HeartbeatRequest {
-                                        mailbox_message: Some(message),
-                                        peer: self_peer.clone(),
-                                        ..Default::default()
-                                    };
-                                    Some(req)
-                                }
-                                Err(e) => {
-                                    error!(e; "Failed to encode mailbox messages");
-                                    None
-                                }
-                            }
+                            Self::create_heartbeat_request(message, &self_peer)
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break

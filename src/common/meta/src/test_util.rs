@@ -180,6 +180,6 @@ pub fn new_ddl_context_with_kv_backend(
         table_metadata_manager,
         flow_metadata_allocator,
         flow_metadata_manager,
-        peer_lookup_service: Arc::new(StandalonePeerLookupService),
+        peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
     }
 }

@@ -102,15 +102,16 @@ impl DropFlowProcedure {
         let flownode_ids = &self.data.flow_info_value.as_ref().unwrap().flownode_ids;
         let flow_id = self.data.task.flow_id;
         let mut drop_flow_tasks = Vec::with_capacity(flownode_ids.len());
+        let cluster_id = self.data.cluster_id;
 
         for flownode in flownode_ids.values() {
             let peer = self
                 .context
                 .peer_lookup_service
-                .flownode(0, *flownode)
+                .flownode(cluster_id, *flownode)
                 .await?
                 .with_context(|| UnexpectedSnafu {
-                    err_msg: "Flownode not found when trying to drop flow on it",
+                    err_msg: "Attempted to drop flow on a node that could not be found. Consider verifying node availability.",
                 })?;
             let requester = self.context.node_manager.flownode(&peer).await;
             let request = FlowRequest {

@@ -119,7 +119,7 @@ pub mod test_data {
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;
-    use common_meta::peer::{DummyPeerLookupService, Peer};
+    use common_meta::peer::{Peer, StandalonePeerLookupService};
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::RegionRoute;
     use common_meta::sequence::SequenceBuilder;
@@ -225,7 +225,7 @@ pub mod test_data {
             flow_metadata_manager,
             flow_metadata_allocator,
             memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
-            peer_lookup_service: Arc::new(DummyPeerLookupService {}),
+            peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
         }
     }
 }

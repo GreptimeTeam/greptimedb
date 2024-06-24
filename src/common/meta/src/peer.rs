@@ -78,30 +78,24 @@ pub trait PeerLookupService {
 
 pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;
 
-/// A dummy implementation of [PeerLookupService] for testing purpose.
-pub struct DummyPeerLookupService;
+/// always return `Peer::new(0, "")` for any query
+pub struct StandalonePeerLookupService {
+    default_peer: Peer,
+}
 
-#[async_trait::async_trait]
-impl PeerLookupService for DummyPeerLookupService {
-    async fn datanode(
-        &self,
-        _cluster_id: ClusterId,
-        _id: DatanodeId,
-    ) -> Result<Option<Peer>, Error> {
-        Ok(None)
-    }
-
-    async fn flownode(
-        &self,
-        _cluster_id: ClusterId,
-        _id: FlownodeId,
-    ) -> Result<Option<Peer>, Error> {
-        Ok(None)
+impl StandalonePeerLookupService {
+    pub fn new() -> Self {
+        Self {
+            default_peer: Peer::new(0, ""),
+        }
     }
 }
 
-/// always return `Peer::new(0, "")` for any query
-pub struct StandalonePeerLookupService;
+impl Default for StandalonePeerLookupService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl PeerLookupService for StandalonePeerLookupService {
@@ -110,7 +104,7 @@ impl PeerLookupService for StandalonePeerLookupService {
         _cluster_id: ClusterId,
         _id: DatanodeId,
     ) -> Result<Option<Peer>, Error> {
-        Ok(Some(Peer::new(0, "")))
+        Ok(Some(self.default_peer.clone()))
     }
 
     async fn flownode(
@@ -118,6 +112,6 @@ impl PeerLookupService for StandalonePeerLookupService {
         _cluster_id: ClusterId,
         _id: FlownodeId,
     ) -> Result<Option<Peer>, Error> {
-        Ok(Some(Peer::new(0, "")))
+        Ok(Some(self.default_peer.clone()))
     }
 }

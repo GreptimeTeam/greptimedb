@@ -810,7 +810,7 @@ mod tests {
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
-    use crate::peer::{DummyPeerLookupService, Peer};
+    use crate::peer::{Peer, StandalonePeerLookupService};
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
@@ -855,7 +855,7 @@ mod tests {
                 flow_metadata_manager,
                 flow_metadata_allocator,
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
-                peer_lookup_service: Arc::new(DummyPeerLookupService {}),
+                peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
             },
             procedure_manager.clone(),
             true,
