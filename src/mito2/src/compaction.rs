@@ -276,6 +276,7 @@ impl CompactionScheduler {
 
         let compaction_region = CompactionRegion {
             region_id,
+            region_dir: access_layer.region_dir().to_string(),
             current_version: current_version.clone(),
             region_options: current_version.options.clone(),
             engine_config: engine_config.clone(),

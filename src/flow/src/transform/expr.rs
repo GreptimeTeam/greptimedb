@@ -34,7 +34,7 @@ use crate::expr::{
     BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr, UnaryFunc,
     UnmaterializableFunc, VariadicFunc,
 };
-use crate::repr::{ColumnType, RelationDesc};
+use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
 use crate::transform::{substrait_proto, FunctionExtensions};
 // TODO(discord9): found proper place for this
@@ -99,20 +99,69 @@ pub(crate) fn from_scalar_fn_to_df_fn_impl(
     Ok(phy_expr)
 }
 
+/// Return an [`Expression`](wrapped in a [`FunctionArgument`]) that references the i-th column of the input relation
+pub(crate) fn proto_col(i: usize) -> substrait_proto::proto::FunctionArgument {
+    use substrait_proto::proto::expression;
+    let expr = Expression {
+        rex_type: Some(expression::RexType::Selection(Box::new(
+            expression::FieldReference {
+                reference_type: Some(expression::field_reference::ReferenceType::DirectReference(
+                    expression::ReferenceSegment {
+                        reference_type: Some(
+                            expression::reference_segment::ReferenceType::StructField(Box::new(
+                                expression::reference_segment::StructField {
+                                    field: i as i32,
+                                    child: None,
+                                },
+                            )),
+                        ),
+                    },
+                )),
+                root_type: None,
+            },
+        ))),
+    };
+    substrait_proto::proto::FunctionArgument {
+        arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
+            expr,
+        )),
+    }
+}
+
+/// rewrite ScalarFunction's arguments to Columns 0..n so nested exprs are still handled by us instead of datafusion
+fn rewrite_scalar_function(f: &ScalarFunction) -> ScalarFunction {
+    let mut f_rewrite = f.clone();
+    for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
+        *raw_expr = proto_col(idx);
+    }
+    f_rewrite
+}
+
 impl TypedExpr {
     pub fn from_substrait_to_datafusion_scalar_func(
         f: &ScalarFunction,
-        input_schema: &RelationDesc,
+        arg_exprs_typed: Vec<TypedExpr>,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
-        let phy_expr = from_scalar_fn_to_df_fn_impl(f, input_schema, extensions)?;
-        let raw_fn = RawDfScalarFn::from_proto(f, input_schema.clone(), extensions.clone())?;
-        let expr = DfScalarFunction::new(raw_fn, phy_expr)?;
-        let expr = ScalarExpr::CallDf { df_scalar_fn: expr };
+        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) =
+            arg_exprs_typed.into_iter().map(|e| (e.expr, e.typ)).unzip();
+
+        let f_rewrite = rewrite_scalar_function(f);
+
+        let input_schema = RelationType::new(arg_types).into_unnamed();
+        let raw_fn =
+            RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
+
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn)?;
+        let expr = ScalarExpr::CallDf {
+            df_scalar_fn: df_func,
+            exprs: arg_exprs,
+        };
         // df already know it's own schema, so not providing here
         let ret_type = expr.typ(&[])?;
         Ok(TypedExpr::new(expr, ret_type))
     }
+
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
         f: &ScalarFunction,
@@ -242,7 +291,7 @@ impl TypedExpr {
                 } else {
                     let try_as_df = Self::from_substrait_to_datafusion_scalar_func(
                         f,
-                        input_schema,
+                        arg_typed_exprs,
                         extensions,
                     )?;
                     Ok(try_as_df)
@@ -395,6 +444,7 @@ mod test {
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+
     /// test if `WHERE` condition can be converted to Flow's ScalarExpr in mfp's filter
     #[tokio::test]
     async fn test_where_and() {
@@ -608,39 +658,10 @@ mod test {
                 )),
             }
         }
-        fn col(i: usize) -> substrait_proto::proto::FunctionArgument {
-            use substrait_proto::proto::expression;
-            let expr = Expression {
-                rex_type: Some(expression::RexType::Selection(Box::new(
-                    expression::FieldReference {
-                        reference_type: Some(
-                            expression::field_reference::ReferenceType::DirectReference(
-                                expression::ReferenceSegment {
-                                    reference_type: Some(
-                                        expression::reference_segment::ReferenceType::StructField(
-                                            Box::new(expression::reference_segment::StructField {
-                                                field: i as i32,
-                                                child: None,
-                                            }),
-                                        ),
-                                    ),
-                                },
-                            ),
-                        ),
-                        root_type: None,
-                    },
-                ))),
-            };
-            substrait_proto::proto::FunctionArgument {
-                arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
-                    expr,
-                )),
-            }
-        }
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0)],
+            arguments: vec![proto_col(0)],
             options: vec![],
             output_type: None,
             ..Default::default()
@@ -663,7 +684,7 @@ mod test {
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), col(1)],
+            arguments: vec![proto_col(0), proto_col(1)],
             options: vec![],
             output_type: None,
             ..Default::default()
@@ -690,7 +711,7 @@ mod test {
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
+            arguments: vec![proto_col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
             options: vec![],
             output_type: None,
             ..Default::default()
@@ -718,7 +739,7 @@ mod test {
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), lit("1 second")],
+            arguments: vec![proto_col(0), lit("1 second")],
             options: vec![],
             output_type: None,
             ..Default::default()
