@@ -26,6 +26,7 @@ use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
+use crate::peer::PeerLookupServiceRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
@@ -118,4 +119,6 @@ pub struct DdlContext {
     pub flow_metadata_manager: FlowMetadataManagerRef,
     /// Allocator for flow metadata.
     pub flow_metadata_allocator: FlowMetadataAllocatorRef,
+    /// look up peer by id.
+    pub peer_lookup_service: PeerLookupServiceRef,
 }
