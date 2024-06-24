@@ -148,7 +148,7 @@ impl TransformRule for TypeAliasTransformRule {
 
 fn replace_type_alias(data_type: &mut DataType) {
     match data_type {
-        // TODO(dennis): The sqlparser latest version contains the Int8 alias for postres Bigint.
+        // TODO(dennis): The sqlparser latest version contains the Int8 alias for Postgres Bigint.
         // Which means 8 bytes in postgres (not 8 bits). If we upgrade the sqlparser, need to process it.
         // See https://docs.rs/sqlparser/latest/sqlparser/ast/enum.DataType.html#variant.Int8
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
