@@ -5,6 +5,7 @@ CREATE TABLE numbers_input_df_func (
     TIME INDEX(ts)
 );
 
+-- call `sum(abs(number))` where `abs` is DataFusion Function and `sum` is flow function
 CREATE FLOW test_numbers_df_func 
 SINK TO out_num_cnt_df_func
 AS 
@@ -37,6 +38,7 @@ CREATE TABLE numbers_input_df_func (
     TIME INDEX(ts)
 );
 
+-- call `abs(sum(number))`to make sure that calling `abs` function(impl by datafusion) on `sum` function(impl by flow) is working
 CREATE FLOW test_numbers_df_func 
 SINK TO out_num_cnt_df_func
 AS 
