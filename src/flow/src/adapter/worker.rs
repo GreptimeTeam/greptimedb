@@ -501,6 +501,19 @@ mod test {
     use crate::plan::Plan;
     use crate::repr::{RelationType, Row};
 
+    #[test]
+    fn drop_handle() {
+        let (tx, rx) = oneshot::channel();
+        let worker_thread_handle = std::thread::spawn(move || {
+            let (handle, mut worker) = create_worker();
+            tx.send(handle).unwrap();
+            worker.run();
+        });
+        let handle = rx.blocking_recv().unwrap();
+        drop(handle);
+        worker_thread_handle.join().unwrap();
+    }
+
     #[tokio::test]
     pub async fn test_simple_get_with_worker_and_handle() {
         let (tx, rx) = oneshot::channel();
