@@ -64,19 +64,18 @@ pub struct CompactionRegion {
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
 }
 
-/// CompactorRequest represents the request to compact a region.
+/// OpenCompactionRegionRequest represents the request to open a compaction region.
 #[derive(Debug, Clone)]
-pub struct CompactorRequest {
+pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub region_dir: String,
     pub region_options: RegionOptions,
-    pub picker_output: PickerOutput,
 }
 
 /// Open a compaction region from a compaction request.
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
-    req: &CompactorRequest,
+    req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
