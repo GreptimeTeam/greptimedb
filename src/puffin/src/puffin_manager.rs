@@ -36,22 +36,14 @@ pub trait PuffinManager {
 /// The `PuffinWriter` trait provides methods for writing blobs and directories to a Puffin file.
 #[async_trait]
 pub trait PuffinWriter {
-    /// Writes a blob to the Puffin file.
-    async fn put_blob(
-        &mut self,
-        key: &str,
-        raw_data: impl AsyncRead + Send,
-        options: Option<PutOptions>,
-    ) -> Result<u64>;
+    /// Writes a blob associated with the specified `key` to the Puffin file.
+    async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>
+    where
+        R: AsyncRead + Send;
 
-    /// Writes a directory from the filesystem to the Puffin file.
+    /// Writes a directory associated with the specified `key` to the Puffin file.
     /// The specified `dir` should be accessible from the filesystem.
-    async fn put_dir(
-        &mut self,
-        key: &str,
-        dir: PathBuf,
-        options: Option<PutOptions>,
-    ) -> Result<u64>;
+    async fn put_dir(&mut self, key: &str, dir: PathBuf, options: PutOptions) -> Result<u64>;
 
     /// Sets whether the footer should be LZ4 compressed.
     fn set_footer_lz4_compressed(&mut self, lz4_compressed: bool);
@@ -61,9 +53,10 @@ pub trait PuffinWriter {
 }
 
 /// Options available for `put_blob` and `put_dir` methods.
+#[derive(Debug, Clone, Default)]
 pub struct PutOptions {
     /// The compression codec to use for blob data.
-    pub data_compression: Option<CompressionCodec>,
+    pub compression: Option<CompressionCodec>,
 }
 
 /// The `PuffinReader` trait provides methods for reading blobs and directories from a Puffin file.
@@ -75,6 +68,6 @@ pub trait PuffinReader {
     async fn blob(&self, key: &str) -> Result<Self::Reader>;
 
     /// Reads a directory from the Puffin file.
-    /// The returned `PathBuf` can be used to access the directory in the filesystem.
+    /// The returned `PathBuf` is used to access the directory in the filesystem.
     async fn dir(&self, key: &str) -> Result<PathBuf>;
 }
