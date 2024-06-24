@@ -24,7 +24,7 @@ use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
-    BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRef, MemtableStats,
+    BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRange, MemtableRef, MemtableStats,
 };
 
 #[allow(unused)]
@@ -60,6 +60,14 @@ impl Memtable for BulkMemtable {
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator> {
+        todo!()
+    }
+
+    fn ranges(
+        &self,
+        _projection: Option<&[ColumnId]>,
+        _predicate: Option<Predicate>,
+    ) -> Vec<MemtableRange> {
         todo!()
     }
 
