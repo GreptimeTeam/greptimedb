@@ -128,6 +128,15 @@ pub(crate) fn proto_col(i: usize) -> substrait_proto::proto::FunctionArgument {
     }
 }
 
+/// rewrite ScalarFunction's arguments to Columns 0..n so nested exprs are still handled by us instead of datafusion
+fn rewrite_scalar_function(f: &ScalarFunction) -> ScalarFunction {
+    let mut f_rewrite = f.clone();
+    for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
+        *raw_expr = proto_col(idx);
+    }
+    f_rewrite
+}
+
 impl TypedExpr {
     pub fn from_substrait_to_datafusion_scalar_func(
         f: &ScalarFunction,
@@ -136,14 +145,13 @@ impl TypedExpr {
     ) -> Result<TypedExpr, Error> {
         let (arg_exprs, arg_types): (Vec<_>, Vec<_>) =
             arg_exprs_typed.into_iter().map(|e| (e.expr, e.typ)).unzip();
-        // rewrite ScalarFunction's arguments to Columns 0..n so nested exprs are still handled by us instead of datafusion
-        let mut f_rewrite = f.clone();
-        for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
-            *raw_expr = proto_col(idx);
-        }
+
+        let f_rewrite = rewrite_scalar_function(f);
+
         let input_schema = RelationType::new(arg_types).into_unnamed();
         let raw_fn =
             RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
+
         let df_func = DfScalarFunction::try_from_raw_fn(raw_fn)?;
         let expr = ScalarExpr::CallDf {
             df_scalar_fn: df_func,
@@ -153,6 +161,7 @@ impl TypedExpr {
         let ret_type = expr.typ(&[])?;
         Ok(TypedExpr::new(expr, ret_type))
     }
+
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
         f: &ScalarFunction,

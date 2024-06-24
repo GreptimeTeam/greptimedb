@@ -21,10 +21,10 @@ use bytes::BytesMut;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
 use datafusion_physical_expr::PhysicalExpr;
-use datatypes::arrow_array;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
+use datatypes::{arrow_array, value};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -199,13 +199,18 @@ impl DfScalarFunction {
         })
     }
 
+    /// eval a list of expressions using input values
+    fn eval_args(values: &[Value], exprs: &[ScalarExpr]) -> Result<Vec<Value>, EvalError> {
+        exprs
+            .iter()
+            .map(|expr| expr.eval(values))
+            .collect::<Result<_, _>>()
+    }
+
     // TODO(discord9): add RecordBatch support
     pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
         // first eval exprs to construct values to feed to datafusion
-        let values: Vec<_> = exprs
-            .iter()
-            .map(|expr| expr.eval(values))
-            .collect::<Result<_, _>>()?;
+        let values: Vec<_> = Self::eval_args(values, exprs)?;
 
         if values.is_empty() {
             return InvalidArgumentSnafu {
