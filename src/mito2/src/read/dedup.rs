@@ -361,12 +361,12 @@ impl LastFieldsBuilder {
             }
         };
 
+        // Resets itself. `self.builders` already reset in `to_vector()`.
+        self.clear();
+
         if self.filter_deleted {
             filter_deleted_from_batch(&mut output, metrics)?;
         }
-
-        // Resets itself. `self.builders` already reset in `to_vector()`.
-        self.clear();
 
         if output.is_empty() {
             Ok(None)
