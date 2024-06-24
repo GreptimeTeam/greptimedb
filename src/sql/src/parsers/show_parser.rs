@@ -32,7 +32,7 @@ impl<'a> ParserContext<'a> {
     /// todo(hl) support `show settings`/`show create`/`show users` etc.
     pub(crate) fn parse_show(&mut self) -> Result<Statement> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
-            self.parse_show_databases()
+            self.parse_show_databases(false)
         } else if self.matches_keyword(Keyword::TABLES) {
             self.parser.next_token();
             self.parse_show_tables(false)
@@ -75,6 +75,8 @@ impl<'a> ParserContext<'a> {
             } else if self.consume_token("COLUMNS") || self.consume_token("FIELDS") {
                 // SHOW {COLUMNS | FIELDS}
                 self.parse_show_columns(true)
+            } else if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
+                self.parse_show_databases(true)
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
@@ -341,12 +343,13 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses `SHOW DATABASES` statement.
-    pub fn parse_show_databases(&mut self) -> Result<Statement> {
+    pub fn parse_show_databases(&mut self, full: bool) -> Result<Statement> {
         let tok = self.parser.next_token().token;
         match &tok {
-            Token::EOF | Token::SemiColon => {
-                Ok(Statement::ShowDatabases(ShowDatabases::new(ShowKind::All)))
-            }
+            Token::EOF | Token::SemiColon => Ok(Statement::ShowDatabases(ShowDatabases::new(
+                ShowKind::All,
+                full,
+            ))),
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
                     ShowKind::Like(self.parse_identifier().with_context(|_| {
@@ -356,6 +359,7 @@ impl<'a> ParserContext<'a> {
                             actual: tok.to_string(),
                         }
                     })?),
+                    full,
                 ))),
                 Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(
                     ShowKind::Where(self.parser.parse_expr().with_context(|_| {
@@ -365,6 +369,7 @@ impl<'a> ParserContext<'a> {
                             actual: self.peek_token_as_string(),
                         }
                     })?),
+                    full,
                 ))),
                 _ => self.unsupported(self.peek_token_as_string()),
             },
@@ -395,7 +400,39 @@ mod tests {
         assert_matches!(
             &stmts[0],
             Statement::ShowDatabases(ShowDatabases {
-                kind: ShowKind::All
+                kind: ShowKind::All,
+                full: false,
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_full_databases() {
+        let sql = "SHOW FULL DATABASES";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowDatabases(ShowDatabases {
+                kind: ShowKind::All,
+                full: true,
+            })
+        );
+
+        let sql = "SHOW FULL DATABASES LIKE 'test%'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowDatabases(ShowDatabases {
+                kind: ShowKind::Like(_),
+                full: true,
             })
         );
     }
@@ -414,7 +451,8 @@ mod tests {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
-                })
+                }),
+                ..
             })
         );
     }
@@ -434,7 +472,8 @@ mod tests {
                     left: _,
                     right: _,
                     op: sqlparser::ast::BinaryOperator::Or,
-                })
+                }),
+                ..
             })
         );
     }

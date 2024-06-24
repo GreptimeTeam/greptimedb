@@ -235,7 +235,7 @@ mod tests {
         let request = ScanRequest::default();
         let stream = env
             .metric()
-            .handle_query(physical_region_id, request)
+            .scan_to_stream(physical_region_id, request)
             .await
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -255,7 +255,7 @@ mod tests {
         let request = ScanRequest::default();
         let stream = env
             .metric()
-            .handle_query(logical_region_id, request)
+            .scan_to_stream(logical_region_id, request)
             .await
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();

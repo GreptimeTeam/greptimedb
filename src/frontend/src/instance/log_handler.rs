@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
-use pipeline::table::PipelineVersion;
+use pipeline::table::{PipelineInfo, PipelineVersion};
 use pipeline::{GreptimeTransformer, Pipeline};
 use servers::error::{
     AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
@@ -65,7 +65,7 @@ impl LogHandler for Instance {
         content_type: &str,
         pipeline: &str,
         query_ctx: QueryContextRef,
-    ) -> ServerResult<()> {
+    ) -> ServerResult<PipelineInfo> {
         self.pipeline_operator
             .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await

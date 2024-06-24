@@ -57,6 +57,11 @@ pub type PipelineVersion = Option<TimestampNanosecond>;
 
 pub type PipelineTableRef = Arc<PipelineTable>;
 
+pub type PipelineRef = Arc<Pipeline<GreptimeTransformer>>;
+
+/// Pipeline info. A tuple of timestamp and pipeline reference.
+pub type PipelineInfo = (Timestamp, PipelineRef);
+
 pub const PIPELINE_TABLE_NAME: &str = "pipelines";
 
 pub const PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME: &str = "name";
@@ -311,7 +316,7 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+    ) -> Result<PipelineInfo> {
         let compiled_pipeline = Arc::new(Self::compile_pipeline(pipeline)?);
         // we will use the version in the future
         let version = self
@@ -329,7 +334,7 @@ impl PipelineTable {
             );
         }
 
-        Ok(compiled_pipeline)
+        Ok((version, compiled_pipeline))
     }
 
     async fn find_pipeline_by_name(

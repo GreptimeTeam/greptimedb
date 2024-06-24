@@ -22,7 +22,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
 use snafu::{ensure, ResultExt};
@@ -36,7 +36,7 @@ const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
@@ -102,7 +102,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
 }
 
 /// Options for compactions
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "compaction.type")]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionOptions {
@@ -133,7 +133,7 @@ impl Default for CompactionOptions {
 
 /// Time window compaction options.
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwcsOptions {
     /// Max num of files that can be kept in active writing time window.
@@ -205,7 +205,7 @@ impl Default for RegionOptionsWithoutEnum {
 with_prefix!(prefix_inverted_index "index.inverted_index.");
 
 /// Options for index.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IndexOptions {
     /// Options for the inverted index.
@@ -215,7 +215,7 @@ pub struct IndexOptions {
 
 /// Options for the inverted index.
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InvertedIndexOptions {
     /// The column ids that should be ignored when building the inverted index.
@@ -238,7 +238,7 @@ impl Default for InvertedIndexOptions {
 }
 
 /// Options for region level memtable.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "memtable.type", rename_all = "snake_case")]
 pub enum MemtableOptions {
     TimeSeries,
@@ -250,7 +250,7 @@ with_prefix!(prefix_partition_tree "memtable.partition_tree.");
 
 /// Partition tree memtable options.
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionTreeOptions {
     /// Max keys in an index shard.

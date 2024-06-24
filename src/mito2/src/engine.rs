@@ -139,6 +139,9 @@ impl MitoEngine {
     }
 
     /// Handle substrait query and return a stream of record batches
+    ///
+    /// Notice that the output stream's ordering is not guranateed. If order
+    /// matter, please use [`scanner`] to build a [`Scanner`] to consume.
     #[tracing::instrument(skip_all)]
     pub async fn scan_to_stream(
         &self,

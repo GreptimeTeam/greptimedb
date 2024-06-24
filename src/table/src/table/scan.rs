@@ -14,9 +14,10 @@
 
 use std::any::Any;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
@@ -31,14 +32,14 @@ use datafusion_common::DataFusionError;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use futures::{Stream, StreamExt};
-use store_api::region_engine::RegionScannerRef;
+use store_api::region_engine::{PartitionRange, RegionScannerRef};
 
 use crate::table::metrics::MemoryUsageMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Debug)]
 pub struct RegionScanExec {
-    scanner: RegionScannerRef,
+    scanner: Mutex<RegionScannerRef>,
     arrow_schema: ArrowSchemaRef,
     /// The expected output ordering for the plan.
     output_ordering: Option<Vec<PhysicalSortExpr>>,
@@ -50,7 +51,7 @@ impl RegionScanExec {
     pub fn new(scanner: RegionScannerRef) -> Self {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
-        let mut num_output_partition = scanner_props.partitioning().num_partitions();
+        let mut num_output_partition = scanner_props.num_partitions();
         // The meaning of word "partition" is different in different context. For datafusion
         // it's about "parallelism" and for storage it's about "data range". Thus here we add
         // a special case to handle the situation where the number of storage partition is 0.
@@ -63,7 +64,7 @@ impl RegionScanExec {
             ExecutionMode::Bounded,
         );
         Self {
-            scanner,
+            scanner: Mutex::new(scanner),
             arrow_schema,
             output_ordering: None,
             metric: ExecutionPlanMetricsSet::new(),
@@ -75,6 +76,27 @@ impl RegionScanExec {
     pub fn with_output_ordering(mut self, output_ordering: Vec<PhysicalSortExpr>) -> Self {
         self.output_ordering = Some(output_ordering);
         self
+    }
+
+    /// Get the partition ranges of the scanner. This method will collapse the ranges into
+    /// a single vector.
+    pub fn get_partition_ranges(&self) -> Vec<PartitionRange> {
+        let scanner = self.scanner.lock().unwrap();
+        let raw_ranges = &scanner.properties().partitions;
+
+        // collapse the ranges
+        let mut ranges = Vec::with_capacity(raw_ranges.len());
+        for partition in raw_ranges {
+            ranges.extend_from_slice(partition);
+        }
+
+        ranges
+    }
+
+    /// Update the partition ranges of underlying scanner.
+    pub fn set_partitions(&self, partitions: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        let mut scanner = self.scanner.lock().unwrap();
+        scanner.prepare(partitions)
     }
 }
 
@@ -113,6 +135,8 @@ impl ExecutionPlan for RegionScanExec {
 
         let stream = self
             .scanner
+            .lock()
+            .unwrap()
             .scan_partition(partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let mem_usage_metrics = MemoryUsageMetrics::new(&self.metric, partition);
@@ -131,7 +155,10 @@ impl ExecutionPlan for RegionScanExec {
 impl DisplayAs for RegionScanExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // The scanner contains all information needed to display the plan.
-        self.scanner.fmt_as(t, f)
+        match self.scanner.try_lock() {
+            Ok(scanner) => scanner.fmt_as(t, f),
+            Err(_) => write!(f, "RegionScanExec <locked>"),
+        }
     }
 }
 
@@ -217,7 +244,7 @@ mod test {
             RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
         let stream = recordbatches.as_stream();
 
-        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        let scanner = Box::new(SinglePartitionScanner::new(stream));
         let plan = RegionScanExec::new(scanner);
         let actual: SchemaRef = Arc::new(
             plan.properties

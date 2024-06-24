@@ -697,6 +697,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Partition {} out of range, {} in total", given, all))]
+    PartitionOutOfRange {
+        given: usize,
+        all: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to iter data part"))]
     ReadDataPart {
         #[snafu(source)]
@@ -803,7 +811,8 @@ impl ErrorExt for Error {
             | ColumnNotFound { .. }
             | InvalidMetadata { .. }
             | InvalidRegionOptions { .. }
-            | InvalidWalReadRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidWalReadRequest { .. }
+            | PartitionOutOfRange { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 

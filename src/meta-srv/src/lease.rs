@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use common_meta::kv_backend::KvBackend;
 use common_meta::peer::Peer;
@@ -20,12 +21,13 @@ use common_meta::{util, ClusterId};
 use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::Result;
-use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
+use crate::error::{Error, Result};
+use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
-fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseKey, &LeaseValue) -> bool {
-    move |_: &LeaseKey, v: &LeaseValue| {
-        ((time_util::current_time_millis() - v.timestamp_millis) as u64) < lease_secs * 1000
+fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
+    move |v: &LeaseValue| {
+        ((time_util::current_time_millis() - v.timestamp_millis) as u64)
+            < lease_secs.checked_mul(1000).unwrap_or(u64::MAX)
     }
 }
 
@@ -36,7 +38,7 @@ pub async fn lookup_alive_datanode_peer(
     lease_secs: u64,
 ) -> Result<Option<Peer>> {
     let lease_filter = build_lease_filter(lease_secs);
-    let lease_key = LeaseKey {
+    let lease_key = DatanodeLeaseKey {
         cluster_id,
         node_id: datanode_id,
     };
@@ -45,7 +47,7 @@ pub async fn lookup_alive_datanode_peer(
         return Ok(None);
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
-    if lease_filter(&lease_key, &lease_value) {
+    if lease_filter(&lease_value) {
         Ok(Some(Peer {
             id: lease_key.node_id,
             addr: lease_value.node_addr,
@@ -59,23 +61,40 @@ pub async fn alive_datanodes(
     cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
-) -> Result<HashMap<LeaseKey, LeaseValue>> {
-    let lease_filter = build_lease_filter(lease_secs);
-
-    filter_datanodes(cluster_id, meta_peer_client, lease_filter).await
+) -> Result<HashMap<DatanodeLeaseKey, LeaseValue>> {
+    let predicate = build_lease_filter(lease_secs);
+    filter(
+        DatanodeLeaseKey::prefix_key_by_cluster(cluster_id),
+        meta_peer_client,
+        |v| predicate(v),
+    )
+    .await
 }
 
-pub async fn filter_datanodes<P>(
+pub async fn alive_flownodes(
     cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
-    predicate: P,
-) -> Result<HashMap<LeaseKey, LeaseValue>>
-where
-    P: Fn(&LeaseKey, &LeaseValue) -> bool,
-{
-    let key = get_lease_prefix(cluster_id);
-    let range_end = util::get_prefix_end_key(&key);
+    lease_secs: u64,
+) -> Result<HashMap<FlownodeLeaseKey, LeaseValue>> {
+    let predicate = build_lease_filter(lease_secs);
+    filter(
+        FlownodeLeaseKey::prefix_key_by_cluster(cluster_id),
+        meta_peer_client,
+        |v| predicate(v),
+    )
+    .await
+}
 
+pub async fn filter<P, K>(
+    key: Vec<u8>,
+    meta_peer_client: &MetaPeerClientRef,
+    predicate: P,
+) -> Result<HashMap<K, LeaseValue>>
+where
+    P: Fn(&LeaseValue) -> bool,
+    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error>,
+{
+    let range_end = util::get_prefix_end_key(&key);
     let range_req = common_meta::rpc::store::RangeRequest {
         key,
         range_end,
@@ -85,18 +104,13 @@ where
     let kvs = meta_peer_client.range(range_req).await?.kvs;
     let mut lease_kvs = HashMap::new();
     for kv in kvs {
-        let lease_key: LeaseKey = kv.key.try_into()?;
+        let lease_key: K = kv.key.try_into()?;
         let lease_value: LeaseValue = kv.value.try_into()?;
-        if !predicate(&lease_key, &lease_value) {
+        if !predicate(&lease_value) {
             continue;
         }
         let _ = lease_kvs.insert(lease_key, lease_value);
     }
 
     Ok(lease_kvs)
-}
-
-#[inline]
-pub fn get_lease_prefix(cluster_id: u64) -> Vec<u8> {
-    format!("{DN_LEASE_PREFIX}-{cluster_id}").into_bytes()
 }

@@ -90,7 +90,7 @@ impl RegionEngine for FileRegionEngine {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
         let stream = self.handle_query(region_id, request).await?;
-        let scanner = Arc::new(SinglePartitionScanner::new(stream));
+        let scanner = Box::new(SinglePartitionScanner::new(stream));
         Ok(scanner)
     }
 

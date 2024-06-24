@@ -52,7 +52,10 @@ fn test_permission_checker() {
 
     let sql_result = checker.check_permission(
         None,
-        PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(ShowKind::All))),
+        PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(
+            ShowKind::All,
+            false,
+        ))),
     );
     assert_matches!(sql_result, Ok(PermissionResp::Reject));
 
