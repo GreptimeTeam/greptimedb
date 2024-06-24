@@ -348,8 +348,10 @@ impl TypedPlan {
             let mut output_types = Vec::new();
             // give best effort to get column name
             let mut output_names = Vec::new();
+            // mark all auto added cols
+            let mut auto_cols = vec![];
             // first append group_expr as key, then aggr_expr as value
-            for expr in &group_exprs {
+            for (idx, expr) in group_exprs.iter().enumerate() {
                 output_types.push(expr.typ.clone());
                 let col_name = match &expr.expr {
                     ScalarExpr::CallUnary {
@@ -359,7 +361,10 @@ impl TypedPlan {
                     ScalarExpr::CallUnary {
                         func: UnaryFunc::TumbleWindowCeiling { .. },
                         ..
-                    } => Some("window_end".to_string()),
+                    } => {
+                        auto_cols.push(idx);
+                        Some("window_end".to_string())
+                    }
                     ScalarExpr::Column(col) => input.schema.get_name(*col).clone(),
                     _ => None,
                 };
@@ -380,6 +385,7 @@ impl TypedPlan {
                 RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
             }
             .with_time_index(time_index)
+            .with_autos(&auto_cols)
             .into_named(output_names)
         };
 
@@ -455,17 +461,19 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use bytes::BytesMut;
     use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use pretty_assertions::{assert_eq, assert_ne};
 
     use super::*;
+    use crate::expr::{DfScalarFunction, RawDfScalarFn};
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     /// TODO(discord9): add more illegal sql tests
     #[tokio::test]
-    async fn tes_missing_key_check() {
+    async fn test_missing_key_check() {
         let engine = create_test_query_engine();
         let sql = "SELECT avg(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour'), number";
         let plan = sql_to_substrait(engine.clone(), sql).await;
@@ -473,6 +481,282 @@ mod test {
         let mut ctx = create_test_ctx();
         assert!(TypedPlan::from_substrait_plan(&mut ctx, &plan).is_err());
     }
+
+    #[tokio::test]
+    async fn test_df_func_basic() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(abs(number)) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            schema: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .with_autos(&[2])
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .map(vec![ScalarExpr::CallDf {
+                                    df_scalar_fn: DfScalarFunction::try_from_raw_fn(
+                                        RawDfScalarFn {
+                                            f: BytesMut::from(
+                                                b"\x08\x01\"\x08\x1a\x06\x12\x04\n\x02\x12\0"
+                                                    .as_ref(),
+                                            ),
+                                            input_schema: RelationType::new(vec![ColumnType::new(
+                                                ConcreteDataType::uint32_datatype(),
+                                                false,
+                                            )])
+                                            .into_unnamed(),
+                                            extensions: FunctionExtensions {
+                                                anchor_to_name: BTreeMap::from([
+                                                    (0, "tumble".to_string()),
+                                                    (1, "abs".to_string()),
+                                                    (2, "sum".to_string()),
+                                                ]),
+                                            },
+                                        },
+                                    )
+                                    .unwrap(),
+                                    exprs: vec![ScalarExpr::Column(0)],
+                                }])
+                                .unwrap()
+                                .project(vec![2])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::Column(3),
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(expected, flow_plan);
+    }
+
+    #[tokio::test]
+    async fn test_df_func_expr_tree() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT abs(sum(number)) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            schema: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .with_autos(&[2])
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .project(vec![0, 1])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::CallDf {
+                            df_scalar_fn: DfScalarFunction::try_from_raw_fn(RawDfScalarFn {
+                                f: BytesMut::from(b"\"\x08\x1a\x06\x12\x04\n\x02\x12\0".as_ref()),
+                                input_schema: RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint64_datatype(),
+                                    true,
+                                )])
+                                .into_unnamed(),
+                                extensions: FunctionExtensions {
+                                    anchor_to_name: BTreeMap::from([
+                                        (0, "abs".to_string()),
+                                        (1, "tumble".to_string()),
+                                        (2, "sum".to_string()),
+                                    ]),
+                                },
+                            })
+                            .unwrap(),
+                            exprs: vec![ScalarExpr::Column(3)],
+                        },
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(expected, flow_plan);
+    }
+
     /// TODO(discord9): add more illegal sql tests
     #[tokio::test]
     async fn test_tumble_composite() {
@@ -581,6 +865,7 @@ mod test {
                         ])
                         .with_key(vec![1, 2])
                         .with_time_index(Some(0))
+                        .with_autos(&[1])
                         .into_named(vec![
                             Some("window_start".to_string()),
                             Some("window_end".to_string()),
@@ -610,6 +895,7 @@ mod test {
             ])
             .with_key(vec![0, 3])
             .with_time_index(Some(2))
+            .with_autos(&[3])
             .into_named(vec![
                 Some("number".to_string()),
                 None,
@@ -642,15 +928,12 @@ mod test {
             ])
             .with_key(vec![2])
             .with_time_index(Some(1))
+            .with_autos(&[2])
             .into_named(vec![
                 None,
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
-            // TODO(discord9): mfp indirectly ref to key columns
-            /*
-            .with_key(vec![1])
-            .with_time_index(Some(0)),*/
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -716,6 +999,7 @@ mod test {
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))
+                        .with_autos(&[1])
                         .into_named(vec![
                             Some("window_start".to_string()),
                             Some("window_end".to_string()),
@@ -760,6 +1044,7 @@ mod test {
             ])
             .with_key(vec![2])
             .with_time_index(Some(1))
+            .with_autos(&[2])
             .into_named(vec![
                 None,
                 Some("window_start".to_string()),
@@ -830,6 +1115,7 @@ mod test {
                         ])
                         .with_key(vec![1])
                         .with_time_index(Some(0))
+                        .with_autos(&[1])
                         .into_named(vec![
                             Some("window_start".to_string()),
                             Some("window_end".to_string()),

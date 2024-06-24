@@ -321,7 +321,7 @@ impl FlownodeManager {
                                 schema
                                     .get_name(*i)
                                     .clone()
-                                    .unwrap_or_else(|| format!("Col_{i}"))
+                                    .unwrap_or_else(|| format!("col_{i}"))
                             })
                             .collect_vec()
                     })
@@ -344,7 +344,7 @@ impl FlownodeManager {
                             .get(idx)
                             .cloned()
                             .flatten()
-                            .unwrap_or(format!("Col_{}", idx));
+                            .unwrap_or(format!("col_{}", idx));
                         let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
                         if schema.typ().time_index == Some(idx) {
                             ret.with_time_index(true)
