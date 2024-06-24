@@ -18,17 +18,17 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::region::supervisor::{DatanodeHeartbeat, HeartbeatSender, RegionSupervisor};
+use crate::region::supervisor::{DatanodeHeartbeat, HeartbeatAcceptor, RegionSupervisor};
 
 pub struct RegionFailureHandler {
-    heartbeat_sender: HeartbeatSender,
+    heartbeat_acceptor: HeartbeatAcceptor,
 }
 
 impl RegionFailureHandler {
     pub(crate) fn new(mut region_supervisor: RegionSupervisor) -> Self {
-        let heartbeat_sender = region_supervisor.heartbeat_sender();
+        let heartbeat_acceptor = region_supervisor.heartbeat_acceptor();
         tokio::spawn(async move { region_supervisor.run().await });
-        Self { heartbeat_sender }
+        Self { heartbeat_acceptor }
     }
 }
 
@@ -48,8 +48,8 @@ impl HeartbeatHandler for RegionFailureHandler {
             return Ok(HandleControl::Continue);
         };
 
-        self.heartbeat_sender
-            .send(DatanodeHeartbeat::from(stat))
+        self.heartbeat_acceptor
+            .accept(DatanodeHeartbeat::from(stat))
             .await;
 
         Ok(HandleControl::Continue)

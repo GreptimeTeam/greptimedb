@@ -141,6 +141,8 @@ pub type RegionSupervisorRef = Arc<RegionSupervisor>;
 /// The default tick interval.
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The [`RegionSupervisor`] is used to detect Region failures
+/// and initiate Region failover upon detection, ensuring uninterrupted region service.
 pub struct RegionSupervisor {
     /// Used to detect the failure of regions.
     failure_detector: RegionFailureDetector,
@@ -148,7 +150,9 @@ pub struct RegionSupervisor {
     tick_interval: Duration,
     /// Receives [Event]s.
     receiver: Receiver<Event>,
+    /// [Event] Sender.
     sender: Sender<Event>,
+    /// The context of [`SelectorRef`]
     selector_context: SelectorContext,
     /// Candidate node selector.
     selector: SelectorRef,
@@ -159,12 +163,14 @@ pub struct RegionSupervisor {
     table_metadata_manager: TableMetadataManagerRef,
 }
 
-pub(crate) struct HeartbeatSender {
+/// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].
+pub(crate) struct HeartbeatAcceptor {
     sender: Sender<Event>,
 }
 
-impl HeartbeatSender {
-    pub(crate) async fn send(&self, heartbeat: DatanodeHeartbeat) {
+impl HeartbeatAcceptor {
+    /// Accepts heartbeats from datanodes.
+    pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
         if let Err(e) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
             error!(e; "RegionSupervisor is stop receiving heartbeat");
         }
@@ -202,14 +208,14 @@ impl RegionSupervisor {
         }
     }
 
-    /// Returns the [HeartbeatSender].
-    pub(crate) fn heartbeat_sender(&self) -> HeartbeatSender {
-        HeartbeatSender {
+    /// Returns the [`HeartbeatAcceptor`].
+    pub(crate) fn heartbeat_acceptor(&self) -> HeartbeatAcceptor {
+        HeartbeatAcceptor {
             sender: self.sender.clone(),
         }
     }
 
-    /// Returns the [RegionSupervisorTicker].
+    /// Returns the [`RegionSupervisorTicker`].
     pub(crate) fn ticker(&self) -> RegionSupervisorTickerRef {
         Arc::new(RegionSupervisorTicker {
             tick_interval: self.tick_interval,
