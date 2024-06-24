@@ -28,6 +28,7 @@ use common_time::util::current_time_millis;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::{interval, MissedTickBehavior};
 
 use super::failure_detector::RegionFailureDetector;
 use crate::error::{self, Result};
@@ -101,12 +102,14 @@ impl RegionSupervisorTicker {
             let sender = self.sender.clone();
             let tick_interval = self.tick_interval;
             let ticker_loop = tokio::spawn(async move {
+                let mut interval = interval(tick_interval);
+                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 if let Err(err) = sender.send(Event::Clear).await {
                     warn!(err; "EventReceiver is dropped, failed to send Event::Clear");
                     return;
                 }
                 loop {
-                    tokio::time::sleep(tick_interval).await;
+                    interval.tick().await;
                     if let Err(err) = sender.send(Event::Tick).await {
                         warn!(err; "EventReceiver is dropped, tick loop is stopped");
                         break;
