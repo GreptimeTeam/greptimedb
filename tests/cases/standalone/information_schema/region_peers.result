@@ -1,0 +1,58 @@
+--- test information_schema.region_peers ----
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+CREATE TABLE region_peers_phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE region_peers_t1 (
+    ts timestamp time index,
+    val double,
+    host string primary key
+) engine = metric with ("on_physical_table" = "region_peers_phy");
+
+Affected Rows: 0
+
+CREATE TABLE region_peers_t2 (
+    ts timestamp time index,
+    job string primary key,
+    val double
+) engine = metric with ("on_physical_table" = "region_peers_phy");
+
+Affected Rows: 0
+
+CREATE TABLE region_peers_test (
+    a int primary key,
+    b string,
+    ts timestamp time index,
+) PARTITION ON COLUMNS (a) (
+    a < 10,
+    a >= 10 AND a < 20,
+    a >= 20,
+);
+
+Affected Rows: 0
+
+SELECT * FROM region_peers ORDER BY region_id;
+
++---------------+---------+-----------+-----------+--------+--------------+
+| region_id     | peer_id | peer_addr | is_leader | status | down_seconds |
++---------------+---------+-----------+-----------+--------+--------------+
+| 5561982648320 | 0       |           | Yes       | ALIVE  |              |
+| 5566277615616 | 0       |           | Yes       | ALIVE  |              |
+| 5570572582912 | 0       |           | Yes       | ALIVE  |              |
+| 5574867550208 | 0       |           | Yes       | ALIVE  |              |
+| 5574867550209 | 0       |           | Yes       | ALIVE  |              |
+| 5574867550210 | 0       |           | Yes       | ALIVE  |              |
++---------------+---------+-----------+-----------+--------+--------------+
+
+DROP TABLE region_peers_t1, region_peers_t2, region_peers_phy, region_peers_test;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
