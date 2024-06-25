@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::{info, warn};
 use futures_util::future::BoxFuture;
@@ -107,7 +106,7 @@ impl HandlerContext {
                     InstructionReply::UpgradeRegion(UpgradeRegionReply {
                         ready: false,
                         exists: true,
-                        error: Some(err.output_msg()),
+                        error: Some(format!("{err:?}")),
                     })
                 }
             }

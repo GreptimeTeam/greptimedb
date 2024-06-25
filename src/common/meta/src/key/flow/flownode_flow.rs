@@ -79,6 +79,7 @@ impl FlownodeFlowKey {
         self.0.flow_id
     }
 
+    #[cfg(test)]
     /// Returns the [FlownodeId].
     pub fn flownode_id(&self) -> FlownodeId {
         self.0.flownode_id
@@ -149,8 +150,6 @@ impl<'a> MetaKey<'a, FlownodeFlowKeyInner> for FlownodeFlowKeyInner {
         })
     }
 }
-
-pub type FlownodeFlowManagerRef = Arc<FlownodeFlowManager>;
 
 /// The manager of [FlownodeFlowKey].
 pub struct FlownodeFlowManager {
