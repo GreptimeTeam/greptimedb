@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//!  Bulk part encoder/decoder.
+//! Bulk part encoder/decoder.
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -138,8 +138,8 @@ fn mutations_to_record_batch(
         .column_schema
         .data_type
         .create_mutable_vector(total_rows);
-    let mut sequence_vector = UInt64Builder::with_capacity(total_rows);
-    let mut op_type_vector = UInt8Builder::with_capacity(total_rows);
+    let mut sequence_builder = UInt64Builder::with_capacity(total_rows);
+    let mut op_type_builder = UInt8Builder::with_capacity(total_rows);
 
     let mut field_builders: Vec<Box<dyn MutableVector>> = metadata
         .field_columns()
@@ -157,25 +157,35 @@ fn mutations_to_record_batch(
             pk_encoder.encode_to_vec(row.primary_keys(), &mut pk_buffer)?;
             pk_builder.append_value(pk_buffer.as_bytes());
             ts_vector.push_value_ref(row.timestamp());
-            sequence_vector.append_value(row.sequence());
-            op_type_vector.append_value(row.op_type() as u8);
+            sequence_builder.append_value(row.sequence());
+            op_type_builder.append_value(row.op_type() as u8);
             for (builder, field) in field_builders.iter_mut().zip(row.fields()) {
                 builder.push_value_ref(field);
             }
         }
     }
 
-    let sorter = ArraysSorter::new(
-        metadata,
-        pk_builder.finish(),
-        ts_vector.to_vector().to_arrow_array(),
-        sequence_vector.finish(),
-        op_type_vector.finish(),
-        field_builders
+    let arrow_schema = to_sst_arrow_schema(metadata);
+    // safety: timestamp column must be valid, and values must not be None.
+    let timestamp_unit = metadata
+        .time_index_column()
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .unwrap()
+        .unit();
+    let sorter = ArraysSorter {
+        encoded_primary_keys: pk_builder.finish(),
+        timestamp_unit,
+        timestamp: ts_vector.to_vector().to_arrow_array(),
+        sequence: sequence_builder.finish(),
+        op_type: op_type_builder.finish(),
+        fields: field_builders
             .iter_mut()
             .map(|f| f.to_vector().to_arrow_array()),
         dedup,
-    );
+        arrow_schema,
+    };
 
     sorter.sort().map(Some)
 }
@@ -191,45 +201,13 @@ struct ArraysSorter<I> {
     arrow_schema: SchemaRef,
 }
 
-impl<I> ArraysSorter<I> {
-    fn new(
-        metadata: &RegionMetadataRef,
-        encoded_primary_keys: BinaryArray,
-        timestamp: ArrayRef,
-        sequence: UInt64Array,
-        op_type: UInt8Array,
-        fields: I,
-        dedup: bool,
-    ) -> Self {
-        let arrow_schema = to_sst_arrow_schema(metadata);
-        // safety: timestamp column must be valid, and values must not be None.
-        let timestamp_unit = metadata
-            .time_index_column()
-            .column_schema
-            .data_type
-            .as_timestamp()
-            .unwrap()
-            .unit();
-        Self {
-            encoded_primary_keys,
-            timestamp_unit,
-            timestamp,
-            sequence,
-            op_type,
-            fields,
-            dedup,
-            arrow_schema,
-        }
-    }
-}
-
 impl<I> ArraysSorter<I>
 where
     I: Iterator<Item = ArrayRef>,
 {
     /// Converts arrays to record batch.
     fn sort(self) -> Result<(RecordBatch, i64, i64)> {
-        debug_assert!(self.timestamp.len() != 0);
+        debug_assert!(!self.timestamp.is_empty());
         debug_assert!(self.timestamp.len() == self.sequence.len());
         debug_assert!(self.timestamp.len() == self.op_type.len());
         debug_assert!(self.timestamp.len() == self.encoded_primary_keys.len());
