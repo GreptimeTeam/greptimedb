@@ -16,59 +16,5 @@ mod dir_meta;
 mod reader;
 mod writer;
 
-use async_trait::async_trait;
-use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 pub use reader::CachedPuffinReader;
 pub use writer::CachedPuffinWriter;
-
-use crate::error::Result;
-use crate::puffin_manager::cache_manager::CacheManagerRef;
-use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
-use crate::puffin_manager::PuffinManager;
-
-/// `CachedPuffinManager` is a `PuffinManager` that provides cached readers and writers for puffin files.
-pub struct CachedPuffinManager<CR, AR, AW> {
-    cache_manager: CacheManagerRef<CR>,
-    puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
-}
-
-impl<CR, AR, AW> CachedPuffinManager<CR, AR, AW> {
-    /// Creates a new `CachedPuffinManager`.
-    pub fn new(
-        cache_manager: CacheManagerRef<CR>,
-        puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
-    ) -> Self {
-        Self {
-            cache_manager,
-            puffin_file_accessor,
-        }
-    }
-}
-
-#[async_trait]
-impl<CR, AR, AW> PuffinManager for CachedPuffinManager<CR, AR, AW>
-where
-    CR: AsyncRead + AsyncSeek,
-    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
-    AW: AsyncWrite + Send + Unpin + 'static,
-{
-    type Reader = CachedPuffinReader<CR, AR, AW>;
-    type Writer = CachedPuffinWriter<CR, AW>;
-
-    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
-        Ok(CachedPuffinReader::new(
-            puffin_file_name.to_string(),
-            self.cache_manager.clone(),
-            self.puffin_file_accessor.clone(),
-        ))
-    }
-
-    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
-        let writer = self.puffin_file_accessor.writer(puffin_file_name).await?;
-        Ok(CachedPuffinWriter::new(
-            puffin_file_name.to_string(),
-            self.cache_manager.clone(),
-            writer,
-        ))
-    }
-}
