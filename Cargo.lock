@@ -3890,6 +3890,7 @@ version = "0.8.2"
 dependencies = [
  "api",
  "arrow-schema",
+ "async-recursion",
  "async-trait",
  "bytes",
  "catalog",

@@ -191,9 +191,9 @@ impl DfScalarFunction {
         })
     }
 
-    pub fn try_from_raw_fn(raw_fn: RawDfScalarFn) -> Result<Self, Error> {
+    pub async fn try_from_raw_fn(raw_fn: RawDfScalarFn) -> Result<Self, Error> {
         Ok(Self {
-            fn_impl: raw_fn.get_fn_impl()?,
+            fn_impl: raw_fn.get_fn_impl().await?,
             df_schema: Arc::new(raw_fn.input_schema.to_df_schema()?),
             raw_fn,
         })
@@ -280,7 +280,10 @@ impl<'de> serde::de::Deserialize<'de> for DfScalarFunction {
         D: serde::de::Deserializer<'de>,
     {
         let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
-        DfScalarFunction::try_from_raw_fn(raw_fn).map_err(serde::de::Error::custom)
+
+        // deserialize is already supposed to be sync and somewhere blocking since it's computational heavy, so block on async is ok here
+        futures::executor::block_on(async { DfScalarFunction::try_from_raw_fn(raw_fn).await })
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -311,7 +314,7 @@ impl RawDfScalarFn {
             extensions,
         })
     }
-    fn get_fn_impl(&self) -> Result<Arc<dyn PhysicalExpr>, Error> {
+    async fn get_fn_impl(&self) -> Result<Arc<dyn PhysicalExpr>, Error> {
         let f = ScalarFunction::decode(&mut self.f.as_ref())
             .context(DecodeRelSnafu)
             .map_err(BoxedError::new)
@@ -320,7 +323,7 @@ impl RawDfScalarFn {
         let input_schema = &self.input_schema;
         let extensions = &self.extensions;
 
-        from_scalar_fn_to_df_fn_impl(&f, input_schema, extensions)
+        from_scalar_fn_to_df_fn_impl(&f, input_schema, extensions).await
     }
 }
 
@@ -894,7 +897,7 @@ mod test {
         .unwrap();
         let extensions = FunctionExtensions::from_iter(vec![(0, "abs")]);
         let raw_fn = RawDfScalarFn::from_proto(&raw_scalar_func, input_schema, extensions).unwrap();
-        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn).unwrap();
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn).await.unwrap();
         let as_str = serde_json::to_string(&df_func).unwrap();
         let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
         assert_eq!(df_func, from_str);
