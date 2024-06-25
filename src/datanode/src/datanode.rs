@@ -52,7 +52,7 @@ use store_api::storage::RegionId;
 use tokio::fs;
 use tokio::sync::Notify;
 
-use crate::config::{DatanodeOptions, RegionEngineConfig};
+use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
     MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
@@ -270,6 +270,20 @@ impl DatanodeBuilder {
         })
     }
 
+    /// Builds [ObjectStoreManager] from [StorageConfig].
+    pub async fn build_object_store_manager(cfg: &StorageConfig) -> Result<ObjectStoreManagerRef> {
+        let object_store = store::new_object_store(cfg.store.clone(), &cfg.data_home).await?;
+        let default_name = cfg.store.name();
+        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
+        for store in &cfg.providers {
+            object_store_manager.add(
+                store.name(),
+                store::new_object_store(store.clone(), &cfg.data_home).await?,
+            );
+        }
+        Ok(Arc::new(object_store_manager))
+    }
+
     #[cfg(test)]
     /// Open all regions belong to this datanode.
     async fn initialize_region_server(
@@ -329,7 +343,7 @@ impl DatanodeBuilder {
             table_provider_factory,
         );
 
-        let object_store_manager = Self::build_object_store_manager(opts).await?;
+        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
         let engines = Self::build_store_engines(opts, object_store_manager).await?;
         for engine in engines {
             region_server.register_engine(engine);
@@ -431,21 +445,6 @@ impl DatanodeBuilder {
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
             .map(Arc::new)
-    }
-
-    /// Builds [ObjectStoreManager]
-    async fn build_object_store_manager(opts: &DatanodeOptions) -> Result<ObjectStoreManagerRef> {
-        let object_store =
-            store::new_object_store(opts.storage.store.clone(), &opts.storage.data_home).await?;
-        let default_name = opts.storage.store.name();
-        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
-        for store in &opts.storage.providers {
-            object_store_manager.add(
-                store.name(),
-                store::new_object_store(store.clone(), &opts.storage.data_home).await?,
-            );
-        }
-        Ok(Arc::new(object_store_manager))
     }
 }
 
