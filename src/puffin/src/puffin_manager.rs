@@ -14,6 +14,7 @@
 
 pub mod cache_manager;
 pub mod cached_puffin_manager;
+pub mod file_accessor;
 
 use std::path::PathBuf;
 

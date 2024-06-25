@@ -12,27 +12,63 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod dir_meta;
+mod reader;
 mod writer;
 
-use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
+use futures::{AsyncRead, AsyncSeek, AsyncWrite};
+pub use reader::CachedPuffinReader;
 pub use writer::CachedPuffinWriter;
 
-/// Metadata for directory in puffin file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirMetadata {
-    pub files: Vec<DirFileMetadata>,
+use crate::error::Result;
+use crate::puffin_manager::cache_manager::CacheManagerRef;
+use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
+use crate::puffin_manager::PuffinManager;
+
+/// `CachedPuffinManager` is a `PuffinManager` that provides cached readers and writers for puffin files.
+pub struct CachedPuffinManager<CR, AR, AW> {
+    cache_manager: CacheManagerRef<CR>,
+    puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
 }
 
-/// Metadata for file in directory in puffin file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirFileMetadata {
-    /// The relative path of the file in the directory.
-    pub relative_path: String,
+impl<CR, AR, AW> CachedPuffinManager<CR, AR, AW> {
+    /// Creates a new `CachedPuffinManager`.
+    pub fn new(
+        cache_manager: CacheManagerRef<CR>,
+        puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
+    ) -> Self {
+        Self {
+            cache_manager,
+            puffin_file_accessor,
+        }
+    }
+}
 
-    /// The file is stored as a blob in the puffin file.
-    /// `blob_index` is the index of the blob in the puffin file.
-    pub blob_index: usize,
+#[async_trait]
+impl<CR, AR, AW> PuffinManager for CachedPuffinManager<CR, AR, AW>
+where
+    CR: AsyncRead + AsyncSeek,
+    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
+    AW: AsyncWrite + Send + Unpin + 'static,
+{
+    type Reader = CachedPuffinReader<CR, AR, AW>;
+    type Writer = CachedPuffinWriter<CR, AW>;
 
-    /// The key of the blob in the puffin file.
-    pub key: String,
+    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
+        Ok(CachedPuffinReader::new(
+            puffin_file_name.to_string(),
+            self.cache_manager.clone(),
+            self.puffin_file_accessor.clone(),
+        ))
+    }
+
+    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
+        let writer = self.puffin_file_accessor.writer(puffin_file_name).await?;
+        Ok(CachedPuffinWriter::new(
+            puffin_file_name.to_string(),
+            self.cache_manager.clone(),
+            writer,
+        ))
+    }
 }

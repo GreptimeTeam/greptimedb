@@ -197,6 +197,29 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Blob not found: {blob}"))]
+    BlobNotFound {
+        blob: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Blob index out of bound, index: {}, max index: {}", index, max_index))]
+    BlobIndexOutOfBound {
+        index: usize,
+        max_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("File key not match, expected: {}, actual: {}", expected, actual))]
+    FileKeyNotMatch {
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -221,6 +244,9 @@ impl ErrorExt for Error {
             | InvalidBlobAreaEnd { .. }
             | Lz4Compression { .. }
             | Lz4Decompression { .. }
+            | BlobNotFound { .. }
+            | BlobIndexOutOfBound { .. }
+            | FileKeyNotMatch { .. }
             | WalkDirError { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
