@@ -38,7 +38,7 @@ impl Default for NodeClients {
 
 impl Debug for NodeClients {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DatanodeClients")
+        f.debug_struct("NodeClients")
             .field("channel_manager", &self.channel_manager)
             .finish()
     }
