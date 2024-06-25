@@ -50,7 +50,7 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
-use crate::lease::lookup_alive_datanode_peer;
+use crate::lease::lookup_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
@@ -484,7 +484,7 @@ impl Metasrv {
         cluster_id: ClusterId,
         peer_id: u64,
     ) -> Result<Option<Peer>> {
-        lookup_alive_datanode_peer(
+        lookup_datanode_peer(
             cluster_id,
             peer_id,
             &self.meta_peer_client,
