@@ -322,7 +322,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
     info!("Generates {} tables", input.tables);
     let exprs = generate_create_exprs(input.tables, input.columns, &mut rng)?;
-    let parallelism = 64;
+    let parallelism = 8;
     let table_ctxs = exprs
         .iter()
         .map(|expr| Arc::new(TableContext::from(expr)))
