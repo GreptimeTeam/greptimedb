@@ -38,6 +38,9 @@ use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::RegionMigrationProcedureTask;
 use crate::selector::SelectorOptions;
 
+/// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
+/// It includes identifiers for the cluster and datanode, a list of regions being monitored,
+/// and a timestamp indicating when the heartbeat was sent.
 #[derive(Debug)]
 pub(crate) struct DatanodeHeartbeat {
     cluster_id: ClusterId,
