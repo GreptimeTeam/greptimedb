@@ -55,30 +55,24 @@ pub struct SerializedPickerOutput {
     pub time_window_size: i64,
 }
 
-impl From<PickerOutput> for SerializedPickerOutput {
-    fn from(input: PickerOutput) -> Self {
+impl From<&PickerOutput> for SerializedPickerOutput {
+    fn from(input: &PickerOutput) -> Self {
         let outputs = input
             .outputs
-            .into_iter()
+            .iter()
             .map(|output| SerializedCompactionOutput {
                 output_file_id: output.output_file_id,
                 output_level: output.output_level,
-                inputs: output
-                    .inputs
-                    .into_iter()
-                    .map(|s| s.meta_ref().clone())
-                    .collect(),
+                inputs: output.inputs.iter().map(|s| s.meta_ref().clone()).collect(),
                 filter_deleted: output.filter_deleted,
                 output_time_range: output.output_time_range,
             })
             .collect();
-
         let expired_ssts = input
             .expired_ssts
-            .into_iter()
+            .iter()
             .map(|s| s.meta_ref().clone())
             .collect();
-
         Self {
             outputs,
             expired_ssts,
@@ -187,7 +181,7 @@ mod tests {
         };
 
         let picker_output_str =
-            serde_json::to_string(&SerializedPickerOutput::from(picker_output.clone())).unwrap();
+            serde_json::to_string(&SerializedPickerOutput::from(&picker_output)).unwrap();
         let serialized_picker_output: SerializedPickerOutput =
             serde_json::from_str(&picker_output_str).unwrap();
         let picker_output_from_serialized =
