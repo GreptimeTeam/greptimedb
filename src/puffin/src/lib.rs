@@ -17,6 +17,7 @@ pub mod error;
 pub mod file_format;
 pub mod file_metadata;
 pub mod partial_reader;
+pub mod puffin_manager;
 
 #[cfg(test)]
 mod tests;

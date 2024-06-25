@@ -33,7 +33,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::node_manager::{
     Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef,
 };
-use crate::peer::Peer;
+use crate::peer::{Peer, StandalonePeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::WalOptionsAllocator;
@@ -180,5 +180,6 @@ pub fn new_ddl_context_with_kv_backend(
         table_metadata_manager,
         flow_metadata_allocator,
         flow_metadata_manager,
+        peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
     }
 }

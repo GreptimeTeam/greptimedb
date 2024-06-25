@@ -28,7 +28,7 @@ use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use smallvec::smallvec;
 use snafu::ResultExt;
-use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
+use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
@@ -58,9 +58,8 @@ pub struct UnorderedScan {
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
     pub(crate) fn new(input: ScanInput) -> Self {
-        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(
-            input.parallelism.parallelism.max(1),
-        ));
+        let properties =
+            ScannerProperties::new_with_partitions(input.parallelism.parallelism.max(1));
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
@@ -71,7 +70,7 @@ impl UnorderedScan {
 
     /// Scans the region and returns a stream.
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part_num = self.properties.partitioning().num_partitions();
+        let part_num = self.properties.num_partitions();
         let streams = (0..part_num)
             .map(|i| self.scan_partition(i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
@@ -133,6 +132,11 @@ impl RegionScanner for UnorderedScan {
 
     fn schema(&self) -> SchemaRef {
         self.stream_ctx.input.mapper.output_schema()
+    }
+
+    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        self.properties = ScannerProperties::new(ranges);
+        Ok(())
     }
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {

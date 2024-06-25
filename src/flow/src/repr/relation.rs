@@ -21,7 +21,9 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::adapter::error::{DatafusionSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
+use crate::adapter::error::{
+    DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu,
+};
 use crate::expr::{MapFilterProject, SafeMfpPlan, ScalarExpr};
 
 /// a set of column indices that are "keys" for the collection.
@@ -93,13 +95,19 @@ pub struct RelationType {
     ///
     /// A collection can contain multiple sets of keys, although it is common to
     /// have either zero or one sets of key indices.
-    #[serde(default)]
     pub keys: Vec<Key>,
     /// optionally indicate the column that is TIME INDEX
     pub time_index: Option<usize>,
+    /// mark all the columns that are added automatically by flow, but are not present in original sql
+    pub auto_columns: Vec<usize>,
 }
 
 impl RelationType {
+    pub fn with_autos(mut self, auto_cols: &[usize]) -> Self {
+        self.auto_columns = auto_cols.to_vec();
+        self
+    }
+
     /// Trying to apply a mpf on current types, will return a new RelationType
     /// with the new types, will also try to preserve keys&time index information
     /// if the old key&time index columns are preserve in given mfp
@@ -155,10 +163,16 @@ impl RelationType {
         let time_index = self
             .time_index
             .and_then(|old| old_to_new_col.get(&old).cloned());
+        let auto_columns = self
+            .auto_columns
+            .iter()
+            .filter_map(|old| old_to_new_col.get(old).cloned())
+            .collect_vec();
         Ok(Self {
             column_types: mfp_out_types,
             keys,
             time_index,
+            auto_columns,
         })
     }
     /// Constructs a `RelationType` representing the relation with no columns and
@@ -175,6 +189,7 @@ impl RelationType {
             column_types,
             keys: Vec::new(),
             time_index: None,
+            auto_columns: vec![],
         }
     }
 
@@ -340,6 +355,16 @@ pub struct RelationDesc {
 }
 
 impl RelationDesc {
+    pub fn len(&self) -> Result<usize> {
+        ensure!(
+            self.typ.column_types.len() == self.names.len(),
+            InternalSnafu {
+                reason: "Expect typ and names field to be of same length"
+            }
+        );
+        Ok(self.names.len())
+    }
+
     pub fn to_df_schema(&self) -> Result<DFSchema> {
         let fields: Vec<_> = self
             .iter()

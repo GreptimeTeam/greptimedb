@@ -34,6 +34,7 @@ use greptime_proto::v1;
 use itertools::Itertools;
 use query::{QueryEngine, QueryEngineFactory};
 use serde::{Deserialize, Serialize};
+use servers::grpc::GrpcOptions;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
@@ -78,8 +79,8 @@ pub type TableName = [String; 3];
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
-    /// rpc address
-    pub rpc_addr: String,
+    pub node_id: Option<u64>,
+    pub grpc: GrpcOptions,
 }
 
 /// Flownode Builder
@@ -321,7 +322,7 @@ impl FlownodeManager {
                                 schema
                                     .get_name(*i)
                                     .clone()
-                                    .unwrap_or_else(|| format!("Col_{i}"))
+                                    .unwrap_or_else(|| format!("col_{i}"))
                             })
                             .collect_vec()
                     })
@@ -344,7 +345,7 @@ impl FlownodeManager {
                             .get(idx)
                             .cloned()
                             .flatten()
-                            .unwrap_or(format!("Col_{}", idx));
+                            .unwrap_or(format!("col_{}", idx));
                         let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
                         if schema.typ().time_index == Some(idx) {
                             ret.with_time_index(true)
@@ -497,6 +498,7 @@ impl FlownodeManager {
     /// run in common_runtime background runtime
     pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
+        // TODO(discord9): add heartbeat tasks here
         common_runtime::spawn_bg(async move {
             self.run().await;
         })

@@ -14,6 +14,7 @@
 
 pub mod count_wildcard;
 pub mod order_hint;
+pub mod parallelize_scan;
 pub mod remove_duplicate;
 pub mod string_normalization;
 #[cfg(test)]

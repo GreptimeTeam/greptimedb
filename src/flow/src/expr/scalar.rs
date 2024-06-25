@@ -21,10 +21,10 @@ use bytes::BytesMut;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
 use datafusion_physical_expr::PhysicalExpr;
-use datatypes::arrow_array;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
+use datatypes::{arrow_array, value};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -155,8 +155,10 @@ pub enum ScalarExpr {
         exprs: Vec<ScalarExpr>,
     },
     CallDf {
-        // TODO(discord9): support shuffle
+        /// invariant: the input args set inside this [`DfScalarFunction`] is
+        /// always col(0) to col(n-1) where n is the length of `expr`
         df_scalar_fn: DfScalarFunction,
+        exprs: Vec<ScalarExpr>,
     },
     /// Conditionally evaluated expressions.
     ///
@@ -189,8 +191,27 @@ impl DfScalarFunction {
         })
     }
 
+    pub fn try_from_raw_fn(raw_fn: RawDfScalarFn) -> Result<Self, Error> {
+        Ok(Self {
+            fn_impl: raw_fn.get_fn_impl()?,
+            df_schema: Arc::new(raw_fn.input_schema.to_df_schema()?),
+            raw_fn,
+        })
+    }
+
+    /// eval a list of expressions using input values
+    fn eval_args(values: &[Value], exprs: &[ScalarExpr]) -> Result<Vec<Value>, EvalError> {
+        exprs
+            .iter()
+            .map(|expr| expr.eval(values))
+            .collect::<Result<_, _>>()
+    }
+
     // TODO(discord9): add RecordBatch support
-    pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+    pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
+        // first eval exprs to construct values to feed to datafusion
+        let values: Vec<_> = Self::eval_args(values, exprs)?;
+
         if values.is_empty() {
             return InvalidArgumentSnafu {
                 reason: "values is empty".to_string(),
@@ -259,16 +280,18 @@ impl<'de> serde::de::Deserialize<'de> for DfScalarFunction {
         D: serde::de::Deserializer<'de>,
     {
         let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
-        let fn_impl = raw_fn.get_fn_impl().map_err(serde::de::Error::custom)?;
-        DfScalarFunction::new(raw_fn, fn_impl).map_err(serde::de::Error::custom)
+        DfScalarFunction::try_from_raw_fn(raw_fn).map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawDfScalarFn {
-    f: bytes::BytesMut,
-    input_schema: RelationDesc,
-    extensions: FunctionExtensions,
+    /// The raw bytes encoded datafusion scalar function
+    pub(crate) f: bytes::BytesMut,
+    /// The input schema of the function
+    pub(crate) input_schema: RelationDesc,
+    /// Extension contains mapping from function reference to function name
+    pub(crate) extensions: FunctionExtensions,
 }
 
 impl RawDfScalarFn {
@@ -354,7 +377,7 @@ impl ScalarExpr {
                 Ok(ColumnType::new_nullable(func.signature().output))
             }
             ScalarExpr::If { then, .. } => then.typ(context),
-            ScalarExpr::CallDf { df_scalar_fn } => {
+            ScalarExpr::CallDf { df_scalar_fn, .. } => {
                 let arrow_typ = df_scalar_fn
                     .fn_impl
                     // TODO(discord9): get scheme from args instead?
@@ -445,7 +468,10 @@ impl ScalarExpr {
                 }
                 .fail(),
             },
-            ScalarExpr::CallDf { df_scalar_fn } => df_scalar_fn.eval(values),
+            ScalarExpr::CallDf {
+                df_scalar_fn,
+                exprs,
+            } => df_scalar_fn.eval(values, exprs),
         }
     }
 
@@ -614,7 +640,15 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
-            _ => Ok(()),
+            ScalarExpr::CallDf {
+                df_scalar_fn: _,
+                exprs,
+            } => {
+                for expr in exprs {
+                    f(expr)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -650,7 +684,15 @@ impl ScalarExpr {
                 f(then)?;
                 f(els)
             }
-            _ => Ok(()),
+            ScalarExpr::CallDf {
+                df_scalar_fn: _,
+                exprs,
+            } => {
+                for expr in exprs {
+                    f(expr)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -852,11 +894,15 @@ mod test {
         .unwrap();
         let extensions = FunctionExtensions::from_iter(vec![(0, "abs")]);
         let raw_fn = RawDfScalarFn::from_proto(&raw_scalar_func, input_schema, extensions).unwrap();
-        let fn_impl = raw_fn.get_fn_impl().unwrap();
-        let df_func = DfScalarFunction::new(raw_fn, fn_impl).unwrap();
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn).unwrap();
         let as_str = serde_json::to_string(&df_func).unwrap();
         let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
         assert_eq!(df_func, from_str);
-        assert_eq!(df_func.eval(&[Value::Null]).unwrap(), Value::Int64(1));
+        assert_eq!(
+            df_func
+                .eval(&[Value::Null], &[ScalarExpr::Column(0)])
+                .unwrap(),
+            Value::Int64(1)
+        );
     }
 }

@@ -56,6 +56,9 @@ impl MetricEngineInner {
             )
             .await
             .context(MitoCatchupOperationSnafu)
-            .map(|response| response.affected_rows)
+            .map(|response| response.affected_rows)?;
+
+        self.recover_states(region_id).await?;
+        Ok(0)
     }
 }
