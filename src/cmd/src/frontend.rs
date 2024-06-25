@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -333,7 +333,7 @@ impl StartCommand {
             timeout: None,
             ..Default::default()
         };
-        let client = DatanodeClients::new(channel_config);
+        let client = NodeClients::new(channel_config);
 
         let mut instance = FrontendBuilder::new(
             cached_meta_backend.clone(),
