@@ -941,7 +941,7 @@ pub fn build_rows_with_fields(
                     value_data: field2.map(|v| ValueData::F64Value(v as f64)),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(*ts)),
+                    value_data: Some(ValueData::TimestampMillisecondValue(*ts * 1000)),
                 },
             ],
         })

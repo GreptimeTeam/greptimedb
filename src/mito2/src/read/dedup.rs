@@ -488,8 +488,8 @@ impl<I> LastNotNullIter<I> {
     pub(crate) fn new(iter: I) -> Self {
         Self {
             iter: Some(iter),
-            // We always filter deleted rows in the iterator as only memtables use it.
-            strategy: LastNotNull::new(true),
+            // We only use the iter in memtables. Memtables never filter deleted.
+            strategy: LastNotNull::new(false),
             metrics: DedupMetrics::default(),
             current_batch: None,
         }
@@ -1134,6 +1134,7 @@ mod tests {
         let expect = [
             new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
             new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+            new_batch_multi_fields(b"k1", &[3], &[13], &[OpType::Delete], &[(None, None)]),
             new_batch_multi_fields(b"k2", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
             new_batch_multi_fields(b"k2", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
         ];
