@@ -12,27 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod dir_meta;
+mod reader;
 mod writer;
 
-use serde::{Deserialize, Serialize};
+pub use reader::CachedPuffinReader;
 pub use writer::CachedPuffinWriter;
-
-/// Metadata for directory in puffin file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirMetadata {
-    pub files: Vec<DirFileMetadata>,
-}
-
-/// Metadata for file in directory in puffin file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirFileMetadata {
-    /// The relative path of the file in the directory.
-    pub relative_path: String,
-
-    /// The file is stored as a blob in the puffin file.
-    /// `blob_index` is the index of the blob in the puffin file.
-    pub blob_index: usize,
-
-    /// The key of the blob in the puffin file.
-    pub key: String,
-}
