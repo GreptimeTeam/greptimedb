@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use api::v1::Mutation;
+use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
 use datatypes::arrow::array::{
@@ -179,9 +180,9 @@ fn mutations_to_record_batch(
     sorter.sort().map(Some)
 }
 
-struct ArraysSorter<'a, I> {
-    metadata: &'a RegionMetadataRef,
+struct ArraysSorter<I> {
     encoded_primary_keys: BinaryArray,
+    timestamp_unit: TimeUnit,
     timestamp: ArrayRef,
     sequence: UInt64Array,
     op_type: UInt8Array,
@@ -190,9 +191,9 @@ struct ArraysSorter<'a, I> {
     arrow_schema: SchemaRef,
 }
 
-impl<'a, I> ArraysSorter<'a, I> {
+impl<I> ArraysSorter<I> {
     fn new(
-        metadata: &'a RegionMetadataRef,
+        metadata: &RegionMetadataRef,
         encoded_primary_keys: BinaryArray,
         timestamp: ArrayRef,
         sequence: UInt64Array,
@@ -201,9 +202,17 @@ impl<'a, I> ArraysSorter<'a, I> {
         dedup: bool,
     ) -> Self {
         let arrow_schema = to_sst_arrow_schema(metadata);
+        // safety: timestamp column must be valid, and values must not be None.
+        let timestamp_unit = metadata
+            .time_index_column()
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .unwrap()
+            .unit();
         Self {
-            metadata,
             encoded_primary_keys,
+            timestamp_unit,
             timestamp,
             sequence,
             op_type,
@@ -214,7 +223,7 @@ impl<'a, I> ArraysSorter<'a, I> {
     }
 }
 
-impl<'a, I> ArraysSorter<'a, I>
+impl<I> ArraysSorter<I>
 where
     I: Iterator<Item = ArrayRef>,
 {
@@ -225,7 +234,7 @@ where
         debug_assert!(self.timestamp.len() == self.op_type.len());
         debug_assert!(self.timestamp.len() == self.encoded_primary_keys.len());
 
-        let timestamp_iter = timestamp_array_to_iter(self.metadata, &self.timestamp);
+        let timestamp_iter = timestamp_array_to_iter(self.timestamp_unit, &self.timestamp);
         let (mut min_timestamp, mut max_timestamp) = (i64::MAX, i64::MIN);
         let mut to_sort = self
             .encoded_primary_keys
@@ -323,38 +332,31 @@ where
 }
 
 /// Converts timestamp array to an iter of i64 values.
-fn timestamp_array_to_iter<'a>(
-    metadata: &RegionMetadataRef,
-    timestamp: &'a ArrayRef,
-) -> impl Iterator<Item = &'a i64> {
-    // safety: timestamp column must be valid, and values must not be None.
-    match metadata
-        .time_index_column()
-        .column_schema
-        .data_type
-        .as_timestamp()
-        .unwrap()
-    {
+fn timestamp_array_to_iter(
+    timestamp_unit: TimeUnit,
+    timestamp: &ArrayRef,
+) -> impl Iterator<Item = &i64> {
+    match timestamp_unit {
         // safety: timestamp column must be valid.
-        TimestampType::Second(_) => timestamp
+        TimeUnit::Second => timestamp
             .as_any()
             .downcast_ref::<TimestampSecondArray>()
             .unwrap()
             .values()
             .iter(),
-        TimestampType::Millisecond(_) => timestamp
+        TimeUnit::Millisecond => timestamp
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap()
             .values()
             .iter(),
-        TimestampType::Microsecond(_) => timestamp
+        TimeUnit::Microsecond => timestamp
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
             .unwrap()
             .values()
             .iter(),
-        TimestampType::Nanosecond(_) => timestamp
+        TimeUnit::Nanosecond => timestamp
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap()
