@@ -60,7 +60,6 @@ impl FlownodeClient {
             .map_err(|e| {
                 let code = e.code();
                 let err: crate::error::Error = e.into();
-                // Uses `Error::RegionServer` instead of `Error::Server`
                 crate::error::Error::FlowServer {
                     addr,
                     code,
@@ -92,7 +91,6 @@ impl FlownodeClient {
             .map_err(|e| {
                 let code = e.code();
                 let err: crate::error::Error = e.into();
-                // Uses `Error::RegionServer` instead of `Error::Server`
                 crate::error::Error::FlowServer {
                     addr,
                     code,
