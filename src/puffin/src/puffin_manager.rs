@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cache_manager;
+pub mod cached_puffin_manager;
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
