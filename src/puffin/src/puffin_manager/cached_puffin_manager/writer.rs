@@ -30,7 +30,7 @@ use crate::error::{
 };
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
 use crate::puffin_manager::cache_manager::CacheManagerRef;
-use crate::puffin_manager::cached_puffin_manager::{DirFileMetadata, DirMetadata};
+use crate::puffin_manager::cached_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
 use crate::puffin_manager::{PuffinWriter, PutOptions};
 
 /// `CachedPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
@@ -46,6 +46,22 @@ pub struct CachedPuffinWriter<CR, W> {
 
     /// Written blob keys.
     blob_keys: HashSet<String>,
+}
+
+impl<CR, W> CachedPuffinWriter<CR, W> {
+    #[allow(unused)]
+    pub(crate) fn new(
+        puffin_file_name: String,
+        cache_manager: CacheManagerRef<CR>,
+        writer: W,
+    ) -> Self {
+        Self {
+            puffin_file_name,
+            cache_manager,
+            puffin_file_writer: PuffinFileWriter::new(writer),
+            blob_keys: HashSet::new(),
+        }
+    }
 }
 
 #[async_trait]

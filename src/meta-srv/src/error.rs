@@ -39,6 +39,14 @@ pub enum Error {
         peer_id: u64,
     },
 
+    #[snafu(display("Failed to lookup peer: {}", peer_id))]
+    LookupPeer {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+        peer_id: u64,
+    },
+
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         #[snafu(implicit)]
@@ -972,6 +980,7 @@ impl ErrorExt for Error {
             }
 
             Error::Other { source, .. } => source.status_code(),
+            Error::LookupPeer { source, .. } => source.status_code(),
         }
     }
 
