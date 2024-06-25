@@ -33,7 +33,7 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
-    BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder, MemtableId,
+    BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -73,6 +73,10 @@ impl Memtable for EmptyMemtable {
     }
 
     fn write_one(&self, _key_value: KeyValue) -> Result<()> {
+        Ok(())
+    }
+
+    fn write_bulk(&self, _part: BulkPart) -> Result<()> {
         Ok(())
     }
 
