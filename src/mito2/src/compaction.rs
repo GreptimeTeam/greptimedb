@@ -32,6 +32,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -57,7 +58,7 @@ use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileHandle, FileId, Level};
+use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
@@ -284,6 +285,7 @@ impl CompactionScheduler {
             cache_manager: cache_manager.clone(),
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
+            file_purger: None,
         };
 
         let picker_output = {
@@ -439,6 +441,16 @@ pub struct CompactionOutput {
     pub filter_deleted: bool,
     /// Compaction output time range.
     pub output_time_range: Option<TimestampRange>,
+}
+
+/// SerializedCompactionOutput is a serialized version of [CompactionOutput] by replacing [FileHandle] with [FileMeta].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedCompactionOutput {
+    output_file_id: FileId,
+    output_level: Level,
+    inputs: Vec<FileMeta>,
+    filter_deleted: bool,
+    output_time_range: Option<TimestampRange>,
 }
 
 /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
