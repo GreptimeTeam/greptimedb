@@ -80,6 +80,30 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create"))]
+    Create {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to rename"))]
+    Rename {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to remove"))]
+    Remove {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Error while walking directory"))]
     WalkDirError {
         #[snafu(source)]
@@ -212,6 +236,9 @@ impl ErrorExt for Error {
             | Close { .. }
             | Open { .. }
             | Metadata { .. }
+            | Create { .. }
+            | Remove { .. }
+            | Rename { .. }
             | SerializeJson { .. }
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }
