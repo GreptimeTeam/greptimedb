@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::flow::flow_client::FlowClient as PbFlowClient;
 use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::region::region_client::RegionClient as PbRegionClient;
@@ -176,6 +177,16 @@ impl Client {
     pub(crate) fn raw_region_client(&self) -> Result<(String, PbRegionClient<Channel>)> {
         let (addr, channel) = self.find_channel()?;
         let client = PbRegionClient::new(channel)
+            .max_decoding_message_size(self.max_grpc_recv_message_size())
+            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
+        Ok((addr, client))
+    }
+
+    pub(crate) fn raw_flow_client(&self) -> Result<(String, PbFlowClient<Channel>)> {
+        let (addr, channel) = self.find_channel()?;
+        let client = PbFlowClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
             .max_encoding_message_size(self.max_grpc_send_message_size())
             .accept_compressed(CompressionEncoding::Zstd)

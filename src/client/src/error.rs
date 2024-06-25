@@ -98,6 +98,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to request FlowServer {}, code: {}", addr, code))]
+    FlowServer {
+        addr: String,
+        code: Code,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     // Server error carried in Tonic Status's metadata.
     #[snafu(display("{}", msg))]
     Server {
@@ -136,7 +145,8 @@ impl ErrorExt for Error {
             Error::Server { code, .. } => *code,
             Error::FlightGet { source, .. }
             | Error::HandleRequest { source, .. }
-            | Error::RegionServer { source, .. } => source.status_code(),
+            | Error::RegionServer { source, .. }
+            | Error::FlowServer { source, .. } => source.status_code(),
             Error::CreateChannel { source, .. }
             | Error::ConvertFlightData { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.status_code(),

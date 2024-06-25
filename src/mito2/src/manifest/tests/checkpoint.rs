@@ -172,6 +172,11 @@ async fn test_corrupted_data_causing_checksum_error() {
         manager.update(nop_action()).await.unwrap();
     }
 
+    // Wait for the checkpoint to finish.
+    while manager.checkpointer().is_doing_checkpoint() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     // Check if there is a checkpoint
     assert!(manager
         .store()

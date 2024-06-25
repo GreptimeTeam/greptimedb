@@ -208,8 +208,9 @@ mod tests {
         puffin_writer
             .add_blob(Blob {
                 blob_type: INDEX_BLOB_TYPE.to_string(),
-                data: Cursor::new(vec![]),
+                compressed_data: Cursor::new(vec![]),
                 properties: Default::default(),
+                compression_codec: None,
             })
             .await
             .unwrap();
@@ -260,8 +261,9 @@ mod tests {
         puffin_writer
             .add_blob(Blob {
                 blob_type: "invalid_blob_type".to_string(),
-                data: Cursor::new(vec![]),
+                compressed_data: Cursor::new(vec![]),
                 properties: Default::default(),
+                compression_codec: None,
             })
             .await
             .unwrap();
