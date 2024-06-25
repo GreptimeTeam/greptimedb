@@ -75,3 +75,5 @@ jobs:
         mode:
           - name: "Basic"
           - name: "Remote WAL"
+    steps:
+      - run: 'echo "No action required"'
