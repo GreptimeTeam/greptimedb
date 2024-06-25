@@ -123,23 +123,8 @@ where
                 .context(BlobNotFoundSnafu { blob: key })?;
             let reader = file.blob_reader(blob_metadata)?;
 
-            let size = match blob_metadata.compression_codec {
-                Some(CompressionCodec::Lz4) => {
-                    return UnsupportedDecompressionSnafu {
-                        decompression: "lz4",
-                    }
-                    .fail();
-                }
-                Some(CompressionCodec::Zstd) => {
-                    let reader = ZstdDecoder::new(BufReader::new(reader));
-                    futures::io::copy(reader, &mut writer)
-                        .await
-                        .context(WriteSnafu)?
-                }
-                None => futures::io::copy(reader, &mut writer)
-                    .await
-                    .context(WriteSnafu)?,
-            };
+            let compression = blob_metadata.compression_codec;
+            let size = Self::handle_decompress(reader, &mut writer, compression).await?;
 
             Ok(size)
         })
@@ -185,29 +170,37 @@ where
                 );
 
                 let reader = file.blob_reader(blob_meta)?;
-                let mut writer = writer_provider.writer(&file_meta.relative_path).await?;
-                match blob_meta.compression_codec {
-                    Some(CompressionCodec::Lz4) => {
-                        UnsupportedDecompressionSnafu {
-                            decompression: "lz4",
-                        }
-                        .fail()?;
-                    }
-                    Some(CompressionCodec::Zstd) => {
-                        let reader = ZstdDecoder::new(BufReader::new(reader));
-                        size += futures::io::copy(reader, &mut writer)
-                            .await
-                            .context(WriteSnafu)?;
-                    }
-                    None => {
-                        size += futures::io::copy(reader, &mut writer)
-                            .await
-                            .context(WriteSnafu)?;
-                    }
-                }
+                let writer = writer_provider.writer(&file_meta.relative_path).await?;
+
+                let compression = blob_meta.compression_codec;
+                size += Self::handle_decompress(reader, writer, compression).await?;
             }
 
             Ok(size)
         })
+    }
+
+    /// Handles the decompression of the reader and writes the decompressed data to the writer.
+    /// Returns the number of bytes written.
+    async fn handle_decompress(
+        reader: impl AsyncRead,
+        mut writer: impl AsyncWrite + Unpin,
+        compression: Option<CompressionCodec>,
+    ) -> Result<u64> {
+        match compression {
+            Some(CompressionCodec::Lz4) => UnsupportedDecompressionSnafu {
+                decompression: "lz4",
+            }
+            .fail(),
+            Some(CompressionCodec::Zstd) => {
+                let reader = ZstdDecoder::new(BufReader::new(reader));
+                futures::io::copy(reader, &mut writer)
+                    .await
+                    .context(WriteSnafu)
+            }
+            None => futures::io::copy(reader, &mut writer)
+                .await
+                .context(WriteSnafu),
+        }
     }
 }
