@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::warn;
+
 /// Resolves hostname:port address for meta registration.
 /// If `hostname_addr` is present, prefer to use it, `bind_addr` otherwise.
-///
 pub fn resolve_addr(bind_addr: &str, hostname_addr: Option<&str>) -> String {
     match hostname_addr {
         Some(hostname_addr) => {
@@ -28,7 +29,10 @@ pub fn resolve_addr(bind_addr: &str, hostname_addr: Option<&str>) -> String {
                 format!("{hostname_addr}:{port}")
             }
         }
-        None => bind_addr.to_string(),
+        None => {
+            warn!("hostname not set, using bind_addr: {bind_addr} instead.");
+            bind_addr.to_string()
+        }
     }
 }
 
