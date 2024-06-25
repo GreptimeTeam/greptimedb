@@ -357,7 +357,7 @@ impl LastFieldsBuilder {
             }
         };
 
-        // Resets itself. `self.builders` already reset in `to_vector()`.
+        // Resets itself. `self.builders` is already reset in `to_vector()`.
         self.clear();
 
         if self.filter_deleted {
