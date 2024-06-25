@@ -360,7 +360,7 @@ mod tests {
                 Box::new(|writer_provider| {
                     Box::pin(async move {
                         for (rel_path, content) in &files_in_dir {
-                            let mut writer = writer_provider.writer(*rel_path).await.unwrap();
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
                             writer.write_all(content).await.unwrap();
                         }
                         Ok(0)
@@ -428,7 +428,7 @@ mod tests {
                 Box::new(|writer_provider| {
                     Box::pin(async move {
                         for (rel_path, content) in &files_in_dir {
-                            let mut writer = writer_provider.writer(*rel_path).await.unwrap();
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
                             writer.write_all(content).await.unwrap();
                         }
                         Ok(0)
