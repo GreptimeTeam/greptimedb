@@ -305,21 +305,7 @@ impl MetasrvBuilder {
                 let region_supervisor = RegionSupervisor::new(
                     options.failure_detector,
                     DEFAULT_TICK_INTERVAL,
-                    // Requires to select MUST alive nodes.
-                    SelectorContext {
-                        server_addr: options.server_addr.clone(),
-                        datanode_lease_secs: Duration::from_millis(
-                            distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-                        )
-                        .as_secs(),
-                        flownode_lease_secs: Duration::from_millis(
-                            distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-                        )
-                        .as_secs(),
-                        kv_backend: kv_backend.clone(),
-                        meta_peer_client: meta_peer_client.clone(),
-                        table_id: None,
-                    },
+                    selector_ctx.clone(),
                     selector.clone(),
                     region_migration_manager.clone(),
                     leader_cached_kv_backend.clone() as _,

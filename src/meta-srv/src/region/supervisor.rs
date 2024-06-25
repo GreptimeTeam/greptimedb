@@ -17,6 +17,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common_meta::distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef, MAINTENANCE_KEY};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -139,7 +140,7 @@ impl Drop for RegionSupervisorTicker {
 pub type RegionSupervisorRef = Arc<RegionSupervisor>;
 
 /// The default tick interval.
-pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(HEARTBEAT_INTERVAL_MILLIS);
 
 /// The [`RegionSupervisor`] is used to detect Region failures
 /// and initiate Region failover upon detection, ensuring uninterrupted region service.
