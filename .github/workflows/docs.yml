@@ -3,24 +3,24 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - "docs/**"
-      - "config/**"
-      - "**.md"
-      - ".dockerignore"
-      - "docker/**"
-      - ".gitignore"
-      - "grafana/**"
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
   push:
     branches:
       - main
     paths:
-      - "docs/**"
-      - "config/**"
-      - "**.md"
-      - ".dockerignore"
-      - "docker/**"
-      - ".gitignore"
-      - "grafana/**"
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
   workflow_dispatch:
 
 name: CI
@@ -67,19 +67,19 @@ jobs:
       - run: 'echo "No action required"'
 
   sqlness:
-    name: Sqlness Test (${{ matrix.mode.name }})
-    needs: build
+    name: Sqlness Test (Basic)
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-20.04]
-        mode:
-          - name: "Basic"
-            opts: ""
-            kafka: false
-          - name: "Remote WAL"
-            opts: "-w kafka -k 127.0.0.1:9092"
-            kafka: true
-    timeout-minutes: 60
+        os: [ ubuntu-20.04 ]
+    steps:
+      - run: 'echo "No action required"'
+
+  sqlness-kafka-wal:
+    name: Sqlness Test (Remote WAL)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04 ]
     steps:
       - run: 'echo "No action required"'
