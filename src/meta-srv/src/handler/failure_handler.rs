@@ -60,12 +60,8 @@ impl HeartbeatHandler for RegionFailureHandler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
     use api::v1::meta::HeartbeatRequest;
     use common_catalog::consts::default_engine;
-    use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use tokio::sync::oneshot;
@@ -74,31 +70,8 @@ mod tests {
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
     use crate::metasrv::builder::MetasrvBuilder;
-    use crate::procedure::region_migration::manager::RegionMigrationManager;
-    use crate::procedure::region_migration::test_util::TestingEnv;
-    use crate::region::supervisor::{Event, RegionSupervisor};
-    use crate::selector::test_utils::{new_test_selector_context, RandomNodeSelector};
-
-    fn new_test_supervisor() -> RegionSupervisor {
-        let env = TestingEnv::new();
-        let kv_backend = env.kv_backend();
-        let selector_context = new_test_selector_context();
-        let selector = Arc::new(RandomNodeSelector::new(vec![Peer::empty(1)]));
-        let context_factory = env.context_factory();
-        let region_migration_manager = Arc::new(RegionMigrationManager::new(
-            env.procedure_manager().clone(),
-            context_factory,
-        ));
-
-        RegionSupervisor::new(
-            Default::default(),
-            Duration::from_secs(1),
-            selector_context,
-            selector,
-            region_migration_manager,
-            kv_backend,
-        )
-    }
+    use crate::region::supervisor::tests::new_test_supervisor;
+    use crate::region::supervisor::Event;
 
     #[tokio::test]
     async fn test_handle_heartbeat() {

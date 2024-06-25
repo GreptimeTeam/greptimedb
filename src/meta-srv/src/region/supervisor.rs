@@ -437,7 +437,7 @@ impl RegionSupervisor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -456,7 +456,7 @@ mod tests {
     };
     use crate::selector::test_utils::{new_test_selector_context, RandomNodeSelector};
 
-    fn new_test_supervisor() -> RegionSupervisor {
+    pub(crate) fn new_test_supervisor() -> RegionSupervisor {
         let env = TestingEnv::new();
         let selector_context = new_test_selector_context();
         let selector = Arc::new(RandomNodeSelector::new(vec![Peer::empty(1)]));
@@ -561,21 +561,15 @@ mod tests {
             tick_interval: Duration::from_millis(10),
             sender: tx,
         };
-        ticker.start();
-        sleep(Duration::from_millis(100)).await;
-        ticker.stop();
-        assert!(!rx.is_empty());
-        while let Ok(event) = rx.try_recv() {
-            assert_matches!(event, Event::Tick | Event::Clear);
-        }
-
         // It's ok if we start the ticker again.
-        ticker.start();
-        sleep(Duration::from_millis(100)).await;
-        ticker.stop();
-        assert!(!rx.is_empty());
-        while let Ok(event) = rx.try_recv() {
-            assert_matches!(event, Event::Tick | Event::Clear);
+        for _ in 0..2 {
+            ticker.start();
+            sleep(Duration::from_millis(100)).await;
+            ticker.stop();
+            assert!(!rx.is_empty());
+            while let Ok(event) = rx.try_recv() {
+                assert_matches!(event, Event::Tick | Event::Clear);
+            }
         }
     }
 }
