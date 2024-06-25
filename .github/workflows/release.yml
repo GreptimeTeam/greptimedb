@@ -344,12 +344,12 @@ jobs:
       - name: Build and push images to ecr
         uses: ./.github/actions/build-images
         with:
-          aws-image-registry: ${{ vars.aws-image-registry }} # public.ecr.aws/i8k6a5e1
+          aws-image-registry: ${{ vars.aws-image-registry }}
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          aws-ecr-region: ${{ vars.AWS_ECR_REGION }} # us-east-1
+          aws-ecr-region: ${{ vars.AWS_ECR_REGION }}
 
       - name: Set build image result
         id: set-build-image-result
