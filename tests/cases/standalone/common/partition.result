@@ -167,3 +167,17 @@ DROP TABLE my_table;
 
 Affected Rows: 0
 
+-- incorrect partition rule
+CREATE TABLE invalid_rule (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 10,
+  a > 10 AND a < 20,
+  a >= 20
+);
+
+Error: 1004(InvalidArguments), Unclosed value Int32(10) on column a
+
