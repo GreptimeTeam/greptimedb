@@ -36,7 +36,6 @@ use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::warn;
 use snafu::ResultExt;
 
 use super::{SelectTarget, FLOW_ID_SEQ};
@@ -313,7 +312,10 @@ impl MetasrvBuilder {
         region_migration_manager.try_start()?;
 
         if !is_remote_wal && options.enable_region_failover {
-            warn!("Region failover is not supported in the local WAL implementation!");
+            return error::UnexpectedSnafu {
+                violated: "Region failover is not supported in the local WAL implementation!",
+            }
+            .fail();
         }
 
         let (region_failover_handler, region_supervisor_ticker) =

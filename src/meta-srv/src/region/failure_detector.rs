@@ -70,7 +70,7 @@ impl RegionFailureDetector {
 
     /// Removes the specific [PhiAccrualFailureDetector] if exists.
     pub(crate) fn remove(&self, ident: &Ident) {
-        let _ = self.detectors.remove(ident);
+        self.detectors.remove(ident);
     }
 
     /// Removes all [PhiAccrualFailureDetector]s.

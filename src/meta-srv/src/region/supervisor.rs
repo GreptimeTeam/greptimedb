@@ -61,6 +61,18 @@ impl From<&Stat> for DatanodeHeartbeat {
     }
 }
 
+/// `Event` represents various types of events that can be processed by the region supervisor.
+/// These events are crucial for managing state transitions and handling specific scenarios
+/// in the region lifecycle.
+///
+/// Variants:
+/// - `Tick`: This event is used to trigger region failure detection periodically.
+/// - `HeartbeatArrived`: This event presents the metasrv received [`DatanodeHeartbeat`] from the datanodes.
+/// - `Clear`: This event is used to reset the state of the supervisor, typically used
+///   when a system-wide reset or reinitialization is needed.
+/// - `Dump`: (Available only in test) This event triggers a dump of the
+///   current state for debugging purposes. It allows developers to inspect the internal state
+///   of the supervisor during tests.
 pub(crate) enum Event {
     Tick,
     HeartbeatArrived(DatanodeHeartbeat),
@@ -112,8 +124,8 @@ impl RegionSupervisorTicker {
                 }
                 loop {
                     interval.tick().await;
-                    if let Err(err) = sender.send(Event::Tick).await {
-                        warn!(err; "EventReceiver is dropped, tick loop is stopped");
+                    if sender.send(Event::Tick).await.is_err() {
+                        info!("EventReceiver is dropped, tick loop is stopped");
                         break;
                     }
                 }
@@ -274,13 +286,7 @@ impl RegionSupervisor {
                 .remove(&(cluster_id, datanode_id, region_id));
         }
 
-        warn!(
-            "Detects region failures: {:?}",
-            regions
-                .iter()
-                .map(|(_, datanode, region)| (datanode, region))
-                .collect::<Vec<_>>()
-        );
+        warn!("Detects region failures: {:?}", regions);
         for (cluster_id, datanode_id, region_id) in regions {
             match self.do_failover(cluster_id, datanode_id, region_id).await {
                 Ok(_) => self
