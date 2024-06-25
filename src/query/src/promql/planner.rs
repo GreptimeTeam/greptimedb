@@ -2337,7 +2337,7 @@ mod test {
             false,
             QueryContext::arc().as_ref(),
             DummyDecoder::arc(),
-            true,
+            false,
         )
     }
 
