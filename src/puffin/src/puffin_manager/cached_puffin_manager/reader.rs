@@ -45,6 +45,7 @@ pub struct CachedPuffinReader<CR, AR, AW> {
 }
 
 impl<CR, AR, AW> CachedPuffinReader<CR, AR, AW> {
+    #[allow(unused)]
     pub(crate) fn new(
         puffin_file_name: String,
         cache_manager: CacheManagerRef<CR>,
@@ -76,7 +77,7 @@ where
                     let accessor = self.puffin_file_accessor.clone();
                     let puffin_file_name = self.puffin_file_name.clone();
                     let key = key.to_string();
-                    Self::init_blob(puffin_file_name, key, writer, accessor)
+                    Self::init_blob_to_cache(puffin_file_name, key, writer, accessor)
                 }),
             )
             .await
@@ -91,7 +92,7 @@ where
                     let accessor = self.puffin_file_accessor.clone();
                     let puffin_file_name = self.puffin_file_name.clone();
                     let key = key.to_string();
-                    Self::init_dir(puffin_file_name, key, writer_provider, accessor)
+                    Self::init_dir_to_cache(puffin_file_name, key, writer_provider, accessor)
                 }),
             )
             .await
@@ -104,7 +105,7 @@ where
     AW: AsyncWrite + 'static,
     CR: AsyncRead + AsyncSeek,
 {
-    fn init_blob(
+    fn init_blob_to_cache(
         puffin_file_name: String,
         key: String,
         mut writer: BoxWriter,
@@ -144,7 +145,7 @@ where
         })
     }
 
-    fn init_dir(
+    fn init_dir_to_cache(
         puffin_file_name: String,
         key: String,
         writer_provider: DirWriterProviderRef,
