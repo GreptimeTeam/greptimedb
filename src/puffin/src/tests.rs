@@ -189,18 +189,20 @@ fn test_writer_reader_sync() {
         let blob1 = "abcdefghi";
         writer
             .add_blob(Blob {
-                data: Cursor::new(&blob1),
+                compressed_data: Cursor::new(&blob1),
                 blob_type: "some-blob".to_string(),
                 properties: Default::default(),
+                compression_codec: None,
             })
             .unwrap();
 
         let blob2 = include_bytes!("tests/resources/sample-metric-data.blob");
         writer
             .add_blob(Blob {
-                data: Cursor::new(&blob2),
+                compressed_data: Cursor::new(&blob2),
                 blob_type: "some-other-blob".to_string(),
                 properties: Default::default(),
+                compression_codec: None,
             })
             .unwrap();
 
@@ -257,9 +259,10 @@ async fn test_writer_reader_async() {
         let blob1 = "abcdefghi".as_bytes();
         writer
             .add_blob(Blob {
-                data: AsyncCursor::new(blob1),
+                compressed_data: AsyncCursor::new(blob1),
                 blob_type: "some-blob".to_string(),
                 properties: Default::default(),
+                compression_codec: None,
             })
             .await
             .unwrap();
@@ -267,9 +270,10 @@ async fn test_writer_reader_async() {
         let blob2 = include_bytes!("tests/resources/sample-metric-data.blob");
         writer
             .add_blob(Blob {
-                data: AsyncCursor::new(&blob2),
+                compressed_data: AsyncCursor::new(&blob2),
                 blob_type: "some-other-blob".to_string(),
                 properties: Default::default(),
+                compression_codec: None,
             })
             .await
             .unwrap();
