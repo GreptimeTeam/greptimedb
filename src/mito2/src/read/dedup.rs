@@ -265,8 +265,6 @@ impl LastFieldsBuilder {
 
         self.initialized = true;
 
-        common_telemetry::info!("Init by batch: {:?}", batch);
-
         let last_idx = batch.num_rows() - 1;
         let fields = batch.fields();
         // Safety: The last_idx is valid.
@@ -329,8 +327,6 @@ impl LastFieldsBuilder {
         debug_assert!(self.initialized);
 
         let mut output = if self.last_fields.is_empty() {
-            common_telemetry::info!("Not need to overwrite");
-
             // No need to overwrite the last row.
             buffer
         } else {
@@ -426,11 +422,6 @@ impl DedupStrategy for LastNotNull {
         if buffer.primary_key() != batch.primary_key() {
             // Next key is different.
             let buffer = std::mem::replace(buffer, batch);
-            common_telemetry::info!(
-                "different key, merge last not null, buffer: {:?}, self.buffer: {:?}",
-                buffer,
-                self.buffer
-            );
             let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
             return Ok(merged);
         }
@@ -438,7 +429,6 @@ impl DedupStrategy for LastNotNull {
         if buffer.last_timestamp() != batch.first_timestamp() {
             // The next batch has a different timestamp.
             let buffer = std::mem::replace(buffer, batch);
-            common_telemetry::info!("different ts, merge last not null, buffer: {:?}", buffer);
             let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
             return Ok(merged);
         }
@@ -448,11 +438,6 @@ impl DedupStrategy for LastNotNull {
         metrics.num_unselected_rows += 1;
         // We assumes each batch doesn't contain duplicate rows so we only need to check the first row.
         if batch.num_rows() == 1 {
-            common_telemetry::info!(
-                "num rows 1, push first row, batch: {:?}, buffer: {:?}",
-                batch,
-                buffer
-            );
             self.last_fields.push_first_row(&batch);
             return Ok(None);
         }
@@ -460,20 +445,10 @@ impl DedupStrategy for LastNotNull {
         // The next batch has the same key and timestamp but contains multiple rows.
         // We can merge the first row and buffer the remaining rows.
         let first = batch.slice(0, 1);
-        common_telemetry::info!(
-            "more rows, push first row, first: {:?}, buffer: {:?}",
-            first,
-            buffer
-        );
         self.last_fields.push_first_row(&first);
         // Moves the remaining rows to the buffer.
         let batch = batch.slice(1, batch.num_rows() - 1);
         let buffer = std::mem::replace(buffer, batch);
-        common_telemetry::info!(
-            "more rows, remaining rows, buffer: {:?}, self.buffer: {:?}",
-            buffer,
-            self.buffer
-        );
         let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
 
         Ok(merged)
@@ -486,8 +461,6 @@ impl DedupStrategy for LastNotNull {
 
         // Initializes last fields with the first buffer.
         self.last_fields.maybe_init(&buffer);
-
-        common_telemetry::info!("finish, buffer: {:?}", buffer);
 
         let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
 
@@ -912,8 +885,6 @@ mod tests {
 
     #[test]
     fn test_last_not_null_strategy_delete_last() {
-        common_telemetry::init_default_ut_logging();
-
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
             new_batch_multi_fields(
@@ -948,8 +919,6 @@ mod tests {
 
     #[test]
     fn test_last_not_null_strategy_delete_one() {
-        common_telemetry::init_default_ut_logging();
-
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[1], &[OpType::Delete], &[(None, None)]),
             new_batch_multi_fields(b"k2", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
@@ -971,8 +940,6 @@ mod tests {
 
     #[test]
     fn test_last_not_null_strategy_delete_all() {
-        common_telemetry::init_default_ut_logging();
-
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[1], &[OpType::Delete], &[(None, None)]),
             new_batch_multi_fields(b"k2", &[1], &[6], &[OpType::Delete], &[(Some(11), None)]),
@@ -984,8 +951,6 @@ mod tests {
 
     #[test]
     fn test_last_not_null_strategy_same_batch() {
-        common_telemetry::init_default_ut_logging();
-
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
             new_batch_multi_fields(
