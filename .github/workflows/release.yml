@@ -325,6 +325,37 @@ jobs:
         run: |
           echo "build-image-result=success" >> $GITHUB_OUTPUT
 
+  release-images-to-ecr:
+    name: Build and push images to aws ecr
+    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+      build-linux-arm64-artifacts,
+    ]
+    runs-on: ubuntu-2004-16-cores
+    outputs:
+      build-image-result: ${{ steps.set-build-image-result.outputs.build-image-result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and push images to ecr
+        uses: ./.github/actions/build-images
+        with:
+          aws-image-registry: ${{ vars.aws-image-registry }} # public.ecr.aws/i8k6a5e1
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          aws-ecr-region: ${{ vars.AWS_ECR_REGION }} # us-east-1
+
+      - name: Set build image result
+        id: set-build-image-result
+        run: |
+          echo "build-image-result=success" >> $GITHUB_OUTPUT
+
   release-cn-artifacts:
     name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
@@ -335,6 +366,7 @@ jobs:
       build-macos-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
+      release-images-to-ecr,
     ]
     runs-on: ubuntu-20.04
     # When we push to ACR, it's easy to fail due to some unknown network issues.
@@ -375,6 +407,7 @@ jobs:
       build-macos-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
+      release-images-to-ecr,
     ]
     runs-on: ubuntu-20.04
     steps:
@@ -445,6 +478,7 @@ jobs:
     name: Send notification to Greptime team
     needs: [
       release-images-to-dockerhub,
+      release-images-to-ecr,
       build-macos-artifacts,
       build-windows-artifacts,
     ]
@@ -460,17 +494,17 @@ jobs:
         run: pnpm tsx bin/report-ci-failure.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.release-images-to-ecr.outputs.build-image-result == 'success' &&  needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
       - name: Notify release successful result
         uses: slackapi/slack-github-action@v1.25.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result == 'success' && needs.release-images-to-ecr.outputs.build-image-result == 'success' && needs.build-windows-artifacts.outputs.build-windows-result == 'success' && needs.build-macos-artifacts.outputs.build-macos-result == 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's release version has completed successfully."}
 
       - name: Notify release failed result
         uses: slackapi/slack-github-action@v1.25.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-image-result != 'success' || needs.release-images-to-ecr.outputs.build-image-result != 'success' || needs.build-windows-artifacts.outputs.build-windows-result != 'success' || needs.build-macos-artifacts.outputs.build-macos-result != 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's release version has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}

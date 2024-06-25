@@ -43,6 +43,11 @@ jobs:
           build-dev-builder-ubuntu: ${{ inputs.release_dev_builder_ubuntu_image }}
           build-dev-builder-centos: ${{ inputs.release_dev_builder_centos_image }}
           build-dev-builder-android: ${{ inputs.release_dev_builder_android_image }}
+          aws-image-registry: ${{ vars.aws-image-registry }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-ecr-region: ${{ vars.AWS_ECR_REGION }}
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
 
   release-dev-builder-images-cn: # Note: Be careful issue: https://github.com/containers/skopeo/issues/1874 and we decide to use the latest stable skopeo container.
     name: Release dev builder images to CN region
