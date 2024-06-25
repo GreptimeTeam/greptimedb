@@ -33,4 +33,5 @@ mod transform;
 mod utils;
 
 pub use adapter::error::{Error, Result};
-pub use adapter::{FlownodeBuilder, FlownodeManager, FlownodeManagerRef, FlownodeOptions};
+pub use adapter::server::FlownodeServer;
+pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeBuilder, FlownodeOptions};

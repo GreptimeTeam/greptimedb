@@ -162,6 +162,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to start server"))]
+    StartServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown server"))]
+    ShutdownServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
 }
 
 /// Result type for flow module
@@ -169,7 +183,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        match self {
+        match &self {
             Self::Eval { .. } | &Self::JoinTask { .. } | &Self::Datafusion { .. } => {
                 StatusCode::Internal
             }
@@ -187,8 +201,11 @@ impl ErrorExt for Error {
             &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
-            &Self::External { .. } => StatusCode::Unknown,
+            &Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } => StatusCode::Internal,
+            Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

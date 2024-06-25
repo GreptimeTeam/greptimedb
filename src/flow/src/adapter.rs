@@ -54,7 +54,7 @@ use crate::transform::{register_function_to_query_engine, sql_to_flow_plan};
 pub(crate) mod error;
 mod flownode_impl;
 mod parse_expr;
-mod server;
+pub(crate) mod server;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -111,7 +111,7 @@ impl FlownodeBuilder {
     }
 
     /// TODO(discord9): error handling
-    pub async fn build(self) -> FlownodeManager {
+    pub async fn build(self) -> FlowWorkerManager {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in flownode only translate plan with resolved table source.
             self.catalog_manager.clone(),
@@ -131,7 +131,7 @@ impl FlownodeBuilder {
 
         let _handle = std::thread::spawn(move || {
             let (flow_node_manager, mut worker) =
-                FlownodeManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
+                FlowWorkerManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
             let _ = tx.send(flow_node_manager);
             info!("Flow Worker started in new thread");
             worker.run();
@@ -143,12 +143,12 @@ impl FlownodeBuilder {
 }
 
 /// Arc-ed FlowNodeManager, cheaper to clone
-pub type FlownodeManagerRef = Arc<FlownodeManager>;
+pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
-pub struct FlownodeManager {
+pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
@@ -166,7 +166,7 @@ pub struct FlownodeManager {
 }
 
 /// Building FlownodeManager
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// set frontend invoker
     pub async fn set_frontend_invoker(
         self: &Arc<Self>,
@@ -188,7 +188,7 @@ impl FlownodeManager {
         let node_context = FlownodeContext::default();
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
-        FlownodeManager {
+        FlowWorkerManager {
             worker_handles,
             query_engine,
             table_info_source: srv_map,
@@ -248,7 +248,7 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 }
 
 /// This impl block contains methods to send writeback requests to frontend
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// TODO(discord9): merge all same type of diff row into one requests
     ///
     /// Return the number of requests it made
@@ -494,7 +494,7 @@ impl FlownodeManager {
 }
 
 /// Flow Runtime related methods
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// run in common_runtime background runtime
     pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
@@ -604,7 +604,7 @@ impl FlownodeManager {
 }
 
 /// Create&Remove flow
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {

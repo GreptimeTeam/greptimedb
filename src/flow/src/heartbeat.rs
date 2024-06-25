@@ -14,6 +14,7 @@
 
 //! Send heartbeat from flownode to metasrv
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Peer};
@@ -45,6 +46,7 @@ pub struct HeartbeatTask {
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
+    running: Arc<AtomicBool>,
 }
 
 impl HeartbeatTask {
@@ -62,10 +64,19 @@ impl HeartbeatTask {
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn start(&self) -> Result<(), Error> {
+        let running = self.running.clone();
+        if running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Heartbeat task started multiple times");
+            return Ok(());
+        }
         info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
@@ -82,6 +93,18 @@ impl HeartbeatTask {
         self.start_handle_resp_stream(resp_stream, mailbox);
 
         self.start_heartbeat_report(req_sender, outgoing_rx);
+
+        Ok(())
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        let running = self.running.clone();
+        if running
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Call close heartbeat task multiple times");
+        }
 
         Ok(())
     }

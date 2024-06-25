@@ -22,19 +22,22 @@ use futures::FutureExt;
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::server::Server;
 use snafu::{ensure, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::FlownodeManagerRef;
+use crate::adapter::error::{ShutdownServerSnafu, StartServerSnafu};
+use crate::adapter::FlowWorkerManagerRef;
+use crate::heartbeat::HeartbeatTask;
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
-    pub manager: FlownodeManagerRef,
+    pub manager: FlowWorkerManagerRef,
 }
 
 #[async_trait::async_trait]
@@ -82,8 +85,9 @@ impl flow_server::Flow for FlowService {
 }
 
 pub struct FlownodeServer {
-    pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
-    pub flow_service: FlowService,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    heartbeat_task: Option<HeartbeatTask>,
+    flow_service: FlowService,
 }
 
 impl FlownodeServer {
@@ -134,7 +138,6 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        // TODO(discord9): better place for dataflow to run per second
         let manager_ref = self.flow_service.manager.clone();
         let _handle = manager_ref.clone().run_background();
 
@@ -143,5 +146,35 @@ impl servers::server::Server for FlownodeServer {
 
     fn name(&self) -> &str {
         FLOW_NODE_SERVER_NAME
+    }
+}
+
+pub struct FlownodeInstance {
+    server: FlownodeServer,
+    addr: SocketAddr,
+    heartbeat_task: Option<HeartbeatTask>,
+}
+
+impl FlownodeInstance {
+    pub async fn start(&mut self) -> Result<(), crate::Error> {
+        if let Some(task) = &self.heartbeat_task {
+            task.start().await?;
+        }
+
+        self.addr = self
+            .server
+            .start(self.addr)
+            .await
+            .context(StartServerSnafu)?;
+        Ok(())
+    }
+    pub async fn shutdown(&self) -> Result<(), crate::Error> {
+        self.server.shutdown().await.context(ShutdownServerSnafu)?;
+
+        if let Some(task) = &self.heartbeat_task {
+            task.close()?;
+        }
+
+        Ok(())
     }
 }

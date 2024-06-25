@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::error::InternalSnafu;
-use crate::adapter::FlownodeManager;
+use crate::adapter::FlowWorkerManager;
 use crate::repr::{self, DiffRow};
 
 fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
@@ -38,7 +38,7 @@ fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
 }
 
 #[async_trait::async_trait]
-impl Flownode for FlownodeManager {
+impl Flownode for FlowWorkerManager {
     async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
         let query_ctx = request
             .header
