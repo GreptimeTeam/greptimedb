@@ -19,7 +19,7 @@ pub(crate) mod migration_end;
 pub(crate) mod migration_start;
 pub(crate) mod open_candidate_region;
 #[cfg(test)]
-pub(crate) mod test_util;
+pub mod test_util;
 pub(crate) mod update_metadata;
 pub(crate) mod upgrade_candidate_region;
 
@@ -43,6 +43,7 @@ use common_procedure::error::{
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
 pub use manager::RegionMigrationProcedureTask;
+use manager::{RegionMigrationProcedureGuard, RegionMigrationProcedureTracker};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -364,43 +365,61 @@ pub struct RegionMigrationData<'a> {
     state: &'a dyn State,
 }
 
-pub struct RegionMigrationProcedure {
+pub(crate) struct RegionMigrationProcedure {
     state: Box<dyn State>,
     context: Context,
+    _guard: Option<RegionMigrationProcedureGuard>,
 }
 
-#[allow(dead_code)]
 impl RegionMigrationProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::RegionMigration";
 
     pub fn new(
         persistent_context: PersistentContext,
         context_factory: impl ContextFactory,
+        guard: Option<RegionMigrationProcedureGuard>,
     ) -> Self {
         let state = Box::new(RegionMigrationStart {});
-        Self::new_inner(state, persistent_context, context_factory)
+        Self::new_inner(state, persistent_context, context_factory, guard)
     }
 
     fn new_inner(
         state: Box<dyn State>,
         persistent_context: PersistentContext,
         context_factory: impl ContextFactory,
+        guard: Option<RegionMigrationProcedureGuard>,
     ) -> Self {
         Self {
             state,
             context: context_factory.new_context(persistent_context),
+            _guard: guard,
         }
     }
 
-    fn from_json(json: &str, context_factory: impl ContextFactory) -> ProcedureResult<Self> {
+    fn from_json(
+        json: &str,
+        context_factory: impl ContextFactory,
+        tracker: RegionMigrationProcedureTracker,
+    ) -> ProcedureResult<Self> {
         let RegionMigrationDataOwned {
             persistent_ctx,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
+        let guard = tracker.insert_running_procedure(&RegionMigrationProcedureTask {
+            cluster_id: persistent_ctx.cluster_id,
+            region_id: persistent_ctx.region_id,
+            from_peer: persistent_ctx.from_peer.clone(),
+            to_peer: persistent_ctx.to_peer.clone(),
+            replay_timeout: persistent_ctx.replay_timeout,
+        });
         let context = context_factory.new_context(persistent_ctx);
 
-        Ok(Self { state, context })
+        Ok(Self {
+            state,
+            context,
+            _guard: guard,
+        })
     }
 }
 
@@ -467,7 +486,7 @@ mod tests {
         let env = TestingEnv::new();
         let context = env.context_factory();
 
-        let procedure = RegionMigrationProcedure::new(persistent_context, context);
+        let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
         let key = procedure.lock_key();
         let keys = key.keys_to_lock().cloned().collect::<Vec<_>>();
@@ -484,7 +503,7 @@ mod tests {
         let env = TestingEnv::new();
         let context = env.context_factory();
 
-        let procedure = RegionMigrationProcedure::new(persistent_context, context);
+        let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
         let serialized = procedure.dump().unwrap();
         let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"replay_timeout":"1s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
@@ -531,7 +550,7 @@ mod tests {
             let persistent_context = new_persistent_context();
             let context_factory = env.context_factory();
             let state = Box::<MockState>::default();
-            RegionMigrationProcedure::new_inner(state, persistent_context, context_factory)
+            RegionMigrationProcedure::new_inner(state, persistent_context, context_factory, None)
         }
 
         let ctx = TestingEnv::procedure_context();
@@ -550,8 +569,11 @@ mod tests {
         let serialized = procedure.dump().unwrap();
 
         let context_factory = env.context_factory();
+        let tracker = env.tracker();
         let mut procedure =
-            RegionMigrationProcedure::from_json(&serialized, context_factory).unwrap();
+            RegionMigrationProcedure::from_json(&serialized, context_factory, tracker.clone())
+                .unwrap();
+        assert!(tracker.contains(procedure.context.persistent_ctx.region_id));
 
         for _ in 1..3 {
             status = Some(procedure.execute(&ctx).await.unwrap());
