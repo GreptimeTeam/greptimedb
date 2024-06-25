@@ -504,7 +504,7 @@ impl<I> LastNotNullIter<I> {
 
         // Safety: The batch is not empty.
         let timestamps = batch.timestamps_native().unwrap();
-        (0..timestamps.len() - 1).find(|&i| timestamps[i] == timestamps[i + 1])
+        timestamps.windows(2).position(|t| t[0] == t[1])
     }
 }
 
@@ -1093,6 +1093,37 @@ mod tests {
             new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
             new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
         ];
+        assert_eq!(&expect, &actual[..]);
+    }
+
+    #[test]
+    fn test_last_not_null_iter_same_row() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 1, 1],
+                &[13, 12, 11],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[(None, None), (Some(1), None), (Some(11), None)],
+            ),
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 1],
+                &[10, 9],
+                &[OpType::Put, OpType::Put],
+                &[(None, Some(11)), (Some(21), Some(31))],
+            ),
+        ];
+        let iter = input.into_iter().map(Ok);
+        let iter = LastNotNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [new_batch_multi_fields(
+            b"k1",
+            &[1],
+            &[13],
+            &[OpType::Put],
+            &[(Some(1), Some(11))],
+        )];
         assert_eq!(&expect, &actual[..]);
     }
 

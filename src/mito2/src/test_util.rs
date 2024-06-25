@@ -920,7 +920,11 @@ pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
         .collect()
 }
 
-/// Build rows with schema (string, f64, f64, ts_millis)
+/// Build rows with schema (string, f64, f64, ts_millis).
+/// - `key`: A string key that is common across all rows.
+/// - `timestamps`: Array of timestamp values.
+/// - `fields`: Array of tuples where each tuple contains two optional i64 values, representing two optional float fields.
+/// Returns a vector of `Row` each containing the key, two optional float fields, and a timestamp.
 pub fn build_rows_with_fields(
     key: &str,
     timestamps: &[i64],
