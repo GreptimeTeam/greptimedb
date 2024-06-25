@@ -205,7 +205,7 @@ impl MokaCacheManager {
         Ok(size)
     }
 
-    /// Recover the cache by iterating through the cache directory.
+    /// Recovers the cache by iterating through the cache directory.
     async fn recover(&self) -> Result<()> {
         let mut read_dir = fs::read_dir(&self.root).await.context(ReadSnafu)?;
         while let Some(entry) = read_dir.next_entry().await.context(ReadSnafu)? {
@@ -235,7 +235,7 @@ impl MokaCacheManager {
         Ok(())
     }
 
-    /// Walk through the directory and calculate the total size of all files in the directory.
+    /// Walks through the directory and calculate the total size of all files in the directory.
     async fn get_dir_size(path: &PathBuf) -> Result<u64> {
         let mut size = 0;
         let mut wd = WalkDir::new(path).filter(|entry| async move {
