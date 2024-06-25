@@ -282,6 +282,7 @@ impl MetasrvBuilder {
                 server_addr: options.server_addr.clone(),
             },
         ));
+        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
@@ -292,9 +293,7 @@ impl MetasrvBuilder {
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator: flow_metadata_allocator.clone(),
-                    peer_lookup_service: Arc::new(MetaPeerLookupService::new(
-                        meta_peer_client.clone(),
-                    )),
+                    peer_lookup_service: peer_lookup_service.clone(),
                 },
                 procedure_manager.clone(),
                 true,
@@ -326,6 +325,7 @@ impl MetasrvBuilder {
                     selector.clone(),
                     region_migration_manager.clone(),
                     leader_cached_kv_backend.clone() as _,
+                    peer_lookup_service,
                 );
                 let region_supervisor_ticker = region_supervisor.ticker();
                 (

@@ -18,13 +18,13 @@ use std::time::Duration;
 
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::peer::Peer;
+use common_meta::peer::PeerLookupServiceRef;
 use common_meta::{ClusterId, DatanodeId};
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use error::Error::{MigrationRunning, TableRouteNotFound};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{interval, MissedTickBehavior};
@@ -159,6 +159,8 @@ pub struct RegionSupervisor {
     region_migration_manager: RegionMigrationManagerRef,
     // TODO(weny): find a better way
     kv_backend: KvBackendRef,
+    /// Peer lookup service
+    peer_lookup: PeerLookupServiceRef,
 }
 
 /// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].
@@ -191,6 +193,7 @@ impl RegionSupervisor {
         selector: SelectorRef,
         region_migration_manager: RegionMigrationManagerRef,
         kv_backend: KvBackendRef,
+        peer_lookup: PeerLookupServiceRef,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1024);
         Self {
@@ -202,6 +205,7 @@ impl RegionSupervisor {
             selector,
             region_migration_manager,
             kv_backend,
+            peer_lookup,
         }
     }
 
@@ -311,13 +315,20 @@ impl RegionSupervisor {
             )
             .await?;
         let to_peer = peers.remove(0);
+        let from_peer = self
+            .peer_lookup
+            .datanode(cluster_id, datanode_id)
+            .await
+            .context(error::LookupPeerSnafu {
+                peer_id: datanode_id,
+            })?
+            .context(error::PeerUnavailableSnafu {
+                peer_id: datanode_id,
+            })?;
         let task = RegionMigrationProcedureTask {
             cluster_id,
             region_id,
-            from_peer: Peer {
-                id: datanode_id,
-                addr: String::new(),
-            },
+            from_peer,
             to_peer,
             replay_timeout: Duration::from_secs(60),
         };
@@ -374,6 +385,7 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use common_meta::peer::Peer;
+    use common_meta::test_util::NoopPeerLookupService;
     use common_time::util::current_time_millis;
     use rand::Rng;
     use store_api::storage::RegionId;
@@ -397,6 +409,7 @@ pub(crate) mod tests {
             context_factory,
         ));
         let kv_backend = env.kv_backend();
+        let peer_lookup = Arc::new(NoopPeerLookupService);
 
         RegionSupervisor::new(
             Default::default(),
@@ -405,6 +418,7 @@ pub(crate) mod tests {
             selector,
             region_migration_manager,
             kv_backend,
+            peer_lookup,
         )
     }
 
