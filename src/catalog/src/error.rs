@@ -253,8 +253,9 @@ impl ErrorExt for Error {
             | Error::FindPartitions { .. }
             | Error::FindRegionRoutes { .. }
             | Error::CacheNotFound { .. }
-            | Error::ViewPlanColumnsChanged { .. }
             | Error::CastManager { .. } => StatusCode::Unexpected,
+
+            Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
 
             Error::ViewInfoNotFound { .. } => StatusCode::TableNotFound,
 
