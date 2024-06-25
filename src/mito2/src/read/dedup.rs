@@ -505,13 +505,7 @@ impl<I> LastNotNullIter<I> {
 
         // Safety: The batch is not empty.
         let timestamps = batch.timestamps_native().unwrap();
-        for i in 0..timestamps.len() - 1 {
-            if timestamps[i] == timestamps[i + 1] {
-                return Some(i);
-            }
-        }
-
-        None
+        (0..timestamps.len() - 1).find(|&i| timestamps[i] == timestamps[i + 1])
     }
 }
 
@@ -1093,7 +1087,7 @@ mod tests {
             &[OpType::Put, OpType::Put, OpType::Put],
             &[(None, None), (Some(1), None), (Some(2), Some(22))],
         )];
-        let iter = input.into_iter().map(|batch| Ok(batch));
+        let iter = input.into_iter().map(Ok);
         let iter = LastNotNullIter::new(iter);
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         let expect = [
@@ -1128,7 +1122,7 @@ mod tests {
                 &[(None, None), (Some(1), None), (Some(2), Some(22))],
             ),
         ];
-        let iter = input.into_iter().map(|batch| Ok(batch));
+        let iter = input.into_iter().map(Ok);
         let iter = LastNotNullIter::new(iter);
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         let expect = [
