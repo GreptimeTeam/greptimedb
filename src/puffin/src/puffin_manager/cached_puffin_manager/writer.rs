@@ -49,7 +49,6 @@ pub struct CachedPuffinWriter<CR, W> {
 }
 
 impl<CR, W> CachedPuffinWriter<CR, W> {
-    #[allow(unused)]
     pub(crate) fn new(
         puffin_file_name: String,
         cache_manager: CacheManagerRef<CR>,

@@ -16,6 +16,9 @@ pub mod cache_manager;
 pub mod cached_puffin_manager;
 pub mod file_accessor;
 
+#[cfg(test)]
+mod tests;
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;

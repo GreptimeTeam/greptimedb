@@ -20,6 +20,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
+pub use moka_cache_manager::MokaCacheManager;
 
 use crate::error::Result;
 
