@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
@@ -272,7 +272,7 @@ impl MetasrvBuilder {
                     options.datanode.client_options.connect_timeout_millis,
                 ))
                 .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
-            Arc::new(DatanodeClients::new(datanode_client_channel_config))
+            Arc::new(NodeClients::new(datanode_client_channel_config))
         });
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
             mailbox.clone(),
