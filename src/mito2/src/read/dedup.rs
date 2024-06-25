@@ -498,8 +498,7 @@ impl<I> LastNotNullIter<I> {
     /// Finds the index of the first row that has the same timestamp with the next row.
     /// If no duplicate rows, returns None.
     fn find_split_index(batch: &Batch) -> Option<usize> {
-        let num_rows = batch.num_rows();
-        if num_rows < 2 {
+        if batch.num_rows() < 2 {
             return None;
         }
 
