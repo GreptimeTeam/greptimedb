@@ -2067,6 +2067,10 @@ CREATE TABLE log (
             }
             _ => unreachable!(),
         }
+        assert_eq!(
+            "CREATE VIEW test AS SELECT * FROM NUMBERS",
+            result[0].to_string()
+        );
 
         let sql = "CREATE VIEW test (n1) AS SELECT * FROM NUMBERS";
         let result =
@@ -2082,6 +2086,7 @@ CREATE TABLE log (
             }
             _ => unreachable!(),
         }
+        assert_eq!(sql, result[0].to_string());
 
         let sql = "CREATE VIEW test (n1, n2) AS SELECT * FROM NUMBERS";
         let result =
@@ -2097,6 +2102,7 @@ CREATE TABLE log (
             }
             _ => unreachable!(),
         }
+        assert_eq!(sql, result[0].to_string());
 
         // Some invalid syntax cases
         let sql = "CREATE VIEW test (n1 AS select * from demo";
