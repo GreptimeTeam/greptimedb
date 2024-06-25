@@ -74,7 +74,7 @@ pub trait CacheManager {
         puffin_file_name: &str,
         key: &str,
         dir_path: PathBuf,
-        size: u64,
+        dir_size: u64,
     ) -> Result<()>;
 }
 

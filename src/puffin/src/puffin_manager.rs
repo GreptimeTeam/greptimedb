@@ -40,11 +40,14 @@ pub trait PuffinManager {
 #[async_trait]
 pub trait PuffinWriter {
     /// Writes a blob associated with the specified `key` to the Puffin file.
+    /// Returns the number of bytes written.
     async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>
     where
         R: AsyncRead + Send;
 
     /// Writes a directory associated with the specified `key` to the Puffin file.
+    /// Returns the number of bytes written.
+    ///
     /// The specified `dir` should be accessible from the filesystem.
     async fn put_dir(&mut self, key: &str, dir: PathBuf, options: PutOptions) -> Result<u64>;
 

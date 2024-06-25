@@ -103,8 +103,10 @@ where
             UnsupportedCompressionSnafu { codec: "lz4" }
         );
 
+        // Walk the directory and add all files to the puffin file.
         let mut wd = async_walkdir::WalkDir::new(&dir_path).filter(|entry| async move {
             match entry.file_type().await {
+                // Ignore directories.
                 Ok(ft) if ft.is_dir() => async_walkdir::Filtering::Ignore,
                 _ => async_walkdir::Filtering::Continue,
             }
