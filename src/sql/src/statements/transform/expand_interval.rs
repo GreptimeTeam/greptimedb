@@ -23,9 +23,8 @@ use sqlparser::ast::{Expr, Interval, Value};
 use crate::statements::transform::TransformRule;
 
 lazy_static! {
-    /// Matches either one or more digits `(\d+)` or one or more non-digits `(\D+)` characters
-    /// Negative sign before digits is matched optionally
-    static ref INTERVAL_SHORT_NAME_PATTERN: Regex = Regex::new(r"(-?\d+|\D+)").unwrap();
+    /// Matches either one or more digits `(\d+)` or one or more ASCII characters `[a-zA-Z]` or plus/minus signs
+    static ref INTERVAL_SHORT_NAME_PATTERN: Regex = Regex::new(r"([+-]?\d+|[a-zA-Z]+|\+|-)").unwrap();
 
     static ref INTERVAL_SHORT_NAME_MAPPING: HashMap<&'static str, &'static str> = HashMap::from([
         ("y","years"),
@@ -144,7 +143,7 @@ mod tests {
     use crate::statements::transform::TransformRule;
 
     #[test]
-    fn test_transform_interval_conversions() {
+    fn test_transform_interval_basic_conversions() {
         let test_cases = vec![
             ("1y", "1 years"),
             ("4mon", "4 months"),
@@ -158,7 +157,6 @@ mod tests {
             ("200ms", "200 microseconds"),
             ("350us", "350 microseconds"),
             ("400ns", "400 nanoseconds"),
-            ("2y4w1h", "2 years 4 weeks 1 hours"),
         ];
         for (input, expected) in test_cases {
             let result = expand_interval_name(input).unwrap();
@@ -168,6 +166,37 @@ mod tests {
         let test_cases = vec!["1 year 2 months 3 days 4 hours", "-2 months"];
         for input in test_cases {
             assert_eq!(expand_interval_name(input), None);
+        }
+    }
+
+    #[test]
+    fn test_transform_interval_compound_conversions() {
+        let test_cases = vec![
+            ("2y4mon6w", "2 years 4 months 6 weeks"),
+            ("5d3h1m", "5 days 3 hours 1 minutes"),
+            (
+                "10s312millis789ms",
+                "10 seconds 312 milliseconds 789 microseconds",
+            ),
+            (
+                "23mils987us754ns",
+                "23 milliseconds 987 microseconds 754 nanoseconds",
+            ),
+            ("-1d-5h", "-1 days -5 hours"),
+            ("-2y-4mon-6w", "-2 years -4 months -6 weeks"),
+            ("-5d-3h-1m", "-5 days -3 hours -1 minutes"),
+            (
+                "-10s-312millis-789ms",
+                "-10 seconds -312 milliseconds -789 microseconds",
+            ),
+            (
+                "-23mils-987us-754ns",
+                "-23 milliseconds -987 microseconds -754 nanoseconds",
+            ),
+        ];
+        for (input, expected) in test_cases {
+            let result = expand_interval_name(input).unwrap();
+            assert_eq!(result, expected);
         }
     }
 
