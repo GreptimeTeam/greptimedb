@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -53,7 +54,7 @@ impl MokaCacheManager {
 
         let cache = Cache::builder()
             .max_capacity(max_size)
-            .weigher(|_: &String, size: &u64| *size as u32)
+            .weigher(|_: &String, size: &u64| (*size).try_into().unwrap_or(u32::MAX))
             .async_eviction_listener(move |key, _, _| {
                 let cloned_root = cache_root_clone.clone();
                 async move {
@@ -104,13 +105,19 @@ impl CacheManager for MokaCacheManager {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let file_path = self.root.join(&cache_key);
 
-        if self.cache.get(&cache_key).await.is_some() {
-            Ok(fs::File::open(file_path).await.context(OpenSnafu)?.compat())
-        } else {
-            let size = self.write_blob(&file_path, init_fn).await?;
-            self.cache.insert(cache_key, size).await;
-            Ok(fs::File::open(file_path).await.context(OpenSnafu)?.compat())
+        let open_res = fs::File::open(&file_path).await;
+        match open_res {
+            Ok(file) => return Ok(file.compat()),
+            Err(err) if err.kind() != ErrorKind::NotFound => return Err(err).context(OpenSnafu),
+            _ => {}
         }
+
+        let size = self.write_blob(&file_path, init_fn).await?;
+        let file = fs::File::open(file_path).await;
+        // Open the file before inserting to the cache to avoid evicting the file immediately.
+        self.cache.insert(cache_key, size).await;
+
+        Ok(file.context(OpenSnafu)?.compat())
     }
 
     async fn get_dir<'a>(
@@ -438,7 +445,7 @@ mod tests {
             .await
             .unwrap();
 
-        // reover cache
+        // recover cache
         drop(manager);
         let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
