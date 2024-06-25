@@ -22,12 +22,12 @@ use crate::error::Result;
 use crate::Client;
 
 #[derive(Debug)]
-pub struct FlownodeClient {
+pub struct FlowRequester {
     client: Client,
 }
 
 #[async_trait::async_trait]
-impl Flownode for FlownodeClient {
+impl Flownode for FlowRequester {
     async fn handle(&self, request: FlowRequest) -> common_meta::error::Result<FlowResponse> {
         self.handle_inner(request)
             .await
@@ -46,7 +46,7 @@ impl Flownode for FlownodeClient {
     }
 }
 
-impl FlownodeClient {
+impl FlowRequester {
     pub fn new(client: Client) -> Self {
         Self { client }
     }

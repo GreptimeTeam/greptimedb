@@ -21,7 +21,7 @@ use common_meta::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 
-use crate::flow::FlownodeClient;
+use crate::flow::FlowRequester;
 use crate::region::RegionRequester;
 use crate::Client;
 
@@ -55,7 +55,7 @@ impl NodeManager for NodeClients {
     async fn flownode(&self, flownode: &Peer) -> FlownodeRef {
         let client = self.get_client(flownode).await;
 
-        Arc::new(FlownodeClient::new(client))
+        Arc::new(FlowRequester::new(client))
     }
 }
 
