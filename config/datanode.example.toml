@@ -43,7 +43,8 @@ rpc_max_send_message_size = "512MB"
 [grpc]
 ## The address to bind the gRPC server.
 addr = "127.0.0.1:3001"
-## The hostname to advertise to the metasrv.
+## The hostname advertised to the metasrv,
+## and used for connections from outside the host
 hostname = "127.0.0.1"
 ## The number of server worker threads.
 runtime_size = 8
