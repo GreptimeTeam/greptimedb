@@ -24,7 +24,8 @@ inputs:
     description: "Etcd endpoints"
   values-filename:
     default: "with-minio.yaml"
-    
+  enable-region-failover:
+    default: false
 
 runs:
   using: composite
@@ -47,6 +48,7 @@ runs:
       helm upgrade \
         --install my-greptimedb \
         --set meta.etcdEndpoints=${{ inputs.etcd-endpoints }} \
+        --set meta.enableRegionFailover=${{ inputs.enable-region-failover }} \
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
         --set image.tag=${{ inputs.image-tag }} \

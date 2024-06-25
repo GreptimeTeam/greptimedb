@@ -497,6 +497,7 @@ jobs:
         with:
           image-registry: localhost:5001
           values-filename: ${{ matrix.mode.values }}
+          enable-region-failover: true
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
