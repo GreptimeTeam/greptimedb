@@ -306,6 +306,16 @@ impl RegionSupervisor {
         datanode_id: DatanodeId,
         region_id: RegionId,
     ) -> Result<()> {
+        let from_peer = self
+            .peer_lookup
+            .datanode(cluster_id, datanode_id)
+            .await
+            .context(error::LookupPeerSnafu {
+                peer_id: datanode_id,
+            })?
+            .context(error::PeerUnavailableSnafu {
+                peer_id: datanode_id,
+            })?;
         let mut peers = self
             .selector
             .select(
@@ -318,16 +328,6 @@ impl RegionSupervisor {
             )
             .await?;
         let to_peer = peers.remove(0);
-        let from_peer = self
-            .peer_lookup
-            .datanode(cluster_id, datanode_id)
-            .await
-            .context(error::LookupPeerSnafu {
-                peer_id: datanode_id,
-            })?
-            .context(error::PeerUnavailableSnafu {
-                peer_id: datanode_id,
-            })?;
         let task = RegionMigrationProcedureTask {
             cluster_id,
             region_id,
