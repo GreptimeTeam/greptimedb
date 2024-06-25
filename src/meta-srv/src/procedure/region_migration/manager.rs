@@ -67,16 +67,6 @@ impl RegionMigrationProcedureTracker {
         }
     }
 
-    /// Returns the [RegionMigrationProcedureTask] of the specific region(`region_id`).
-    pub(crate) fn get(&self, region_id: RegionId) -> Option<RegionMigrationProcedureTask> {
-        self.running_procedures
-            .read()
-            .unwrap()
-            .get(&region_id)
-            .cloned()
-    }
-
-    #[cfg(test)]
     /// Returns true if it contains the specific region(`region_id`).
     pub(crate) fn contains(&self, region_id: RegionId) -> bool {
         self.running_procedures

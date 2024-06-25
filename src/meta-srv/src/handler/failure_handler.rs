@@ -29,7 +29,7 @@ impl RegionFailureHandler {
     pub(crate) fn new(mut region_supervisor: RegionSupervisor) -> Self {
         let heartbeat_acceptor = region_supervisor.heartbeat_acceptor();
         info!("Starting region supervisor");
-        tokio::spawn(async move { region_supervisor.run().await });
+        common_runtime::spawn_bg(async move { region_supervisor.run().await });
         Self { heartbeat_acceptor }
     }
 }

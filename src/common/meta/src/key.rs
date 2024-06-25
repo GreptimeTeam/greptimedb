@@ -139,7 +139,7 @@ use crate::rpc::store::BatchDeleteRequest;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
-pub const MAINTENANCE_KEY: &str = "maintenance";
+pub const MAINTENANCE_KEY: &str = "__maintenance";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
