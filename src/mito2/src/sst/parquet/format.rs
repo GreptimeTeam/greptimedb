@@ -180,17 +180,17 @@ impl ReadFormat {
     ///
     /// This schema is computed from the region metadata but should be the same
     /// as the arrow schema decoded from the file metadata.
-    pub fn arrow_schema(&self) -> &SchemaRef {
+    pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Gets the metadata of the SST.
-    pub fn metadata(&self) -> &RegionMetadataRef {
+    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
     }
 
     /// Gets sorted projection indices to read.
-    pub fn projection_indices(&self) -> &[usize] {
+    pub(crate) fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
     }
 
@@ -517,7 +517,7 @@ impl ReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> ReadFormat {
         Self::new(
-            metadata.clone(),
+            Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),
         )
     }

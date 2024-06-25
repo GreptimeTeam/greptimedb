@@ -20,9 +20,9 @@ use api::v1::Mutation;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayData, ArrayRef, BinaryBuilder, DictionaryArray, RecordBatch,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampSecondArray, UInt16Array,
-    UInt16BufferBuilder, UInt32Array, UInt64Array, UInt8Array, UInt8Builder,
+    Array, ArrayRef, BinaryBuilder, DictionaryArray, RecordBatch, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
+    UInt8Array, UInt8Builder,
 };
 use datatypes::arrow::compute::TakeOptions;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef, UInt16Type};
@@ -60,7 +60,6 @@ impl BulkPart {
 #[derive(Debug)]
 pub struct BulkPartMeta {
     pub num_rows: usize,
-    pub size: usize,
     pub max_timestamp: i64,
     pub min_timestamp: i64,
 }
@@ -69,7 +68,6 @@ impl Default for BulkPartMeta {
     fn default() -> Self {
         Self {
             num_rows: 0,
-            size: 0,
             max_timestamp: i64::MIN,
             min_timestamp: i64::MAX,
         }
@@ -84,10 +82,13 @@ pub struct BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    /// Encodes mutations to a [BulkPart].
-    fn encode_mutations(&self, mutations: &[Mutation], dest: &mut BulkPart) -> Result<()> {
-        let (arrow_record_batch, min_ts, max_ts) =
-            mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, false)?;
+    /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
+    fn encode_mutations(&self, mutations: &[Mutation], dest: &mut BulkPart) -> Result<bool> {
+        let Some((arrow_record_batch, min_ts, max_ts)) =
+            mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, false)?
+        else {
+            return Ok(false);
+        };
 
         let arrow_schema = arrow_record_batch.schema();
         {
@@ -99,14 +100,12 @@ impl BulkPartEncoder {
             let _metadata = writer.finish().context(EncodeMemtableSnafu)?;
         }
 
-        let part_size = { dest.data.len() };
         dest.metadata = BulkPartMeta {
             num_rows: arrow_record_batch.num_rows(),
-            size: part_size,
             max_timestamp: max_ts,
             min_timestamp: min_ts,
         };
-        Ok(())
+        Ok(true)
     }
 
     /// Decodes [BulkPart] to [Batch]es.
@@ -115,17 +114,21 @@ impl BulkPartEncoder {
     }
 }
 
-/// Converts mutations to record batches
+/// Converts mutations to record batches.
 fn mutations_to_record_batch(
     mutations: &[Mutation],
     metadata: &RegionMetadataRef,
     pk_encoder: &McmpRowCodec,
     dedup: bool,
-) -> Result<(RecordBatch, i64, i64)> {
+) -> Result<Option<(RecordBatch, i64, i64)>> {
     let total_rows: usize = mutations
         .iter()
         .map(|m| m.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
         .sum();
+
+    if total_rows == 0 {
+        return Ok(None);
+    }
 
     let mut pk_builder = BinaryBuilder::with_capacity(total_rows, 0);
 
@@ -161,9 +164,7 @@ fn mutations_to_record_batch(
         }
     }
 
-    let schema = to_sst_arrow_schema(metadata);
-
-    sort_arrays_to_record_batch(
+    let sorter = ArraysSorter::new(
         metadata,
         pk_builder.finish(),
         ts_vector.to_vector().to_arrow_array(),
@@ -172,69 +173,131 @@ fn mutations_to_record_batch(
         field_builders
             .iter_mut()
             .map(|f| f.to_vector().to_arrow_array()),
-        schema,
         dedup,
-    )
+    );
+
+    sorter.sort().map(Some)
 }
 
-/// Converts arrays to arrow record batch with SST schema along with timestamp range.
-#[allow(clippy::too_many_arguments)]
-fn sort_arrays_to_record_batch(
-    metadata: &RegionMetadataRef,
-    pk: BinaryArray,
+struct ArraysSorter<'a, I> {
+    metadata: &'a RegionMetadataRef,
+    encoded_primary_keys: BinaryArray,
     timestamp: ArrayRef,
     sequence: UInt64Array,
     op_type: UInt8Array,
-    fields: impl Iterator<Item = ArrayRef>,
-    schema: SchemaRef,
+    fields: I,
     dedup: bool,
-) -> Result<(RecordBatch, i64, i64)> {
-    let timestamp_iter = timestamp_array_to_iter(metadata, &timestamp);
-    let (mut min_timestamp, mut max_timestamp) = (i64::MAX, i64::MIN);
-    let mut to_sort = pk
-        .iter()
-        .zip(timestamp_iter)
-        .zip(sequence.iter())
-        .map(|((pk, timestamp), sequence)| {
-            max_timestamp = max_timestamp.max(*timestamp);
-            min_timestamp = min_timestamp.min(*timestamp);
-            (pk, timestamp, sequence)
-        })
-        .enumerate()
-        .collect::<Vec<_>>();
+    arrow_schema: SchemaRef,
+}
 
-    to_sort.sort_unstable_by(|(_, (l_pk, l_ts, l_seq)), (_, (r_pk, r_ts, r_seq))| {
-        l_pk.cmp(r_pk)
-            .then(l_ts.cmp(r_ts))
-            .then(l_seq.cmp(r_seq).reverse())
-    });
-
-    if dedup {
-        // Dedup by timestamps while ignore sequence.
-        to_sort.dedup_by(|(_, (l_pk, l_ts, _)), (_, (r_pk, r_ts, _))| l_pk == r_pk && l_ts == r_ts);
+impl<'a, I> ArraysSorter<'a, I> {
+    fn new(
+        metadata: &'a RegionMetadataRef,
+        encoded_primary_keys: BinaryArray,
+        timestamp: ArrayRef,
+        sequence: UInt64Array,
+        op_type: UInt8Array,
+        fields: I,
+        dedup: bool,
+    ) -> Self {
+        let arrow_schema = to_sst_arrow_schema(metadata);
+        Self {
+            metadata,
+            encoded_primary_keys,
+            timestamp,
+            sequence,
+            op_type,
+            fields,
+            dedup,
+            arrow_schema,
+        }
     }
+}
 
-    let indices = UInt32Array::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
+impl<'a, I> ArraysSorter<'a, I>
+where
+    I: Iterator<Item = ArrayRef>,
+{
+    /// Converts arrays to record batch.
+    fn sort(self) -> Result<(RecordBatch, i64, i64)> {
+        debug_assert!(self.timestamp.len() != 0);
+        debug_assert!(self.timestamp.len() == self.sequence.len());
+        debug_assert!(self.timestamp.len() == self.op_type.len());
+        debug_assert!(self.timestamp.len() == self.encoded_primary_keys.len());
 
-    let pk_dictionary = Arc::new(binary_array_to_dictionary(
-        // safety: pk must be BinaryArray
-        arrow::compute::take(
-            &pk,
+        let timestamp_iter = timestamp_array_to_iter(self.metadata, &self.timestamp);
+        let (mut min_timestamp, mut max_timestamp) = (i64::MAX, i64::MIN);
+        let mut to_sort = self
+            .encoded_primary_keys
+            .iter()
+            .zip(timestamp_iter)
+            .zip(self.sequence.iter())
+            .map(|((pk, timestamp), sequence)| {
+                max_timestamp = max_timestamp.max(*timestamp);
+                min_timestamp = min_timestamp.min(*timestamp);
+                (pk, timestamp, sequence)
+            })
+            .enumerate()
+            .collect::<Vec<_>>();
+
+        to_sort.sort_unstable_by(|(_, (l_pk, l_ts, l_seq)), (_, (r_pk, r_ts, r_seq))| {
+            l_pk.cmp(r_pk)
+                .then(l_ts.cmp(r_ts))
+                .then(l_seq.cmp(r_seq).reverse())
+        });
+
+        if self.dedup {
+            // Dedup by timestamps while ignore sequence.
+            to_sort.dedup_by(|(_, (l_pk, l_ts, _)), (_, (r_pk, r_ts, _))| {
+                l_pk == r_pk && l_ts == r_ts
+            });
+        }
+
+        let indices = UInt32Array::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
+
+        let pk_dictionary = Arc::new(binary_array_to_dictionary(
+            // safety: pk must be BinaryArray
+            arrow::compute::take(
+                &self.encoded_primary_keys,
+                &indices,
+                Some(TakeOptions {
+                    check_bounds: false,
+                }),
+            )
+            .context(ComputeArrowSnafu)?
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap(),
+        )?) as ArrayRef;
+
+        let mut arrays = Vec::with_capacity(self.arrow_schema.fields.len());
+        for arr in self.fields {
+            arrays.push(
+                arrow::compute::take(
+                    &arr,
+                    &indices,
+                    Some(TakeOptions {
+                        check_bounds: false,
+                    }),
+                )
+                .context(ComputeArrowSnafu)?,
+            );
+        }
+
+        let timestamp = arrow::compute::take(
+            &self.timestamp,
             &indices,
             Some(TakeOptions {
                 check_bounds: false,
             }),
         )
-        .context(ComputeArrowSnafu)?
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .unwrap(),
-    )?) as ArrayRef;
-    let mut arrays = Vec::with_capacity(schema.fields.len());
-    for arr in fields {
+        .context(ComputeArrowSnafu)?;
+
+        arrays.push(timestamp);
+        arrays.push(pk_dictionary);
         arrays.push(
             arrow::compute::take(
-                &arr,
+                &self.sequence,
                 &indices,
                 Some(TakeOptions {
                     check_bounds: false,
@@ -242,43 +305,21 @@ fn sort_arrays_to_record_batch(
             )
             .context(ComputeArrowSnafu)?,
         );
+
+        arrays.push(
+            arrow::compute::take(
+                &self.op_type,
+                &indices,
+                Some(TakeOptions {
+                    check_bounds: false,
+                }),
+            )
+            .context(ComputeArrowSnafu)?,
+        );
+
+        let batch = RecordBatch::try_new(self.arrow_schema, arrays).context(NewRecordBatchSnafu)?;
+        Ok((batch, min_timestamp, max_timestamp))
     }
-
-    let timestamp = arrow::compute::take(
-        &timestamp,
-        &indices,
-        Some(TakeOptions {
-            check_bounds: false,
-        }),
-    )
-    .context(ComputeArrowSnafu)?;
-
-    arrays.push(timestamp);
-    arrays.push(pk_dictionary);
-    arrays.push(
-        arrow::compute::take(
-            &sequence,
-            &indices,
-            Some(TakeOptions {
-                check_bounds: false,
-            }),
-        )
-        .context(ComputeArrowSnafu)?,
-    );
-
-    arrays.push(
-        arrow::compute::take(
-            &op_type,
-            &indices,
-            Some(TakeOptions {
-                check_bounds: false,
-            }),
-        )
-        .context(ComputeArrowSnafu)?,
-    );
-
-    let batch = RecordBatch::try_new(schema, arrays).context(NewRecordBatchSnafu)?;
-    Ok((batch, min_timestamp, max_timestamp))
 }
 
 /// Converts timestamp array to an iter of i64 values.
@@ -326,14 +367,14 @@ fn timestamp_array_to_iter<'a>(
 fn binary_array_to_dictionary(input: &BinaryArray) -> Result<DictionaryArray<UInt16Type>> {
     if input.is_empty() {
         return Ok(DictionaryArray::new(
-            <UInt16Array as From<Vec<u16>>>::from(vec![]),
+            UInt16Array::from(Vec::<u16>::new()),
             Arc::new(BinaryArray::from_vec(vec![])) as ArrayRef,
         ));
     }
-    let mut keys = UInt16BufferBuilder::new(16);
+    let mut keys = Vec::with_capacity(16);
     let mut values = BinaryBuilder::new();
     let mut prev: usize = 0;
-    keys.append(prev as u16);
+    keys.push(prev as u16);
     values.append_value(input.value(prev));
 
     for current_bytes in input.iter().skip(1) {
@@ -344,17 +385,11 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<DictionaryArray<UIn
             values.append_value(current_bytes);
             prev += 1;
         }
-        keys.append(prev as u16);
+        keys.push(prev as u16);
     }
 
     Ok(DictionaryArray::new(
-        UInt16Array::from(
-            ArrayData::builder(ArrowDataType::UInt16)
-                .len(keys.len())
-                .add_buffer(keys.finish())
-                .build()
-                .context(ComputeArrowSnafu)?,
-        ),
+        UInt16Array::from(keys),
         Arc::new(values.finish()) as ArrayRef,
     ))
 }
@@ -468,8 +503,9 @@ mod tests {
 
         let pk_encoder = McmpRowCodec::new_with_primary_keys(&metadata);
 
-        let (batch, _, _) =
-            mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup).unwrap();
+        let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
+            .unwrap()
+            .unwrap();
         let read_format = ReadFormat::new_with_all_columns(metadata.clone());
         let mut batches = VecDeque::new();
         read_format

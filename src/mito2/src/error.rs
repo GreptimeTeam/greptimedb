@@ -878,7 +878,7 @@ impl ErrorExt for Error {
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
-            UnsupportedOperation { .. } => StatusCode::InvalidArguments,
+            UnsupportedOperation { .. } => StatusCode::Unsupported,
         }
     }
 
