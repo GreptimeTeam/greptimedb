@@ -195,9 +195,7 @@ impl MokaCacheManager {
         // the directory to a temporary directory first...
         let tmp_root = target_path.with_extension(TMP_EXTENSION);
 
-        let writer_provider = Box::new(MokaDirWriterProvider {
-            root: tmp_root.clone(),
-        });
+        let writer_provider = Box::new(MokaDirWriterProvider(tmp_root.clone()));
         let size = init_fn(writer_provider).await?;
 
         // ...then rename the temporary directory to the target path
@@ -256,14 +254,13 @@ impl MokaCacheManager {
     }
 }
 
-pub struct MokaDirWriterProvider {
-    root: PathBuf,
-}
+/// `MokaDirWriterProvider` implements `DirWriterProvider` for initializing a directory.
+struct MokaDirWriterProvider(PathBuf);
 
 #[async_trait]
 impl DirWriterProvider for MokaDirWriterProvider {
     async fn writer(&self, rel_path: &str) -> Result<BoxWriter> {
-        let full_path = self.root.join(rel_path);
+        let full_path = self.0.join(rel_path);
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await.context(CreateSnafu)?;
         }
