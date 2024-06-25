@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn test_last_not_null_iter() {
+    fn test_last_not_null_iter_on_batch() {
         let input = [new_batch_multi_fields(
             b"k1",
             &[1, 1, 2],
@@ -1099,6 +1099,43 @@ mod tests {
         let expect = [
             new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
             new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+        ];
+        assert_eq!(&expect, &actual[..]);
+    }
+
+    #[test]
+    fn test_last_not_null_iter_multi_batch() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 1, 2],
+                &[13, 12, 13],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[(None, None), (Some(1), None), (Some(2), Some(22))],
+            ),
+            new_batch_multi_fields(
+                b"k1",
+                &[2, 3],
+                &[12, 13],
+                &[OpType::Put, OpType::Delete],
+                &[(None, Some(12)), (None, None)],
+            ),
+            new_batch_multi_fields(
+                b"k2",
+                &[1, 1, 2],
+                &[13, 12, 13],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[(None, None), (Some(1), None), (Some(2), Some(22))],
+            ),
+        ];
+        let iter = input.into_iter().map(|batch| Ok(batch));
+        let iter = LastNotNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [
+            new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+            new_batch_multi_fields(b"k2", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k2", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
         ];
         assert_eq!(&expect, &actual[..]);
     }

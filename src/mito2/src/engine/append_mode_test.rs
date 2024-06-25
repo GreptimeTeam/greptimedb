@@ -113,7 +113,7 @@ async fn test_append_mode_compaction() {
         .await
         .unwrap();
 
-    // Flush 2 SSTs for compaction.
+    // Flush 3 SSTs for compaction.
     // a, field 1, 2
     let rows = Rows {
         schema: column_schemas.clone(),
