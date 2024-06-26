@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,28 +61,26 @@ pub struct CompactionRegion {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
+    pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
 }
 
-/// CompactorRequest represents the request to compact a region.
+/// OpenCompactionRegionRequest represents the request to open a compaction region.
 #[derive(Debug, Clone)]
-pub struct CompactorRequest {
+pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub region_dir: String,
-    pub region_options: HashMap<String, String>,
-    pub compaction_options: compact_request::Options,
-    pub picker_output: PickerOutput,
+    pub region_options: RegionOptions,
 }
 
 /// Open a compaction region from a compaction request.
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
-    req: &CompactorRequest,
+    req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
-    let region_options = RegionOptions::try_from(&req.region_options)?;
     let object_store = {
-        let name = &region_options.storage;
+        let name = &req.region_options.storage;
         if let Some(name) = name {
             object_store_manager
                 .find(name)
@@ -139,9 +136,9 @@ pub async fn open_compaction_region(
     let current_version = {
         let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
             .builder_for_options(
-                region_options.memtable.as_ref(),
-                !region_options.append_mode,
-                region_options.update_mode,
+                req.region_options.memtable.as_ref(),
+                !req.region_options.append_mode,
+                req.region_options.update_mode,
             );
 
         // Initial memtable id is 0.
@@ -149,7 +146,7 @@ pub async fn open_compaction_region(
             region_metadata.clone(),
             memtable_builder.clone(),
             0,
-            region_options.compaction.time_window(),
+            req.region_options.compaction.time_window(),
         ));
 
         let version = VersionBuilder::new(region_metadata.clone(), mutable)
@@ -158,7 +155,7 @@ pub async fn open_compaction_region(
             .flushed_sequence(manifest.flushed_sequence)
             .truncated_entry_id(manifest.truncated_entry_id)
             .compaction_time_window(manifest.compaction_time_window)
-            .options(region_options.clone())
+            .options(req.region_options.clone())
             .build();
         let version_control = Arc::new(VersionControl::new(version));
         version_control.current().version
@@ -166,7 +163,7 @@ pub async fn open_compaction_region(
 
     Ok(CompactionRegion {
         region_id: req.region_id,
-        region_options: region_options.clone(),
+        region_options: req.region_options.clone(),
         region_dir: req.region_dir.clone(),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
@@ -174,7 +171,14 @@ pub async fn open_compaction_region(
         access_layer,
         manifest_ctx,
         current_version,
+        file_purger: Some(file_purger),
     })
+}
+
+impl CompactionRegion {
+    pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
+        self.file_purger.clone()
+    }
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.

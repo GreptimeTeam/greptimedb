@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(trait_alias)]
+mod dir_meta;
+mod reader;
+mod writer;
 
-pub mod blob_metadata;
-pub mod error;
-pub mod file_format;
-pub mod file_metadata;
-pub mod partial_reader;
-pub mod puffin_manager;
-
-#[cfg(test)]
-mod tests;
+pub use reader::CachedPuffinReader;
+pub use writer::CachedPuffinWriter;

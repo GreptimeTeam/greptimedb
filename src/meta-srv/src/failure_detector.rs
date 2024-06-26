@@ -63,7 +63,7 @@ pub(crate) struct PhiAccrualFailureDetector {
     last_heartbeat_millis: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhiAccrualFailureDetectorOptions {
     pub threshold: f32,
@@ -195,7 +195,7 @@ fn phi(time_diff: i64, mean: f64, std_deviation: f64) -> f64 {
 /// It is capped by the number of samples specified in `max_sample_size`.
 ///
 /// The stats (mean, variance, std_deviation) are not defined for empty HeartbeatHistory.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct HeartbeatHistory {
     /// Number of samples to use for calculation of mean and standard deviation of inter-arrival
     /// times.

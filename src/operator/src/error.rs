@@ -156,6 +156,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid partition"))]
+    InvalidPartition {
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql {
         err_msg: String,
@@ -727,7 +734,8 @@ impl ErrorExt for Error {
             | Error::InvalidViewName { .. }
             | Error::InvalidExpr { .. }
             | Error::InvalidViewStmt { .. }
-            | Error::ConvertIdentifier { .. } => StatusCode::InvalidArguments,
+            | Error::ConvertIdentifier { .. }
+            | Error::InvalidPartition { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

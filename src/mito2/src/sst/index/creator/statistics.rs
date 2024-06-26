@@ -35,7 +35,7 @@ pub(crate) struct Statistics {
     /// Number of rows in the index.
     row_count: usize,
     /// Number of bytes in the index.
-    byte_count: usize,
+    byte_count: u64,
 }
 
 impl Statistics {
@@ -63,7 +63,7 @@ impl Statistics {
     }
 
     /// Returns byte count.
-    pub fn byte_count(&self) -> usize {
+    pub fn byte_count(&self) -> u64 {
         self.byte_count
     }
 }
@@ -112,7 +112,7 @@ impl<'a> TimerGuard<'a> {
     }
 
     /// Increases the byte count of the index creation statistics.
-    pub fn inc_byte_count(&mut self, n: usize) {
+    pub fn inc_byte_count(&mut self, n: u64) {
         self.stats.byte_count += n;
     }
 }

@@ -18,6 +18,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+pub use bulk::part::BulkPart;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
@@ -35,6 +36,7 @@ use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::region::options::{MemtableOptions, UpdateMode};
 
+pub mod bulk;
 pub mod key_values;
 pub mod partition_tree;
 pub mod time_partition;
@@ -100,6 +102,9 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Writes one key value pair into the memtable.
     fn write_one(&self, key_value: KeyValue) -> Result<()>;
+
+    /// Writes an encoded batch of into memtable.
+    fn write_bulk(&self, part: BulkPart) -> Result<()>;
 
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.

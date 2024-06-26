@@ -26,7 +26,7 @@ pub struct KeyValues {
     ///
     /// This mutation must be a valid mutation and rows in the mutation
     /// must not be `None`.
-    mutation: Mutation,
+    pub(crate) mutation: Mutation,
     /// Key value read helper.
     helper: SparseReadRowHelper,
 }
@@ -40,6 +40,52 @@ impl KeyValues {
         let helper = SparseReadRowHelper::new(metadata, rows);
 
         Some(KeyValues { mutation, helper })
+    }
+
+    /// Returns a key value iterator.
+    pub fn iter(&self) -> impl Iterator<Item = KeyValue> {
+        let rows = self.mutation.rows.as_ref().unwrap();
+        let schema = &rows.schema;
+        rows.rows.iter().enumerate().map(|(idx, row)| {
+            KeyValue {
+                row,
+                schema,
+                helper: &self.helper,
+                sequence: self.mutation.sequence + idx as u64, // Calculate sequence for each row.
+                // Safety: This is a valid mutation.
+                op_type: OpType::try_from(self.mutation.op_type).unwrap(),
+            }
+        })
+    }
+
+    /// Returns number of rows.
+    pub fn num_rows(&self) -> usize {
+        // Safety: rows is not None.
+        self.mutation.rows.as_ref().unwrap().rows.len()
+    }
+}
+
+/// Key value view of a mutation.
+#[derive(Debug)]
+pub struct KeyValuesRef<'a> {
+    /// Mutation to read.
+    ///
+    /// This mutation must be a valid mutation and rows in the mutation
+    /// must not be `None`.
+    mutation: &'a Mutation,
+    /// Key value read helper.
+    helper: SparseReadRowHelper,
+}
+
+impl<'a> KeyValuesRef<'a> {
+    /// Creates [crate::memtable::KeyValues] from specific `mutation`.
+    ///
+    /// Returns `None` if `rows` of the `mutation` is `None`.
+    pub fn new(metadata: &RegionMetadata, mutation: &'a Mutation) -> Option<KeyValuesRef<'a>> {
+        let rows = mutation.rows.as_ref()?;
+        let helper = SparseReadRowHelper::new(metadata, rows);
+
+        Some(KeyValuesRef { mutation, helper })
     }
 
     /// Returns a key value iterator.

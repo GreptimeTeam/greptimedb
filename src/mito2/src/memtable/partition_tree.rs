@@ -34,13 +34,13 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::Result;
+use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
+    AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::region::options::UpdateMode;
@@ -151,6 +151,13 @@ impl Memtable for PartitionTreeMemtable {
         self.update_stats(&metrics);
 
         res
+    }
+
+    fn write_bulk(&self, _part: BulkPart) -> Result<()> {
+        UnsupportedOperationSnafu {
+            err_msg: "PartitionTreeMemtable does not support write_bulk",
+        }
+        .fail()
     }
 
     fn iter(

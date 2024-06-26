@@ -753,6 +753,13 @@ pub enum Error {
         location: Location,
         source: Arc<Error>,
     },
+
+    #[snafu(display("Operation is not supported: {}", err_msg))]
+    UnsupportedOperation {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -871,6 +878,7 @@ impl ErrorExt for Error {
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
+            UnsupportedOperation { .. } => StatusCode::Unsupported,
         }
     }
 

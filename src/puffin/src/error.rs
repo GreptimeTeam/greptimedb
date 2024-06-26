@@ -64,6 +64,30 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to open"))]
+    Open {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read metadata"))]
+    Metadata {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Error while walking directory"))]
+    WalkDirError {
+        #[snafu(source)]
+        error: async_walkdir::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Magic not matched"))]
     MagicNotMatched {
         #[snafu(implicit)]
@@ -159,6 +183,43 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unsupported compression: {codec}"))]
+    UnsupportedCompression {
+        codec: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Write to the same blob twice: {blob}"))]
+    DuplicateBlob {
+        blob: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Blob not found: {blob}"))]
+    BlobNotFound {
+        blob: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Blob index out of bound, index: {}, max index: {}", index, max_index))]
+    BlobIndexOutOfBound {
+        index: usize,
+        max_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("File key not match, expected: {}, actual: {}", expected, actual))]
+    FileKeyNotMatch {
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -172,6 +233,8 @@ impl ErrorExt for Error {
             | Write { .. }
             | Flush { .. }
             | Close { .. }
+            | Open { .. }
+            | Metadata { .. }
             | SerializeJson { .. }
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }
@@ -180,9 +243,17 @@ impl ErrorExt for Error {
             | InvalidBlobOffset { .. }
             | InvalidBlobAreaEnd { .. }
             | Lz4Compression { .. }
-            | Lz4Decompression { .. } => StatusCode::Unexpected,
+            | Lz4Decompression { .. }
+            | BlobNotFound { .. }
+            | BlobIndexOutOfBound { .. }
+            | FileKeyNotMatch { .. }
+            | WalkDirError { .. } => StatusCode::Unexpected,
 
-            UnsupportedDecompression { .. } => StatusCode::Unsupported,
+            UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
+                StatusCode::Unsupported
+            }
+
+            DuplicateBlob { .. } => StatusCode::InvalidArguments,
         }
     }
 
