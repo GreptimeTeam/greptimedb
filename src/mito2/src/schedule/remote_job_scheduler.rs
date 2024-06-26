@@ -108,7 +108,7 @@ impl Notifier for DefaultNotifier {
                     } else if let Some(region_edit) = result.region_edit {
                         BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
-                            senders: None,
+                            senders: vec![],
                             start_time: result.start_time,
                             edit: region_edit,
                         })

@@ -148,7 +148,7 @@ impl CompactionTask for CompactionTaskImpl {
         let notify = match self.handle_compaction().await {
             Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                 region_id: self.compaction_region.region_id,
-                senders: Some(std::mem::take(&mut self.waiters)),
+                senders: std::mem::take(&mut self.waiters),
                 start_time: self.start_time,
                 edit,
             }),

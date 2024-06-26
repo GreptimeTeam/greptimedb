@@ -693,7 +693,7 @@ pub(crate) struct CompactionFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
     /// Compaction result senders.
-    pub(crate) senders: Option<Vec<OutputTx>>,
+    pub(crate) senders: Vec<OutputTx>,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
     /// Region edit to apply.
@@ -705,12 +705,9 @@ impl CompactionFinished {
         // only update compaction time on success
         COMPACTION_ELAPSED_TOTAL.observe(self.start_time.elapsed().as_secs_f64());
 
-        if let Some(senders) = self.senders {
-            for sender in senders {
-                sender.send(Ok(0));
-            }
+        for sender in self.senders {
+            sender.send(Ok(0));
         }
-
         info!("Successfully compacted region: {}", self.region_id);
     }
 }
@@ -719,12 +716,10 @@ impl OnFailure for CompactionFinished {
     /// Compaction succeeded but failed to update manifest or region's already been dropped.
     fn on_failure(&mut self, err: Error) {
         let err = Arc::new(err);
-        if let Some(senders) = &mut self.senders {
-            for sender in senders.drain(..) {
-                sender.send(Err(err.clone()).context(CompactRegionSnafu {
-                    region_id: self.region_id,
-                }));
-            }
+        for sender in self.senders.drain(..) {
+            sender.send(Err(err.clone()).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
         }
     }
 }
