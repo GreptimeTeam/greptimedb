@@ -400,7 +400,7 @@ impl StatementExecutor {
                 return InvalidViewStmtSnafu {}.fail();
             }
         };
-        //Save the definition for `show create view`.
+        // Save the definition for `show create view`.
         let definition = create_view.to_string();
 
         // Save the columns in plan, it may changed when the schemas of tables in plan
