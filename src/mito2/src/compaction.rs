@@ -318,7 +318,7 @@ impl CompactionScheduler {
                     error!("Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id)
                 }
             } else {
-                info!(
+                debug!(
                     "Remote compaction is not enabled, fallback to local compaction for region {}",
                     region_id
                 );

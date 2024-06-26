@@ -498,6 +498,7 @@ mod tests {
             ("compaction.twcs.max_inactive_window_files", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
+            ("compaction.twcs.remote_compaction", "false"),
             ("storage", "S3"),
             ("append_mode", "true"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),

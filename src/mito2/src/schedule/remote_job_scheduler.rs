@@ -21,7 +21,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::request::{BackgroundNotify, CompactionFailed, CompactionFinished, WorkerRequest};
 
@@ -85,8 +85,7 @@ pub struct CompactionJobResult {
     pub job_id: JobId,
     pub region_id: RegionId,
     pub start_time: Instant,
-    pub region_edit: Option<RegionEdit>,
-    pub err: Option<Error>,
+    pub region_edit: Result<RegionEdit>,
 }
 
 /// DefaultNotifier is a default implementation of Notifier that sends WorkerRequest to the mito engine.
@@ -100,21 +99,17 @@ impl Notifier for DefaultNotifier {
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {
-                    if let Some(err) = result.err {
-                        BackgroundNotify::CompactionFailed(CompactionFailed {
-                            region_id: result.region_id,
-                            err: Arc::new(err),
-                        })
-                    } else if let Some(region_edit) = result.region_edit {
-                        BackgroundNotify::CompactionFinished(CompactionFinished {
+                    match result.region_edit {
+                        Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
                             senders: vec![],
                             start_time: result.start_time,
-                            edit: region_edit,
-                        })
-                    } else {
-                        // Do nothing if region_edit is None and there is no error.
-                        return;
+                            edit,
+                        }),
+                        Err(err) => BackgroundNotify::CompactionFailed(CompactionFailed {
+                            region_id: result.region_id,
+                            err: Arc::new(err),
+                        }),
                     }
                 };
 
