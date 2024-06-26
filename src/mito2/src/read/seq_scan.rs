@@ -41,7 +41,7 @@ use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
 };
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
-use crate::region::options::UpdateMode;
+use crate::region::options::MergeMode;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
@@ -211,12 +211,12 @@ impl SeqScan {
 
         let dedup = !stream_ctx.input.append_mode;
         if dedup {
-            let reader = match stream_ctx.input.update_mode {
-                UpdateMode::LastRow => Box::new(DedupReader::new(
+            let reader = match stream_ctx.input.merge_mode {
+                MergeMode::LastRow => Box::new(DedupReader::new(
                     reader,
                     LastRow::new(stream_ctx.input.filter_deleted),
                 )) as _,
-                UpdateMode::LastNotNull => Box::new(DedupReader::new(
+                MergeMode::LastNotNull => Box::new(DedupReader::new(
                     reader,
                     LastNotNull::new(stream_ctx.input.filter_deleted),
                 )) as _,

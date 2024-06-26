@@ -209,7 +209,7 @@ mod tests {
     use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
     use crate::memtable::time_partition::TimePartitions;
     use crate::memtable::version::MemtableVersion;
-    use crate::region::options::{RegionOptions, UpdateMode};
+    use crate::region::options::{MergeMode, RegionOptions};
     use crate::region::version::{Version, VersionRef};
     use crate::sst::file::{FileId, FileMeta, Level};
     use crate::sst::version::SstVersion;
@@ -260,7 +260,7 @@ mod tests {
                 wal_options: Default::default(),
                 index_options: Default::default(),
                 memtable: None,
-                update_mode: UpdateMode::default(),
+                merge_mode: MergeMode::default(),
             },
         })
     }

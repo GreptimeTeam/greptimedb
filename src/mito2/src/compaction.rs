@@ -54,7 +54,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
-use crate::region::options::UpdateMode;
+use crate::region::options::MergeMode;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
@@ -463,7 +463,7 @@ struct CompactionSstReaderBuilder<'a> {
     append_mode: bool,
     filter_deleted: bool,
     time_range: Option<TimestampRange>,
-    update_mode: UpdateMode,
+    merge_mode: MergeMode,
 }
 
 impl<'a> CompactionSstReaderBuilder<'a> {
@@ -476,7 +476,7 @@ impl<'a> CompactionSstReaderBuilder<'a> {
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)
-            .with_update_mode(self.update_mode);
+            .with_merge_mode(self.merge_mode);
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.

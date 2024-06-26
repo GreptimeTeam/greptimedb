@@ -39,6 +39,8 @@ mod flush_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
+mod merge_mode_test;
+#[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod parallel_test;
@@ -50,8 +52,6 @@ mod prune_test;
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
-#[cfg(test)]
-mod update_mode_test;
 
 use std::any::Any;
 use std::collections::HashMap;

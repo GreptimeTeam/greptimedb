@@ -28,7 +28,7 @@ use crate::test_util::{
 };
 
 #[tokio::test]
-async fn test_update_mode_write_query() {
+async fn test_merge_mode_write_query() {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new();
@@ -37,7 +37,7 @@ async fn test_update_mode_write_query() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
         .field_num(2)
-        .insert_option("update_mode", "last_not_null")
+        .insert_option("merge_mode", "last_not_null")
         .build();
 
     let column_schemas = rows_schema(&request);
@@ -86,7 +86,7 @@ async fn test_update_mode_write_query() {
 }
 
 #[tokio::test]
-async fn test_update_mode_compaction() {
+async fn test_merge_mode_compaction() {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new();
@@ -103,7 +103,7 @@ async fn test_update_mode_compaction() {
         .insert_option("compaction.type", "twcs")
         .insert_option("compaction.twcs.max_active_window_files", "2")
         .insert_option("compaction.twcs.max_inactive_window_files", "2")
-        .insert_option("update_mode", "last_not_null")
+        .insert_option("merge_mode", "last_not_null")
         .build();
     let region_dir = request.region_dir.clone();
     let region_opts = request.options.clone();

@@ -42,7 +42,7 @@ use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNotNullIter;
 use crate::read::Batch;
-use crate::region::options::UpdateMode;
+use crate::region::options::MergeMode;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The partition tree.
@@ -86,7 +86,7 @@ impl PartitionTree {
         };
         let is_partitioned = Partition::has_multi_partitions(&metadata);
         let mut config = config.clone();
-        if config.update_mode == UpdateMode::LastNotNull {
+        if config.merge_mode == MergeMode::LastNotNull {
             config.dedup = false;
         }
 
@@ -244,7 +244,7 @@ impl PartitionTree {
 
         iter.metrics.iter_elapsed += start.elapsed();
 
-        if self.config.update_mode == UpdateMode::LastNotNull {
+        if self.config.merge_mode == MergeMode::LastNotNull {
             let iter = LastNotNullIter::new(iter);
             Ok(Box::new(iter))
         } else {

@@ -43,7 +43,7 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
-use crate::region::options::UpdateMode;
+use crate::region::options::MergeMode;
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 pub(crate) const DICTIONARY_SIZE_FACTOR: u64 = 8;
@@ -81,9 +81,9 @@ pub struct PartitionTreeConfig {
     pub dedup: bool,
     /// Total bytes of dictionary to keep in fork.
     pub fork_dictionary_bytes: ReadableSize,
-    /// Update mode of the tree.
+    /// Merge mode of the tree.
     #[serde(skip_deserializing)]
-    pub update_mode: UpdateMode,
+    pub merge_mode: MergeMode,
 }
 
 impl Default for PartitionTreeConfig {
@@ -102,7 +102,7 @@ impl Default for PartitionTreeConfig {
             data_freeze_threshold: 131072,
             dedup: true,
             fork_dictionary_bytes,
-            update_mode: UpdateMode::LastRow,
+            merge_mode: MergeMode::LastRow,
         }
     }
 }

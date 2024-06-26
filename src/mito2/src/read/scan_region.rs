@@ -42,7 +42,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
-use crate::region::options::UpdateMode;
+use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::{overlaps, FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
@@ -297,7 +297,7 @@ impl ScanRegion {
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
-            .with_update_mode(self.version.options.update_mode);
+            .with_merge_mode(self.version.options.merge_mode);
         Ok(input)
     }
 
@@ -400,8 +400,8 @@ pub(crate) struct ScanInput {
     pub(crate) append_mode: bool,
     /// Whether to remove deletion markers.
     pub(crate) filter_deleted: bool,
-    /// Mode to update duplicate rows.
-    pub(crate) update_mode: UpdateMode,
+    /// Mode to merge duplicate rows.
+    pub(crate) merge_mode: MergeMode,
 }
 
 impl ScanInput {
@@ -422,7 +422,7 @@ impl ScanInput {
             query_start: None,
             append_mode: false,
             filter_deleted: true,
-            update_mode: UpdateMode::default(),
+            merge_mode: MergeMode::default(),
         }
     }
 
@@ -502,10 +502,10 @@ impl ScanInput {
         self
     }
 
-    /// Sets the update mode.
+    /// Sets the merge mode.
     #[must_use]
-    pub(crate) fn with_update_mode(mut self, update_mode: UpdateMode) -> Self {
-        self.update_mode = update_mode;
+    pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
+        self.merge_mode = merge_mode;
         self
     }
 

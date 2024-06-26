@@ -24,7 +24,7 @@ use datatypes::schema::ColumnSchema;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
-use mito2::region::options::UpdateMode;
+use mito2::region::options::MergeMode;
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
@@ -52,8 +52,7 @@ fn write_rows(c: &mut Criterion) {
         });
     });
     group.bench_function("time_series", |b| {
-        let memtable =
-            TimeSeriesMemtable::new(metadata.clone(), 1, None, true, UpdateMode::LastRow);
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true, MergeMode::LastRow);
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
         b.iter(|| {
@@ -85,8 +84,7 @@ fn full_scan(c: &mut Criterion) {
         });
     });
     group.bench_function("time_series", |b| {
-        let memtable =
-            TimeSeriesMemtable::new(metadata.clone(), 1, None, true, UpdateMode::LastRow);
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true, MergeMode::LastRow);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }
@@ -124,8 +122,7 @@ fn filter_1_host(c: &mut Criterion) {
         });
     });
     group.bench_function("time_series", |b| {
-        let memtable =
-            TimeSeriesMemtable::new(metadata.clone(), 1, None, true, UpdateMode::LastRow);
+        let memtable = TimeSeriesMemtable::new(metadata.clone(), 1, None, true, MergeMode::LastRow);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }

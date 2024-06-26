@@ -138,7 +138,7 @@ pub async fn open_compaction_region(
             .builder_for_options(
                 req.region_options.memtable.as_ref(),
                 !req.region_options.append_mode,
-                req.region_options.update_mode,
+                req.region_options.merge_mode,
             );
 
         // Initial memtable id is 0.
@@ -283,7 +283,7 @@ impl Compactor for DefaultCompactor {
                 .index_options
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
-            let update_mode = compaction_region.current_version.options.update_mode;
+            let merge_mode = compaction_region.current_version.options.merge_mode;
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
@@ -293,7 +293,7 @@ impl Compactor for DefaultCompactor {
                     append_mode,
                     filter_deleted: output.filter_deleted,
                     time_range: output.output_time_range,
-                    update_mode,
+                    merge_mode,
                 }
                 .build_sst_reader()
                 .await?;
