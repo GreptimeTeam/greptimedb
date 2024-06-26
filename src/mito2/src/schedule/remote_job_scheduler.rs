@@ -23,7 +23,9 @@ use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
-use crate::request::{BackgroundNotify, CompactionFailed, CompactionFinished, WorkerRequest};
+use crate::request::{
+    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
+};
 
 pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 
@@ -38,7 +40,7 @@ pub trait RemoteJobScheduler: Send + Sync + 'static {
 #[async_trait::async_trait]
 pub trait Notifier: Send + Sync + 'static {
     /// Notify the mito engine that a remote job is completed.
-    async fn notify(&self, result: RemoteJobResult);
+    async fn notify(&mut self, result: RemoteJobResult);
 }
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
@@ -75,18 +77,19 @@ pub struct CompactionJobResult {
 /// DefaultNotifier is a default implementation of Notifier that sends WorkerRequest to the mito engine.
 pub(crate) struct DefaultNotifier {
     pub(crate) request_sender: Sender<WorkerRequest>,
+    pub(crate) waiters: Vec<OutputTx>,
 }
 
 #[async_trait::async_trait]
 impl Notifier for DefaultNotifier {
-    async fn notify(&self, result: RemoteJobResult) {
+    async fn notify(&mut self, result: RemoteJobResult) {
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {
                     match result.region_edit {
                         Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
-                            senders: vec![],
+                            senders: std::mem::take(&mut self.waiters),
                             start_time: result.start_time,
                             edit,
                         }),

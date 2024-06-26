@@ -241,7 +241,7 @@ impl CompactionScheduler {
             current_version,
             access_layer,
             request_sender,
-            waiters,
+            mut waiters,
             start_time,
             cache_manager,
             manifest_ctx,
@@ -298,6 +298,7 @@ impl CompactionScheduler {
                         RemoteJob::CompactionJob(remote_compaction_job),
                         Arc::new(DefaultNotifier {
                             request_sender: request_sender.clone(),
+                            waiters: std::mem::take(&mut waiters),
                         }),
                     )
                     .await;
@@ -308,12 +309,7 @@ impl CompactionScheduler {
                         job_id, region_id
                     );
 
-                    // Return 0 to the client as we are going to schedule the compaction job remotely.
-                    for waiter in waiters {
-                        waiter.send(Ok(0));
-                    }
-
-                    // Finish the remote compaction job.
+                    // The remote compaction job is scheduled successfully.
                     return Ok(());
                 } else {
                     error!("Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id)
