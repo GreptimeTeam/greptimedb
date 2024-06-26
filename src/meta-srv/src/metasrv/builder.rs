@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
@@ -42,6 +42,7 @@ use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, Result};
+use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_cluster_info_handler::{
@@ -58,15 +59,16 @@ use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::response_header_handler::ResponseHeaderHandler;
 use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
+use crate::lease::MetaPeerLookupService;
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
-use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublisherRef;
+use crate::region::supervisor::{RegionSupervisor, DEFAULT_TICK_INTERVAL};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
@@ -223,6 +225,7 @@ impl MetasrvBuilder {
             options.wal.clone(),
             kv_backend.clone(),
         ));
+        let is_remote_wal = wal_options_allocator.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
                 SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -240,14 +243,26 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
-        // TODO(weny): use the real allocator.
-        let flow_metadata_allocator =
-            Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
+        let flow_metadata_allocator = {
+            // for now flownode just use round robin selector
+            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
+            let flow_selector_ctx = selector_ctx.clone();
+            let peer_allocator = Arc::new(FlowPeerAllocator::new(
+                flow_selector_ctx,
+                Arc::new(flow_selector),
+            ));
+            let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                     .initial(MIN_USER_FLOW_ID as u64)
                     .step(10)
                     .build(),
-            )));
+            );
+
+            Arc::new(FlowMetadataAllocator::with_peer_allocator(
+                seq,
+                peer_allocator,
+            ))
+        };
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
@@ -258,7 +273,7 @@ impl MetasrvBuilder {
                     options.datanode.client_options.connect_timeout_millis,
                 ))
                 .tcp_nodelay(options.datanode.client_options.tcp_nodelay);
-            Arc::new(DatanodeClients::new(datanode_client_channel_config))
+            Arc::new(NodeClients::new(datanode_client_channel_config))
         });
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
             mailbox.clone(),
@@ -266,6 +281,7 @@ impl MetasrvBuilder {
                 server_addr: options.server_addr.clone(),
             },
         ));
+        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
@@ -276,6 +292,7 @@ impl MetasrvBuilder {
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator: flow_metadata_allocator.clone(),
+                    peer_lookup_service: peer_lookup_service.clone(),
                 },
                 procedure_manager.clone(),
                 true,
@@ -294,32 +311,36 @@ impl MetasrvBuilder {
         ));
         region_migration_manager.try_start()?;
 
+        if !is_remote_wal && options.enable_region_failover {
+            return error::UnexpectedSnafu {
+                violated: "Region failover is not supported in the local WAL implementation!",
+            }
+            .fail();
+        }
+
+        let (region_failover_handler, region_supervisor_ticker) =
+            if options.enable_region_failover && is_remote_wal {
+                let region_supervisor = RegionSupervisor::new(
+                    options.failure_detector,
+                    DEFAULT_TICK_INTERVAL,
+                    selector_ctx.clone(),
+                    selector.clone(),
+                    region_migration_manager.clone(),
+                    leader_cached_kv_backend.clone() as _,
+                    peer_lookup_service,
+                );
+                let region_supervisor_ticker = region_supervisor.ticker();
+                (
+                    Some(RegionFailureHandler::new(region_supervisor)),
+                    Some(region_supervisor_ticker),
+                )
+            } else {
+                (None, None)
+            };
+
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
-                let region_failover_handler = if options.enable_region_failover {
-                    let region_failover_manager = Arc::new(RegionFailoverManager::new(
-                        distributed_time_constants::REGION_LEASE_SECS,
-                        in_memory.clone(),
-                        kv_backend.clone(),
-                        mailbox.clone(),
-                        procedure_manager.clone(),
-                        (selector.clone(), selector_ctx.clone()),
-                        lock.clone(),
-                        table_metadata_manager.clone(),
-                    ));
-                    Some(
-                        RegionFailureHandler::try_new(
-                            election.clone(),
-                            region_failover_manager,
-                            options.failure_detector.clone(),
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                };
-
                 let publish_heartbeat_handler = plugins
                     .clone()
                     .and_then(|plugins| plugins.get::<PublisherRef>())
@@ -389,6 +410,7 @@ impl MetasrvBuilder {
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper,
             region_migration_manager,
+            region_supervisor_ticker,
         })
     }
 }

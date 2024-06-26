@@ -33,10 +33,11 @@ use crate::kv_backend::KvBackendRef;
 use crate::node_manager::{
     Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef,
 };
-use crate::peer::Peer;
+use crate::peer::{Peer, PeerLookupService, StandalonePeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::WalOptionsAllocator;
+use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {
@@ -180,5 +181,19 @@ pub fn new_ddl_context_with_kv_backend(
         table_metadata_manager,
         flow_metadata_allocator,
         flow_metadata_manager,
+        peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+    }
+}
+
+pub struct NoopPeerLookupService;
+
+#[async_trait::async_trait]
+impl PeerLookupService for NoopPeerLookupService {
+    async fn datanode(&self, _cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>> {
+        Ok(Some(Peer::empty(id)))
+    }
+
+    async fn flownode(&self, _cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>> {
+        Ok(Some(Peer::empty(id)))
     }
 }

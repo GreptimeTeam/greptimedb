@@ -33,6 +33,10 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 /// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
 /// ignore op type as sequence is already unique).
 /// 2. Batches from sources **must** not be empty.
+///
+/// The reader won't concatenate batches. Each batch returned by the reader also doesn't
+/// contain duplicate rows. But the last (primary key, timestamp) of a batch may be the same
+/// as the first one in the next batch.
 pub struct MergeReader {
     /// Holds [Node]s whose key range of current batch **is** overlapped with the merge window.
     /// Each node yields batches from a `source`.

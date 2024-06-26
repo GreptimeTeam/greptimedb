@@ -50,10 +50,11 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
-use crate::lease::lookup_alive_datanode_peer;
+use crate::lease::lookup_datanode_peer;
 use crate::lock::DistLockRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
+use crate::region::supervisor::RegionSupervisorTickerRef;
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
@@ -266,6 +267,7 @@ pub struct MetaStateHandler {
     subscribe_manager: Option<SubscriptionManagerRef>,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
+    region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     state: StateRef,
 }
 
@@ -277,6 +279,10 @@ impl MetaStateHandler {
             error!(e; "Failed to load kv into leader cache kv store");
         } else {
             self.state.write().unwrap().next_state(become_leader(true));
+        }
+
+        if let Some(ticker) = self.region_supervisor_ticker.as_ref() {
+            ticker.start();
         }
 
         if let Err(e) = self.procedure_manager.start().await {
@@ -297,6 +303,12 @@ impl MetaStateHandler {
         if let Err(e) = self.procedure_manager.stop().await {
             error!(e; "Failed to stop procedure manager");
         }
+
+        if let Some(ticker) = self.region_supervisor_ticker.as_ref() {
+            // Stops the supervisor ticker.
+            ticker.stop();
+        }
+
         // Suspends reporting.
         self.greptimedb_telemetry_task.should_report(false);
 
@@ -336,6 +348,7 @@ pub struct Metasrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
+    region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
 
     plugins: Plugins,
 }
@@ -367,6 +380,7 @@ impl Metasrv {
             greptimedb_telemetry_task
                 .start()
                 .context(StartTelemetryTaskSnafu)?;
+            let region_supervisor_ticker = self.region_supervisor_ticker.clone();
             let state_handler = MetaStateHandler {
                 greptimedb_telemetry_task,
                 subscribe_manager,
@@ -374,6 +388,7 @@ impl Metasrv {
                 wal_options_allocator: self.wal_options_allocator.clone(),
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
+                region_supervisor_ticker,
             };
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
@@ -484,7 +499,7 @@ impl Metasrv {
         cluster_id: ClusterId,
         peer_id: u64,
     ) -> Result<Option<Peer>> {
-        lookup_alive_datanode_peer(
+        lookup_datanode_peer(
             cluster_id,
             peer_id,
             &self.meta_peer_client,

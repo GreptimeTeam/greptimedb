@@ -136,7 +136,7 @@ where
 
         let index_size = self.indexer.finish().await;
         let inverted_index_available = index_size.is_some();
-        let index_file_size = index_size.unwrap_or(0) as u64;
+        let index_file_size = index_size.unwrap_or(0);
 
         if stats.num_rows == 0 {
             return Ok(None);

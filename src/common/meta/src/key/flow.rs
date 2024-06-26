@@ -29,9 +29,9 @@ use self::flownode_flow::FlownodeFlowKey;
 use self::table_flow::TableFlowKey;
 use crate::ensure_values;
 use crate::error::{self, Result};
-use crate::key::flow::flow_info::{FlowInfoManager, FlowInfoManagerRef};
-use crate::key::flow::flow_name::{FlowNameManager, FlowNameManagerRef};
-use crate::key::flow::flownode_flow::{FlownodeFlowManager, FlownodeFlowManagerRef};
+use crate::key::flow::flow_info::FlowInfoManager;
+use crate::key::flow::flow_name::FlowNameManager;
+use crate::key::flow::flownode_flow::FlownodeFlowManager;
 pub use crate::key::flow::table_flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{FlowId, MetaKey};
@@ -214,15 +214,15 @@ impl FlowMetadataManager {
         let source_table_ids = flow_value.source_table_ids();
         let mut keys =
             Vec::with_capacity(2 + flow_value.flownode_ids.len() * (source_table_ids.len() + 1));
-        /// Builds flow name key
+        // Builds flow name key
         let flow_name = FlowNameKey::new(&flow_value.catalog_name, &flow_value.flow_name);
         keys.push(flow_name.to_bytes());
 
-        /// Builds flow value key
+        // Builds flow value key
         let flow_info_key = FlowInfoKey::new(flow_id);
         keys.push(flow_info_key.to_bytes());
 
-        /// Builds flownode flow keys & table flow keys
+        // Builds flownode flow keys & table flow keys
         flow_value
             .flownode_ids
             .iter()
@@ -310,7 +310,6 @@ mod tests {
     }
 
     fn test_flow_info_value(
-        flow_id: FlowId,
         flow_name: &str,
         flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
         source_table_ids: Vec<TableId>,
@@ -339,8 +338,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let flow_id = 10;
-        let flow_value =
-            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await
@@ -380,9 +378,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let flow_id = 10;
-        let catalog_name = "greptime";
-        let flow_value =
-            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await
@@ -401,8 +397,7 @@ mod tests {
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let flow_id = 10;
         let catalog_name = "greptime";
-        let flow_value =
-            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await
@@ -436,9 +431,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let flow_id = 10;
-        let catalog_name = "greptime";
-        let flow_value =
-            test_flow_info_value(flow_id, "flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
         flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value.clone())
             .await

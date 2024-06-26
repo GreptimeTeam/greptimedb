@@ -69,3 +69,15 @@ INSERT INTO my_table VALUES
 SELECT * FROM my_table;
 
 DROP TABLE my_table;
+
+-- incorrect partition rule
+CREATE TABLE invalid_rule (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 10,
+  a > 10 AND a < 20,
+  a >= 20
+);

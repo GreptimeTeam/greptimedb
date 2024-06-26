@@ -18,7 +18,7 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -55,7 +55,7 @@ pub async fn mock(
     opts: MetasrvOptions,
     kv_backend: KvBackendRef,
     selector: Option<SelectorRef>,
-    datanode_clients: Option<Arc<DatanodeClients>>,
+    datanode_clients: Option<Arc<NodeClients>>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));

@@ -24,6 +24,7 @@ use memcomparable::{Deserializer, Serializer};
 use paste::paste;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadata;
 
 use crate::error;
 use crate::error::{FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, SerializeFieldSnafu};
@@ -279,6 +280,16 @@ pub struct McmpRowCodec {
 }
 
 impl McmpRowCodec {
+    /// Creates [McmpRowCodec] instance with all primary keys in given `metadata`.
+    pub fn new_with_primary_keys(metadata: &RegionMetadata) -> Self {
+        Self::new(
+            metadata
+                .primary_key_columns()
+                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .collect(),
+        )
+    }
+
     pub fn new(fields: Vec<SortField>) -> Self {
         Self { fields }
     }

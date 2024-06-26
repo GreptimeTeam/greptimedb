@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{self, SeekFrom};
+use std::io::{self, Cursor, SeekFrom};
 
 use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{
     BytesToIntegerSnafu, DeserializeJsonSnafu, InvalidBlobAreaEndSnafu, InvalidBlobOffsetSnafu,
-    MagicNotMatchedSnafu, ParseStageNotMatchSnafu, ReadSnafu, Result, SeekSnafu,
-    UnexpectedFooterPayloadSizeSnafu, UnsupportedDecompressionSnafu,
+    Lz4DecompressionSnafu, MagicNotMatchedSnafu, ParseStageNotMatchSnafu, ReadSnafu, Result,
+    SeekSnafu, UnexpectedFooterPayloadSizeSnafu,
 };
 use crate::file_format::{Flags, FLAGS_SIZE, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PAYLOAD_SIZE_SIZE};
 use crate::file_metadata::FileMetadata;
@@ -249,15 +249,13 @@ impl StageParser {
     }
 
     fn parse_payload(&self, bytes: &[u8]) -> Result<FileMetadata> {
-        // TODO(zhongzc): support lz4
-        ensure!(
-            !self.flags.contains(Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4),
-            UnsupportedDecompressionSnafu {
-                decompression: "lz4"
-            }
-        );
-
-        serde_json::from_slice(bytes).context(DeserializeJsonSnafu)
+        if self.flags.contains(Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4) {
+            let decoder = lz4_flex::frame::FrameDecoder::new(Cursor::new(bytes));
+            let res = serde_json::from_reader(decoder).context(Lz4DecompressionSnafu)?;
+            Ok(res)
+        } else {
+            serde_json::from_slice(bytes).context(DeserializeJsonSnafu)
+        }
     }
 
     fn validate_metadata(&self) -> Result<()> {

@@ -87,6 +87,11 @@ impl WalOptionsAllocator {
             }
         }
     }
+
+    /// Returns true if it's the remote WAL.
+    pub fn is_remote_wal(&self) -> bool {
+        matches!(&self, WalOptionsAllocator::Kafka(_))
+    }
 }
 
 /// Allocates a wal options for each region. The allocated wal options is encoded immediately.

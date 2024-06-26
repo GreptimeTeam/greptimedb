@@ -39,8 +39,41 @@ pub type RegionMigrationManagerRef = Arc<RegionMigrationManager>;
 /// Manager of region migration procedure.
 pub struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
-    running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
     context_factory: DefaultContextFactory,
+    tracker: RegionMigrationProcedureTracker,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct RegionMigrationProcedureTracker {
+    running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
+}
+
+impl RegionMigrationProcedureTracker {
+    /// Returns the [RegionMigrationProcedureGuard] if current region isn't migrating.
+    pub(crate) fn insert_running_procedure(
+        &self,
+        task: &RegionMigrationProcedureTask,
+    ) -> Option<RegionMigrationProcedureGuard> {
+        let mut procedures = self.running_procedures.write().unwrap();
+        match procedures.entry(task.region_id) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(v) => {
+                v.insert(task.clone());
+                Some(RegionMigrationProcedureGuard {
+                    region_id: task.region_id,
+                    running_procedures: self.running_procedures.clone(),
+                })
+            }
+        }
+    }
+
+    /// Returns true if it contains the specific region(`region_id`).
+    pub(crate) fn contains(&self, region_id: RegionId) -> bool {
+        self.running_procedures
+            .read()
+            .unwrap()
+            .contains_key(&region_id)
+    }
 }
 
 /// The guard of running [RegionMigrationProcedureTask].
@@ -51,10 +84,17 @@ pub(crate) struct RegionMigrationProcedureGuard {
 
 impl Drop for RegionMigrationProcedureGuard {
     fn drop(&mut self) {
-        self.running_procedures
-            .write()
+        let exists = self
+            .running_procedures
+            .read()
             .unwrap()
-            .remove(&self.region_id);
+            .contains_key(&self.region_id);
+        if exists {
+            self.running_procedures
+                .write()
+                .unwrap()
+                .remove(&self.region_id);
+        }
     }
 }
 
@@ -96,27 +136,34 @@ impl Display for RegionMigrationProcedureTask {
 }
 
 impl RegionMigrationManager {
-    /// Returns new [RegionMigrationManager]
+    /// Returns new [`RegionMigrationManager`]
     pub(crate) fn new(
         procedure_manager: ProcedureManagerRef,
         context_factory: DefaultContextFactory,
     ) -> Self {
         Self {
             procedure_manager,
-            running_procedures: Arc::new(RwLock::new(HashMap::new())),
             context_factory,
+            tracker: RegionMigrationProcedureTracker::default(),
         }
+    }
+
+    /// Returns the [`RegionMigrationProcedureTracker`].
+    pub(crate) fn tracker(&self) -> &RegionMigrationProcedureTracker {
+        &self.tracker
     }
 
     /// Registers the loader of [RegionMigrationProcedure] to the `ProcedureManager`.
     pub(crate) fn try_start(&self) -> Result<()> {
         let context_factory = self.context_factory.clone();
+        let tracker = self.tracker.clone();
         self.procedure_manager
             .register_loader(
                 RegionMigrationProcedure::TYPE_NAME,
                 Box::new(move |json| {
                     let context_factory = context_factory.clone();
-                    RegionMigrationProcedure::from_json(json, context_factory)
+                    let tracker = tracker.clone();
+                    RegionMigrationProcedure::from_json(json, context_factory, tracker)
                         .map(|p| Box::new(p) as _)
                 }),
             )
@@ -129,18 +176,7 @@ impl RegionMigrationManager {
         &self,
         task: &RegionMigrationProcedureTask,
     ) -> Option<RegionMigrationProcedureGuard> {
-        let mut procedures = self.running_procedures.write().unwrap();
-
-        match procedures.entry(task.region_id) {
-            Entry::Occupied(_) => None,
-            Entry::Vacant(v) => {
-                v.insert(task.clone());
-                Some(RegionMigrationProcedureGuard {
-                    region_id: task.region_id,
-                    running_procedures: self.running_procedures.clone(),
-                })
-            }
-        }
+        self.tracker.insert_running_procedure(task)
     }
 
     fn verify_task(&self, task: &RegionMigrationProcedureTask) -> Result<()> {
@@ -210,6 +246,10 @@ impl RegionMigrationManager {
         region_route: &RegionRoute,
         task: &RegionMigrationProcedureTask,
     ) -> Result<bool> {
+        if region_route.is_leader_downgraded() {
+            return Ok(false);
+        }
+
         let leader_peer = region_route
             .leader_peer
             .as_ref()
@@ -301,15 +341,13 @@ impl RegionMigrationManager {
                 replay_timeout,
             },
             self.context_factory.clone(),
+            Some(guard),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
-
         let procedure_manager = self.procedure_manager.clone();
-
         common_runtime::spawn_bg(async move {
-            let _ = guard;
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {
@@ -356,6 +394,7 @@ mod test {
         };
         // Inserts one
         manager
+            .tracker
             .running_procedures
             .write()
             .unwrap()

@@ -754,11 +754,18 @@ pub enum Error {
         source: Arc<Error>,
     },
 
+
     #[snafu(display("Internal error occurred in remote job scheduler: {}", reason))]
     RemoteJobScheduler {
         #[snafu(implicit)]
         location: Location,
         reason: String,
+
+    #[snafu(display("Operation is not supported: {}", err_msg))]
+    UnsupportedOperation {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -879,6 +886,7 @@ impl ErrorExt for Error {
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             RemoteJobScheduler { .. } => StatusCode::Internal,
+            UnsupportedOperation { .. } => StatusCode::Unsupported,
         }
     }
 
