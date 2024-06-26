@@ -1925,7 +1925,11 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 | greptime      | information_schema | columns    | table_name               | string       | FIELD         |
 | greptime      | information_schema | columns    | table_schema             | string       | FIELD         |
 | greptime      | public             | numbers    | number                   | int unsigned | TAG           |
+| greptime      | information_schema | tables     | avg_row_length           | bigint       | FIELD         |
+| greptime      | information_schema | tables     | data_length              | bigint       | FIELD         |
 | greptime      | information_schema | tables     | engine                   | string       | FIELD         |
+| greptime      | information_schema | tables     | index_length             | bigint       | FIELD         |
+| greptime      | information_schema | tables     | max_data_length          | bigint       | FIELD         |
 | greptime      | information_schema | tables     | table_catalog            | string       | FIELD         |
 | greptime      | information_schema | tables     | table_id                 | int unsigned | FIELD         |
 | greptime      | information_schema | tables     | table_name               | string       | FIELD         |
@@ -1965,7 +1969,11 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 | another_catalog | information_schema | columns       | table_catalog            | string       | FIELD         |
 | another_catalog | information_schema | columns       | table_name               | string       | FIELD         |
 | another_catalog | information_schema | columns       | table_schema             | string       | FIELD         |
+| another_catalog | information_schema | tables        | avg_row_length           | bigint       | FIELD         |
+| another_catalog | information_schema | tables        | data_length              | bigint       | FIELD         |
 | another_catalog | information_schema | tables        | engine                   | string       | FIELD         |
+| another_catalog | information_schema | tables        | index_length             | bigint       | FIELD         |
+| another_catalog | information_schema | tables        | max_data_length          | bigint       | FIELD         |
 | another_catalog | information_schema | tables        | table_catalog            | string       | FIELD         |
 | another_catalog | information_schema | tables        | table_id                 | int unsigned | FIELD         |
 | another_catalog | information_schema | tables        | table_name               | string       | FIELD         |

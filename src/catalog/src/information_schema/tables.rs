@@ -26,7 +26,7 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder};
+use datatypes::vectors::{Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -73,10 +73,10 @@ impl InformationSchemaTables {
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), true),
-            ColumnSchema::new(DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(MAX_DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(AVG_ROW_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(DATA_LENGTH, ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new(MAX_DATA_LENGTH, ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new(INDEX_LENGTH, ConcreteDataType::int64_datatype(), true),
+            ColumnSchema::new(AVG_ROW_LENGTH, ConcreteDataType::int64_datatype(), true),
             ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
         ]))
     }
@@ -139,10 +139,10 @@ struct InformationSchemaTablesBuilder {
     table_names: StringVectorBuilder,
     table_types: StringVectorBuilder,
     table_ids: UInt32VectorBuilder,
-    data_length: UInt64VectorBuilder,
-    max_data_length: UInt64VectorBuilder,
-    index_length: UInt64VectorBuilder,
-    avg_row_length: UInt64VectorBuilder,
+    data_length: Int64VectorBuilder,
+    max_data_length: Int64VectorBuilder,
+    index_length: Int64VectorBuilder,
+    avg_row_length: Int64VectorBuilder,
     engines: StringVectorBuilder,
 }
 
@@ -161,10 +161,10 @@ impl InformationSchemaTablesBuilder {
             table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
-            data_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            max_data_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            index_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            avg_row_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            data_length: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
+            max_data_length: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
+            index_length: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
+            avg_row_length: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
