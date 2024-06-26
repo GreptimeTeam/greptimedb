@@ -109,8 +109,13 @@ impl Session {
     }
 
     #[inline]
-    pub fn get_catalog(&self) -> String {
+    pub fn catalog(&self) -> String {
         self.catalog.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn schema(&self) -> String {
+        self.schema.load().as_ref().clone()
     }
 
     #[inline]

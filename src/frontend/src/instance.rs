@@ -513,7 +513,8 @@ pub fn check_permission(
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
         | Statement::DropDatabase(_)
-        | Statement::DropFlow(_) => {}
+        | Statement::DropFlow(_)
+        | Statement::Use(_) => {}
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
         }
