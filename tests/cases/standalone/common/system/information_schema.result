@@ -768,4 +768,3 @@ Error: 4001(TableNotFound), Table not found: greptime.my_db.foo
 use public;
 
 Affected Rows: 0
-
