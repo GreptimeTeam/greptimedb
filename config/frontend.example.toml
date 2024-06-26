@@ -29,7 +29,7 @@ addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
 timeout = "30s"
 ## HTTP request body limit.
-## Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
 
