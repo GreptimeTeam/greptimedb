@@ -18,7 +18,7 @@ use std::ops::ControlFlow;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
-use sqlparser::ast::{Expr, Interval, Value};
+use sqlparser::ast::{DataType, Expr, Interval, Value};
 
 use crate::statements::transform::TransformRule;
 
@@ -36,7 +36,7 @@ lazy_static! {
         ("s","seconds"),
         ("millis","milliseconds"),
         ("mils","milliseconds"),
-        ("ms","microseconds"),
+        ("ms","milliseconds"),
         ("us","microseconds"),
         ("ns","nanoseconds"),
     ]);
@@ -52,7 +52,7 @@ lazy_static! {
 /// - `s` for `seconds`
 /// - `millis` for `milliseconds`
 /// - `mils` for `milliseconds`
-/// - `ms` for `microseconds`
+/// - `ms` for `milliseconds`
 /// - `us` for `microseconds`
 /// - `ns` for `nanoseconds`
 /// Required for use cases that use the shortened version of Interval declaration,
@@ -65,8 +65,8 @@ impl TransformRule for ExpandIntervalTransformRule {
     /// it's AST has `left` part of type `Value::SingleQuotedString` which needs to be handled specifically.
     /// To handle the `right` part which is `Interval` no extra steps are needed.
     fn visit_expr(&self, expr: &mut Expr) -> ControlFlow<()> {
-        if let Expr::Interval(interval) = expr {
-            match *interval.value.clone() {
+        match expr {
+            Expr::Interval(interval) => match *interval.value.clone() {
                 Expr::Value(Value::SingleQuotedString(value))
                 | Expr::Value(Value::DoubleQuotedString(value)) => {
                     if let Some(data) = expand_interval_name(&value) {
@@ -91,7 +91,30 @@ impl TransformRule for ExpandIntervalTransformRule {
                     _ => {}
                 },
                 _ => {}
+            },
+            Expr::Cast {
+                expr: cast_exp,
+                data_type,
+                ..
+            } => {
+                if DataType::Interval == *data_type {
+                    match *cast_exp.clone() {
+                        Expr::Value(Value::SingleQuotedString(value))
+                        | Expr::Value(Value::DoubleQuotedString(value)) => {
+                            let data = expand_interval_name(&value).unwrap_or(value);
+                            *expr = Expr::Interval(Interval {
+                                value: single_quoted_string_expr(data),
+                                leading_field: None,
+                                leading_precision: None,
+                                last_field: None,
+                                fractional_seconds_precision: None,
+                            })
+                        }
+                        _ => {}
+                    }
+                }
             }
+            _ => {}
         }
         ControlFlow::<()>::Continue(())
     }
@@ -135,7 +158,7 @@ fn expand_interval_name(interval_str: &str) -> Option<String> {
 mod tests {
     use std::ops::ControlFlow;
 
-    use sqlparser::ast::{BinaryOperator, Expr, Interval, Value};
+    use sqlparser::ast::{BinaryOperator, DataType, Expr, Interval, Value};
 
     use crate::statements::transform::expand_interval::{
         expand_interval_name, single_quoted_string_expr, ExpandIntervalTransformRule,
@@ -154,7 +177,7 @@ mod tests {
             ("2m", "2 minutes"),
             ("100millis", "100 milliseconds"),
             ("150mils", "150 milliseconds"),
-            ("200ms", "200 microseconds"),
+            ("200ms", "200 milliseconds"),
             ("350us", "350 microseconds"),
             ("400ns", "400 nanoseconds"),
         ];
@@ -175,8 +198,8 @@ mod tests {
             ("2y4mon6w", "2 years 4 months 6 weeks"),
             ("5d3h1m", "5 days 3 hours 1 minutes"),
             (
-                "10s312millis789ms",
-                "10 seconds 312 milliseconds 789 microseconds",
+                "10s312ms789ns",
+                "10 seconds 312 milliseconds 789 nanoseconds",
             ),
             (
                 "23mils987us754ns",
@@ -186,8 +209,8 @@ mod tests {
             ("-2y-4mon-6w", "-2 years -4 months -6 weeks"),
             ("-5d-3h-1m", "-5 days -3 hours -1 minutes"),
             (
-                "-10s-312millis-789ms",
-                "-10 seconds -312 milliseconds -789 microseconds",
+                "-10s-312ms-789ns",
+                "-10 seconds -312 milliseconds -789 nanoseconds",
             ),
             (
                 "-23mils-987us-754ns",
@@ -273,6 +296,49 @@ mod tests {
                 last_field: None,
                 fractional_seconds_precision: None,
             })
+        );
+    }
+
+    #[test]
+    fn test_visit_expr_when_cast_expr() {
+        let interval_transformation_rule = ExpandIntervalTransformRule {};
+
+        let mut cast_to_interval_expr = Expr::Cast {
+            expr: single_quoted_string_expr("3y2mon".to_string()),
+            data_type: DataType::Interval,
+            format: None,
+        };
+
+        let control_flow = interval_transformation_rule.visit_expr(&mut cast_to_interval_expr);
+
+        assert_eq!(control_flow, ControlFlow::Continue(()));
+        assert_eq!(
+            cast_to_interval_expr,
+            Expr::Interval(Interval {
+                value: Box::new(Expr::Value(Value::SingleQuotedString(
+                    "3 years 2 months".to_string()
+                ))),
+                leading_field: None,
+                leading_precision: None,
+                last_field: None,
+                fractional_seconds_precision: None,
+            })
+        );
+
+        let mut cast_to_i64_expr = Expr::Cast {
+            expr: single_quoted_string_expr("5".to_string()),
+            data_type: DataType::Int64,
+            format: None,
+        };
+        let control_flow = interval_transformation_rule.visit_expr(&mut cast_to_i64_expr);
+        assert_eq!(control_flow, ControlFlow::Continue(()));
+        assert_eq!(
+            cast_to_i64_expr,
+            Expr::Cast {
+                expr: single_quoted_string_expr("5".to_string()),
+                data_type: DataType::Int64,
+                format: None,
+            }
         );
     }
 }
