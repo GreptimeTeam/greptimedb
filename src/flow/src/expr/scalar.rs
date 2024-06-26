@@ -43,7 +43,7 @@ use crate::expr::func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFun
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
 /// A scalar expression with a known type.
-#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TypedExpr {
     /// The expression.
     pub expr: ScalarExpr,
@@ -129,7 +129,7 @@ impl TypedExpr {
 }
 
 /// A scalar expression, which can be evaluated to a value.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScalarExpr {
     /// A column of the input row
     Column(usize),
@@ -264,30 +264,7 @@ impl DfScalarFunction {
     }
 }
 
-// simply serialize the raw_fn instead of derive to avoid complex deserialize of struct
-impl Serialize for DfScalarFunction {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.raw_fn.serialize(serializer)
-    }
-}
-
-impl<'de> serde::de::Deserialize<'de> for DfScalarFunction {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        let raw_fn = RawDfScalarFn::deserialize(deserializer)?;
-
-        // deserialize is already supposed to be sync and somewhere blocking since it's computational heavy, so block on async is ok here
-        futures::executor::block_on(async { DfScalarFunction::try_from_raw_fn(raw_fn).await })
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawDfScalarFn {
     /// The raw bytes encoded datafusion scalar function
     pub(crate) f: bytes::BytesMut,
@@ -898,9 +875,6 @@ mod test {
         let extensions = FunctionExtensions::from_iter(vec![(0, "abs")]);
         let raw_fn = RawDfScalarFn::from_proto(&raw_scalar_func, input_schema, extensions).unwrap();
         let df_func = DfScalarFunction::try_from_raw_fn(raw_fn).await.unwrap();
-        let as_str = serde_json::to_string(&df_func).unwrap();
-        let from_str: DfScalarFunction = serde_json::from_str(&as_str).unwrap();
-        assert_eq!(df_func, from_str);
         assert_eq!(
             df_func
                 .eval(&[Value::Null], &[ScalarExpr::Column(0)])

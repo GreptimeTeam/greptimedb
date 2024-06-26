@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::expr::{AggregateExpr, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr};
 
 /// Describe how to extract key-value pair from a `Row`
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct KeyValPlan {
     /// Extract key from row
     pub key_plan: SafeMfpPlan,
@@ -27,7 +27,7 @@ pub struct KeyValPlan {
 
 /// TODO(discord9): def&impl of Hierarchical aggregates(for min/max with support to deletion) and
 /// basic aggregates(for other aggregate functions) and mixed aggregate
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ReducePlan {
     /// Plan for not computing any aggregations, just determining the set of
     /// distinct keys.
@@ -38,7 +38,7 @@ pub enum ReducePlan {
 }
 
 /// Accumulable plan for the execution of a reduction.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct AccumulablePlan {
     /// All of the aggregations we were asked to compute, stored
     /// in order.
@@ -57,7 +57,7 @@ pub struct AccumulablePlan {
 
 /// Invariant: the output index is the index of the aggregation in `full_aggrs`
 /// which means output index is always smaller than the length of `full_aggrs`
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct AggrWithIndex {
     /// aggregation expression
     pub expr: AggregateExpr,
