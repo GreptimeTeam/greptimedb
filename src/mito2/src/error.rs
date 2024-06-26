@@ -754,12 +754,12 @@ pub enum Error {
         source: Arc<Error>,
     },
 
-
     #[snafu(display("Internal error occurred in remote job scheduler: {}", reason))]
     RemoteJobScheduler {
         #[snafu(implicit)]
         location: Location,
         reason: String,
+    },
 
     #[snafu(display("Operation is not supported: {}", err_msg))]
     UnsupportedOperation {
