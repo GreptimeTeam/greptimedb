@@ -26,7 +26,7 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
+use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -43,6 +43,10 @@ pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
 pub const TABLE_NAME: &str = "table_name";
 pub const TABLE_TYPE: &str = "table_type";
+pub const DATA_LENGTH: &str = "data_length";
+pub const INDEX_LENGTH: &str = "index_length";
+pub const MAX_DATA_LENGTH: &str = "max_data_length";
+pub const AVG_ROW_LENGTH: &str = "avg_row_length";
 const TABLE_ID: &str = "table_id";
 const ENGINE: &str = "engine";
 const INIT_CAPACITY: usize = 42;
@@ -69,6 +73,10 @@ impl InformationSchemaTables {
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(MAX_DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(AVG_ROW_LENGTH, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
         ]))
     }
@@ -131,6 +139,10 @@ struct InformationSchemaTablesBuilder {
     table_names: StringVectorBuilder,
     table_types: StringVectorBuilder,
     table_ids: UInt32VectorBuilder,
+    data_length: UInt64VectorBuilder,
+    max_data_length: UInt64VectorBuilder,
+    index_length: UInt64VectorBuilder,
+    avg_row_length: UInt64VectorBuilder,
     engines: StringVectorBuilder,
 }
 
@@ -149,6 +161,10 @@ impl InformationSchemaTablesBuilder {
             table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            data_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            max_data_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            index_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            avg_row_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
@@ -215,6 +231,10 @@ impl InformationSchemaTablesBuilder {
         self.table_names.push(Some(table_name));
         self.table_types.push(Some(table_type));
         self.table_ids.push(table_id);
+        self.data_length.push(Some(0));
+        self.max_data_length.push(Some(0));
+        self.index_length.push(Some(0));
+        self.avg_row_length.push(Some(0));
         self.engines.push(engine);
     }
 
@@ -225,6 +245,10 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.table_names.finish()),
             Arc::new(self.table_types.finish()),
             Arc::new(self.table_ids.finish()),
+            Arc::new(self.data_length.finish()),
+            Arc::new(self.max_data_length.finish()),
+            Arc::new(self.index_length.finish()),
+            Arc::new(self.avg_row_length.finish()),
             Arc::new(self.engines.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
