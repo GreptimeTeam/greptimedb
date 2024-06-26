@@ -303,8 +303,7 @@ impl CompactionScheduler {
                 if let Ok(job_id) = result {
                     info!(
                         "Scheduled remote compaction job {} for region {}",
-                        job_id.as_u64(),
-                        region_id
+                        job_id, region_id
                     );
 
                     // Return 0 to the client as we are going to schedule the compaction job remotely.

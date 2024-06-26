@@ -30,8 +30,8 @@ pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 /// RemoteJobScheduler is a trait that defines the API to schedule remote jobs.
 #[async_trait::async_trait]
 pub trait RemoteJobScheduler: Send + Sync + 'static {
-    /// Sends a job to the scheduler and returns a unique identifier for the job.
-    async fn schedule(&self, job: RemoteJob, notifier: Arc<dyn Notifier>) -> Result<JobId>;
+    /// Sends a job to the scheduler and returns a UUID for the job.
+    async fn schedule(&self, job: RemoteJob, notifier: Arc<dyn Notifier>) -> Result<String>;
 }
 
 /// Notifier is used to notify the mito engine when a remote job is completed.
@@ -39,22 +39,6 @@ pub trait RemoteJobScheduler: Send + Sync + 'static {
 pub trait Notifier: Send + Sync + 'static {
     /// Notify the mito engine that a remote job is completed.
     async fn notify(&self, result: RemoteJobResult);
-}
-
-/// JobId is a unique identifier for a remote job and allocated by the scheduler.
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct JobId(u64);
-
-impl JobId {
-    /// Returns the JobId as a u64.
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-
-    /// Construct a new [JobId] from u64.
-    pub const fn from_u64(id: u64) -> JobId {
-        JobId(id)
-    }
 }
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
@@ -82,7 +66,7 @@ pub enum RemoteJobResult {
 /// CompactionJobResult is the result of a compaction job.
 #[allow(dead_code)]
 pub struct CompactionJobResult {
-    pub job_id: JobId,
+    pub job_id: String,
     pub region_id: RegionId,
     pub start_time: Instant,
     pub region_edit: Result<RegionEdit>,
