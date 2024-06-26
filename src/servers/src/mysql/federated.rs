@@ -38,9 +38,6 @@ static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
 
-static SELECT_DATABASE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(SELECT DATABASE\(\s*\))").unwrap());
-
 // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
 static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SELECT TIMEDIFF\\(NOW\\(\\), UTC_TIMESTAMP\\(\\)\\))").unwrap());
@@ -249,15 +246,12 @@ fn check_show_variables(query: &str) -> Option<Output> {
 }
 
 // Check for SET or others query, this is the final check of the federated query.
-fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
+fn check_others(query: &str, _query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
         return Some(Output::new_with_record_batches(RecordBatches::empty()));
     }
 
-    let recordbatches = if SELECT_DATABASE_PATTERN.is_match(query) {
-        let schema = query_ctx.current_schema();
-        Some(select_function("database()", &schema))
-    } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
+    let recordbatches = if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",
             "00:00:00",
