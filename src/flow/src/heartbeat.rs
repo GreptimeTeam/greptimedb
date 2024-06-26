@@ -25,6 +25,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMess
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
+use servers::addrs;
 use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
@@ -37,7 +38,7 @@ use crate::{Error, FlownodeOptions};
 #[derive(Clone)]
 pub struct HeartbeatTask {
     node_id: u64,
-    server_addr: String,
+    peer_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: Duration,
     retry_interval: Duration,
@@ -53,7 +54,7 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
-            server_addr: opts.grpc.addr.clone(),
+            peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
             meta_client,
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,
@@ -110,7 +111,7 @@ impl HeartbeatTask {
         let report_interval = self.report_interval;
         let self_peer = Some(Peer {
             id: self.node_id,
-            addr: self.server_addr.clone(),
+            addr: self.peer_addr.clone(),
         });
 
         common_runtime::spawn_hb(async move {
