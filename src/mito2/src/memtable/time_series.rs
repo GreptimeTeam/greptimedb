@@ -47,7 +47,7 @@ use crate::memtable::{
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::dedup::LastNotNullIter;
+use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -118,7 +118,7 @@ impl TimeSeriesMemtable {
                 .collect(),
         ));
         let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
-        let dedup = if merge_mode == MergeMode::LastNotNull {
+        let dedup = if merge_mode == MergeMode::LastNonNull {
             false
         } else {
             dedup
@@ -269,8 +269,8 @@ impl Memtable for TimeSeriesMemtable {
             .series_set
             .iter_series(projection, filters, self.dedup)?;
 
-        if self.merge_mode == MergeMode::LastNotNull {
-            let iter = LastNotNullIter::new(iter);
+        if self.merge_mode == MergeMode::LastNonNull {
+            let iter = LastNonNullIter::new(iter);
             Ok(Box::new(iter))
         } else {
             Ok(Box::new(iter))
@@ -892,8 +892,8 @@ impl IterBuilder for TimeSeriesIterBuilder {
             self.dedup,
         )?;
 
-        if self.merge_mode == MergeMode::LastNotNull {
-            let iter = LastNotNullIter::new(iter);
+        if self.merge_mode == MergeMode::LastNonNull {
+            let iter = LastNonNullIter::new(iter);
             Ok(Box::new(iter))
         } else {
             Ok(Box::new(iter))

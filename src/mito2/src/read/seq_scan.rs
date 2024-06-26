@@ -35,7 +35,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::memtable::MemtableRef;
-use crate::read::dedup::{DedupReader, LastNotNull, LastRow};
+use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
@@ -216,9 +216,9 @@ impl SeqScan {
                     reader,
                     LastRow::new(stream_ctx.input.filter_deleted),
                 )) as _,
-                MergeMode::LastNotNull => Box::new(DedupReader::new(
+                MergeMode::LastNonNull => Box::new(DedupReader::new(
                     reader,
-                    LastNotNull::new(stream_ctx.input.filter_deleted),
+                    LastNonNull::new(stream_ctx.input.filter_deleted),
                 )) as _,
             };
             Ok(Some(reader))

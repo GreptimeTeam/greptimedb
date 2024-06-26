@@ -43,7 +43,7 @@ pub enum MergeMode {
     #[default]
     LastRow,
     /// Keeps the last non-null field for each row.
-    LastNotNull,
+    LastNonNull,
 }
 
 /// Options that affect the entire region.
@@ -503,9 +503,9 @@ mod tests {
         let options = RegionOptions::try_from(&map).unwrap();
         assert_eq!(MergeMode::LastRow, options.merge_mode);
 
-        let map = make_map(&[("merge_mode", "last_not_null")]);
+        let map = make_map(&[("merge_mode", "last_non_null")]);
         let options = RegionOptions::try_from(&map).unwrap();
-        assert_eq!(MergeMode::LastNotNull, options.merge_mode);
+        assert_eq!(MergeMode::LastNonNull, options.merge_mode);
 
         let map = make_map(&[("merge_mode", "unknown")]);
         let err = RegionOptions::try_from(&map).unwrap_err();
@@ -535,7 +535,7 @@ mod tests {
             ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
             ("memtable.partition_tree.data_freeze_threshold", "2048"),
             ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
-            ("merge_mode", "last_not_null"),
+            ("merge_mode", "last_non_null"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -559,7 +559,7 @@ mod tests {
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
             })),
-            merge_mode: MergeMode::LastNotNull,
+            merge_mode: MergeMode::LastNonNull,
         };
         assert_eq!(expect, options);
     }
