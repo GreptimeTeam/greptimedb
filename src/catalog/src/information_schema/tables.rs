@@ -231,6 +231,7 @@ impl InformationSchemaTablesBuilder {
         self.table_names.push(Some(table_name));
         self.table_types.push(Some(table_type));
         self.table_ids.push(table_id);
+        // TODO(sunng87): use real data for these fields
         self.data_length.push(Some(0));
         self.max_data_length.push(Some(0));
         self.index_length.push(Some(0));
