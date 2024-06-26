@@ -24,9 +24,9 @@ use crate::statements::transform::TransformRule;
 
 lazy_static! {
     /// Matches either one or more digits `(\d+)` or one or more ASCII characters `[a-zA-Z]` or plus/minus signs
-    static ref INTERVAL_SHORT_NAME_PATTERN: Regex = Regex::new(r"([+-]?\d+|[a-zA-Z]+|\+|-)").unwrap();
+    static ref INTERVAL_ABBREVIATION_PATTERN: Regex = Regex::new(r"([+-]?\d+|[a-zA-Z]+|\+|-)").unwrap();
 
-    static ref INTERVAL_SHORT_NAME_MAPPING: HashMap<&'static str, &'static str> = HashMap::from([
+    static ref INTERVAL_ABBREVIATION_MAPPING: HashMap<&'static str, &'static str> = HashMap::from([
         ("y","years"),
         ("mon","months"),
         ("w","weeks"),
@@ -35,14 +35,13 @@ lazy_static! {
         ("m","minutes"),
         ("s","seconds"),
         ("millis","milliseconds"),
-        ("mils","milliseconds"),
         ("ms","milliseconds"),
         ("us","microseconds"),
         ("ns","nanoseconds"),
     ]);
 }
 
-/// 'Interval' expression transformer
+/// 'INTERVAL' abbreviation transformer
 /// - `y` for `years`
 /// - `mon` for `months`
 /// - `w` for `weeks`
@@ -51,12 +50,11 @@ lazy_static! {
 /// - `m` for `minutes`
 /// - `s` for `seconds`
 /// - `millis` for `milliseconds`
-/// - `mils` for `milliseconds`
 /// - `ms` for `milliseconds`
 /// - `us` for `microseconds`
 /// - `ns` for `nanoseconds`
-/// Required for use cases that use the shortened version of Interval declaration,
-/// f.e `select interval '1h'` or `select interval '3w'`
+/// Required for scenarios that use the shortened version of `INTERVAL`,
+/// f.e `SELECT INTERVAL '1h'` or `SELECT INTERVAL '3w2d'`
 pub(crate) struct ExpandIntervalTransformRule;
 
 impl TransformRule for ExpandIntervalTransformRule {
@@ -66,26 +64,26 @@ impl TransformRule for ExpandIntervalTransformRule {
     /// To handle the `right` part which is `Interval` no extra steps are needed.
     fn visit_expr(&self, expr: &mut Expr) -> ControlFlow<()> {
         match expr {
-            Expr::Interval(interval) => match *interval.value.clone() {
+            Expr::Interval(interval) => match &*interval.value {
                 Expr::Value(Value::SingleQuotedString(value))
                 | Expr::Value(Value::DoubleQuotedString(value)) => {
-                    if let Some(data) = expand_interval_name(&value) {
-                        *expr = create_interval_with_expanded_name(
+                    if let Some(expanded_name) = expand_interval_name(value) {
+                        *expr = update_existing_interval_with_value(
                             interval,
-                            single_quoted_string_expr(data),
+                            single_quoted_string_expr(expanded_name),
                         );
                     }
                 }
-                Expr::BinaryOp { left, op, right } => match *left {
+                Expr::BinaryOp { left, op, right } => match &**left {
                     Expr::Value(Value::SingleQuotedString(value))
                     | Expr::Value(Value::DoubleQuotedString(value)) => {
-                        if let Some(data) = expand_interval_name(&value) {
-                            let new_value = Box::new(Expr::BinaryOp {
-                                left: single_quoted_string_expr(data),
-                                op,
-                                right,
+                        if let Some(expanded_name) = expand_interval_name(value) {
+                            let new_expr_value = Box::new(Expr::BinaryOp {
+                                left: single_quoted_string_expr(expanded_name),
+                                op: op.clone(),
+                                right: right.clone(),
                             });
-                            *expr = create_interval_with_expanded_name(interval, new_value);
+                            *expr = update_existing_interval_with_value(interval, new_expr_value);
                         }
                     }
                     _ => {}
@@ -98,17 +96,12 @@ impl TransformRule for ExpandIntervalTransformRule {
                 ..
             } => {
                 if DataType::Interval == *data_type {
-                    match *cast_exp.clone() {
+                    match &**cast_exp {
                         Expr::Value(Value::SingleQuotedString(value))
                         | Expr::Value(Value::DoubleQuotedString(value)) => {
-                            let data = expand_interval_name(&value).unwrap_or(value);
-                            *expr = Expr::Interval(Interval {
-                                value: single_quoted_string_expr(data),
-                                leading_field: None,
-                                leading_precision: None,
-                                last_field: None,
-                                fractional_seconds_precision: None,
-                            })
+                            let interval_name =
+                                expand_interval_name(value).unwrap_or_else(|| value.to_string());
+                            *expr = create_interval(single_quoted_string_expr(interval_name));
                         }
                         _ => {}
                     }
@@ -120,13 +113,23 @@ impl TransformRule for ExpandIntervalTransformRule {
     }
 }
 
-fn single_quoted_string_expr(data: String) -> Box<Expr> {
-    Box::new(Expr::Value(Value::SingleQuotedString(data)))
+fn single_quoted_string_expr(string: String) -> Box<Expr> {
+    Box::new(Expr::Value(Value::SingleQuotedString(string)))
 }
 
-fn create_interval_with_expanded_name(interval: &Interval, new_value: Box<Expr>) -> Expr {
+fn create_interval(value: Box<Expr>) -> Expr {
     Expr::Interval(Interval {
-        value: new_value,
+        value,
+        leading_field: None,
+        leading_precision: None,
+        last_field: None,
+        fractional_seconds_precision: None,
+    })
+}
+
+fn update_existing_interval_with_value(interval: &Interval, value: Box<Expr>) -> Expr {
+    Expr::Interval(Interval {
+        value,
         leading_field: interval.leading_field.clone(),
         leading_precision: interval.leading_precision,
         last_field: interval.last_field.clone(),
@@ -134,19 +137,21 @@ fn create_interval_with_expanded_name(interval: &Interval, new_value: Box<Expr>)
     })
 }
 
-/// Expands a shortened interval name to its full name.
-/// Returns an interval's full name (e.g., "years", "hours", "minutes") according to `INTERVAL_SHORT_NAME_MAPPING` mapping
+/// Expands an interval abbreviation to its full name.
+/// Returns an interval's full name (e.g., "years", "hours", "minutes") according to the `INTERVAL_ABBREVIATION_MAPPING`
 /// If the `interval_str` contains whitespaces, the interval name is considered to be in a full form.
 /// Hybrid format "1y 2 days 3h" is not supported.
 fn expand_interval_name(interval_str: &str) -> Option<String> {
     return if !interval_str.contains(|c: char| c.is_whitespace()) {
         Some(
-            INTERVAL_SHORT_NAME_PATTERN
+            INTERVAL_ABBREVIATION_PATTERN
                 .find_iter(interval_str)
-                .map(|mat| match INTERVAL_SHORT_NAME_MAPPING.get(mat.as_str()) {
-                    Some(&expanded_name) => expanded_name,
-                    None => mat.as_str(),
-                })
+                .map(
+                    |mat| match INTERVAL_ABBREVIATION_MAPPING.get(mat.as_str()) {
+                        Some(&expanded_name) => expanded_name,
+                        None => mat.as_str(),
+                    },
+                )
                 .join(" "),
         )
     } else {
@@ -161,7 +166,8 @@ mod tests {
     use sqlparser::ast::{BinaryOperator, DataType, Expr, Interval, Value};
 
     use crate::statements::transform::expand_interval::{
-        expand_interval_name, single_quoted_string_expr, ExpandIntervalTransformRule,
+        create_interval, expand_interval_name, single_quoted_string_expr,
+        ExpandIntervalTransformRule,
     };
     use crate::statements::transform::TransformRule;
 
@@ -176,7 +182,6 @@ mod tests {
             ("5s", "5 seconds"),
             ("2m", "2 minutes"),
             ("100millis", "100 milliseconds"),
-            ("150mils", "150 milliseconds"),
             ("200ms", "200 milliseconds"),
             ("350us", "350 microseconds"),
             ("400ns", "400 nanoseconds"),
@@ -202,7 +207,7 @@ mod tests {
                 "10 seconds 312 milliseconds 789 nanoseconds",
             ),
             (
-                "23mils987us754ns",
+                "23millis987us754ns",
                 "23 milliseconds 987 microseconds 754 nanoseconds",
             ),
             ("-1d-5h", "-1 days -5 hours"),
@@ -213,7 +218,7 @@ mod tests {
                 "-10 seconds -312 milliseconds -789 nanoseconds",
             ),
             (
-                "-23mils-987us-754ns",
+                "-23millis-987us-754ns",
                 "-23 milliseconds -987 microseconds -754 nanoseconds",
             ),
         ];
@@ -227,13 +232,7 @@ mod tests {
     fn test_visit_expr_when_interval_is_single_quoted_string_expr() {
         let interval_transformation_rule = ExpandIntervalTransformRule {};
 
-        let mut string_expr = Expr::Interval(Interval {
-            value: single_quoted_string_expr("5y".to_string()),
-            leading_field: None,
-            leading_precision: None,
-            last_field: None,
-            fractional_seconds_precision: None,
-        });
+        let mut string_expr = create_interval(single_quoted_string_expr("5y".to_string()));
 
         let control_flow = interval_transformation_rule.visit_expr(&mut string_expr);
 
@@ -256,24 +255,12 @@ mod tests {
     fn test_visit_expr_when_interval_is_binary_op() {
         let interval_transformation_rule = ExpandIntervalTransformRule {};
 
-        let mut binary_op_expr = Expr::Interval(Interval {
-            value: Box::new(Expr::BinaryOp {
-                left: single_quoted_string_expr("2d".to_string()),
-                op: BinaryOperator::Minus,
-                right: Box::new(Expr::Interval(Interval {
-                    value: single_quoted_string_expr("1d".to_string()),
-                    leading_field: None,
-                    leading_precision: None,
-                    last_field: None,
-                    fractional_seconds_precision: None,
-                })),
-            }),
-            leading_field: None,
-            leading_precision: None,
-            last_field: None,
-            fractional_seconds_precision: None,
+        let binary_op = Box::new(Expr::BinaryOp {
+            left: single_quoted_string_expr("2d".to_string()),
+            op: BinaryOperator::Minus,
+            right: Box::new(create_interval(single_quoted_string_expr("1d".to_string()))),
         });
-
+        let mut binary_op_expr = create_interval(binary_op);
         let control_flow = interval_transformation_rule.visit_expr(&mut binary_op_expr);
 
         assert_eq!(control_flow, ControlFlow::Continue(()));
