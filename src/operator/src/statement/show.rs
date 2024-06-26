@@ -148,7 +148,7 @@ impl StatementExecutor {
             .context(FindViewInfoSnafu { view_name: &view })?
             .context(ViewInfoNotFoundSnafu { view_name: &view })?;
 
-        query::sql::show_create_view(show.view_name.clone(), &view_info.definition, query_ctx)
+        query::sql::show_create_view(show.view_name, &view_info.definition, query_ctx)
             .context(error::ExecuteStatementSnafu)
     }
 
