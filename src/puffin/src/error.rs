@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::io::Error as IoError;
+use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -244,6 +245,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Get value from cache"))]
+    CacheGet { source: Arc<Error> },
+
+    #[snafu(display("Retries exhausted, retires: {retires}"))]
+    RetriesExhausted {
+        #[snafu(implicit)]
+        location: Location,
+        retires: usize,
+    },
 }
 
 impl ErrorExt for Error {
@@ -274,13 +285,16 @@ impl ErrorExt for Error {
             | BlobNotFound { .. }
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }
-            | WalkDirError { .. } => StatusCode::Unexpected,
+            | WalkDirError { .. }
+            | RetriesExhausted { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
                 StatusCode::Unsupported
             }
 
             DuplicateBlob { .. } => StatusCode::InvalidArguments,
+
+            CacheGet { source } => source.status_code(),
         }
     }
 

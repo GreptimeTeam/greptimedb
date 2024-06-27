@@ -28,6 +28,7 @@ snafu.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+common-runtime.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true

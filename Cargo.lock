@@ -8467,6 +8467,7 @@ dependencies = [
  "bitflags 2.5.0",
  "common-error",
  "common-macro",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "derive_builder 0.12.0",

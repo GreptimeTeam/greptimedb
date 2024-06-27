@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
 use common_telemetry::warn;
+use futures::lock::Mutex;
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use sha2::{Digest, Sha256};
@@ -28,63 +31,83 @@ use tokio::fs;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    CreateSnafu, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu, RenameSnafu, Result,
-    WalkDirSnafu,
+    CacheGetSnafu, CreateSnafu, Error, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu,
+    RenameSnafu, Result, RetriesExhaustedSnafu, WalkDirSnafu,
 };
 use crate::puffin_manager::cache_manager::{
     BoxWriter, CacheManager, DirWriterProvider, InitBlobFn, InitDirFn,
 };
+use crate::puffin_manager::DirGuard;
+
+const MAX_RETRIES: usize = 3;
 
 const TMP_EXTENSION: &str = "tmp";
 const DELETED_EXTENSION: &str = "deleted";
 
 /// `MokaCacheManager` is a `CacheManager` that uses `moka` to manage cache.
 pub struct MokaCacheManager {
-    /// The root directory of the cache.
-    root: PathBuf,
+    /// The base directory of the cache.
+    base_dir: PathBuf,
 
     /// The cache maintaining the cache key to the size of the file or directory.
-    cache: Cache<String, u64>,
+    cache: Cache<String, CacheValue>,
+
+    /// The unreleased directories that are waiting to be released. The value is the count of
+    /// references to the directory.
+    unreleased_dir: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl MokaCacheManager {
     #[allow(unused)]
-    pub async fn new(root: PathBuf, max_size: u64) -> Result<Self> {
-        let cache_root_clone = root.clone();
+    pub async fn new(base_dir: PathBuf, max_size: u64) -> Result<Self> {
+        let cache_root_clone = base_dir.clone();
+
+        let unreleased_dir = Arc::new(Mutex::new(HashMap::new()));
+        let unreleased_dir_cloned = unreleased_dir.clone();
 
         let cache = Cache::builder()
             .max_capacity(max_size)
-            .weigher(|_: &String, size: &u64| (*size).try_into().unwrap_or(u32::MAX))
-            .async_eviction_listener(move |key, _, _| {
-                let cloned_root = cache_root_clone.clone();
+            .weigher(|_: &String, v: &CacheValue| v.weight())
+            .async_eviction_listener(move |key, v, _| {
+                let unreleased_dir = unreleased_dir_cloned.clone();
+                let cache_root_clone = cache_root_clone.clone();
                 async move {
-                    // To guarantee the atomicity of the eviction, we need to rename the file or
-                    // directory to a deleted path first...
-                    let path = cloned_root.join(key.as_str());
-                    let deleted_path = path.with_extension(DELETED_EXTENSION);
-                    if let Err(err) = fs::rename(&path, &deleted_path).await {
-                        warn!(err; "Failed to rename evicted file to deleted path.")
-                    }
-
-                    // ...then remove the file or directory
-                    match fs::metadata(&deleted_path).await {
-                        Ok(metadata) => {
-                            if metadata.is_dir() {
-                                if let Err(err) = fs::remove_dir_all(&deleted_path).await {
-                                    warn!(err; "Failed to remove evicted directory.")
-                                }
-                            } else if let Err(err) = fs::remove_file(&deleted_path).await {
+                    let path = cache_root_clone.join(key.as_str());
+                    match v {
+                        CacheValue::File(_) => {
+                            if let Err(err) = fs::remove_file(&path).await {
                                 warn!(err; "Failed to remove evicted file.")
                             }
                         }
-                        Err(err) => warn!(err; "Failed to get metadata of evicted file."),
+                        CacheValue::Dir(_) => {
+                            let deleted_path = path.with_extension(DELETED_EXTENSION);
+                            {
+                                // Begin of `unreleased_dir`
+                                let unreleased_dir = unreleased_dir.lock().await;
+                                if unreleased_dir.contains_key(key.as_ref()) {
+                                    // Won't remove the directory if it's still in use.
+                                    return;
+                                }
+                                if let Err(err) = fs::rename(&path, &deleted_path).await {
+                                    warn!(err; "Failed to rename evicted file to deleted path.")
+                                }
+                                // End of `unreleased_dir`
+                            }
+                            if let Err(err) = fs::remove_dir_all(&deleted_path).await {
+                                warn!(err; "Failed to remove evicted directory.")
+                            }
+                        }
                     }
                 }
                 .boxed()
             })
             .build();
 
-        let manager = Self { cache, root };
+        let manager = Self {
+            cache,
+            base_dir,
+            unreleased_dir,
+        };
 
         manager.recover().await?;
 
@@ -95,47 +118,91 @@ impl MokaCacheManager {
 #[async_trait]
 impl CacheManager for MokaCacheManager {
     type Reader = Compat<fs::File>;
+    type Dir = RcDirGuard;
 
     async fn get_blob<'a>(
         &self,
         puffin_file_name: &str,
         key: &str,
-        init_fn: Box<dyn InitBlobFn + Send + 'a>,
+        init_fn: Box<dyn InitBlobFn + Send + Sync + 'a>,
     ) -> Result<Self::Reader> {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
-        let file_path = self.root.join(&cache_key);
+        let file_path = self.base_dir.join(&cache_key);
 
-        let open_res = fs::File::open(&file_path).await;
-        match open_res {
-            Ok(file) => return Ok(file.compat()),
-            Err(err) if err.kind() != ErrorKind::NotFound => return Err(err).context(OpenSnafu),
-            _ => {}
+        for _ in 0..(MAX_RETRIES + 1) {
+            self.cache
+                .try_get_with(cache_key.clone(), async {
+                    let size = Self::write_blob(&file_path, &init_fn).await?;
+                    Ok(CacheValue::File(size))
+                })
+                .await
+                .context(CacheGetSnafu)?;
+
+            let file = fs::File::open(&file_path).await;
+            match file {
+                Ok(file) => return Ok(file.compat()),
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    // The file is evicted from the cache, retry to write the file
+                    continue;
+                }
+                Err(err) => return Err(err).context(OpenSnafu),
+            }
         }
 
-        let size = self.write_blob(&file_path, init_fn).await?;
-        let file = fs::File::open(file_path).await;
-        // Open the file before inserting to the cache to avoid evicting the file immediately.
-        self.cache.insert(cache_key, size).await;
-
-        Ok(file.context(OpenSnafu)?.compat())
+        RetriesExhaustedSnafu {
+            retires: MAX_RETRIES,
+        }
+        .fail()
     }
 
     async fn get_dir<'a>(
         &self,
         puffin_file_name: &str,
         key: &str,
-        init_fn: Box<dyn InitDirFn + Send + 'a>,
-    ) -> Result<PathBuf> {
+        init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
+    ) -> Result<RcDirGuard> {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
-        let dir_path = self.root.join(&cache_key);
+        let dir_path = self.base_dir.join(&cache_key);
 
-        if self.cache.get(&cache_key).await.is_some() {
-            Ok(dir_path)
-        } else {
-            let size = self.write_dir(&dir_path, init_fn).await?;
-            self.cache.insert(cache_key, size).await;
-            Ok(dir_path)
+        {
+            // Begin of `unreleased_dir`
+            let mut unreleased_dir = self.unreleased_dir.lock().await;
+
+            // Prevent the directory from being removed by a snap eviction
+            unreleased_dir
+                .entry(cache_key.clone())
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            // End of `unreleased_dir`
         }
+
+        let res = self
+            .cache
+            .try_get_with(cache_key.clone(), async {
+                let size = Self::write_dir(&dir_path, init_fn).await?;
+                Ok(CacheValue::Dir(size))
+            })
+            .await
+            .context(CacheGetSnafu);
+
+        if res.is_err() {
+            // Begin of `unreleased_dir`
+            let mut unreleased_dir = self.unreleased_dir.lock().await;
+            if let Some(count) = unreleased_dir.get_mut(&cache_key) {
+                if *count > 1 {
+                    *count -= 1;
+                } else {
+                    unreleased_dir.remove(&cache_key);
+                }
+            }
+            // End of `unreleased_dir`
+        }
+
+        res.map(move |_| RcDirGuard {
+            path: dir_path,
+            key: cache_key,
+            unreleased_dir: self.unreleased_dir.clone(),
+        })
     }
 
     async fn put_dir(
@@ -146,34 +213,35 @@ impl CacheManager for MokaCacheManager {
         size: u64,
     ) -> Result<()> {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
-        let target_path = self.root.join(&cache_key);
+        let target_path = self.base_dir.join(&cache_key);
 
-        fs::rename(&dir_path, &target_path)
+        self.cache
+            .try_get_with::<_, Error>(cache_key, async move {
+                fs::rename(&dir_path, &target_path)
+                    .await
+                    .context(RenameSnafu)?;
+                Ok(CacheValue::Dir(size))
+            })
             .await
-            .context(RenameSnafu)?;
-        self.cache.insert(cache_key, size).await;
-
-        Ok(())
+            .map(|_| ())
+            .context(CacheGetSnafu)
     }
 }
 
 impl MokaCacheManager {
     fn encode_cache_key(puffin_file_name: &str, key: &str) -> String {
-        let key1 = Sha256::digest(puffin_file_name);
-        let key2 = Sha256::digest(key);
-
         let mut hasher = Sha256::new();
-        hasher.update(key1);
-        hasher.update(key2);
+        hasher.update(puffin_file_name);
+        hasher.update(key);
+        hasher.update(puffin_file_name);
         let hash = hasher.finalize();
 
         BASE64_URL_SAFE.encode(hash)
     }
 
     async fn write_blob(
-        &self,
         target_path: &PathBuf,
-        init_fn: Box<dyn InitBlobFn + Send + '_>,
+        init_fn: &(dyn InitBlobFn + Send + Sync + '_),
     ) -> Result<u64> {
         // To guarantee the atomicity of writing the file, we need to write
         // the directory to a temporary file first...
@@ -194,9 +262,8 @@ impl MokaCacheManager {
     }
 
     async fn write_dir(
-        &self,
         target_path: &PathBuf,
-        init_fn: Box<dyn InitDirFn + Send + '_>,
+        init_fn: Box<dyn InitDirFn + Send + Sync + '_>,
     ) -> Result<u64> {
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
@@ -214,7 +281,7 @@ impl MokaCacheManager {
 
     /// Recovers the cache by iterating through the cache directory.
     async fn recover(&self) -> Result<()> {
-        let mut read_dir = fs::read_dir(&self.root).await.context(ReadSnafu)?;
+        let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
         while let Some(entry) = read_dir.next_entry().await.context(ReadSnafu)? {
             let path = entry.path();
 
@@ -233,9 +300,9 @@ impl MokaCacheManager {
                 let key = path.file_name().unwrap().to_string_lossy().into_owned();
                 if meta.is_dir() {
                     let size = Self::get_dir_size(&path).await?;
-                    self.cache.insert(key, size).await;
+                    self.cache.insert(key, CacheValue::Dir(size)).await;
                 } else {
-                    self.cache.insert(key, meta.len()).await;
+                    self.cache.insert(key, CacheValue::File(meta.len())).await;
                 }
             }
         }
@@ -261,6 +328,25 @@ impl MokaCacheManager {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CacheValue {
+    File(u64),
+    Dir(u64),
+}
+
+impl CacheValue {
+    fn size(&self) -> u64 {
+        match self {
+            CacheValue::File(size) => *size,
+            CacheValue::Dir(size) => *size,
+        }
+    }
+
+    fn weight(&self) -> u32 {
+        self.size().try_into().unwrap_or(u32::MAX)
+    }
+}
+
 /// `MokaDirWriterProvider` implements `DirWriterProvider` for initializing a directory.
 struct MokaDirWriterProvider(PathBuf);
 
@@ -280,11 +366,62 @@ impl DirWriterProvider for MokaDirWriterProvider {
     }
 }
 
+pub struct RcDirGuard {
+    path: PathBuf,
+    key: String,
+    unreleased_dir: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl DirGuard for RcDirGuard {
+    fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+}
+
+impl Drop for RcDirGuard {
+    fn drop(&mut self) {
+        let unreleased_dir = self.unreleased_dir.clone();
+        let key = self.key.clone();
+        let path = self.path.clone();
+        common_runtime::bg_runtime().spawn(async move {
+            let deleted_path = path.with_extension(DELETED_EXTENSION);
+
+            {
+                // Begin of `unreleased_dir`
+                let mut unreleased_dir = unreleased_dir.lock().await;
+                match unreleased_dir.get_mut(&key) {
+                    Some(count) => {
+                        if *count > 1 {
+                            *count -= 1;
+                            return;
+                        } else {
+                            unreleased_dir.remove(&key);
+                        }
+                    }
+                    None => {
+                        warn!("Unreleased directory not found. Path: {path:?}");
+                        return;
+                    }
+                }
+
+                if let Err(err) = fs::rename(&path, &deleted_path).await {
+                    warn!(err; "Failed to rename evicted file to deleted path.")
+                }
+                // End of `unreleased_dir`
+            }
+
+            if let Err(err) = fs::remove_dir_all(&deleted_path).await {
+                warn!(err; "Failed to remove evicted directory.")
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 impl MokaCacheManager {
     pub async fn must_get_file(&self, puffin_file_name: &str, key: &str) -> fs::File {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
-        let file_path = self.root.join(&cache_key);
+        let file_path = self.base_dir.join(&cache_key);
 
         self.cache.get(&cache_key).await.unwrap();
 
@@ -293,7 +430,7 @@ impl MokaCacheManager {
 
     pub async fn must_get_dir(&self, puffin_file_name: &str, key: &str) -> PathBuf {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
-        let dir_path = self.root.join(&cache_key);
+        let dir_path = self.base_dir.join(&cache_key);
 
         self.cache.get(&cache_key).await.unwrap();
 
@@ -378,7 +515,7 @@ mod tests {
             .unwrap();
 
         for (rel_path, content) in &files_in_dir {
-            let file_path = dir_path.join(rel_path);
+            let file_path = dir_path.path().join(rel_path);
             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await.unwrap();
@@ -472,7 +609,7 @@ mod tests {
             .await
             .unwrap();
         for (rel_path, content) in &files_in_dir {
-            let file_path = dir_path.join(rel_path);
+            let file_path = dir_path.path().join(rel_path);
             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await.unwrap();

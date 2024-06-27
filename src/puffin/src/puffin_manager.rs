@@ -70,11 +70,20 @@ pub struct PutOptions {
 #[async_trait]
 pub trait PuffinReader {
     type Reader: AsyncRead + AsyncSeek;
+    type Dir: DirGuard;
 
     /// Reads a blob from the Puffin file.
     async fn blob(&self, key: &str) -> Result<Self::Reader>;
 
     /// Reads a directory from the Puffin file.
-    /// The returned `PathBuf` is used to access the directory in the filesystem.
-    async fn dir(&self, key: &str) -> Result<PathBuf>;
+    ///
+    /// The returned `DirGuard` is used to access the directory in the filesystem.
+    /// The caller is responsible for holding the `DirGuard` until they are done with the directory.
+    async fn dir(&self, key: &str) -> Result<Self::Dir>;
+}
+
+/// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.
+/// Users should hold the `DirGuard` until they are done with the directory.
+pub trait DirGuard {
+    fn path(&self) -> PathBuf;
 }
