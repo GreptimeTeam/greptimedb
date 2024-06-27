@@ -24,13 +24,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to find column in pipeline table, name: {}", name))]
-    FindColumnInPipelineTable {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Pipeline table not found"))]
     PipelineTableNotFound {
         #[snafu(implicit)]
@@ -116,7 +109,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            FindColumnInPipelineTable { .. } | CastType { .. } => StatusCode::Unexpected,
+            CastType { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
