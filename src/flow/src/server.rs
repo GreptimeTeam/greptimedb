@@ -29,8 +29,8 @@ use tokio::sync::{oneshot, Mutex};
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::error::{ShutdownServerSnafu, StartServerSnafu};
 use crate::adapter::FlowWorkerManagerRef;
+use crate::error::{ShutdownServerSnafu, StartServerSnafu};
 use crate::heartbeat::HeartbeatTask;
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 

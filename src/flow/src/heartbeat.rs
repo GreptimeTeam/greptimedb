@@ -33,7 +33,7 @@ use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
-use crate::adapter::error::ExternalSnafu;
+use crate::error::ExternalSnafu;
 use crate::{Error, FlownodeOptions};
 
 /// The flownode heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.

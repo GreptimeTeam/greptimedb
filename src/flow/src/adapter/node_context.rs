@@ -23,8 +23,8 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
+use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};

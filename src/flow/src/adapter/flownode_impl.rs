@@ -26,11 +26,11 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::adapter::error::InternalSnafu;
 use crate::adapter::FlowWorkerManager;
+use crate::error::InternalSnafu;
 use crate::repr::{self, DiffRow};
 
-fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
+fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
     // TODO(discord9): refactor this
     Err::<(), _>(BoxedError::new(err))
         .with_context(|_| ExternalSnafu)

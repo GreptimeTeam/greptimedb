@@ -25,13 +25,15 @@
 // allow unused for now because it should be use later
 mod adapter;
 mod compute;
+mod error;
 mod expr;
 mod heartbeat;
 mod plan;
 mod repr;
+mod server;
 mod transform;
 mod utils;
 
-pub use adapter::error::{Error, Result};
-pub use adapter::server::{FlownodeInstance, FlownodeServer};
 pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeBuilder, FlownodeOptions};
+pub use error::{Error, Result};
+pub use server::{FlownodeInstance, FlownodeServer};

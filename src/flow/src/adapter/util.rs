@@ -19,7 +19,7 @@ use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
 use snafu::ResultExt;
 
-use crate::adapter::error::{Error, ExternalSnafu};
+use crate::error::{Error, ExternalSnafu};
 
 /// convert `ColumnSchema` lists to it's corresponding proto type
 pub fn column_schemas_to_proto(

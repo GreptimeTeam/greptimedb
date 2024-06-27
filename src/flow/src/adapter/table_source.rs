@@ -20,10 +20,10 @@ use common_meta::key::table_name::{TableNameKey, TableNameManager};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
-use crate::adapter::error::{
+use crate::adapter::TableName;
+use crate::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
-use crate::adapter::TableName;
 use crate::repr::{self, ColumnType, RelationDesc, RelationType};
 
 /// mapping of table name <-> table id should be query from tableinfo manager

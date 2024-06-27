@@ -45,20 +45,18 @@ use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
 use tokio::sync::{oneshot, watch, Mutex, RwLock};
 
-use crate::adapter::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
+use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::repr::{self, DiffRow, Row};
 use crate::transform::{register_function_to_query_engine, sql_to_flow_plan};
 
-pub(crate) mod error;
 mod flownode_impl;
 mod parse_expr;
-pub(crate) mod server;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -67,7 +65,7 @@ mod worker;
 pub(crate) mod node_context;
 mod table_source;
 
-use error::Error;
+use crate::error::Error;
 
 // TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
