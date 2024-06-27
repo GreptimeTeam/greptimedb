@@ -172,7 +172,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)])

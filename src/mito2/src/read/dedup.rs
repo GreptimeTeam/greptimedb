@@ -317,9 +317,9 @@ impl LastFieldsBuilder {
         self.contains_null = self.last_fields.iter().any(Value::is_null);
     }
 
-    /// Merges last not null fields, builds a new batch and resets the builder.
+    /// Merges last non-null fields, builds a new batch and resets the builder.
     /// It may overwrites the last row of the `buffer`.
-    fn merge_last_not_null(
+    fn merge_last_non_null(
         &mut self,
         buffer: Batch,
         metrics: &mut DedupMetrics,
@@ -380,20 +380,20 @@ impl LastFieldsBuilder {
     }
 }
 
-/// Dedup strategy that keeps the last not null field for the same key.
+/// Dedup strategy that keeps the last non-null field for the same key.
 ///
 /// It assumes that batches from files and memtables don't contain duplicate rows
 /// and the merge reader never concatenates batches from different source.
 ///
 /// We might implement a new strategy if we need to process files with duplicate rows.
-pub(crate) struct LastNotNull {
+pub(crate) struct LastNonNull {
     /// Buffered batch that fields in the last row may be updated.
     buffer: Option<Batch>,
     /// Fields that overlaps with the last row of the `buffer`.
     last_fields: LastFieldsBuilder,
 }
 
-impl LastNotNull {
+impl LastNonNull {
     /// Creates a new strategy with the given `filter_deleted` flag.
     #[allow(dead_code)]
     pub(crate) fn new(filter_deleted: bool) -> Self {
@@ -404,7 +404,7 @@ impl LastNotNull {
     }
 }
 
-impl DedupStrategy for LastNotNull {
+impl DedupStrategy for LastNonNull {
     fn push_batch(&mut self, batch: Batch, metrics: &mut DedupMetrics) -> Result<Option<Batch>> {
         if batch.is_empty() {
             return Ok(None);
@@ -422,14 +422,14 @@ impl DedupStrategy for LastNotNull {
         if buffer.primary_key() != batch.primary_key() {
             // Next key is different.
             let buffer = std::mem::replace(buffer, batch);
-            let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
+            let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
             return Ok(merged);
         }
 
         if buffer.last_timestamp() != batch.first_timestamp() {
             // The next batch has a different timestamp.
             let buffer = std::mem::replace(buffer, batch);
-            let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
+            let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
             return Ok(merged);
         }
 
@@ -449,7 +449,7 @@ impl DedupStrategy for LastNotNull {
         // Moves the remaining rows to the buffer.
         let batch = batch.slice(1, batch.num_rows() - 1);
         let buffer = std::mem::replace(buffer, batch);
-        let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
+        let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
 
         Ok(merged)
     }
@@ -462,9 +462,104 @@ impl DedupStrategy for LastNotNull {
         // Initializes last fields with the first buffer.
         self.last_fields.maybe_init(&buffer);
 
-        let merged = self.last_fields.merge_last_not_null(buffer, metrics)?;
+        let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
 
         Ok(merged)
+    }
+}
+
+/// An iterator that dedup rows by [LastNonNull] strategy.
+/// The input iterator must returns sorted batches.
+pub(crate) struct LastNonNullIter<I> {
+    /// Inner iterator that returns sorted batches.
+    iter: Option<I>,
+    /// Dedup strategy.
+    strategy: LastNonNull,
+    /// Dedup metrics.
+    metrics: DedupMetrics,
+    /// The current batch returned by the iterator. If it is None, we need to
+    /// fetch a new batch.
+    /// The batch is always not empty.
+    current_batch: Option<Batch>,
+}
+
+impl<I> LastNonNullIter<I> {
+    /// Creates a new iterator with the given inner iterator.
+    pub(crate) fn new(iter: I) -> Self {
+        Self {
+            iter: Some(iter),
+            // We only use the iter in memtables. Memtables never filter deleted.
+            strategy: LastNonNull::new(false),
+            metrics: DedupMetrics::default(),
+            current_batch: None,
+        }
+    }
+
+    /// Finds the index of the first row that has the same timestamp with the next row.
+    /// If no duplicate rows, returns None.
+    fn find_split_index(batch: &Batch) -> Option<usize> {
+        if batch.num_rows() < 2 {
+            return None;
+        }
+
+        // Safety: The batch is not empty.
+        let timestamps = batch.timestamps_native().unwrap();
+        timestamps.windows(2).position(|t| t[0] == t[1])
+    }
+}
+
+impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
+    /// Fetches the next batch from the inner iterator. It will slice the batch if it
+    /// contains duplicate rows.
+    fn next_batch_for_merge(&mut self) -> Result<Option<Batch>> {
+        if self.current_batch.is_none() {
+            // No current batch. Fetches a new batch from the inner iterator.
+            let Some(iter) = self.iter.as_mut() else {
+                // The iterator is exhausted.
+                return Ok(None);
+            };
+
+            self.current_batch = iter.next().transpose()?;
+            if self.current_batch.is_none() {
+                // The iterator is exhausted.
+                self.iter = None;
+                return Ok(None);
+            }
+        }
+
+        if let Some(batch) = &self.current_batch {
+            let Some(index) = Self::find_split_index(batch) else {
+                // No duplicate rows in the current batch.
+                return Ok(self.current_batch.take());
+            };
+
+            let first = batch.slice(0, index + 1);
+            let batch = batch.slice(index + 1, batch.num_rows() - index - 1);
+            // `index` is Some indicates that the batch has at least one row remaining.
+            debug_assert!(!batch.is_empty());
+            self.current_batch = Some(batch);
+            return Ok(Some(first));
+        }
+
+        Ok(None)
+    }
+
+    fn next_batch(&mut self) -> Result<Option<Batch>> {
+        while let Some(batch) = self.next_batch_for_merge()? {
+            if let Some(batch) = self.strategy.push_batch(batch, &mut self.metrics)? {
+                return Ok(Some(batch));
+            }
+        }
+
+        self.strategy.finish(&mut self.metrics)
+    }
+}
+
+impl<I: Iterator<Item = Result<Batch>>> Iterator for LastNonNullIter<I> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_batch().transpose()
     }
 }
 
@@ -506,9 +601,9 @@ mod tests {
         assert_eq!(0, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
 
-        // Test last not null.
+        // Test last non-null.
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(true));
         check_reader_result(&mut reader, &input).await;
         assert_eq!(0, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
@@ -640,7 +735,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_last_not_null_merge() {
+    async fn test_last_non_null_merge() {
         let input = [
             new_batch_multi_fields(
                 b"k1",
@@ -688,7 +783,7 @@ mod tests {
 
         // Filter deleted.
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(true));
         check_reader_result(
             &mut reader,
             &[
@@ -722,7 +817,7 @@ mod tests {
 
         // Does not filter deleted.
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(false));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(false));
         check_reader_result(
             &mut reader,
             &[
@@ -762,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_last_not_null_skip_merge_single() {
+    async fn test_last_non_null_skip_merge_single() {
         let input = [new_batch_multi_fields(
             b"k1",
             &[1, 2, 3],
@@ -772,7 +867,7 @@ mod tests {
         )];
 
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(true));
         check_reader_result(
             &mut reader,
             &[new_batch_multi_fields(
@@ -788,14 +883,14 @@ mod tests {
         assert_eq!(1, reader.metrics().num_deleted_rows);
 
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(false));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(false));
         check_reader_result(&mut reader, &input).await;
         assert_eq!(0, reader.metrics().num_unselected_rows);
         assert_eq!(0, reader.metrics().num_deleted_rows);
     }
 
     #[tokio::test]
-    async fn test_last_not_null_skip_merge_no_null() {
+    async fn test_last_non_null_skip_merge_no_null() {
         let input = [
             new_batch_multi_fields(
                 b"k1",
@@ -815,7 +910,7 @@ mod tests {
         ];
 
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(true));
         check_reader_result(
             &mut reader,
             &[
@@ -835,7 +930,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_last_not_null_merge_null() {
+    async fn test_last_non_null_merge_null() {
         let input = [
             new_batch_multi_fields(
                 b"k1",
@@ -849,7 +944,7 @@ mod tests {
         ];
 
         let reader = VecBatchReader::new(&input);
-        let mut reader = DedupReader::new(reader, LastNotNull::new(true));
+        let mut reader = DedupReader::new(reader, LastNonNull::new(true));
         check_reader_result(
             &mut reader,
             &[
@@ -884,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn test_last_not_null_strategy_delete_last() {
+    fn test_last_non_null_strategy_delete_last() {
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
             new_batch_multi_fields(
@@ -905,7 +1000,7 @@ mod tests {
             new_batch_multi_fields(b"k2", &[3], &[3], &[OpType::Put], &[(None, Some(3))]),
         ];
 
-        let mut strategy = LastNotNull::new(true);
+        let mut strategy = LastNonNull::new(true);
         check_dedup_strategy(
             &input,
             &mut strategy,
@@ -918,13 +1013,13 @@ mod tests {
     }
 
     #[test]
-    fn test_last_not_null_strategy_delete_one() {
+    fn test_last_non_null_strategy_delete_one() {
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[1], &[OpType::Delete], &[(None, None)]),
             new_batch_multi_fields(b"k2", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
         ];
 
-        let mut strategy = LastNotNull::new(true);
+        let mut strategy = LastNonNull::new(true);
         check_dedup_strategy(
             &input,
             &mut strategy,
@@ -939,18 +1034,18 @@ mod tests {
     }
 
     #[test]
-    fn test_last_not_null_strategy_delete_all() {
+    fn test_last_non_null_strategy_delete_all() {
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[1], &[OpType::Delete], &[(None, None)]),
             new_batch_multi_fields(b"k2", &[1], &[6], &[OpType::Delete], &[(Some(11), None)]),
         ];
 
-        let mut strategy = LastNotNull::new(true);
+        let mut strategy = LastNonNull::new(true);
         check_dedup_strategy(&input, &mut strategy, &[]);
     }
 
     #[test]
-    fn test_last_not_null_strategy_same_batch() {
+    fn test_last_non_null_strategy_same_batch() {
         let input = [
             new_batch_multi_fields(b"k1", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
             new_batch_multi_fields(
@@ -971,7 +1066,7 @@ mod tests {
             new_batch_multi_fields(b"k1", &[3], &[3], &[OpType::Put], &[(None, Some(3))]),
         ];
 
-        let mut strategy = LastNotNull::new(true);
+        let mut strategy = LastNonNull::new(true);
         check_dedup_strategy(
             &input,
             &mut strategy,
@@ -981,5 +1076,93 @@ mod tests {
                 new_batch_multi_fields(b"k1", &[3], &[5], &[OpType::Put], &[(Some(13), Some(3))]),
             ],
         );
+    }
+
+    #[test]
+    fn test_last_non_null_iter_on_batch() {
+        let input = [new_batch_multi_fields(
+            b"k1",
+            &[1, 1, 2],
+            &[13, 12, 13],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[(None, None), (Some(1), None), (Some(2), Some(22))],
+        )];
+        let iter = input.into_iter().map(Ok);
+        let iter = LastNonNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [
+            new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+        ];
+        assert_eq!(&expect, &actual[..]);
+    }
+
+    #[test]
+    fn test_last_non_null_iter_same_row() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 1, 1],
+                &[13, 12, 11],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[(None, None), (Some(1), None), (Some(11), None)],
+            ),
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 1],
+                &[10, 9],
+                &[OpType::Put, OpType::Put],
+                &[(None, Some(11)), (Some(21), Some(31))],
+            ),
+        ];
+        let iter = input.into_iter().map(Ok);
+        let iter = LastNonNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [new_batch_multi_fields(
+            b"k1",
+            &[1],
+            &[13],
+            &[OpType::Put],
+            &[(Some(1), Some(11))],
+        )];
+        assert_eq!(&expect, &actual[..]);
+    }
+
+    #[test]
+    fn test_last_non_null_iter_multi_batch() {
+        let input = [
+            new_batch_multi_fields(
+                b"k1",
+                &[1, 1, 2],
+                &[13, 12, 13],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[(None, None), (Some(1), None), (Some(2), Some(22))],
+            ),
+            new_batch_multi_fields(
+                b"k1",
+                &[2, 3],
+                &[12, 13],
+                &[OpType::Put, OpType::Delete],
+                &[(None, Some(12)), (None, None)],
+            ),
+            new_batch_multi_fields(
+                b"k2",
+                &[1, 1, 2],
+                &[13, 12, 13],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                &[(None, None), (Some(1), None), (Some(2), Some(22))],
+            ),
+        ];
+        let iter = input.into_iter().map(Ok);
+        let iter = LastNonNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [
+            new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k1", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+            new_batch_multi_fields(b"k1", &[3], &[13], &[OpType::Delete], &[(None, None)]),
+            new_batch_multi_fields(b"k2", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k2", &[2], &[13], &[OpType::Put], &[(Some(2), Some(22))]),
+        ];
+        assert_eq!(&expect, &actual[..]);
     }
 }

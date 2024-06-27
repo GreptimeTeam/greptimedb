@@ -33,7 +33,7 @@ pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan,
 use crate::repr::{ColumnType, DiffRow, RelationDesc, RelationType};
 
 /// A plan for a dataflow component. But with type to indicate the output type of the relation.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct TypedPlan {
     /// output type of the relation
     pub schema: RelationDesc,
@@ -121,7 +121,7 @@ impl TypedPlan {
 
 /// TODO(discord9): support `TableFunc`（by define FlatMap that map 1 to n)
 /// Plan describe how to transform data in dataflow
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Plan {
     /// A constant collection of rows.
     Constant { rows: Vec<DiffRow> },
