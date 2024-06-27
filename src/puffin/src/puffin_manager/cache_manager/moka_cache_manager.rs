@@ -54,7 +54,7 @@ pub struct MokaCacheManager {
 
     /// The unreleased directories that are waiting to be released. The value is the count of
     /// references to the directory.
-    unreleased_dir: Arc<Mutex<HashMap<String, usize>>>,
+    unreleased_dirs: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl MokaCacheManager {
@@ -62,14 +62,14 @@ impl MokaCacheManager {
     pub async fn new(base_dir: PathBuf, max_size: u64) -> Result<Self> {
         let cache_root_clone = base_dir.clone();
 
-        let unreleased_dir = Arc::new(Mutex::new(HashMap::new()));
-        let unreleased_dir_cloned = unreleased_dir.clone();
+        let unreleased_dirs = Arc::new(Mutex::new(HashMap::new()));
+        let unreleased_dirs_cloned = unreleased_dirs.clone();
 
         let cache = Cache::builder()
             .max_capacity(max_size)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .async_eviction_listener(move |key, v, _| {
-                let unreleased_dir = unreleased_dir_cloned.clone();
+                let unreleased_dirs = unreleased_dirs_cloned.clone();
                 let cache_root_clone = cache_root_clone.clone();
                 async move {
                     let path = cache_root_clone.join(key.as_str());
@@ -83,8 +83,8 @@ impl MokaCacheManager {
                         CacheValue::Dir(_) => {
                             let deleted_path = path.with_extension(DELETED_EXTENSION);
                             {
-                                let unreleased_dir = unreleased_dir.lock().await;
-                                if unreleased_dir.contains_key(key.as_ref()) {
+                                let unreleased_dirs = unreleased_dirs.lock().await;
+                                if unreleased_dirs.contains_key(key.as_ref()) {
                                     // Won't remove the directory if it's still in use.
                                     debug!("Skipping eviction of directory due to unreleased reference. Path: {path:?}");
                                     return;
@@ -92,7 +92,7 @@ impl MokaCacheManager {
                                 if let Err(err) = fs::rename(&path, &deleted_path).await {
                                     warn!(err; "Failed to rename evicted file to deleted path.")
                                 }
-                            } // End of `unreleased_dir`
+                            } // End of `unreleased_dirs`
                             debug!("Removing directory due to eviction. Path: {path:?}");
                             if let Err(err) = fs::remove_dir_all(&deleted_path).await {
                                 warn!(err; "Failed to remove evicted directory.")
@@ -107,7 +107,7 @@ impl MokaCacheManager {
         let manager = Self {
             cache,
             base_dir,
-            unreleased_dir,
+            unreleased_dirs,
         };
 
         manager.recover().await?;
@@ -166,16 +166,16 @@ impl CacheManager for MokaCacheManager {
         let dir_path = self.base_dir.join(&cache_key);
 
         let dir_exists = {
-            let mut unreleased_dir = self.unreleased_dir.lock().await;
+            let mut unreleased_dirs = self.unreleased_dirs.lock().await;
 
             // Prevent the directory from being removed by a snap eviction
-            let rc = unreleased_dir
+            let rc = unreleased_dirs
                 .entry(cache_key.clone())
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
 
             *rc > 1
-        }; // End of `unreleased_dir`
+        }; // End of `unreleased_dirs`
 
         let res = self
             .cache
@@ -191,20 +191,20 @@ impl CacheManager for MokaCacheManager {
             .context(CacheGetSnafu);
 
         if res.is_err() {
-            let mut unreleased_dir = self.unreleased_dir.lock().await;
-            if let Some(count) = unreleased_dir.get_mut(&cache_key) {
+            let mut unreleased_dirs = self.unreleased_dirs.lock().await;
+            if let Some(count) = unreleased_dirs.get_mut(&cache_key) {
                 if *count > 1 {
                     *count -= 1;
                 } else {
-                    unreleased_dir.remove(&cache_key);
+                    unreleased_dirs.remove(&cache_key);
                 }
             }
-        } // End of `unreleased_dir`
+        } // End of `unreleased_dirs`
 
         res.map(move |_| RcDirGuard {
             path: dir_path,
             key: cache_key,
-            unreleased_dir: self.unreleased_dir.clone(),
+            unreleased_dirs: self.unreleased_dirs.clone(),
             cache: self.cache.clone(),
         })
     }
@@ -374,7 +374,7 @@ impl DirWriterProvider for MokaDirWriterProvider {
 pub struct RcDirGuard {
     path: PathBuf,
     key: String,
-    unreleased_dir: Arc<Mutex<HashMap<String, usize>>>,
+    unreleased_dirs: Arc<Mutex<HashMap<String, usize>>>,
     cache: Cache<String, CacheValue>,
 }
 
@@ -386,7 +386,7 @@ impl DirGuard for RcDirGuard {
 
 impl Drop for RcDirGuard {
     fn drop(&mut self) {
-        let unreleased_dir = self.unreleased_dir.clone();
+        let unreleased_dirs = self.unreleased_dirs.clone();
         let key = self.key.clone();
         let path = self.path.clone();
         let cache = self.cache.clone();
@@ -394,15 +394,15 @@ impl Drop for RcDirGuard {
             let deleted_path = path.with_extension(DELETED_EXTENSION);
 
             {
-                let mut unreleased_dir = unreleased_dir.lock().await;
-                if let Some(count) = unreleased_dir.get_mut(&key) {
+                let mut unreleased_dirs = unreleased_dirs.lock().await;
+                if let Some(count) = unreleased_dirs.get_mut(&key) {
                     *count -= 1;
                     if *count > 0 {
                         // The directory is still in use.
                         return;
                     }
 
-                    unreleased_dir.remove(&key);
+                    unreleased_dirs.remove(&key);
                     if cache.contains_key(&key) {
                         // The directory is still in the cache.
                         return;
@@ -413,7 +413,7 @@ impl Drop for RcDirGuard {
                 if let Err(err) = fs::rename(&path, &deleted_path).await {
                     warn!(err; "Failed to rename evicted file to deleted path.")
                 }
-            } // End of `unreleased_dir`
+            } // End of `unreleased_dirs`
 
             if let Err(err) = fs::remove_dir_all(&deleted_path).await {
                 warn!(err; "Failed to remove evicted directory.")
@@ -777,7 +777,7 @@ mod tests {
         assert!(manager.dir_or_file_exists(puffin_file_name, dir_key).await);
 
         // Third time to get the directory. The returned directory should be the same as
-        // the previous one because the manager will get it from `unreleased_dir`.
+        // the previous one because the manager will get it from `unreleased_dirs`.
         let dir_path_from_trush = manager
             .get_dir(
                 puffin_file_name,
