@@ -920,6 +920,38 @@ pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
         .collect()
 }
 
+/// Build rows with schema (string, f64, f64, ts_millis).
+/// - `key`: A string key that is common across all rows.
+/// - `timestamps`: Array of timestamp values.
+/// - `fields`: Array of tuples where each tuple contains two optional i64 values, representing two optional float fields.
+/// Returns a vector of `Row` each containing the key, two optional float fields, and a timestamp.
+pub fn build_rows_with_fields(
+    key: &str,
+    timestamps: &[i64],
+    fields: &[(Option<i64>, Option<i64>)],
+) -> Vec<Row> {
+    timestamps
+        .iter()
+        .zip(fields.iter())
+        .map(|(ts, (field1, field2))| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(key.to_string())),
+                },
+                api::v1::Value {
+                    value_data: field1.map(|v| ValueData::F64Value(v as f64)),
+                },
+                api::v1::Value {
+                    value_data: field2.map(|v| ValueData::F64Value(v as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(*ts * 1000)),
+                },
+            ],
+        })
+        .collect()
+}
+
 /// Get column schemas for rows.
 pub fn rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnSchema> {
     request
