@@ -85,12 +85,17 @@ impl MokaCacheManager {
                             {
                                 let unreleased_dirs = unreleased_dirs.lock().await;
                                 if unreleased_dirs.contains_key(key.as_ref()) {
-                                    // Won't remove the directory if it's still in use.
-                                    debug!("Skipping eviction of directory due to unreleased reference. Path: {path:?}");
+                                    // Don't remove the directory if it's still in use.
+                                    debug!("Skipping removing directory due to unreleased reference. Path: {path:?}");
                                     return;
                                 }
                                 if let Err(err) = fs::rename(&path, &deleted_path).await {
-                                    warn!(err; "Failed to rename evicted file to deleted path.")
+                                    // `NotFound` indicates that a delayed removal has occurred, meaning
+                                    // the directory has already been deleted upon its release.
+                                    if err.kind() == ErrorKind::NotFound {
+                                        return;
+                                    }
+                                    warn!(err; "Failed to rename evicted directory to deleted path.");
                                 }
                             } // End of `unreleased_dirs`
                             debug!("Removing directory due to eviction. Path: {path:?}");
@@ -248,7 +253,7 @@ impl MokaCacheManager {
         init_fn: &(dyn InitBlobFn + Send + Sync + '_),
     ) -> Result<u64> {
         // To guarantee the atomicity of writing the file, we need to write
-        // the directory to a temporary file first...
+        // the file to a temporary file first...
         let tmp_path = target_path.with_extension(TMP_EXTENSION);
         let writer = Box::new(
             fs::File::create(&tmp_path)
@@ -411,12 +416,12 @@ impl Drop for RcDirGuard {
 
                 debug!("Removing directory due to releasing. Path: {path:?}");
                 if let Err(err) = fs::rename(&path, &deleted_path).await {
-                    warn!(err; "Failed to rename evicted file to deleted path.")
+                    warn!(err; "Failed to rename released directory to deleted path.")
                 }
             } // End of `unreleased_dirs`
 
             if let Err(err) = fs::remove_dir_all(&deleted_path).await {
-                warn!(err; "Failed to remove evicted directory.")
+                warn!(err; "Failed to remove released directory.")
             }
         });
     }
@@ -778,7 +783,7 @@ mod tests {
 
         // Third time to get the directory. The returned directory should be the same as
         // the previous one because the manager will get it from `unreleased_dirs`.
-        let dir_path_from_trush = manager
+        let dir_path_from_trash = manager
             .get_dir(
                 puffin_file_name,
                 dir_key,
@@ -793,14 +798,14 @@ mod tests {
         assert!(manager.dir_or_file_exists(puffin_file_name, dir_key).await);
 
         for (rel_path, content) in &files_in_dir {
-            let file_path = dir_path_from_trush.path().join(rel_path);
+            let file_path = dir_path_from_trash.path().join(rel_path);
             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf, *content);
         }
 
-        drop(dir_path_from_trush);
+        drop(dir_path_from_trash);
         assert!(manager.dir_or_file_exists(puffin_file_name, dir_key).await);
 
         // Drop the directory
