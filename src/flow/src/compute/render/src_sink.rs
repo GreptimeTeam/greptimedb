@@ -62,7 +62,6 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let arr = arranged.get_updates_in_range(..=now);
                 err_collector.run(|| arranged.compact_to(now));
 
-                debug!("Call source");
                 let prev_avail = arr.into_iter().map(|((k, _), t, d)| (k, t, d));
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();

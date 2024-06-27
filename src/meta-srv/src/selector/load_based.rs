@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::keys::{LeaseKey, LeaseValue, StatKey, StatValue};
+use crate::key::{DatanodeLeaseKey, DatanodeStatKey, DatanodeStatValue, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::common::choose_peers;
@@ -58,7 +58,7 @@ impl Default for LoadBasedSelector<RandomWeightedChoose<Peer>, RegionNumsBasedWe
 impl<W, C> Selector for LoadBasedSelector<W, C>
 where
     W: WeightedChoose<Peer>,
-    C: WeightCompute<Source = HashMap<StatKey, StatValue>>,
+    C: WeightCompute<Source = HashMap<DatanodeStatKey, DatanodeStatValue>>,
 {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
@@ -112,9 +112,9 @@ where
 }
 
 fn filter_out_expired_datanode(
-    mut stat_kvs: HashMap<StatKey, StatValue>,
-    lease_kvs: &HashMap<LeaseKey, LeaseValue>,
-) -> HashMap<StatKey, StatValue> {
+    mut stat_kvs: HashMap<DatanodeStatKey, DatanodeStatValue>,
+    lease_kvs: &HashMap<DatanodeLeaseKey, LeaseValue>,
+) -> HashMap<DatanodeStatKey, DatanodeStatValue> {
     lease_kvs
         .iter()
         .filter_map(|(lease_k, _)| stat_kvs.remove_entry(&lease_k.into()))
@@ -122,9 +122,9 @@ fn filter_out_expired_datanode(
 }
 
 fn filter_out_datanode_by_table(
-    stat_kvs: &HashMap<StatKey, StatValue>,
+    stat_kvs: &HashMap<DatanodeStatKey, DatanodeStatValue>,
     leader_peer_ids: &[u64],
-) -> HashMap<StatKey, StatValue> {
+) -> HashMap<DatanodeStatKey, DatanodeStatValue> {
     stat_kvs
         .iter()
         .filter(|(stat_k, _)| leader_peer_ids.contains(&stat_k.node_id))
@@ -162,37 +162,37 @@ async fn get_leader_peer_ids(
 mod tests {
     use std::collections::HashMap;
 
-    use crate::keys::{LeaseKey, LeaseValue, StatKey, StatValue};
+    use crate::key::{DatanodeLeaseKey, DatanodeStatKey, DatanodeStatValue, LeaseValue};
     use crate::selector::load_based::filter_out_expired_datanode;
 
     #[test]
     fn test_filter_out_expired_datanode() {
         let mut stat_kvs = HashMap::new();
         stat_kvs.insert(
-            StatKey {
+            DatanodeStatKey {
                 cluster_id: 1,
                 node_id: 0,
             },
-            StatValue { stats: vec![] },
+            DatanodeStatValue { stats: vec![] },
         );
         stat_kvs.insert(
-            StatKey {
+            DatanodeStatKey {
                 cluster_id: 1,
                 node_id: 1,
             },
-            StatValue { stats: vec![] },
+            DatanodeStatValue { stats: vec![] },
         );
         stat_kvs.insert(
-            StatKey {
+            DatanodeStatKey {
                 cluster_id: 1,
                 node_id: 2,
             },
-            StatValue { stats: vec![] },
+            DatanodeStatValue { stats: vec![] },
         );
 
         let mut lease_kvs = HashMap::new();
         lease_kvs.insert(
-            LeaseKey {
+            DatanodeLeaseKey {
                 cluster_id: 1,
                 node_id: 1,
             },
@@ -205,7 +205,7 @@ mod tests {
         let alive_stat_kvs = filter_out_expired_datanode(stat_kvs, &lease_kvs);
 
         assert_eq!(1, alive_stat_kvs.len());
-        assert!(alive_stat_kvs.contains_key(&StatKey {
+        assert!(alive_stat_kvs.contains_key(&DatanodeStatKey {
             cluster_id: 1,
             node_id: 1
         }));

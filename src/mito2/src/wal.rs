@@ -14,14 +14,8 @@
 
 //! Write ahead log of the engine.
 
-/// TODO(weny): remove it
-#[allow(unused)]
 pub(crate) mod entry_distributor;
-/// TODO(weny): remove it
-#[allow(unused)]
 pub(crate) mod entry_reader;
-/// TODO(weny): remove it
-#[allow(unused)]
 pub(crate) mod raw_entry_reader;
 
 use std::collections::HashMap;
@@ -30,6 +24,7 @@ use std::sync::Arc;
 
 use api::v1::WalEntry;
 use common_error::ext::BoxedError;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use prost::Message;
 use snafu::ResultExt;
@@ -83,6 +78,39 @@ impl<S: LogStore> Wal<S> {
             entries: Vec::new(),
             entry_encode_buf: Vec::new(),
             providers: HashMap::new(),
+        }
+    }
+
+    /// Returns a [OnRegionOpened] function.
+    pub(crate) fn on_region_opened(
+        &self,
+    ) -> impl FnOnce(RegionId, EntryId, &Provider) -> BoxFuture<Result<()>> {
+        let store = self.store.clone();
+        move |region_id, last_entry_id, provider| -> BoxFuture<'_, Result<()>> {
+            Box::pin(async move {
+                store
+                    .obsolete(provider, last_entry_id)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(DeleteWalSnafu { region_id })
+            })
+        }
+    }
+
+    /// Returns a [WalEntryReader]
+    pub(crate) fn wal_entry_reader(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+    ) -> Box<dyn WalEntryReader> {
+        match provider {
+            Provider::RaftEngine(_) => Box::new(LogStoreEntryReader::new(
+                LogStoreRawEntryReader::new(self.store.clone()),
+            )),
+            Provider::Kafka(_) => Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
+                LogStoreRawEntryReader::new(self.store.clone()),
+                region_id,
+            ))),
         }
     }
 

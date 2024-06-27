@@ -17,7 +17,7 @@ use std::hash::Hash;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
 use common_telemetry::{error, info};
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
@@ -26,7 +26,8 @@ use store_api::storage::{RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result,
+    ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu,
+    PhysicalRegionNotFoundSnafu, Result,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::utils::to_data_region_id;
@@ -101,7 +102,7 @@ impl MetricEngineInner {
         physical_region_id: RegionId,
         request: &RegionPutRequest,
     ) -> Result<()> {
-        // check if the region exists
+        // Check if the region exists
         let data_region_id = to_data_region_id(physical_region_id);
         let state = self.state.read().unwrap();
         if !state.is_logical_region_exist(logical_region_id) {
@@ -112,15 +113,22 @@ impl MetricEngineInner {
             .fail();
         }
 
-        // check if the columns exist
+        // Check if a physical column exists
+        let physical_columns =
+            state
+                .physical_columns()
+                .get(&data_region_id)
+                .context(PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?;
         for col in &request.rows.schema {
-            if !state.is_physical_column_exist(data_region_id, &col.column_name)? {
-                return ColumnNotFoundSnafu {
+            ensure!(
+                physical_columns.contains(&col.column_name),
+                ColumnNotFoundSnafu {
                     name: col.column_name.clone(),
                     region_id: logical_region_id,
                 }
-                .fail();
-            }
+            );
         }
 
         Ok(())
@@ -227,7 +235,7 @@ mod tests {
         let request = ScanRequest::default();
         let stream = env
             .metric()
-            .handle_query(physical_region_id, request)
+            .scan_to_stream(physical_region_id, request)
             .await
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -247,7 +255,7 @@ mod tests {
         let request = ScanRequest::default();
         let stream = env
             .metric()
-            .handle_query(logical_region_id, request)
+            .scan_to_stream(logical_region_id, request)
             .await
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();

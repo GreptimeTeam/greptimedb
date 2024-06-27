@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod config;
+pub mod crd;
 pub mod health;
 #[cfg(feature = "unstable")]
 pub mod process;

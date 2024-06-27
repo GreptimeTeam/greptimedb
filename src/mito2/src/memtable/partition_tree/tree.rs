@@ -40,7 +40,9 @@ use crate::memtable::partition_tree::partition::{
 use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
+use crate::region::options::MergeMode;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// The partition tree.
@@ -83,9 +85,13 @@ impl PartitionTree {
                 .collect(),
         };
         let is_partitioned = Partition::has_multi_partitions(&metadata);
+        let mut config = config.clone();
+        if config.merge_mode == MergeMode::LastNonNull {
+            config.dedup = false;
+        }
 
         PartitionTree {
-            config: config.clone(),
+            config,
             metadata,
             row_codec: Arc::new(row_codec),
             partitions: Default::default(),
@@ -237,7 +243,13 @@ impl PartitionTree {
         iter.fetch_next_partition(context)?;
 
         iter.metrics.iter_elapsed += start.elapsed();
-        Ok(Box::new(iter))
+
+        if self.config.merge_mode == MergeMode::LastNonNull {
+            let iter = LastNonNullIter::new(iter);
+            Ok(Box::new(iter))
+        } else {
+            Ok(Box::new(iter))
+        }
     }
 
     /// Returns true if the tree is empty.

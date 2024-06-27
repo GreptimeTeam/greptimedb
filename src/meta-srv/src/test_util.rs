@@ -18,14 +18,11 @@ use std::sync::Arc;
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::key::table_route::TableRouteValue;
-use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::sequence::SequenceBuilder;
-use common_meta::state_store::KvStateStore;
 use common_meta::ClusterId;
-use common_procedure::local::{LocalManager, ManagerConfig};
 use common_time::util as time_util;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -33,12 +30,8 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::requests::TableOptions;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::handler::{HeartbeatMailbox, Pushers};
-use crate::keys::{LeaseKey, LeaseValue};
-use crate::lock::memory::MemLock;
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::metasrv::SelectorContext;
-use crate::procedure::region_failover::RegionFailoverManager;
-use crate::selector::lease_based::LeaseBasedSelector;
 
 pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64) -> RegionRoute {
     let region = Region {
@@ -71,38 +64,12 @@ pub(crate) fn create_selector_context() -> SelectorContext {
 
     SelectorContext {
         datanode_lease_secs: 10,
+        flownode_lease_secs: 10,
         server_addr: "127.0.0.1:3002".to_string(),
         kv_backend: in_memory,
         meta_peer_client,
         table_id: None,
     }
-}
-
-pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
-    let kv_backend = Arc::new(MemoryKvBackend::new());
-
-    let pushers = Pushers::default();
-    let mailbox_sequence =
-        SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
-    let mailbox = HeartbeatMailbox::create(pushers, mailbox_sequence);
-
-    let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-    let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
-
-    let selector = Arc::new(LeaseBasedSelector);
-    let selector_ctx = create_selector_context();
-
-    let in_memory = Arc::new(MemoryKvBackend::new());
-    Arc::new(RegionFailoverManager::new(
-        10,
-        in_memory,
-        kv_backend.clone(),
-        mailbox,
-        procedure_manager,
-        (selector, selector_ctx),
-        Arc::new(MemLock::default()),
-        Arc::new(TableMetadataManager::new(kv_backend)),
-    ))
 }
 
 pub(crate) async fn prepare_table_region_and_info_value(
@@ -175,7 +142,7 @@ pub(crate) async fn put_datanodes(
 ) {
     let backend = meta_peer_client.memory_backend();
     for datanode in datanodes {
-        let lease_key = LeaseKey {
+        let lease_key = DatanodeLeaseKey {
             cluster_id,
             node_id: datanode.id,
         };

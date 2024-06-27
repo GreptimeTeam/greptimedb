@@ -22,6 +22,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMess
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
+use servers::addrs;
 use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
@@ -37,7 +38,7 @@ pub mod handler;
 /// The frontend heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 #[derive(Clone)]
 pub struct HeartbeatTask {
-    server_addr: String,
+    peer_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: u64,
     retry_interval: u64,
@@ -53,7 +54,7 @@ impl HeartbeatTask {
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
-            server_addr: opts.grpc.addr.clone(),
+            peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
             meta_client,
             report_interval: heartbeat_opts.interval.as_millis() as u64,
             retry_interval: heartbeat_opts.retry_interval.as_millis() as u64,
@@ -85,7 +86,7 @@ impl HeartbeatTask {
         let capture_self = self.clone();
         let retry_interval = self.retry_interval;
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_hb(async move {
             loop {
                 match resp_stream.message().await {
                     Ok(Some(resp)) => {
@@ -129,10 +130,10 @@ impl HeartbeatTask {
         let self_peer = Some(Peer {
             // The peer id doesn't make sense for frontend, so we just set it 0.
             id: 0,
-            addr: self.server_addr.clone(),
+            addr: self.peer_addr.clone(),
         });
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 

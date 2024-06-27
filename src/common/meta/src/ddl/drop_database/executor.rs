@@ -131,9 +131,10 @@ mod tests {
     use std::sync::Arc;
 
     use api::region::RegionResponse;
-    use api::v1::region::{QueryRequest, RegionRequest};
+    use api::v1::region::RegionRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_error::ext::BoxedError;
+    use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use table::table_name::TableName;
 

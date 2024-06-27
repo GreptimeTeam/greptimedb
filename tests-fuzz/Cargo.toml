@@ -27,6 +27,13 @@ common-time = { workspace = true }
 datatypes = { workspace = true }
 derive_builder = { workspace = true }
 dotenv = "0.15"
+k8s-openapi = { version = "0.22", features = ["v1_30"] }
+kube = { version = "0.92", features = [
+    "runtime",
+    "derive",
+    "client",
+    "admission",
+] }
 lazy_static = { workspace = true }
 libfuzzer-sys = "0.4"
 nix = { version = "0.28", features = ["process", "signal"], optional = true }
@@ -34,8 +41,10 @@ partition = { workspace = true }
 rand = { workspace = true }
 rand_chacha = "0.3.1"
 reqwest = { workspace = true }
+schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 snafu = { workspace = true }
 sql = { workspace = true }
 sqlparser.workspace = true
@@ -45,6 +54,7 @@ sqlx = { version = "0.6", features = [
     "postgres",
     "chrono",
 ] }
+strum.workspace = true
 tinytemplate = "1.2"
 tokio = { workspace = true }
 

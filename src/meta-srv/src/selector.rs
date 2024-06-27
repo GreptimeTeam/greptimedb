@@ -16,9 +16,10 @@ mod common;
 pub mod lease_based;
 pub mod load_based;
 pub mod round_robin;
+#[cfg(test)]
+pub(crate) mod test_utils;
 mod weight_compute;
 mod weighted_choose;
-
 use serde::{Deserialize, Serialize};
 
 use crate::error;

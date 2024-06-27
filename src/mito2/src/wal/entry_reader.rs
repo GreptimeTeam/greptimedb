@@ -14,14 +14,12 @@
 
 use api::v1::WalEntry;
 use async_stream::stream;
-use common_telemetry::info;
 use futures::StreamExt;
 use opendal::Buffer;
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::storage::RegionId;
 
 use crate::error::{CorruptedEntrySnafu, DecodeWalSnafu, Result};
 use crate::wal::raw_entry_reader::RawEntryReader;
@@ -39,8 +37,10 @@ pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> 
 }
 
 /// [WalEntryReader] provides the ability to read and decode entries from the underlying store.
+///
+/// Notes: It will consume the inner stream and only allow invoking the `read` at once.
 pub(crate) trait WalEntryReader: Send + Sync {
-    fn read(self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>>;
+    fn read(&mut self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>>;
 }
 
 /// A Reader reads the [RawEntry] from [RawEntryReader] and decodes [RawEntry] into [WalEntry].
@@ -55,7 +55,7 @@ impl<R> LogStoreEntryReader<R> {
 }
 
 impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
-    fn read(self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
+    fn read(&mut self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
         let LogStoreEntryReader { reader } = self;
         let mut stream = reader.read(ns, start_id)?;
 
@@ -89,17 +89,15 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::{Mutation, OpType, WalEntry};
-    use futures::{stream, TryStreamExt};
+    use futures::TryStreamExt;
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader};
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
 
-    use crate::error::{self, Result};
+    use crate::error;
     use crate::test_util::wal_util::MockRawEntryStream;
     use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
-    use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
-    use crate::wal::EntryId;
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {
@@ -137,7 +135,7 @@ mod tests {
             ],
         };
 
-        let reader = LogStoreEntryReader::new(raw_entry_stream);
+        let mut reader = LogStoreEntryReader::new(raw_entry_stream);
         let entries = reader
             .read(&provider, 0)
             .unwrap()
@@ -173,7 +171,7 @@ mod tests {
             ],
         };
 
-        let reader = LogStoreEntryReader::new(raw_entry_stream);
+        let mut reader = LogStoreEntryReader::new(raw_entry_stream);
         let err = reader
             .read(&provider, 0)
             .unwrap()

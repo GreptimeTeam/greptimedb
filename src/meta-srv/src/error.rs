@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -19,7 +20,6 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::JoinError;
 use rand::distributions::WeightedError;
-use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -36,6 +36,14 @@ pub enum Error {
     PeerUnavailable {
         #[snafu(implicit)]
         location: Location,
+        peer_id: u64,
+    },
+
+    #[snafu(display("Failed to lookup peer: {}", peer_id))]
+    LookupPeer {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
         peer_id: u64,
     },
 
@@ -274,7 +282,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid datanode lease key: {}", key))]
+    #[snafu(display("Invalid lease key: {}", key))]
     InvalidLeaseKey {
         key: String,
         #[snafu(implicit)]
@@ -295,7 +303,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode lease key from utf8"))]
+    #[snafu(display("Failed to parse lease key from utf8"))]
     LeaseKeyFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -303,7 +311,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode lease value from utf8"))]
+    #[snafu(display("Failed to parse lease value from utf8"))]
     LeaseValueFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -311,7 +319,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode stat key from utf8"))]
+    #[snafu(display("Failed to parse stat key from utf8"))]
     StatKeyFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -319,7 +327,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode stat value from utf8"))]
+    #[snafu(display("Failed to parse stat value from utf8"))]
     StatValueFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -972,6 +980,7 @@ impl ErrorExt for Error {
             }
 
             Error::Other { source, .. } => source.status_code(),
+            Error::LookupPeer { source, .. } => source.status_code(),
         }
     }
 

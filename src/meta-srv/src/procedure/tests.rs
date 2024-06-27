@@ -19,7 +19,7 @@ use api::v1::meta::Partition;
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, SemanticType};
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_catalog::consts::MITO2_ENGINE;
 use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, CreateTablesState};
 use common_meta::ddl::create_table::*;
@@ -99,7 +99,7 @@ fn test_region_request_builder() {
     let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(None),
-        test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
+        test_data::new_ddl_context(Arc::new(NodeClients::default())),
     );
 
     procedure.set_allocated_metadata(
@@ -174,7 +174,7 @@ async fn new_node_manager(
     region_server: &EchoRegionServer,
     region_routes: &[RegionRoute],
 ) -> NodeManagerRef {
-    let clients = DatanodeClients::default();
+    let clients = NodeClients::default();
 
     let datanodes = find_leaders(region_routes);
     for datanode in datanodes {

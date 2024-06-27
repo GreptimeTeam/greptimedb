@@ -15,10 +15,10 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::error::Error as TableError;
@@ -292,6 +292,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to open batch regions"))]
+    HandleBatchOpenRequest {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -387,6 +394,14 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("DataFusion"))]
+    DataFusion {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -439,7 +454,8 @@ impl ErrorExt for Error {
             | IncorrectInternalState { .. }
             | ShutdownInstance { .. }
             | RegionEngineNotFound { .. }
-            | UnsupportedOutput { .. } => StatusCode::Internal,
+            | UnsupportedOutput { .. }
+            | DataFusion { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
@@ -455,9 +471,9 @@ impl ErrorExt for Error {
             TableIdProviderNotFound { .. } | UnsupportedGrpcRequest { .. } => {
                 StatusCode::Unsupported
             }
-            HandleRegionRequest { source, .. } | GetRegionMetadata { source, .. } => {
-                source.status_code()
-            }
+            HandleRegionRequest { source, .. }
+            | GetRegionMetadata { source, .. }
+            | HandleBatchOpenRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),

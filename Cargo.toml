@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "benchmarks",
     "src/api",
     "src/auth",
     "src/catalog",
@@ -46,6 +45,7 @@ members = [
     "src/object-store",
     "src/operator",
     "src/partition",
+    "src/pipeline",
     "src/plugins",
     "src/promql",
     "src/puffin",
@@ -64,7 +64,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -104,15 +104,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
-datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "08e19f4956d32164be6fc66eb5a4c080eb0023d1" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
 derive_builder = "0.12"
 dotenv = "0.15"
 # TODO(LFC): Wait for https://github.com/etcdv3/etcd-client/pull/76
@@ -120,7 +120,7 @@ etcd-client = { git = "https://github.com/MichaelScofield/etcd-client.git", rev 
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ae26136accd82fbdf8be540cd502f2e94951077e" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a70a6af9c69e40f9a918936a48717343402b4393" }
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
@@ -153,6 +153,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "multipart",
 ] }
 rskafka = "0.5"
+rstest = "0.21"
+rstest_reuse = "0.7"
 rust_decimal = "1.33"
 schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
@@ -222,6 +224,7 @@ mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
 partition = { path = "src/partition" }
+pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
@@ -250,9 +253,12 @@ incremental = false
 
 [profile.ci]
 inherits = "dev"
-debug = false
 strip = true
 
 [profile.dev.package.sqlness-runner]
+debug = false
+strip = true
+
+[profile.dev.package.tests-fuzz]
 debug = false
 strip = true

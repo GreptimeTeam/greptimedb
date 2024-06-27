@@ -111,7 +111,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 input,
                 key_val_plan,
                 reduce_plan,
-            } => self.render_reduce(input, key_val_plan, reduce_plan, plan.typ),
+            } => self.render_reduce(input, key_val_plan, reduce_plan, plan.schema.typ),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP",
             }

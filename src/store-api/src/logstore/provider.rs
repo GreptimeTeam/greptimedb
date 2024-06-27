@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::storage::RegionId;
 
 // The Provider of kafka log store
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KafkaProvider {
     pub topic: String,
 }

@@ -13,15 +13,15 @@
 // limitations under the License.
 
 pub mod error;
-mod global;
+pub mod global;
 mod metrics;
 mod repeated_task;
 pub mod runtime;
 
 pub use global::{
     bg_runtime, block_on_bg, block_on_read, block_on_write, create_runtime, init_global_runtimes,
-    read_runtime, spawn_bg, spawn_blocking_bg, spawn_blocking_read, spawn_blocking_write,
-    spawn_read, spawn_write, write_runtime,
+    read_runtime, spawn_bg, spawn_blocking_bg, spawn_blocking_hb, spawn_blocking_read,
+    spawn_blocking_write, spawn_hb, spawn_read, spawn_write, write_runtime,
 };
 
 pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};

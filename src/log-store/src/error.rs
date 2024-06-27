@@ -21,6 +21,8 @@ use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
+use crate::kafka::producer::ProduceRequest;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -129,6 +131,12 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display("Failed to found client"))]
+    ClientNotFount {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to resolve Kafka broker endpoint."))]
     ResolveKafkaEndpoint { source: common_wal::error::Error },
 
@@ -184,6 +192,14 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: rskafka::client::producer::Error,
+    },
+
+    #[snafu(display("Failed to produce batch records to Kafka"))]
+    BatchProduce {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
     },
 
     #[snafu(display("Failed to read a record from Kafka, topic: {}", topic))]
@@ -243,6 +259,40 @@ pub enum Error {
         region_id: RegionId,
         last_index: u64,
         attempt_index: u64,
+    },
+
+    #[snafu(display("Failed to send produce request"))]
+    SendProduceRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::mpsc::error::SendError<ProduceRequest>,
+    },
+
+    #[snafu(display("Failed to send produce request"))]
+    WaitProduceResultReceiver {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
+    },
+
+    #[snafu(display(
+        "The length of meta if exceeded the limit: {}, actual: {}",
+        limit,
+        actual
+    ))]
+    MetaLengthExceededLimit {
+        #[snafu(implicit)]
+        location: Location,
+        limit: usize,
+        actual: usize,
+    },
+
+    #[snafu(display("No max value"))]
+    NoMaxValue {
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 

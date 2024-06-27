@@ -105,6 +105,10 @@ impl BoxedError {
             inner: Box::new(err),
         }
     }
+
+    pub fn into_inner(self) -> Box<dyn crate::ext::ErrorExt + Send + Sync> {
+        self.inner
+    }
 }
 
 impl std::fmt::Debug for BoxedError {

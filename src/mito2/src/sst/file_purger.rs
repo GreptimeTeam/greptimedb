@@ -141,6 +141,8 @@ mod tests {
                     file_size: 4096,
                     available_indexes: Default::default(),
                     index_file_size: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
                 },
                 file_purger,
             );
@@ -192,6 +194,8 @@ mod tests {
                     file_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
                     index_file_size: 4096,
+                    num_rows: 1024,
+                    num_row_groups: 1,
                 },
                 file_purger,
             );

@@ -18,6 +18,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+pub use bulk::part::BulkPart;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
@@ -33,8 +34,9 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
-use crate::region::options::MemtableOptions;
+use crate::region::options::{MemtableOptions, MergeMode};
 
+pub mod bulk;
 pub mod key_values;
 pub mod partition_tree;
 pub mod time_partition;
@@ -64,11 +66,19 @@ impl Default for MemtableConfig {
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     estimated_bytes: usize,
-    /// The time range that this memtable contains.
+    /// The time range that this memtable contains. It is None if
+    /// and only if the memtable is empty.
     time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl MemtableStats {
+    /// Attaches the time range to the stats.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> Self {
+        self.time_range = time_range;
+        self
+    }
+
     /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
@@ -93,6 +103,9 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Writes one key value pair into the memtable.
     fn write_one(&self, key_value: KeyValue) -> Result<()>;
 
+    /// Writes an encoded batch of into memtable.
+    fn write_bulk(&self, part: BulkPart) -> Result<()>;
+
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
     /// `filters` are the predicates to be pushed down to memtable.
@@ -101,6 +114,13 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<BoxedBatchIterator>;
+
+    /// Returns the ranges in the memtable.
+    fn ranges(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Vec<MemtableRange>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;
@@ -231,11 +251,13 @@ impl MemtableBuilderProvider {
         &self,
         options: Option<&MemtableOptions>,
         dedup: bool,
+        merge_mode: MergeMode,
     ) -> MemtableBuilderRef {
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
+                merge_mode,
             )),
             Some(MemtableOptions::PartitionTree(opts)) => {
                 Arc::new(PartitionTreeMemtableBuilder::new(
@@ -244,15 +266,16 @@ impl MemtableBuilderProvider {
                         data_freeze_threshold: opts.data_freeze_threshold,
                         fork_dictionary_bytes: opts.fork_dictionary_bytes,
                         dedup,
+                        merge_mode,
                     },
                     self.write_buffer_manager.clone(),
                 ))
             }
-            None => self.default_memtable_builder(dedup),
+            None => self.default_memtable_builder(dedup, merge_mode),
         }
     }
 
-    fn default_memtable_builder(&self, dedup: bool) -> MemtableBuilderRef {
+    fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();
@@ -265,8 +288,60 @@ impl MemtableBuilderProvider {
             MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
+                merge_mode,
             )),
         }
+    }
+}
+
+/// Builder to build an iterator to read the range.
+/// The builder should know the projection and the predicate to build the iterator.
+pub trait IterBuilder: Send + Sync {
+    /// Returns the iterator to read the range.
+    fn build(&self) -> Result<BoxedBatchIterator>;
+}
+
+pub type BoxedIterBuilder = Box<dyn IterBuilder>;
+
+/// Context shared by ranges of the same memtable.
+pub struct MemtableRangeContext {
+    /// Id of the memtable.
+    id: MemtableId,
+    /// Iterator builder.
+    builder: BoxedIterBuilder,
+}
+
+pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
+
+impl MemtableRangeContext {
+    /// Creates a new [MemtableRangeContext].
+    pub fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
+        Self { id, builder }
+    }
+}
+
+/// A range in the memtable.
+#[derive(Clone)]
+pub struct MemtableRange {
+    /// Shared context.
+    context: MemtableRangeContextRef,
+    // TODO(yingwen): Id to identify the range in the memtable.
+}
+
+impl MemtableRange {
+    /// Creates a new range from context.
+    pub fn new(context: MemtableRangeContextRef) -> Self {
+        Self { context }
+    }
+
+    /// Returns the id of the memtable to read.
+    pub fn id(&self) -> MemtableId {
+        self.context.id
+    }
+
+    /// Builds an iterator to read the range.
+    pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
+        self.context.builder.build()
     }
 }
 

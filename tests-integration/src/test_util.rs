@@ -21,16 +21,13 @@ use std::time::Duration;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
-use client::Database;
 use common_base::secrets::ExposeSecret;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_query::OutputData;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::warn;
 use common_test_util::ports;
-use common_test_util::recordbatch::{check_output_stream, ExpectedOutput};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{
@@ -45,7 +42,7 @@ use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -350,6 +347,7 @@ pub(crate) fn create_datanode_opts(
             providers,
             store: default_store,
         },
+        grpc: GrpcOptions::default().with_addr(PEER_PLACEHOLDER_ADDR),
         mode,
         wal: wal_config,
         ..Default::default()
@@ -509,7 +507,7 @@ pub async fn setup_grpc_server_with(
     let greptime_request_handler = GreptimeRequestHandler::new(
         ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()),
         user_provider.clone(),
-        runtime.clone(),
+        Some(runtime.clone()),
     );
 
     let flight_handler = Arc::new(greptime_request_handler.clone());
@@ -689,26 +687,4 @@ where
         .collect::<Vec<_>>();
 
     test(endpoints).await
-}
-
-pub async fn execute_and_check_output(db: &Database, sql: &str, expected: ExpectedOutput<'_>) {
-    let output = db.sql(sql).await.unwrap();
-    let output = output.data;
-
-    match (&output, expected) {
-        (OutputData::AffectedRows(x), ExpectedOutput::AffectedRows(y)) => {
-            assert_eq!(
-                *x, y,
-                r#"
-expected: {y}
-actual: {x}
-"#
-            )
-        }
-        (OutputData::RecordBatches(_), ExpectedOutput::QueryResult(x))
-        | (OutputData::Stream(_), ExpectedOutput::QueryResult(x)) => {
-            check_output_stream(output, x).await
-        }
-        _ => panic!(),
-    }
 }

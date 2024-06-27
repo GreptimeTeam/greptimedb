@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod failure_detector;
 pub mod lease_keeper;
+pub mod supervisor;
 
 pub use lease_keeper::RegionLeaseKeeper;

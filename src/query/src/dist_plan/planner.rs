@@ -24,22 +24,19 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::TableReference;
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_optimizer::analyzer::Analyzer;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-use crate::error;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
-use crate::query_engine::DefaultSerializer;
 use crate::region_query::RegionQueryHandlerRef;
 
 pub struct DistExtensionPlanner {
@@ -99,13 +96,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = optimized_plan.schema().as_ref().into();
-        // Pass down the original plan, allow execution nodes to do their optimization
-        let amended_plan = Self::plan_with_full_table_name(input_plan.clone(), &table_name)?;
-        let substrait_plan = DFLogicalSubstraitConvertor
-            .encode(&amended_plan, DefaultSerializer)
-            .context(error::EncodeSubstraitLogicalPlanSnafu)?
-            .into();
-
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -113,7 +103,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         let merge_scan_plan = MergeScanExec::new(
             table_name,
             regions,
-            substrait_plan,
+            input_plan.clone(),
             &schema,
             self.region_query_handler.clone(),
             query_ctx,
@@ -128,12 +118,6 @@ impl DistExtensionPlanner {
         let mut extractor = TableNameExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
-    }
-
-    /// Apply the fully resolved table name to the TableScan plan
-    fn plan_with_full_table_name(plan: LogicalPlan, name: &TableName) -> Result<LogicalPlan> {
-        plan.transform(&|plan| TableNameRewriter::rewrite_table_name(plan, name))
-            .map(|x| x.data)
     }
 
     async fn get_regions(&self, table_name: &TableName) -> Result<Vec<RegionId>> {
@@ -228,26 +212,5 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
             }
             _ => Ok(TreeNodeRecursion::Continue),
         }
-    }
-}
-
-struct TableNameRewriter;
-
-impl TableNameRewriter {
-    fn rewrite_table_name(
-        plan: LogicalPlan,
-        name: &TableName,
-    ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
-        Ok(match plan {
-            LogicalPlan::TableScan(mut table_scan) => {
-                table_scan.table_name = TableReference::full(
-                    name.catalog_name.clone(),
-                    name.schema_name.clone(),
-                    name.table_name.clone(),
-                );
-                Transformed::yes(LogicalPlan::TableScan(table_scan))
-            }
-            _ => Transformed::no(plan),
-        })
     }
 }

@@ -27,8 +27,9 @@ use common_telemetry::info;
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
+use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
     AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
@@ -43,7 +44,9 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
 use crate::manifest::action::RegionEdit;
+use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::wal::EntryId;
 
 /// Request to write a region.
@@ -497,6 +500,22 @@ pub(crate) enum WorkerRequest {
 }
 
 impl WorkerRequest {
+    pub(crate) fn new_open_region_request(
+        region_id: RegionId,
+        request: RegionOpenRequest,
+        entry_receiver: Option<WalEntryReceiver>,
+    ) -> (WorkerRequest, Receiver<Result<AffectedRows>>) {
+        let (sender, receiver) = oneshot::channel();
+
+        let worker_request = WorkerRequest::Ddl(SenderDdlRequest {
+            region_id,
+            sender: sender.into(),
+            request: DdlRequest::Open((request, entry_receiver)),
+        });
+
+        (worker_request, receiver)
+    }
+
     /// Converts request from a [RegionRequest].
     pub(crate) fn try_from_region_request(
         region_id: RegionId,
@@ -531,7 +550,7 @@ impl WorkerRequest {
             RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Open(v),
+                request: DdlRequest::Open((v, None)),
             }),
             RegionRequest::Close(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
@@ -585,7 +604,7 @@ impl WorkerRequest {
 pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
-    Open(RegionOpenRequest),
+    Open((RegionOpenRequest, Option<WalEntryReceiver>)),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
@@ -618,6 +637,10 @@ pub(crate) enum BackgroundNotify {
     CompactionFailed(CompactionFailed),
     /// Truncate result.
     Truncate(TruncateResult),
+    /// Region change result.
+    RegionChange(RegionChangeResult),
+    /// Region edit result.
+    RegionEdit(RegionEditResult),
 }
 
 /// Notifies a flush job is finished.
@@ -631,6 +654,10 @@ pub(crate) struct FlushFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// Flush timer.
     pub(crate) _timer: HistogramTimer,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
+    /// Memtables to remove.
+    pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
 }
 
 impl FlushFinished {
@@ -669,6 +696,8 @@ pub(crate) struct CompactionFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
 }
 
 impl CompactionFinished {
@@ -716,6 +745,32 @@ pub(crate) struct TruncateResult {
     pub(crate) truncated_entry_id: EntryId,
     /// Truncated sequence.
     pub(crate) truncated_sequence: SequenceNumber,
+}
+
+/// Notifies the region the result of writing region change action.
+#[derive(Debug)]
+pub(crate) struct RegionChangeResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// The new region metadata to apply.
+    pub(crate) new_meta: RegionMetadataRef,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Result from the manifest manager.
+    pub(crate) result: Result<()>,
+}
+
+/// Notifies the regin the result of editing region.
+#[derive(Debug)]
+pub(crate) struct RegionEditResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: Sender<Result<()>>,
+    /// Region edit to apply.
+    pub(crate) edit: RegionEdit,
+    /// Result from the manifest manager.
+    pub(crate) result: Result<()>,
 }
 
 #[cfg(test)]

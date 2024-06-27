@@ -56,6 +56,11 @@ pub trait EventListener: Send + Sync {
     async fn on_merge_ssts_finished(&self, region_id: RegionId) {
         let _ = region_id;
     }
+
+    /// Notifies the listener that the worker receives requests from the request channel.
+    fn on_recv_requests(&self, request_num: usize) {
+        let _ = request_num;
+    }
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -208,5 +213,48 @@ impl EventListener for CompactionListener {
 
         // Blocks current task.
         self.blocker.notified().await;
+    }
+}
+
+/// Listener to block on flush and alter.
+#[derive(Default)]
+pub struct AlterFlushListener {
+    flush_begin_notify: Notify,
+    block_flush_notify: Notify,
+    request_begin_notify: Notify,
+}
+
+impl AlterFlushListener {
+    /// Waits on flush begin.
+    pub async fn wait_flush_begin(&self) {
+        self.flush_begin_notify.notified().await;
+    }
+
+    /// Waits on request begin.
+    pub async fn wait_request_begin(&self) {
+        self.request_begin_notify.notified().await;
+    }
+
+    /// Continue the flush job.
+    pub fn wake_flush(&self) {
+        self.block_flush_notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for AlterFlushListener {
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        info!("Wait on notify to start flush for region {}", region_id);
+
+        self.flush_begin_notify.notify_one();
+        self.block_flush_notify.notified().await;
+
+        info!("region {} begin flush", region_id);
+    }
+
+    fn on_recv_requests(&self, request_num: usize) {
+        info!("receive {} request", request_num);
+
+        self.request_begin_notify.notify_one();
     }
 }

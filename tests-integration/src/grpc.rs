@@ -555,7 +555,7 @@ CREATE TABLE {table_name} (
             let region_id = RegionId::new(table_id, *region);
 
             let stream = region_server
-                .handle_read(RegionQueryRequest {
+                .handle_remote_read(RegionQueryRequest {
                     region_id: region_id.as_u64(),
                     plan: plan.to_vec(),
                     ..Default::default()
@@ -652,7 +652,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
-                "SELECT ts, a, b FROM auto_created_table".to_string(),
+                "SELECT ts, a, b FROM auto_created_table order by ts".to_string(),
             )),
         });
         let output = query(instance, request.clone()).await;

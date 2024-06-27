@@ -15,6 +15,7 @@
 pub mod builder;
 mod grpc;
 mod influxdb;
+mod log_handler;
 mod opentsdb;
 mod otlp;
 mod prom_store;
@@ -48,6 +49,7 @@ use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
+use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -66,7 +68,7 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
+    InfluxdbLineProtocolHandler, LogHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
@@ -100,6 +102,7 @@ pub trait FrontendInstance:
     + OpenTelemetryProtocolHandler
     + ScriptHandler
     + PrometheusHandler
+    + LogHandler
     + Send
     + Sync
     + 'static
@@ -108,12 +111,12 @@ pub trait FrontendInstance:
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
-pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 #[derive(Clone)]
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
     script_executor: Arc<ScriptExecutor>,
+    pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
@@ -188,7 +191,7 @@ impl Instance {
 
     pub fn build_servers(
         &mut self,
-        opts: impl Into<FrontendOptions> + for<'de> Configurable<'de>,
+        opts: impl Into<FrontendOptions> + Configurable,
         servers: ServerHandlers,
     ) -> Result<()> {
         let opts: FrontendOptions = opts.into();
@@ -514,6 +517,9 @@ pub fn check_permission(
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
         }
+        Statement::ShowCreateFlow(stmt) => {
+            validate_param(&stmt.flow_name, query_ctx)?;
+        }
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
@@ -543,7 +549,9 @@ pub fn check_permission(
             validate_param(&stmt.source_name, query_ctx)?;
         }
         Statement::DropTable(drop_stmt) => {
-            validate_param(drop_stmt.table_name(), query_ctx)?;
+            for table_name in drop_stmt.table_names() {
+                validate_param(table_name, query_ctx)?;
+            }
         }
         Statement::ShowTables(stmt) => {
             validate_db_permission!(stmt, query_ctx);

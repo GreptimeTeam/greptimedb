@@ -24,9 +24,10 @@ use hydroflow::futures::future::Map;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use substrait::variation_const::{
-    DATE_32_TYPE_REF, DATE_64_TYPE_REF, DEFAULT_TYPE_REF, TIMESTAMP_MICRO_TYPE_REF,
-    TIMESTAMP_MILLI_TYPE_REF, TIMESTAMP_NANO_TYPE_REF, TIMESTAMP_SECOND_TYPE_REF,
-    UNSIGNED_INTEGER_TYPE_REF,
+    DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
+    TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
+    TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
+    UNSIGNED_INTEGER_TYPE_VARIATION_REF,
 };
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
@@ -53,14 +54,14 @@ use crate::expr::{
     TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
-use crate::repr::{self, ColumnType, RelationType};
+use crate::repr::{self, ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
-    fn from_substrait_agg_grouping(
+    async fn from_substrait_agg_grouping(
         ctx: &mut FlownodeContext,
         groupings: &[Grouping],
-        typ: &RelationType,
+        typ: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<Vec<TypedExpr>, Error> {
         let _ = ctx;
@@ -68,7 +69,7 @@ impl TypedExpr {
         match groupings.len() {
             1 => {
                 for e in &groupings[0].grouping_expressions {
-                    let x = TypedExpr::from_substrait_rex(e, typ, extensions)?;
+                    let x = TypedExpr::from_substrait_rex(e, typ, extensions).await?;
                     group_expr.push(x);
                 }
             }
@@ -86,10 +87,10 @@ impl AggregateExpr {
     /// Convert list of `Measure` into Flow's AggregateExpr
     ///
     /// Return both the AggregateExpr and a MapFilterProject that is the final output of the aggregate function
-    fn from_substrait_agg_measures(
+    async fn from_substrait_agg_measures(
         ctx: &mut FlownodeContext,
         measures: &[Measure],
-        typ: &RelationType,
+        typ: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<(Vec<AggregateExpr>, MapFilterProject), Error> {
         let _ = ctx;
@@ -97,11 +98,15 @@ impl AggregateExpr {
         let mut post_maps = vec![];
 
         for m in measures {
-            let filter = &m
+            let filter = match m
                 .filter
                 .as_ref()
                 .map(|fil| TypedExpr::from_substrait_rex(fil, typ, extensions))
-                .transpose()?;
+            {
+                Some(fut) => Some(fut.await),
+                None => None,
+            }
+            .transpose()?;
 
             let (aggr_expr, post_mfp) = match &m.measure {
                 Some(f) => {
@@ -111,9 +116,10 @@ impl AggregateExpr {
                         _ => false,
                     };
                     AggregateExpr::from_substrait_agg_func(
-                        f, typ, extensions, filter, // TODO(discord9): impl order_by
+                        f, typ, extensions, &filter, // TODO(discord9): impl order_by
                         &None, distinct,
                     )
+                    .await
                 }
                 None => not_impl_err!("Aggregate without aggregate function is not supported"),
             }?;
@@ -141,9 +147,9 @@ impl AggregateExpr {
     ///
     /// the returned value is a tuple of AggregateExpr and a optional ScalarExpr that if exist is the final output of the aggregate function
     /// since aggr functions like `avg` need to be transform to `sum(x)/cast(count(x) as x_type)`
-    pub fn from_substrait_agg_func(
+    pub async fn from_substrait_agg_func(
         f: &proto::AggregateFunction,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
         filter: &Option<TypedExpr>,
         order_by: &Option<Vec<TypedExpr>>,
@@ -156,7 +162,7 @@ impl AggregateExpr {
         for arg in &f.arguments {
             let arg_expr = match &arg.arg_type {
                 Some(ArgType::Value(e)) => {
-                    TypedExpr::from_substrait_rex(e, input_schema, extensions)
+                    TypedExpr::from_substrait_rex(e, input_schema, extensions).await
                 }
                 _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
             }?;
@@ -285,19 +291,34 @@ impl KeyValPlan {
     }
 }
 
+/// find out the column that should be time index in group exprs(which is all columns that should be keys)
+/// TODO(discord9): better ways to assign time index
+fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
+    group_exprs.iter().position(|expr| {
+        matches!(
+            &expr.expr,
+            ScalarExpr::CallUnary {
+                func: UnaryFunc::TumbleWindowFloor { .. },
+                expr: _
+            }
+        )
+    })
+}
+
 impl TypedPlan {
     /// Convert AggregateRel into Flow's TypedPlan
     ///
     /// The output of aggr plan is:
     ///
     /// <group_exprs>..<aggr_exprs>
-    pub fn from_substrait_agg_rel(
+    #[async_recursion::async_recursion]
+    pub async fn from_substrait_agg_rel(
         ctx: &mut FlownodeContext,
         agg: &proto::AggregateRel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
         let input = if let Some(input) = agg.input.as_ref() {
-            TypedPlan::from_substrait_rel(ctx, input, extensions)?
+            TypedPlan::from_substrait_rel(ctx, input, extensions).await?
         } else {
             return not_impl_err!("Aggregate without an input is not supported");
         };
@@ -306,44 +327,64 @@ impl TypedPlan {
             let group_exprs = TypedExpr::from_substrait_agg_grouping(
                 ctx,
                 &agg.groupings,
-                &input.typ,
+                &input.schema,
                 extensions,
-            )?;
+            )
+            .await?;
 
-            TypedExpr::expand_multi_value(&input.typ, &group_exprs)?
+            TypedExpr::expand_multi_value(&input.schema.typ, &group_exprs)?
         };
 
-        let time_index = group_exprs.iter().position(|expr| {
-            matches!(
-                &expr.expr,
-                ScalarExpr::CallUnary {
-                    func: UnaryFunc::TumbleWindowFloor { .. },
-                    expr: _
-                }
-            )
-        });
+        let time_index = find_time_index_in_group_exprs(&group_exprs);
 
-        let (mut aggr_exprs, post_mfp) =
-            AggregateExpr::from_substrait_agg_measures(ctx, &agg.measures, &input.typ, extensions)?;
+        let (mut aggr_exprs, post_mfp) = AggregateExpr::from_substrait_agg_measures(
+            ctx,
+            &agg.measures,
+            &input.schema,
+            extensions,
+        )
+        .await?;
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(
             &mut aggr_exprs,
             &group_exprs,
-            input.typ.column_types.len(),
+            input.schema.typ.column_types.len(),
         )?;
 
         // output type is group_exprs + aggr_exprs
         let output_type = {
             let mut output_types = Vec::new();
+            // give best effort to get column name
+            let mut output_names = Vec::new();
+            // mark all auto added cols
+            let mut auto_cols = vec![];
             // first append group_expr as key, then aggr_expr as value
-            for expr in &group_exprs {
+            for (idx, expr) in group_exprs.iter().enumerate() {
                 output_types.push(expr.typ.clone());
+                let col_name = match &expr.expr {
+                    ScalarExpr::CallUnary {
+                        func: UnaryFunc::TumbleWindowFloor { .. },
+                        ..
+                    } => Some("window_start".to_string()),
+                    ScalarExpr::CallUnary {
+                        func: UnaryFunc::TumbleWindowCeiling { .. },
+                        ..
+                    } => {
+                        auto_cols.push(idx);
+                        Some("window_end".to_string())
+                    }
+                    ScalarExpr::Column(col) => input.schema.get_name(*col).clone(),
+                    _ => None,
+                };
+                output_names.push(col_name)
             }
 
             for aggr in &aggr_exprs {
                 output_types.push(ColumnType::new_nullable(
                     aggr.func.signature().output.clone(),
                 ));
+                // TODO(discord9): find a clever way to name them?
+                output_names.push(None);
             }
             // TODO(discord9): try best to get time
             if group_exprs.is_empty() {
@@ -351,8 +392,10 @@ impl TypedPlan {
             } else {
                 RelationType::new(output_types).with_key((0..group_exprs.len()).collect_vec())
             }
-        }
-        .with_time_index(time_index);
+            .with_time_index(time_index)
+            .with_autos(&auto_cols)
+            .into_named(output_names)
+        };
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
@@ -390,13 +433,13 @@ impl TypedPlan {
         // FIX(discord9): deal with key first
         if post_mfp.is_identity() {
             Ok(TypedPlan {
-                typ: output_type,
+                schema: output_type,
                 plan,
             })
         } else {
             // make post_mfp map identical mapping of keys
             let input = TypedPlan {
-                typ: output_type.clone(),
+                schema: output_type.clone(),
                 plan,
             };
             let key_arity = group_exprs.len();
@@ -414,7 +457,7 @@ impl TypedPlan {
                 .filter(f)?
                 .project(p)?;
             Ok(TypedPlan {
-                typ: output_type.apply_mfp(&post_mfp)?,
+                schema: output_type.apply_mfp(&post_mfp.clone().into_safe())?,
                 plan: Plan::Mfp {
                     input: Box::new(input),
                     mfp: post_mfp,
@@ -426,14 +469,309 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use bytes::BytesMut;
     use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use pretty_assertions::{assert_eq, assert_ne};
 
     use super::*;
+    use crate::expr::{DfScalarFunction, RawDfScalarFn};
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    /// TODO(discord9): add more illegal sql tests
+    #[tokio::test]
+    async fn test_missing_key_check() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT avg(number) FROM numbers_with_ts GROUP BY tumble(ts, '1 hour'), number";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        assert!(TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_df_func_basic() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT sum(abs(number)) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            schema: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .with_autos(&[2])
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .map(vec![ScalarExpr::CallDf {
+                                    df_scalar_fn: DfScalarFunction::try_from_raw_fn(
+                                        RawDfScalarFn {
+                                            f: BytesMut::from(
+                                                b"\x08\x01\"\x08\x1a\x06\x12\x04\n\x02\x12\0"
+                                                    .as_ref(),
+                                            ),
+                                            input_schema: RelationType::new(vec![ColumnType::new(
+                                                ConcreteDataType::uint32_datatype(),
+                                                false,
+                                            )])
+                                            .into_unnamed(),
+                                            extensions: FunctionExtensions {
+                                                anchor_to_name: BTreeMap::from([
+                                                    (0, "tumble".to_string()),
+                                                    (1, "abs".to_string()),
+                                                    (2, "sum".to_string()),
+                                                ]),
+                                            },
+                                        },
+                                    )
+                                    .await
+                                    .unwrap(),
+                                    exprs: vec![ScalarExpr::Column(0)],
+                                }])
+                                .unwrap()
+                                .project(vec![2])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::Column(3),
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(expected, flow_plan);
+    }
+
+    #[tokio::test]
+    async fn test_df_func_expr_tree() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT abs(sum(number)) FROM numbers_with_ts GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00');";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let aggr_expr = AggregateExpr {
+            func: AggregateFunc::SumUInt32,
+            expr: ScalarExpr::Column(0),
+            distinct: false,
+        };
+        let expected = TypedPlan {
+            schema: RelationType::new(vec![
+                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                ColumnType::new(CDT::datetime_datatype(), false), // window start
+                ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .with_autos(&[2])
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
+            ]),
+            plan: Plan::Mfp {
+                input: Box::new(
+                    Plan::Reduce {
+                        input: Box::new(
+                            Plan::Get {
+                                id: crate::expr::Id::Global(GlobalId::User(1)),
+                            }
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
+                        ),
+                        key_val_plan: KeyValPlan {
+                            key_plan: MapFilterProject::new(2)
+                                .map(vec![
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowFloor {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                    ScalarExpr::Column(1).call_unary(
+                                        UnaryFunc::TumbleWindowCeiling {
+                                            window_size: Interval::from_month_day_nano(
+                                                0,
+                                                0,
+                                                1_000_000_000,
+                                            ),
+                                            start_time: Some(DateTime::new(1625097600000)),
+                                        },
+                                    ),
+                                ])
+                                .unwrap()
+                                .project(vec![2, 3])
+                                .unwrap()
+                                .into_safe(),
+                            val_plan: MapFilterProject::new(2)
+                                .project(vec![0, 1])
+                                .unwrap()
+                                .into_safe(),
+                        },
+                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                            full_aggrs: vec![aggr_expr.clone()],
+                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                            distinct_aggrs: vec![],
+                        }),
+                    }
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::datetime_datatype(), false), // window start
+                            ColumnType::new(CDT::datetime_datatype(), false), // window end
+                            ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
+                        ])
+                        .with_key(vec![1])
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
+                    ),
+                ),
+                mfp: MapFilterProject::new(3)
+                    .map(vec![
+                        ScalarExpr::Column(2),
+                        ScalarExpr::CallDf {
+                            df_scalar_fn: DfScalarFunction::try_from_raw_fn(RawDfScalarFn {
+                                f: BytesMut::from(b"\"\x08\x1a\x06\x12\x04\n\x02\x12\0".as_ref()),
+                                input_schema: RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint64_datatype(),
+                                    true,
+                                )])
+                                .into_unnamed(),
+                                extensions: FunctionExtensions {
+                                    anchor_to_name: BTreeMap::from([
+                                        (0, "abs".to_string()),
+                                        (1, "tumble".to_string()),
+                                        (2, "sum".to_string()),
+                                    ]),
+                                },
+                            })
+                            .await
+                            .unwrap(),
+                            exprs: vec![ScalarExpr::Column(3)],
+                        },
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(1),
+                    ])
+                    .unwrap()
+                    .project(vec![4, 5, 6])
+                    .unwrap(),
+            },
+        };
+        assert_eq!(expected, flow_plan);
+    }
 
     /// TODO(discord9): add more illegal sql tests
     #[tokio::test]
@@ -444,7 +782,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -470,10 +810,6 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            // TODO(discord9): mfp indirectly ref to key columns
-            /*
-            .with_key(vec![1])
-            .with_time_index(Some(0)),*/
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -481,10 +817,16 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -540,7 +882,15 @@ mod test {
                             ColumnType::new(CDT::int64_datatype(), true),  // avg.count(number)
                         ])
                         .with_key(vec![1, 2])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            Some("number".to_string()),
+                            None,
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(5)
@@ -555,11 +905,20 @@ mod test {
                     .project(vec![6, 7, 8, 9])
                     .unwrap(),
             },
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint32_datatype(), false), // number
                 ColumnType::new(CDT::uint64_datatype(), true),  // avg(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![0, 3])
+            .with_time_index(Some(2))
+            .with_autos(&[3])
+            .into_named(vec![
+                Some("number".to_string()),
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
             ]),
         };
         assert_eq!(flow_plan, expected);
@@ -572,7 +931,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -580,15 +941,19 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .with_autos(&[2])
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
             ]),
-            // TODO(discord9): mfp indirectly ref to key columns
-            /*
-            .with_key(vec![1])
-            .with_time_index(Some(0)),*/
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -596,10 +961,16 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -647,7 +1018,13 @@ mod test {
                             ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
                         ])
                         .with_key(vec![1])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -672,7 +1049,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -680,15 +1059,19 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
                 ColumnType::new(CDT::datetime_datatype(), false), // window start
                 ColumnType::new(CDT::datetime_datatype(), false), // window end
+            ])
+            .with_key(vec![2])
+            .with_time_index(Some(1))
+            .with_autos(&[2])
+            .into_named(vec![
+                None,
+                Some("window_start".to_string()),
+                Some("window_end".to_string()),
             ]),
-            // TODO(discord9): mfp indirectly ref to key columns
-            /*
-            .with_key(vec![1])
-            .with_time_index(Some(0)),*/
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -696,10 +1079,16 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(1)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                ColumnType::new(ConcreteDataType::datetime_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![
+                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                    ColumnType::new(ConcreteDataType::datetime_datatype(), false),
+                                ])
+                                .into_named(vec![
+                                    Some("number".to_string()),
+                                    Some("ts".to_string()),
+                                ]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(2)
@@ -747,7 +1136,13 @@ mod test {
                             ColumnType::new(CDT::uint64_datatype(), true),    //sum(number)
                         ])
                         .with_key(vec![1])
-                        .with_time_index(Some(0)),
+                        .with_time_index(Some(0))
+                        .with_autos(&[1])
+                        .into_named(vec![
+                            Some("window_start".to_string()),
+                            Some("window_end".to_string()),
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -772,7 +1167,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -798,10 +1193,12 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number) -> u64
                 ColumnType::new(CDT::uint32_datatype(), false), // number
-            ]),
+            ])
+            .with_key(vec![1])
+            .into_named(vec![None, Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -809,9 +1206,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_named(vec![Some("number".to_string())]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -840,7 +1241,12 @@ mod test {
                             ColumnType::new(ConcreteDataType::uint64_datatype(), true),  // sum
                             ColumnType::new(ConcreteDataType::int64_datatype(), true),   // count
                         ])
-                        .with_key(vec![0]),
+                        .with_key(vec![0])
+                        .into_named(vec![
+                            Some("number".to_string()),
+                            None,
+                            None,
+                        ]),
                     ),
                 ),
                 mfp: MapFilterProject::new(3)
@@ -866,7 +1272,9 @@ mod test {
 
         let mut ctx = create_test_ctx();
 
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -892,7 +1300,8 @@ mod test {
             els: Box::new(ScalarExpr::Literal(Value::Null, CDT::uint64_datatype())),
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_named(vec![None]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -900,9 +1309,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_named(vec![Some("number".to_string())]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -923,10 +1336,13 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(RelationType::new(vec![
-                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
-                        ColumnType::new(ConcreteDataType::int64_datatype(), true),
-                    ])),
+                    .with_types(
+                        RelationType::new(vec![
+                            ColumnType::new(ConcreteDataType::uint64_datatype(), true), // sum
+                            ColumnType::new(ConcreteDataType::int64_datatype(), true),  // count
+                        ])
+                        .into_named(vec![None, None]),
+                    ),
                 ),
                 mfp: MapFilterProject::new(2)
                     .map(vec![
@@ -949,7 +1365,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
         let typ = RelationType::new(vec![ColumnType::new(
             ConcreteDataType::uint64_datatype(),
             true,
@@ -960,7 +1376,8 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -968,9 +1385,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_named(vec![Some("number".to_string())]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -988,7 +1409,7 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(typ),
+                    .with_types(typ.into_unnamed()),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0), ScalarExpr::Column(1)])
@@ -1007,7 +1428,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1015,10 +1438,12 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![
+            schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // col sum(number)
                 ColumnType::new(CDT::uint32_datatype(), false), // col number
-            ]),
+            ])
+            .with_key(vec![1])
+            .into_named(vec![None, Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1026,9 +1451,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_named(vec![Some("number".to_string())]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -1053,7 +1482,8 @@ mod test {
                             ColumnType::new(CDT::uint32_datatype(), false), // col number
                             ColumnType::new(CDT::uint64_datatype(), true),  // col sum(number)
                         ])
-                        .with_key(vec![0]),
+                        .with_key(vec![0])
+                        .into_named(vec![Some("number".to_string()), None]),
                     ),
                 ),
                 mfp: MapFilterProject::new(2)
@@ -1078,7 +1508,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1086,7 +1516,8 @@ mod test {
             distinct: false,
         };
         let expected = TypedPlan {
-            typ: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)]),
+            schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                .into_unnamed(),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1094,9 +1525,13 @@ mod test {
                             Plan::Get {
                                 id: crate::expr::Id::Global(GlobalId::User(0)),
                             }
-                            .with_types(RelationType::new(vec![
-                                ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                            ])),
+                            .with_types(
+                                RelationType::new(vec![ColumnType::new(
+                                    ConcreteDataType::uint32_datatype(),
+                                    false,
+                                )])
+                                .into_named(vec![Some("number".to_string())]),
+                            ),
                         ),
                         key_val_plan: KeyValPlan {
                             key_plan: MapFilterProject::new(1)
@@ -1117,10 +1552,10 @@ mod test {
                             distinct_aggrs: vec![],
                         }),
                     }
-                    .with_types(RelationType::new(vec![ColumnType::new(
-                        CDT::uint64_datatype(),
-                        true,
-                    )])),
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                            .into_unnamed(),
+                    ),
                 ),
                 mfp: MapFilterProject::new(1)
                     .map(vec![ScalarExpr::Column(0), ScalarExpr::Column(1)])

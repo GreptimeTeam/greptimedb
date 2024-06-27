@@ -19,11 +19,10 @@ use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_config::Configurable;
-use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
+use common_telemetry::{info, warn};
 use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
-use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::service::DatanodeServiceBuilder;
 use meta_client::MetaClientOptions;
@@ -34,10 +33,12 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
-use crate::options::GlobalOptions;
+use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-datanode";
+
+type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions>;
 
 pub struct Instance {
     datanode: Datanode,
@@ -97,7 +98,9 @@ impl Command {
     }
 
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
-        self.subcmd.load_options(global_options)
+        match &self.subcmd {
+            SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
     }
 }
 
@@ -110,12 +113,6 @@ impl SubCommand {
     async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
-        }
-    }
-
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
-        match self {
-            SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
     }
 }
@@ -146,22 +143,26 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
-        self.merge_with_cli_options(
-            global_options,
-            DatanodeOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
+        let mut opts = DatanodeOptions::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
         )
+        .context(LoadLayeredConfigSnafu)?;
+
+        self.merge_with_cli_options(global_options, &mut opts)?;
+
+        Ok(opts)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
+    #[allow(deprecated)]
     fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
-        mut opts: DatanodeOptions,
-    ) -> Result<DatanodeOptions> {
+        opts: &mut DatanodeOptions,
+    ) -> Result<()> {
+        let opts = &mut opts.component;
+
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -176,11 +177,32 @@ impl StartCommand {
         };
 
         if let Some(addr) = &self.rpc_addr {
-            opts.rpc_addr.clone_from(addr);
+            opts.grpc.addr.clone_from(addr);
+        } else if let Some(addr) = &opts.rpc_addr {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead.");
+            opts.grpc.addr.clone_from(addr);
         }
 
-        if self.rpc_hostname.is_some() {
-            opts.rpc_hostname.clone_from(&self.rpc_hostname);
+        if let Some(hostname) = &self.rpc_hostname {
+            opts.grpc.hostname.clone_from(hostname);
+        } else if let Some(hostname) = &opts.rpc_hostname {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead.");
+            opts.grpc.hostname.clone_from(hostname);
+        }
+
+        if let Some(runtime_size) = opts.rpc_runtime_size {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_runtime_size`, please use `grpc.runtime_size` instead.");
+            opts.grpc.runtime_size = runtime_size;
+        }
+
+        if let Some(max_recv_message_size) = opts.rpc_max_recv_message_size {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_recv_message_size`, please use `grpc.max_recv_message_size` instead.");
+            opts.grpc.max_recv_message_size = max_recv_message_size;
+        }
+
+        if let Some(max_send_message_size) = opts.rpc_max_send_message_size {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_send_message_size`, please use `grpc.max_send_message_size` instead.");
+            opts.grpc.max_send_message_size = max_send_message_size;
         }
 
         if let Some(node_id) = self.node_id {
@@ -231,24 +253,27 @@ impl StartCommand {
         // Disable dashboard in datanode.
         opts.http.disable_dashboard = true;
 
-        Ok(opts)
+        Ok(())
     }
 
-    async fn build(&self, mut opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
+        common_runtime::init_global_runtimes(&opts.runtime);
+
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
-            &opts.logging,
-            &opts.tracing,
-            opts.node_id.map(|x| x.to_string()),
+            &opts.component.logging,
+            &opts.component.tracing,
+            opts.component.node_id.map(|x| x.to_string()),
         );
         log_versions(version!(), short_version!());
 
+        info!("Datanode start command: {:#?}", self);
+        info!("Datanode options: {:#?}", opts);
+
+        let mut opts = opts.component;
         let plugins = plugins::setup_datanode_plugins(&mut opts)
             .await
             .context(StartDatanodeSnafu)?;
-
-        info!("Datanode start command: {:#?}", self);
-        info!("Datanode options: {:#?}", opts);
 
         let node_id = opts
             .node_id
@@ -300,15 +325,45 @@ mod tests {
     use crate::options::GlobalOptions;
 
     #[test]
+    fn test_deprecated_cli_options() {
+        common_telemetry::init_default_ut_logging();
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+            enable_memory_catalog = false
+            node_id = 42
+            
+            rpc_addr = "127.0.0.1:4001"
+            rpc_hostname = "192.168.0.1"
+            [grpc]
+            addr = "127.0.0.1:3001"
+            hostname = "127.0.0.1"
+            runtime_size = 8
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let cmd = StartCommand {
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let options = cmd.load_options(&Default::default()).unwrap().component;
+        assert_eq!("127.0.0.1:4001".to_string(), options.grpc.addr);
+        assert_eq!("192.168.0.1".to_string(), options.grpc.hostname);
+    }
+
+    #[test]
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            rpc_addr = "127.0.0.1:3001"
-            rpc_hostname = "127.0.0.1"
-            rpc_runtime_size = 8
+            
+            [grpc]
+            addr = "127.0.0.1:3001"
+            hostname = "127.0.0.1"
+            runtime_size = 8
 
             [heartbeat]
             interval = "300ms"
@@ -353,9 +408,9 @@ mod tests {
             ..Default::default()
         };
 
-        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
+        let options = cmd.load_options(&Default::default()).unwrap().component;
 
-        assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.addr);
         assert_eq!(Some(42), options.node_id);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
@@ -414,7 +469,8 @@ mod tests {
     fn test_try_from_cmd() {
         let opt = StartCommand::default()
             .load_options(&GlobalOptions::default())
-            .unwrap();
+            .unwrap()
+            .component;
         assert_eq!(Mode::Standalone, opt.mode);
 
         let opt = (StartCommand {
@@ -423,7 +479,8 @@ mod tests {
             ..Default::default()
         })
         .load_options(&GlobalOptions::default())
-        .unwrap();
+        .unwrap()
+        .component;
         assert_eq!(Mode::Distributed, opt.mode);
 
         assert!((StartCommand {
@@ -454,7 +511,8 @@ mod tests {
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .component;
 
         let logging_opt = options.logging;
         assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
@@ -469,8 +527,8 @@ mod tests {
             enable_memory_catalog = false
             node_id = 42
             rpc_addr = "127.0.0.1:3001"
-            rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
+            rpc_hostname = "10.103.174.219"
 
             [meta_client]
             timeout = "3s"
@@ -536,7 +594,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command.load_options(&GlobalOptions::default()).unwrap();
+                let opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
                 let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
@@ -562,7 +620,11 @@ mod tests {
                 assert_eq!(raft_engine_config.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
-                assert_eq!(opts.http.addr, DatanodeOptions::default().http.addr);
+                assert_eq!(
+                    opts.http.addr,
+                    DatanodeOptions::default().component.http.addr
+                );
+                assert_eq!(opts.grpc.hostname, "10.103.174.219");
             },
         );
     }

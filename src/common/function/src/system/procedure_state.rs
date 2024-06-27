@@ -44,10 +44,10 @@ struct ProcedureStateJson {
 /// A function to query procedure state by its id.
 /// Such as `procedure_state(pid)`.
 #[admin_fn(
-    name = "ProcedureStateFunction",
-    display_name = "procedure_state",
-    sig_fn = "signature",
-    ret = "string"
+    name = ProcedureStateFunction,
+    display_name = procedure_state,
+    sig_fn = signature,
+    ret = string
 )]
 pub(crate) async fn procedure_state(
     procedure_service_handler: &ProcedureServiceHandlerRef,

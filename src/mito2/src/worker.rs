@@ -657,6 +657,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
 
+            self.listener.on_recv_requests(buffer.len());
+
             self.handle_requests(&mut buffer).await;
 
             self.handle_periodical_tasks();
@@ -721,8 +723,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
-                DdlRequest::Open(req) => {
-                    self.handle_open_request(ddl.region_id, req, ddl.sender)
+                DdlRequest::Open((req, wal_entry_receiver)) => {
+                    self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
                         .await;
                     continue;
                 }
@@ -783,6 +785,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
+            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req),
         }
     }
 
@@ -898,6 +902,15 @@ impl WorkerListener {
         }
         // Avoid compiler warning.
         let _ = region_id;
+    }
+
+    pub(crate) fn on_recv_requests(&self, request_num: usize) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_recv_requests(request_num);
+        }
+        // Avoid compiler warning.
+        let _ = request_num;
     }
 }
 

@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, Mode};
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -35,11 +35,10 @@ use snafu::ResultExt;
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
 use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::GrpcOptions;
 
 pub struct Services<T, U>
 where
-    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     opts: T,
@@ -51,7 +50,7 @@ where
 
 impl<T, U> Services<T, U>
 where
-    T: Into<FrontendOptions> + for<'de> Configurable<'de> + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     pub fn new(opts: T, instance: Arc<U>, plugins: Plugins) -> Self {
@@ -89,6 +88,8 @@ where
             ServerSqlQueryHandlerAdapter::arc(self.instance.clone()),
             Some(self.instance.clone()),
         );
+
+        builder = builder.with_log_ingest_handler(self.instance.clone());
 
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
             builder = builder.with_user_provider(user_provider);
@@ -140,11 +141,15 @@ where
         };
 
         let user_provider = self.plugins.get::<UserProviderRef>();
+        let runtime = match opts.mode {
+            Mode::Standalone => Some(builder.runtime().clone()),
+            _ => None,
+        };
 
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
-            builder.runtime().clone(),
+            runtime,
         );
 
         let grpc_server = builder

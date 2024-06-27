@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::WalEntry;
 use async_stream::stream;
 use common_telemetry::{debug, error};
 use futures::future::join_all;
-use snafu::ensure;
+use snafu::OptionExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
@@ -99,34 +97,31 @@ impl WalEntryDistributor {
 /// Receives the Wal entries from [WalEntryDistributor].
 #[derive(Debug)]
 pub(crate) struct WalEntryReceiver {
-    region_id: RegionId,
     /// Receives the [Entry] from the [WalEntryDistributor].
-    entry_receiver: Receiver<Entry>,
+    entry_receiver: Option<Receiver<Entry>>,
     /// Sends the `start_id` to the [WalEntryDistributor].
-    arg_sender: oneshot::Sender<EntryId>,
+    arg_sender: Option<oneshot::Sender<EntryId>>,
 }
 
 impl WalEntryReceiver {
-    pub fn new(
-        region_id: RegionId,
-        entry_receiver: Receiver<Entry>,
-        arg_sender: oneshot::Sender<EntryId>,
-    ) -> Self {
+    pub fn new(entry_receiver: Receiver<Entry>, arg_sender: oneshot::Sender<EntryId>) -> Self {
         Self {
-            region_id,
-            entry_receiver,
-            arg_sender,
+            entry_receiver: Some(entry_receiver),
+            arg_sender: Some(arg_sender),
         }
     }
 }
 
 impl WalEntryReader for WalEntryReceiver {
-    fn read(self, provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
-        let WalEntryReceiver {
-            region_id: expected_region_id,
-            mut entry_receiver,
-            arg_sender,
-        } = self;
+    fn read(&mut self, _provider: &Provider, start_id: EntryId) -> Result<WalEntryStream<'static>> {
+        let arg_sender =
+            self.arg_sender
+                .take()
+                .with_context(|| error::InvalidWalReadRequestSnafu {
+                    reason: format!("Call WalEntryReceiver multiple time, start_id: {start_id}"),
+                })?;
+        // Safety: check via arg_sender
+        let mut entry_receiver = self.entry_receiver.take().unwrap();
 
         if arg_sender.send(start_id).is_err() {
             return error::InvalidWalReadRequestSnafu {
@@ -167,6 +162,9 @@ struct EntryReceiver {
     sender: Sender<Entry>,
 }
 
+/// The default buffer size of the [Entry] receiver.
+pub const DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE: usize = 2048;
+
 /// Returns [WalEntryDistributor] and batch [WalEntryReceiver]s.
 ///
 /// ### Note:
@@ -186,20 +184,20 @@ struct EntryReceiver {
 pub fn build_wal_entry_distributor_and_receivers(
     provider: Provider,
     raw_wal_reader: Arc<dyn RawEntryReader>,
-    region_ids: Vec<RegionId>,
+    region_ids: &[RegionId],
     buffer_size: usize,
 ) -> (WalEntryDistributor, Vec<WalEntryReceiver>) {
     let mut senders = HashMap::with_capacity(region_ids.len());
     let mut readers = Vec::with_capacity(region_ids.len());
     let mut arg_receivers = Vec::with_capacity(region_ids.len());
 
-    for region_id in region_ids {
+    for &region_id in region_ids {
         let (entry_sender, entry_receiver) = mpsc::channel(buffer_size);
         let (arg_sender, arg_receiver) = oneshot::channel();
 
         senders.insert(region_id, entry_sender);
         arg_receivers.push((region_id, arg_receiver));
-        readers.push(WalEntryReceiver::new(region_id, entry_receiver, arg_sender));
+        readers.push(WalEntryReceiver::new(entry_receiver, arg_sender));
     }
 
     (
@@ -217,7 +215,7 @@ pub fn build_wal_entry_distributor_and_receivers(
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::{Mutation, OpType};
+    use api::v1::{Mutation, OpType, WalEntry};
     use futures::{stream, TryStreamExt};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
@@ -238,7 +236,7 @@ mod tests {
     }
 
     impl RawEntryReader for MockRawEntryReader {
-        fn read(&self, provider: &Provider, _start_id: EntryId) -> Result<EntryStream<'static>> {
+        fn read(&self, _provider: &Provider, _start_id: EntryId) -> Result<EntryStream<'static>> {
             let stream = stream::iter(self.entries.clone().into_iter().map(Ok));
             Ok(Box::pin(stream))
         }
@@ -257,7 +255,7 @@ mod tests {
         let (distributor, receivers) = build_wal_entry_distributor_and_receivers(
             provider,
             reader,
-            vec![RegionId::new(1024, 1), RegionId::new(1025, 1)],
+            &[RegionId::new(1024, 1), RegionId::new(1025, 1)],
             128,
         );
 
@@ -317,7 +315,7 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             reader,
-            vec![
+            &[
                 RegionId::new(1024, 1),
                 RegionId::new(1024, 2),
                 RegionId::new(1024, 3),
@@ -331,7 +329,7 @@ mod tests {
         drop(last);
 
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 0).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
@@ -427,12 +425,12 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             Arc::new(corrupted_stream),
-            vec![region1, region2, region3],
+            &[region1, region2, region3],
             128,
         );
         assert_eq!(receivers.len(), 3);
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 0).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
@@ -510,12 +508,12 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             Arc::new(corrupted_stream),
-            vec![region1, region2],
+            &[region1, region2],
             128,
         );
         assert_eq!(receivers.len(), 2);
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 0).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();
@@ -602,12 +600,12 @@ mod tests {
         let (distributor, mut receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             reader,
-            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+            &[RegionId::new(1024, 1), RegionId::new(1024, 2)],
             128,
         );
         assert_eq!(receivers.len(), 2);
         let mut streams = receivers
-            .into_iter()
+            .iter_mut()
             .map(|receiver| receiver.read(&provider, 4).unwrap())
             .collect::<Vec<_>>();
         distributor.distribute().await.unwrap();

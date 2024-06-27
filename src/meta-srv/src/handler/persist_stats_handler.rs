@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error::{self, Result};
 use crate::handler::node_stat::Stat;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
-use crate::keys::{StatKey, StatValue};
+use crate::key::{DatanodeStatKey, DatanodeStatValue};
 use crate::metasrv::Context;
 
 const MAX_CACHED_STATS_PER_KEY: usize = 10;
@@ -68,7 +68,7 @@ impl EpochStats {
 
 #[derive(Default)]
 pub struct PersistStatsHandler {
-    stats_cache: DashMap<StatKey, EpochStats>,
+    stats_cache: DashMap<DatanodeStatKey, EpochStats>,
 }
 
 #[async_trait::async_trait]
@@ -121,7 +121,7 @@ impl HeartbeatHandler for PersistStatsHandler {
             return Ok(HandleControl::Continue);
         }
 
-        let value: Vec<u8> = StatValue {
+        let value: Vec<u8> = DatanodeStatValue {
             stats: epoch_stats.drain_all(),
         }
         .try_into()?;
@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::keys::StatKey;
+    use crate::key::DatanodeStatKey;
     use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
     #[tokio::test]
@@ -186,17 +186,17 @@ mod tests {
         let handler = PersistStatsHandler::default();
         handle_request_many_times(ctx.clone(), &handler, 1).await;
 
-        let key = StatKey {
+        let key = DatanodeStatKey {
             cluster_id: 3,
             node_id: 101,
         };
         let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
-        let key: StatKey = kv.key.clone().try_into().unwrap();
+        let key: DatanodeStatKey = kv.key.clone().try_into().unwrap();
         assert_eq!(3, key.cluster_id);
         assert_eq!(101, key.node_id);
-        let val: StatValue = kv.value.try_into().unwrap();
+        let val: DatanodeStatValue = kv.value.try_into().unwrap();
         // first new stat must be set in kv store immediately
         assert_eq!(1, val.stats.len());
         assert_eq!(1, val.stats[0].region_num);
@@ -206,7 +206,7 @@ mod tests {
         let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
-        let val: StatValue = kv.value.try_into().unwrap();
+        let val: DatanodeStatValue = kv.value.try_into().unwrap();
         // refresh every 10 stats
         assert_eq!(10, val.stats.len());
     }

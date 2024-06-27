@@ -14,7 +14,7 @@
 
 use core::default::Default;
 use std::cmp::Ordering;
-use std::fmt::{Display, Formatter, Write};
+use std::fmt::{self, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ use crate::{error, Interval};
 /// # Note:
 /// For values out of range, you can still store these timestamps, but while performing arithmetic
 /// or formatting operations, it will return an error or just overflow.
-#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
+#[derive(Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,
     unit: TimeUnit,
@@ -495,6 +495,12 @@ impl From<Timestamp> for i64 {
 impl From<Timestamp> for serde_json::Value {
     fn from(d: Timestamp) -> Self {
         serde_json::Value::String(d.to_iso8601_string())
+    }
+}
+
+impl fmt::Debug for Timestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}::{}", self.value, self.unit)
     }
 }
 
@@ -1380,6 +1386,26 @@ mod tests {
         assert_eq!(
             "+262142-12-31 23:59:59",
             Timestamp::MAX_SECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+    }
+
+    #[test]
+    fn test_debug_timestamp() {
+        assert_eq!(
+            "1000::Second",
+            format!("{:?}", Timestamp::new(1000, TimeUnit::Second))
+        );
+        assert_eq!(
+            "1001::Millisecond",
+            format!("{:?}", Timestamp::new(1001, TimeUnit::Millisecond))
+        );
+        assert_eq!(
+            "1002::Microsecond",
+            format!("{:?}", Timestamp::new(1002, TimeUnit::Microsecond))
+        );
+        assert_eq!(
+            "1003::Nanosecond",
+            format!("{:?}", Timestamp::new(1003, TimeUnit::Nanosecond))
         );
     }
 }

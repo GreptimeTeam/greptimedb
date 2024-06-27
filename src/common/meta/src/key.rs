@@ -83,20 +83,16 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
-/// TODO(weny):removes id.
-#[allow(unused)]
 pub mod flow;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
-pub mod view_info;
-// TODO(weny): removes it.
-#[allow(deprecated)]
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
 mod tombstone;
 pub(crate) mod txn_helper;
+pub mod view_info;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
@@ -139,7 +135,7 @@ use crate::rpc::store::BatchDeleteRequest;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
-pub const MAINTENANCE_KEY: &str = "maintenance";
+pub const MAINTENANCE_KEY: &str = "__maintenance";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";

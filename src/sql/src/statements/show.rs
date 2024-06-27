@@ -40,6 +40,7 @@ impl Display for ShowKind {
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowDatabases {
     pub kind: ShowKind,
+    pub full: bool,
 }
 
 /// The SQL `SHOW COLUMNS` statement
@@ -85,15 +86,20 @@ impl Display for ShowIndex {
 
 impl ShowDatabases {
     /// Creates a statement for `SHOW DATABASES`
-    pub fn new(kind: ShowKind) -> Self {
-        ShowDatabases { kind }
+    pub fn new(kind: ShowKind, full: bool) -> Self {
+        ShowDatabases { kind, full }
     }
 }
 
 impl Display for ShowDatabases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = &self.kind;
-        write!(f, r#"SHOW DATABASES {kind}"#)
+
+        if self.full {
+            write!(f, r#"SHOW FULL DATABASES {kind}"#)
+        } else {
+            write!(f, r#"SHOW DATABASES {kind}"#)
+        }
     }
 }
 
@@ -129,6 +135,19 @@ impl Display for ShowCreateTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let table_name = &self.table_name;
         write!(f, r#"SHOW CREATE TABLE {table_name}"#)
+    }
+}
+
+/// SQL structure for `SHOW CREATE FLOW`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct ShowCreateFlow {
+    pub flow_name: ObjectName,
+}
+
+impl Display for ShowCreateFlow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let flow_name = &self.flow_name;
+        write!(f, "SHOW CREATE FLOW {flow_name}")
     }
 }
 
@@ -233,6 +252,35 @@ mod tests {
     #[test]
     pub fn test_show_create_missing_table_name() {
         let sql = "SHOW CREATE TABLE";
+        assert!(ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    pub fn test_show_create_flow() {
+        let sql = "SHOW CREATE FLOW test";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowCreateFlow { .. });
+        match &stmts[0] {
+            Statement::ShowCreateFlow(show) => {
+                let flow_name = show.flow_name.to_string();
+                assert_eq!(flow_name, "test");
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+    #[test]
+    pub fn test_show_create_missing_flow() {
+        let sql = "SHOW CREATE FLOW";
         assert!(ParserContext::create_with_dialect(
             sql,
             &GreptimeDbDialect {},

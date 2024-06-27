@@ -30,6 +30,8 @@ pub const REGION_LEASE_SECS: u64 =
 /// If the node's lease has expired, the `Selector` will not select it.
 pub const DATANODE_LEASE_SECS: u64 = REGION_LEASE_SECS;
 
+pub const FLOWNODE_LEASE_SECS: u64 = DATANODE_LEASE_SECS;
+
 /// The lease seconds of metasrv leader.
 pub const META_LEASE_SECS: u64 = 3;
 

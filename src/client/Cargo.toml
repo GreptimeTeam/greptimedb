@@ -31,9 +31,11 @@ moka = { workspace = true, features = ["future"] }
 parking_lot = "0.12"
 prometheus.workspace = true
 prost.workspace = true
+query.workspace = true
 rand.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+substrait.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
@@ -42,7 +44,6 @@ tonic.workspace = true
 common-grpc-expr.workspace = true
 datanode.workspace = true
 derive-new = "0.5"
-substrait.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

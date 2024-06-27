@@ -82,7 +82,7 @@ async fn test_append_mode_write_query() {
         .scan_region(region_id, ScanRequest::default())
         .unwrap();
     let seq_scan = scan.seq_scan().unwrap();
-    let stream = seq_scan.build_stream().await.unwrap();
+    let stream = seq_scan.build_stream().unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
@@ -113,7 +113,7 @@ async fn test_append_mode_compaction() {
         .await
         .unwrap();
 
-    // Flush 2 SSTs for compaction.
+    // Flush 3 SSTs for compaction.
     // a, field 1, 2
     let rows = Rows {
         schema: column_schemas.clone(),

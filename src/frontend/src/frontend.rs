@@ -17,13 +17,14 @@ use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 
 use crate::service_config::{
-    DatanodeOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
-    PostgresOptions, PromStoreOptions,
+    DatanodeOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
+    PromStoreOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,7 +75,7 @@ impl Default for FrontendOptions {
     }
 }
 
-impl Configurable<'_> for FrontendOptions {
+impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["meta_client.metasrv_addrs"])
     }

@@ -26,7 +26,7 @@ use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
-use crate::engine::options::set_index_options_for_data_region;
+use crate::engine::options::set_data_region_options;
 use crate::error::{OpenMitoRegionSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
@@ -80,7 +80,7 @@ impl MetricEngineInner {
         };
 
         let mut data_region_options = request.options;
-        set_index_options_for_data_region(&mut data_region_options);
+        set_data_region_options(&mut data_region_options);
         let open_data_region_request = RegionOpenRequest {
             region_dir: data_region_dir,
             options: data_region_options,
@@ -122,7 +122,7 @@ impl MetricEngineInner {
     /// Includes:
     /// - Record physical region's column names
     /// - Record the mapping between logical region id and physical region id
-    async fn recover_states(&self, physical_region_id: RegionId) -> Result<()> {
+    pub(crate) async fn recover_states(&self, physical_region_id: RegionId) -> Result<()> {
         // load logical regions and physical column names
         let logical_regions = self
             .metadata_region

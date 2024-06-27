@@ -23,6 +23,7 @@ use itertools::Itertools;
 use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
+use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
@@ -201,6 +202,27 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
     }
 }
 
+pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
+    match param {
+        Expr::Value(v) => {
+            let v = sql_value_to_value("", t, v, None);
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
+                }
+                .fail(),
+            }
+        }
+        _ => error::InvalidParameterSnafu {
+            reason: format!("cannot convert {:?} to scalar value of type {}", param, t),
+        }
+        .fail(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sql::dialect::MySqlDialect;
@@ -264,5 +286,46 @@ mod tests {
             unreachable!()
         };
         assert_eq!("SELECT from AS demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+    }
+
+    #[test]
+    fn test_convert_expr_to_scalar_value() {
+        let expr = Expr::Value(ValueExpr::Number("123".to_string(), false));
+        let t = ConcreteDataType::int32_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Int32(Some(123)), v);
+
+        let expr = Expr::Value(ValueExpr::Number("123.456789".to_string(), false));
+        let t = ConcreteDataType::float64_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Float64(Some(123.456789)), v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("2001-01-02".to_string()));
+        let t = ConcreteDataType::date_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        let scalar_v = ScalarValue::Utf8(Some("2001-01-02".to_string()))
+            .cast_to(&arrow_schema::DataType::Date32)
+            .unwrap();
+        assert_eq!(scalar_v, v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString(
+            "2001-01-02 03:04:05".to_string(),
+        ));
+        let t = ConcreteDataType::datetime_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
+            .cast_to(&arrow_schema::DataType::Date64)
+            .unwrap();
+        assert_eq!(scalar_v, v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("hello".to_string()));
+        let t = ConcreteDataType::string_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Utf8(Some("hello".to_string())), v);
+
+        let expr = Expr::Value(ValueExpr::Null);
+        let t = ConcreteDataType::time_microsecond_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Time64Microsecond(None), v);
     }
 }

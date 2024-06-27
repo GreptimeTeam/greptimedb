@@ -19,6 +19,7 @@ pub mod client_manager;
 #[cfg(feature = "testing")]
 mod database;
 pub mod error;
+pub mod flow;
 pub mod load_balance;
 mod metrics;
 pub mod region;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
 use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
@@ -23,6 +24,8 @@ use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowIndex, ShowKind, ShowTables, ShowVariables,
 };
+use sqlparser::ast::ObjectName;
+use table::metadata::TableType;
 use table::table_name::TableName;
 use table::TableRef;
 
@@ -81,6 +84,15 @@ impl StatementExecutor {
         table: TableRef,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let table_info = table.table_info();
+        if table_info.table_type != TableType::Base {
+            return error::ShowCreateTableBaseOnlySnafu {
+                table_name: table_name.to_string(),
+                table_type: table_info.table_type,
+            }
+            .fail();
+        }
+
         let partitions = self
             .partition_manager
             .find_table_partitions(table.table_info().table_id())
@@ -92,6 +104,17 @@ impl StatementExecutor {
         let partitions = create_partitions_stmt(partitions)?;
 
         query::sql::show_create_table(table, partitions, query_ctx)
+            .context(error::ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_create_flow(
+        &self,
+        flow_name: ObjectName,
+        flow_val: FlowInfoValue,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_create_flow(flow_name, flow_val, query_ctx)
             .context(error::ExecuteStatementSnafu)
     }
 

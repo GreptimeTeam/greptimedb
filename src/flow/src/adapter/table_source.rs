@@ -132,7 +132,7 @@ impl TableSource {
                         nullable: col.is_nullable(),
                         scalar_type: col.data_type,
                     },
-                    col.name,
+                    Some(col.name),
                 )
             })
             .unzip();
@@ -148,6 +148,8 @@ impl TableSource {
                     column_types,
                     keys,
                     time_index,
+                    // by default table schema's column are all non-auto
+                    auto_columns: vec![],
                 },
                 names: col_names,
             },
