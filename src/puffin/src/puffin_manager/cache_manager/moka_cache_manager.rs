@@ -370,6 +370,7 @@ impl DirWriterProvider for MokaDirWriterProvider {
     }
 }
 
+/// `RcDirGuard` is to manage the directory guard with reference counting.
 pub struct RcDirGuard {
     path: PathBuf,
     key: String,
