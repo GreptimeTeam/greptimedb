@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
+use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
@@ -154,15 +155,17 @@ pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
+    region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
 }
 
 impl DefaultContextFactory {
-    /// Returns an [ContextFactoryImpl].
+    /// Returns an [`DefaultContextFactory`].
     pub fn new(
         table_metadata_manager: TableMetadataManagerRef,
         opening_region_keeper: MemoryRegionKeeperRef,
+        region_failure_detector_controller: RegionFailureDetectorControllerRef,
         mailbox: MailboxRef,
         server_addr: String,
     ) -> Self {
@@ -170,6 +173,7 @@ impl DefaultContextFactory {
             volatile_ctx: VolatileContext::default(),
             table_metadata_manager,
             opening_region_keeper,
+            region_failure_detector_controller,
             mailbox,
             server_addr,
         }
@@ -183,6 +187,7 @@ impl ContextFactory for DefaultContextFactory {
             volatile_ctx: self.volatile_ctx,
             table_metadata_manager: self.table_metadata_manager,
             opening_region_keeper: self.opening_region_keeper,
+            region_failure_detector_controller: self.region_failure_detector_controller.clone(),
             mailbox: self.mailbox,
             server_addr: self.server_addr,
         }
@@ -195,6 +200,7 @@ pub struct Context {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
+    region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
 }
