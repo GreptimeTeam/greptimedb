@@ -265,16 +265,35 @@ impl CreateTableProcedure {
     /// - Failed to create table metadata.
     async fn on_create_metadata(&mut self) -> Result<Status> {
         let table_id = self.table_id();
+        let cluster_id = self.creator.data.cluster_id;
         let manager = &self.context.table_metadata_manager;
 
         let raw_table_info = self.table_info().clone();
         // Safety: the region_wal_options must be allocated.
         let region_wal_options = self.region_wal_options()?.clone();
         // Safety: the table_route must be allocated.
-        let table_route = TableRouteValue::Physical(self.table_route()?.clone());
+        let physical_table_route = self.table_route()?.clone();
+
+        let ident = physical_table_route
+            .region_routes
+            .iter()
+            .map(|region| {
+                (
+                    cluster_id,
+                    region.leader_peer.as_ref().unwrap().id,
+                    region.region.id,
+                )
+            })
+            .collect::<Vec<_>>();
+        let table_route = TableRouteValue::Physical(physical_table_route);
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
+        // Notifies region supervisor to detector failures of new created regions.
+        self.context
+            .region_failure_detector_controller
+            .register_failure_detectors(ident)
+            .await;
         info!("Created table metadata for table {table_id}");
 
         self.creator.opening_regions.clear();
