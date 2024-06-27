@@ -125,7 +125,7 @@ impl MatchesFunction {
     }
 
     fn input_schema() -> DFSchema {
-        DFSchema::from_unqualifed_fields(
+        DFSchema::from_unqualified_fields(
             [Arc::new(Field::new("data", DataType::Utf8, true))].into(),
             HashMap::new(),
         )
