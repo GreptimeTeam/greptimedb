@@ -15,6 +15,7 @@ async-trait.workspace = true
 bytes.workspace = true
 catalog.workspace = true
 common-base.workspace = true
+common-config.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-frontend.workspace = true

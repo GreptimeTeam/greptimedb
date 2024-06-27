@@ -3955,6 +3955,7 @@ dependencies = [
  "catalog",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-decimal",
  "common-error",
  "common-frontend",

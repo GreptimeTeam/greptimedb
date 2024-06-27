@@ -177,4 +177,8 @@ impl FlownodeInstance {
 
         Ok(())
     }
+
+    pub fn flow_worker_manager(&self) -> FlowWorkerManagerRef {
+        self.server.flow_service.manager.clone()
+    }
 }

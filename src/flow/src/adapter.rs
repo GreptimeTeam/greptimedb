@@ -23,18 +23,22 @@ use std::time::{Instant, SystemTime};
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::Itertools;
+use meta_client::MetaClientOptions;
 use query::{QueryEngine, QueryEngineFactory};
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
+use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
@@ -76,12 +80,31 @@ pub type FlowId = u64;
 pub type TableName = [String; 3];
 
 /// Options for flow node
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
+    pub mode: Mode,
     pub node_id: Option<u64>,
     pub grpc: GrpcOptions,
+    pub meta_client: Option<MetaClientOptions>,
+    pub logging: LoggingOptions,
+    pub tracing: TracingOptions,
 }
+
+impl Default for FlownodeOptions {
+    fn default() -> Self {
+        Self {
+            mode: servers::Mode::Standalone,
+            node_id: None,
+            grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            meta_client: None,
+            logging: LoggingOptions::default(),
+            tracing: TracingOptions::default(),
+        }
+    }
+}
+
+impl Configurable for FlownodeOptions {}
 
 /// Flownode Builder
 pub struct FlownodeBuilder {
@@ -110,7 +133,7 @@ impl FlownodeBuilder {
         }
     }
 
-    /// TODO(discord9): error handling
+    /// TODO(discord9): error handling&&build a FlownodeInstance instead
     pub async fn build(self) -> FlowWorkerManager {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in flownode only translate plan with resolved table source.

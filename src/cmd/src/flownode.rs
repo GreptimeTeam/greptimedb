@@ -13,13 +13,21 @@
 // limitations under the License.
 
 use clap::Parser;
+use common_config::Configurable;
+use common_telemetry::info;
+use common_telemetry::logging::TracingOptions;
+use common_version::{short_version, version};
 use flow::FlownodeInstance;
-use snafu::ResultExt;
+use meta_client::MetaClientOptions;
+use servers::Mode;
+use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{Result, ShutdownFlownodeSnafu, StartFlownodeSnafu};
+use crate::error::{
+    LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
+};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::App;
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -99,14 +107,110 @@ impl SubCommand {
 }
 
 #[derive(Debug, Parser, Default)]
-struct StartCommand {}
+struct StartCommand {
+    #[clap(long)]
+    node_id: Option<u64>,
+    #[clap(long)]
+    rpc_addr: Option<String>,
+    #[clap(long)]
+    rpc_hostname: Option<String>,
+    #[clap(long, aliases = ["metasrv-addr"], value_delimiter = ',', num_args = 1..)]
+    metasrv_addrs: Option<Vec<String>>,
+    #[clap(short, long)]
+    config_file: Option<String>,
+    #[clap(long, default_value = "GREPTIMEDB_FLOWNODE")]
+    env_prefix: String,
+}
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
-        todo!()
+        let mut opts = FlownodeOptions::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
+        )
+        .context(LoadLayeredConfigSnafu)?;
+
+        self.merge_with_cli_options(global_options, &mut opts)?;
+
+        Ok(opts)
+    }
+
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        opts: &mut FlownodeOptions,
+    ) -> Result<()> {
+        let opts = &mut opts.component;
+
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
+        }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        if let Some(addr) = &self.rpc_addr {
+            opts.grpc.addr.clone_from(addr);
+        }
+
+        if let Some(hostname) = &self.rpc_hostname {
+            opts.grpc.hostname.clone_from(hostname);
+        }
+
+        if let Some(node_id) = self.node_id {
+            opts.node_id = Some(node_id);
+        }
+
+        if let Some(metasrv_addrs) = &self.metasrv_addrs {
+            opts.meta_client
+                .get_or_insert_with(MetaClientOptions::default)
+                .metasrv_addrs
+                .clone_from(metasrv_addrs);
+            opts.mode = Mode::Distributed;
+        }
+
+        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
+            return MissingConfigSnafu {
+                msg: "Missing node id option",
+            }
+            .fail();
+        }
+
+        Ok(())
     }
 
     async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+        common_runtime::init_global_runtimes(&opts.runtime);
+
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.component.logging,
+            &opts.component.tracing,
+            opts.component.node_id.map(|x| x.to_string()),
+        );
+        log_versions(version!(), short_version!());
+
+        info!("Flownode start command: {:#?}", self);
+        info!("Flownode options: {:#?}", opts);
+
+        let mut opts = opts.component;
+
+        let node_id = opts
+            .node_id
+            .context(MissingConfigSnafu { msg: "'node_id'" })?;
+
+        let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client_options'",
+        })?;
+        // TODO(discord9): construct a new MetaClient
+
         todo!()
     }
 }
