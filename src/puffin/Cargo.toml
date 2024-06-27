@@ -15,6 +15,7 @@ base64.workspace = true
 bitflags.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-runtime.workspace = true
 common-telemetry.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
@@ -28,7 +29,6 @@ snafu.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
-common-runtime.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
