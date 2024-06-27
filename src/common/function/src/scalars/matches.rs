@@ -28,7 +28,7 @@ use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::BooleanVector;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ConcreteDataType;
 
 use crate::function::{Function, FunctionContext};
@@ -235,7 +235,10 @@ impl ParserContext {
         }
 
         if self.stack.is_empty() {
-            panic!("todo error");
+            return InvalidFuncArgsSnafu {
+                err_msg: "Empty pattern",
+            }
+            .fail();
         }
 
         // conjoin them together
@@ -258,7 +261,9 @@ impl ParserContext {
                 Token::Phase(_) => result.push(token),
                 Token::Must | Token::Negative => {
                     // unary operator with paren is not handled yet
-                    let phase = raw_tokens.pop().expect("todo error");
+                    let phase = raw_tokens.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Unexpected end of pattern, expected a phase after unary operator",
+                    })?;
                     result.push(phase);
                     result.push(token);
                 }
@@ -301,7 +306,9 @@ impl ParserContext {
         if let Some(token) = tokens.pop() {
             match token {
                 Token::Must => {
-                    let phase = tokens.pop().expect("todo error");
+                    let phase = tokens.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Unexpected end of pattern, expected a phase after \"+\" operator",
+                    })?;
                     self.stack.push(PatternAst::Literal {
                         op: UnaryOp::Must,
                         pattern: Self::unwrap_phase(phase)?,
@@ -309,7 +316,9 @@ impl ParserContext {
                     return Ok(());
                 }
                 Token::Negative => {
-                    let phase = tokens.pop().expect("todo error");
+                    let phase = tokens.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Unexpected end of pattern, expected a phase after \"-\" operator",
+                    })?;
                     self.stack.push(PatternAst::Literal {
                         op: UnaryOp::Negative,
                         pattern: Self::unwrap_phase(phase)?,
@@ -328,11 +337,15 @@ impl ParserContext {
                     if self.stack.is_empty() {
                         self.parse_one_impl(tokens)?
                     };
-                    let rhs = self.stack.pop().expect("todo error");
+                    let rhs = self.stack.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Invalid pattern, \"AND\" operator should have two operands",
+                    })?;
                     if self.stack.is_empty() {
                         self.parse_one_impl(tokens)?
                     };
-                    let lhs = self.stack.pop().expect("todo error");
+                    let lhs = self.stack.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Invalid pattern, \"AND\" operator should have two operands",
+                    })?;
                     self.stack.push(PatternAst::Binary {
                         lhs: Box::new(lhs),
                         op: BinaryOp::And,
@@ -344,11 +357,15 @@ impl ParserContext {
                     if self.stack.is_empty() {
                         self.parse_one_impl(tokens)?
                     };
-                    let rhs = self.stack.pop().expect("todo error");
+                    let rhs = self.stack.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Invalid pattern, \"OR\" operator should have two operands",
+                    })?;
                     if self.stack.is_empty() {
                         self.parse_one_impl(tokens)?
                     };
-                    let lhs = self.stack.pop().expect("todo error");
+                    let lhs = self.stack.pop().context(InvalidFuncArgsSnafu {
+                        err_msg: "Invalid pattern, \"OR\" operator should have two operands",
+                    })?;
                     self.stack.push(PatternAst::Binary {
                         lhs: Box::new(lhs),
                         op: BinaryOp::Or,
@@ -371,7 +388,10 @@ impl ParserContext {
     fn unwrap_phase(token: Token) -> Result<String> {
         match token {
             Token::Phase(phase) => Ok(phase),
-            _ => panic!("todo error {token:?}"),
+            _ => InvalidFuncArgsSnafu {
+                err_msg: format!("Unexpected token: {:?}, want a phase", token),
+            }
+            .fail(),
         }
     }
 }
