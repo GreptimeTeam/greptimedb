@@ -82,7 +82,6 @@ impl MokaCacheManager {
                         }
                         CacheValue::Dir(_) => {
                             let deleted_path = path.with_extension(DELETED_EXTENSION);
-
                             {
                                 let unreleased_dirs = unreleased_dirs.lock().await;
                                 if unreleased_dirs.contains_key(key.as_ref()) {
@@ -90,6 +89,8 @@ impl MokaCacheManager {
                                     debug!("Skipping removing directory due to unreleased reference. Path: {path:?}");
                                     return;
                                 }
+
+                                debug!("Removing directory due to eviction. Path: {path:?}");
                                 if let Err(err) = fs::rename(&path, &deleted_path).await {
                                     // `NotFound` indicates that a delayed removal has occurred, meaning
                                     // the directory has already been deleted upon its release.
@@ -105,7 +106,6 @@ impl MokaCacheManager {
                                     }
                                 }
                             } // End of `unreleased_dirs`
-                            debug!("Removing directory due to eviction. Path: {path:?}");
                             if let Err(err) = fs::remove_dir_all(&deleted_path).await {
                                 warn!(err; "Failed to remove evicted directory.")
                             }
@@ -202,7 +202,7 @@ impl CacheManager for MokaCacheManager {
             .await
             .context(CacheGetSnafu);
 
-        if res.is_err() {
+        if let Err(res_err) = res {
             let mut unreleased_dirs = self.unreleased_dirs.lock().await;
             if let Some(count) = unreleased_dirs.get_mut(&cache_key) {
                 if *count > 1 {
@@ -210,20 +210,20 @@ impl CacheManager for MokaCacheManager {
                 } else {
                     unreleased_dirs.remove(&cache_key);
 
-                    let deleted_path = dir_path.with_extension(DELETED_EXTENSION);
-
                     // Attempt to remove the directory, considering the possibility that the error
                     // originates from `get_dir_size` and the final `RcDirGuard` has just been dropped.
+                    let deleted_path = dir_path.with_extension(DELETED_EXTENSION);
                     if let Err(err) = fs::rename(&dir_path, &deleted_path).await {
                         if err.kind() == ErrorKind::NotFound {
-                            return Err(res.unwrap_err());
+                            // Happy path. No weird stuff happened.
+                            return Err(res_err);
                         }
 
                         // Remove the deleted directory if the rename fails and retry
                         let _ = fs::remove_dir_all(&deleted_path).await;
                         if let Err(err) = fs::rename(&dir_path, &deleted_path).await {
                             warn!(err; "Failed to rename the dangling directory to deleted path.");
-                            return Err(res.unwrap_err());
+                            return Err(res_err);
                         }
                     }
 
@@ -233,9 +233,11 @@ impl CacheManager for MokaCacheManager {
                     }
                 }
             }
+
+            return Err(res_err);
         } // End of `unreleased_dirs`
 
-        res.map(move |_| RcDirGuard {
+        Ok(RcDirGuard {
             path: dir_path,
             key: cache_key,
             unreleased_dirs: self.unreleased_dirs.clone(),
@@ -474,18 +476,14 @@ impl MokaCacheManager {
     pub async fn must_get_file(&self, puffin_file_name: &str, key: &str) -> fs::File {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let file_path = self.base_dir.join(&cache_key);
-
         self.cache.get(&cache_key).await.unwrap();
-
         fs::File::open(&file_path).await.unwrap()
     }
 
     pub async fn must_get_dir(&self, puffin_file_name: &str, key: &str) -> PathBuf {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let dir_path = self.base_dir.join(&cache_key);
-
         self.cache.get(&cache_key).await.unwrap();
-
         dir_path
     }
 
