@@ -176,7 +176,9 @@ impl<'a> ParserContext<'a> {
                                 actual: self.peek_token_as_string(),
                             },
                         )?;
-                        Ok(Statement::Use(database_name.value))
+                        Ok(Statement::Use(
+                            Self::canonicalize_identifier(database_name).value,
+                        ))
                     }
 
                     // todo(hl) support more statements.
