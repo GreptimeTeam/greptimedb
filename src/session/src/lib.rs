@@ -113,7 +113,6 @@ impl Session {
         self.catalog.load().as_ref().clone()
     }
 
-    #[inline]
     pub fn schema(&self) -> String {
         self.schema.load().as_ref().clone()
     }

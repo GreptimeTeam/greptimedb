@@ -572,7 +572,7 @@ pub fn to_create_flow_task_expr(
                 .to_string();
             let schema = reference
                 .schema()
-                .map(|s| s.to_owned())
+                .map(|s| s.to_string())
                 .unwrap_or(query_ctx.current_schema());
 
             let table_name = TableName {
