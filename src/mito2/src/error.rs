@@ -761,6 +761,14 @@ pub enum Error {
         reason: String,
     },
 
+    #[snafu(display("Failed to parse job id"))]
+    ParseJobId {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: uuid::Error,
+    },
+
     #[snafu(display("Operation is not supported: {}", err_msg))]
     UnsupportedOperation {
         err_msg: String,
@@ -819,7 +827,8 @@ impl ErrorExt for Error {
             | InvalidMetadata { .. }
             | InvalidRegionOptions { .. }
             | InvalidWalReadRequest { .. }
-            | PartitionOutOfRange { .. } => StatusCode::InvalidArguments,
+            | PartitionOutOfRange { .. }
+            | ParseJobId { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 

@@ -16,12 +16,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_telemetry::error;
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
+use uuid::Uuid;
 
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
-use crate::error::Result;
+use crate::error::{ParseJobIdSnafu, Result};
 use crate::manifest::action::RegionEdit;
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
@@ -50,7 +53,7 @@ pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 #[async_trait::async_trait]
 pub trait RemoteJobScheduler: Send + Sync + 'static {
     /// Sends a job to the scheduler and returns a UUID for the job.
-    async fn schedule(&self, job: RemoteJob, notifier: Arc<dyn Notifier>) -> Result<String>;
+    async fn schedule(&self, job: RemoteJob, notifier: Box<dyn Notifier>) -> Result<JobId>;
 }
 
 /// Notifier is used to notify the mito engine when a remote job is completed.
@@ -58,6 +61,22 @@ pub trait RemoteJobScheduler: Send + Sync + 'static {
 pub trait Notifier: Send + Sync + 'static {
     /// Notify the mito engine that a remote job is completed.
     async fn notify(&mut self, result: RemoteJobResult);
+}
+
+/// Unique id for a remote job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JobId(Uuid);
+
+impl JobId {
+    /// Parses job id from string.
+    pub fn parse_str(input: &str) -> Result<JobId> {
+        Uuid::parse_str(input).map(JobId).context(ParseJobIdSnafu)
+    }
+
+    /// Covert job id to string.
+    pub fn to_string(&self) -> String {
+        self.0.to_string()
+    }
 }
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
@@ -85,7 +104,7 @@ pub enum RemoteJobResult {
 /// CompactionJobResult is the result of a compaction job.
 #[allow(dead_code)]
 pub struct CompactionJobResult {
-    pub job_id: String,
+    pub job_id: JobId,
     pub region_id: RegionId,
     pub start_time: Instant,
     pub region_edit: Result<RegionEdit>,

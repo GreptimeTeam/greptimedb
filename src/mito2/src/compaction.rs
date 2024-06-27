@@ -296,7 +296,7 @@ impl CompactionScheduler {
                 let result = remote_job_scheduler
                     .schedule(
                         RemoteJob::CompactionJob(remote_compaction_job),
-                        Arc::new(DefaultNotifier {
+                        Box::new(DefaultNotifier {
                             request_sender: request_sender.clone(),
                             waiters: std::mem::take(&mut waiters),
                         }),
@@ -305,7 +305,7 @@ impl CompactionScheduler {
 
                 if let Ok(job_id) = result {
                     info!(
-                        "Scheduled remote compaction job {} for region {}",
+                        "Scheduled remote compaction job {:?} for region {}",
                         job_id, region_id
                     );
 
