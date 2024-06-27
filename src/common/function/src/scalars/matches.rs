@@ -76,7 +76,7 @@ impl Function for MatchesFunction {
         ensure!(
             columns[1].len() == 1,
             InvalidFuncArgsSnafu {
-                err_msg: "The second argument shoudl be a string literal",
+                err_msg: "The second argument should be a string literal",
             }
         );
         let pattern_vector = &columns[1]
