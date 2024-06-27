@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
@@ -781,21 +781,17 @@ pub(crate) struct StreamContext {
     // Metrics:
     /// The start time of the query.
     pub(crate) query_start: Instant,
-    /// Time elapsed before creating the scanner.
-    pub(crate) prepare_scan_cost: Duration,
 }
 
 impl StreamContext {
     /// Creates a new [StreamContext].
     pub(crate) fn new(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let prepare_scan_cost = query_start.elapsed();
 
         Self {
             input,
             parts: Mutex::new(ScanPartList::default()),
             query_start,
-            prepare_scan_cost,
         }
     }
 

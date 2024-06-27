@@ -90,7 +90,7 @@ impl SeqScan {
     /// Builds a [BoxedBatchReader] from sequential scan for compaction.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let maybe_reader =
@@ -247,7 +247,7 @@ impl SeqScan {
         }
 
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
@@ -321,7 +321,7 @@ impl SeqScan {
             ));
         }
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
@@ -444,7 +444,6 @@ impl fmt::Debug for SeqScan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SeqScan")
             .field("parts", &self.stream_ctx.parts)
-            .field("prepare_scan_cost", &self.stream_ctx.prepare_scan_cost)
             .finish()
     }
 }
