@@ -29,13 +29,13 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{interval, MissedTickBehavior};
 
-use super::failure_detector::RegionFailureDetector;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::node_stat::Stat;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::RegionMigrationProcedureTask;
+use crate::region::failure_detector::{Ident, RegionFailureDetector};
 use crate::selector::SelectorOptions;
 
 /// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
@@ -75,6 +75,8 @@ impl From<&Stat> for DatanodeHeartbeat {
 ///   of the supervisor during tests.
 pub(crate) enum Event {
     Tick,
+    RegisterFailureDetectors(Vec<Ident>),
+    DeregisterFailureDetectors(Vec<Ident>),
     HeartbeatArrived(DatanodeHeartbeat),
     Clear,
     #[cfg(test)]
@@ -87,6 +89,14 @@ impl Debug for Event {
             Self::Tick => write!(f, "Tick"),
             Self::HeartbeatArrived(arg0) => f.debug_tuple("HeartbeatArrived").field(arg0).finish(),
             Self::Clear => write!(f, "Clear"),
+            Self::RegisterFailureDetectors(arg0) => f
+                .debug_tuple("RegisterFailureDetectors")
+                .field(arg0)
+                .finish(),
+            Self::DeregisterFailureDetectors(arg0) => f
+                .debug_tuple("DeregisterFailureDetectors")
+                .field(arg0)
+                .finish(),
             #[cfg(test)]
             Self::Dump(_) => f.debug_struct("Dump").finish(),
         }
@@ -178,6 +188,59 @@ pub struct RegionSupervisor {
     peer_lookup: PeerLookupServiceRef,
 }
 
+pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;
+
+#[async_trait::async_trait]
+pub trait RegionFailureDetectorController {
+    /// Registers failure detectors for the given identifiers.
+    async fn register_failure_detectors(&self, ident: Vec<Ident>);
+
+    /// Deregisters failure detectors for the given identifiers.
+    async fn deregister_failure_detectors(&self, ident: Vec<Ident>);
+}
+
+/// Controller for managing failure detectors for regions.
+#[derive(Debug, Clone)]
+pub struct RegionFailureDetectorControl {
+    sender: Sender<Event>,
+}
+
+#[async_trait::async_trait]
+impl RegionFailureDetectorController for RegionFailureDetectorControl {
+    async fn register_failure_detectors(&self, ident: Vec<Ident>) {
+        if self
+            .sender
+            .send(Event::RegisterFailureDetectors(ident))
+            .await
+            .is_err()
+        {
+            error!("RegionSupervisor is stop receiving heartbeat");
+        }
+    }
+
+    async fn deregister_failure_detectors(&self, ident: Vec<Ident>) {
+        if self
+            .sender
+            .send(Event::DeregisterFailureDetectors(ident))
+            .await
+            .is_err()
+        {
+            error!("RegionSupervisor is stop receiving heartbeat");
+        }
+    }
+}
+
+/// A noop implementation of [`RegionFailureDetectorController`].
+#[derive(Debug, Clone)]
+pub struct NoopRegionFailureDetectorControl;
+
+#[async_trait::async_trait]
+impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
+    async fn register_failure_detectors(&self, _ident: Vec<Ident>) {}
+
+    async fn deregister_failure_detectors(&self, _ident: Vec<Ident>) {}
+}
+
 /// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].
 pub(crate) struct HeartbeatAcceptor {
     sender: Sender<Event>,
@@ -231,6 +294,13 @@ impl RegionSupervisor {
         }
     }
 
+    /// Returns the [`RegionFailureDetectorControllerRef`].
+    pub(crate) fn failure_detector_controller(&self) -> RegionFailureDetectorControllerRef {
+        Arc::new(RegionFailureDetectorControl {
+            sender: self.sender.clone(),
+        })
+    }
+
     /// Returns the [`RegionSupervisorTicker`].
     pub(crate) fn ticker(&self) -> RegionSupervisorTickerRef {
         Arc::new(RegionSupervisorTicker {
@@ -248,6 +318,12 @@ impl RegionSupervisor {
                     let regions = self.detect_region_failure();
                     self.handle_region_failures(regions).await;
                 }
+                Event::RegisterFailureDetectors(ident) => {
+                    self.register_failure_detectors(ident).await
+                }
+                Event::DeregisterFailureDetectors(ident) => {
+                    self.deregister_failure_detectors(ident).await
+                }
                 Event::HeartbeatArrived(heartbeat) => self.on_heartbeat_arrived(heartbeat),
                 Event::Clear => self.clear(),
                 #[cfg(test)]
@@ -257,6 +333,21 @@ impl RegionSupervisor {
             }
         }
         info!("RegionSupervisor is stopped!");
+    }
+
+    async fn register_failure_detectors(&self, idents: Vec<Ident>) {
+        let ts_millis = current_time_millis();
+        for ident in idents {
+            // The corresponding region has `acceptable_heartbeat_pause_millis` to send heartbeat from datanode.
+            self.failure_detector
+                .maybe_init_region_failure_detector(ident, ts_millis);
+        }
+    }
+
+    async fn deregister_failure_detectors(&self, idents: Vec<Ident>) {
+        for ident in idents {
+            self.failure_detector.remove(&ident)
+        }
     }
 
     async fn handle_region_failures(&self, mut regions: Vec<(ClusterId, DatanodeId, RegionId)>) {
@@ -525,5 +616,33 @@ pub(crate) mod tests {
                 assert_matches!(event, Event::Tick | Event::Clear);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_region_failure_detector_controller() {
+        let mut supervisor = new_test_supervisor();
+        let sender = supervisor.sender();
+        let controller = supervisor.failure_detector_controller();
+        tokio::spawn(async move { supervisor.run().await });
+        let ident = (0, 1, RegionId::new(1, 1));
+        controller.register_failure_detectors(vec![ident]).await;
+
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        let detector = rx.await.unwrap();
+        let region_detector = detector.region_failure_detector(ident).clone();
+
+        // Registers failure detector again
+        controller.register_failure_detectors(vec![ident]).await;
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        let detector = rx.await.unwrap();
+        let got = detector.region_failure_detector(ident).clone();
+        assert_eq!(region_detector, got);
+
+        controller.deregister_failure_detectors(vec![ident]).await;
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        assert!(rx.await.unwrap().is_empty());
     }
 }

@@ -51,7 +51,7 @@ impl RegionFailureDetector {
         }
     }
 
-    /// Returns [PhiAccrualFailureDetector] of the specific ([DatanodeId],[RegionId]).
+    /// Returns [`PhiAccrualFailureDetector`] of the specific [`Ident`].
     pub(crate) fn region_failure_detector(
         &self,
         ident: Ident,
@@ -59,6 +59,21 @@ impl RegionFailureDetector {
         self.detectors
             .entry(ident)
             .or_insert_with(|| PhiAccrualFailureDetector::from_options(self.options))
+    }
+
+    /// Returns A mutable reference to the [`PhiAccrualFailureDetector`] for the specified [`Ident`].
+    /// If a detector already exists for the region, it is returned. Otherwise, a new
+    /// detector is created and initialized with the provided timestamp.
+    pub(crate) fn maybe_init_region_failure_detector(
+        &self,
+        ident: Ident,
+        ts_millis: i64,
+    ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
+        self.detectors.entry(ident).or_insert_with(|| {
+            let mut detector = PhiAccrualFailureDetector::from_options(self.options);
+            detector.heartbeat(ts_millis);
+            detector
+        })
     }
 
     /// Returns a [FailureDetectorEntry] iterator.

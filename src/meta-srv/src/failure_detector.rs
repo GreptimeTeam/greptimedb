@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// where F is the cumulative distribution function of a normal distribution with mean
 /// and standard deviation estimated from historical heartbeat inter-arrival times.
-#[cfg_attr(test, derive(Clone))]
+#[cfg_attr(test, derive(Debug, Clone, PartialEq))]
 pub(crate) struct PhiAccrualFailureDetector {
     /// A low threshold is prone to generate many wrong suspicions but ensures a quick detection
     /// in the event of a real crash. Conversely, a high threshold generates fewer mistakes but
@@ -198,7 +198,7 @@ fn phi(time_diff: i64, mean: f64, std_deviation: f64) -> f64 {
 /// It is capped by the number of samples specified in `max_sample_size`.
 ///
 /// The stats (mean, variance, std_deviation) are not defined for empty HeartbeatHistory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct HeartbeatHistory {
     /// Number of samples to use for calculation of mean and standard deviation of inter-arrival
     /// times.
