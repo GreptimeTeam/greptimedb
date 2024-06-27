@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use futures::lock::Mutex;
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
@@ -31,8 +31,8 @@ use tokio::fs;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    CacheGetSnafu, CreateSnafu, Error, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu,
-    RenameSnafu, Result, RetriesExhaustedSnafu, WalkDirSnafu,
+    CacheGetSnafu, CreateSnafu, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu, RenameSnafu,
+    Result, RetriesExhaustedSnafu, WalkDirSnafu,
 };
 use crate::puffin_manager::cache_manager::{
     BoxWriter, CacheManager, DirWriterProvider, InitBlobFn, InitDirFn,
@@ -75,6 +75,7 @@ impl MokaCacheManager {
                     let path = cache_root_clone.join(key.as_str());
                     match v {
                         CacheValue::File(_) => {
+                            debug!("Removing file due to eviction. Path: {path:?}");
                             if let Err(err) = fs::remove_file(&path).await {
                                 warn!(err; "Failed to remove evicted file.")
                             }
@@ -82,17 +83,17 @@ impl MokaCacheManager {
                         CacheValue::Dir(_) => {
                             let deleted_path = path.with_extension(DELETED_EXTENSION);
                             {
-                                // Begin of `unreleased_dir`
                                 let unreleased_dir = unreleased_dir.lock().await;
                                 if unreleased_dir.contains_key(key.as_ref()) {
                                     // Won't remove the directory if it's still in use.
+                                    debug!("Skipping eviction of directory due to unreleased reference. Path: {path:?}");
                                     return;
                                 }
                                 if let Err(err) = fs::rename(&path, &deleted_path).await {
                                     warn!(err; "Failed to rename evicted file to deleted path.")
                                 }
-                                // End of `unreleased_dir`
-                            }
+                            } // End of `unreleased_dir`
+                            debug!("Removing directory due to eviction. Path: {path:?}");
                             if let Err(err) = fs::remove_dir_all(&deleted_path).await {
                                 warn!(err; "Failed to remove evicted directory.")
                             }
@@ -142,7 +143,7 @@ impl CacheManager for MokaCacheManager {
             match file {
                 Ok(file) => return Ok(file.compat()),
                 Err(err) if err.kind() == ErrorKind::NotFound => {
-                    // The file is evicted from the cache, retry to write the file
+                    // A snap eviction happened. Retry. :(
                     continue;
                 }
                 Err(err) => return Err(err).context(OpenSnafu),
@@ -164,29 +165,32 @@ impl CacheManager for MokaCacheManager {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let dir_path = self.base_dir.join(&cache_key);
 
-        {
-            // Begin of `unreleased_dir`
+        let dir_exists = {
             let mut unreleased_dir = self.unreleased_dir.lock().await;
 
             // Prevent the directory from being removed by a snap eviction
-            unreleased_dir
+            let rc = unreleased_dir
                 .entry(cache_key.clone())
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
-            // End of `unreleased_dir`
-        }
+
+            *rc > 1
+        }; // End of `unreleased_dir`
 
         let res = self
             .cache
             .try_get_with(cache_key.clone(), async {
-                let size = Self::write_dir(&dir_path, init_fn).await?;
+                let size = if dir_exists {
+                    Self::get_dir_size(&dir_path).await?
+                } else {
+                    Self::write_dir(&dir_path, init_fn).await?
+                };
                 Ok(CacheValue::Dir(size))
             })
             .await
             .context(CacheGetSnafu);
 
         if res.is_err() {
-            // Begin of `unreleased_dir`
             let mut unreleased_dir = self.unreleased_dir.lock().await;
             if let Some(count) = unreleased_dir.get_mut(&cache_key) {
                 if *count > 1 {
@@ -195,13 +199,13 @@ impl CacheManager for MokaCacheManager {
                     unreleased_dir.remove(&cache_key);
                 }
             }
-            // End of `unreleased_dir`
-        }
+        } // End of `unreleased_dir`
 
         res.map(move |_| RcDirGuard {
             path: dir_path,
             key: cache_key,
             unreleased_dir: self.unreleased_dir.clone(),
+            cache: self.cache.clone(),
         })
     }
 
@@ -216,7 +220,7 @@ impl CacheManager for MokaCacheManager {
         let target_path = self.base_dir.join(&cache_key);
 
         self.cache
-            .try_get_with::<_, Error>(cache_key, async move {
+            .try_get_with(cache_key, async move {
                 fs::rename(&dir_path, &target_path)
                     .await
                     .context(RenameSnafu)?;
@@ -370,11 +374,12 @@ pub struct RcDirGuard {
     path: PathBuf,
     key: String,
     unreleased_dir: Arc<Mutex<HashMap<String, usize>>>,
+    cache: Cache<String, CacheValue>,
 }
 
 impl DirGuard for RcDirGuard {
-    fn path(&self) -> PathBuf {
-        self.path.clone()
+    fn path(&self) -> &PathBuf {
+        &self.path
     }
 }
 
@@ -383,32 +388,31 @@ impl Drop for RcDirGuard {
         let unreleased_dir = self.unreleased_dir.clone();
         let key = self.key.clone();
         let path = self.path.clone();
+        let cache = self.cache.clone();
         common_runtime::bg_runtime().spawn(async move {
             let deleted_path = path.with_extension(DELETED_EXTENSION);
 
             {
-                // Begin of `unreleased_dir`
                 let mut unreleased_dir = unreleased_dir.lock().await;
-                match unreleased_dir.get_mut(&key) {
-                    Some(count) => {
-                        if *count > 1 {
-                            *count -= 1;
-                            return;
-                        } else {
-                            unreleased_dir.remove(&key);
-                        }
+                if let Some(count) = unreleased_dir.get_mut(&key) {
+                    *count -= 1;
+                    if *count > 0 {
+                        // The directory is still in use.
+                        return;
                     }
-                    None => {
-                        warn!("Unreleased directory not found. Path: {path:?}");
+
+                    unreleased_dir.remove(&key);
+                    if cache.contains_key(&key) {
+                        // The directory is still in the cache.
                         return;
                     }
                 }
 
+                debug!("Removing directory due to releasing. Path: {path:?}");
                 if let Err(err) = fs::rename(&path, &deleted_path).await {
                     warn!(err; "Failed to rename evicted file to deleted path.")
                 }
-                // End of `unreleased_dir`
-            }
+            } // End of `unreleased_dir`
 
             if let Err(err) = fs::remove_dir_all(&deleted_path).await {
                 warn!(err; "Failed to remove evicted directory.")
@@ -436,6 +440,18 @@ impl MokaCacheManager {
 
         dir_path
     }
+
+    pub async fn dir_or_file_exists(&self, puffin_file_name: &str, key: &str) -> bool {
+        let cache_key = Self::encode_cache_key(puffin_file_name, key);
+        fs::try_exists(self.base_dir.join(&cache_key))
+            .await
+            .unwrap()
+    }
+
+    pub fn in_cache(&self, puffin_file_name: &str, key: &str) -> bool {
+        let cache_key = Self::encode_cache_key(puffin_file_name, key);
+        self.cache.contains_key(&cache_key)
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +461,7 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
 
     use super::*;
+    use crate::error::BlobNotFoundSnafu;
     use crate::puffin_manager::cache_manager::CacheManager;
 
     #[tokio::test]
@@ -591,7 +608,7 @@ mod tests {
         let mut reader = manager
             .get_blob(
                 puffin_file_name,
-                "blob_key",
+                blob_key,
                 Box::new(|_| Box::pin(async { Ok(0) })),
             )
             .await
@@ -615,5 +632,255 @@ mod tests {
             file.read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf, *content);
         }
+    }
+
+    #[tokio::test]
+    async fn test_eviction() {
+        common_telemetry::init_default_ut_logging();
+
+        let tempdir = create_temp_dir("test_eviction_");
+        let manager = MokaCacheManager::new(
+            tempdir.path().to_path_buf(),
+            1, /* extremely small size */
+        )
+        .await
+        .unwrap();
+
+        let puffin_file_name = "test_eviction";
+        let blob_key = "blob_key";
+
+        // First time to get the blob
+        let mut reader = manager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|mut writer| {
+                    Box::pin(async move {
+                        writer.write_all(b"Hello world").await.unwrap();
+                        Ok(11)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+
+        // The blob should be evicted
+        manager.cache.run_pending_tasks().await;
+        assert!(!manager.in_cache(puffin_file_name, blob_key));
+        assert!(!manager.dir_or_file_exists(puffin_file_name, blob_key).await);
+
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"Hello world");
+
+        // Second time to get the blob
+        let mut reader = manager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|mut writer| {
+                    Box::pin(async move {
+                        writer.write_all(b"Hello world").await.unwrap();
+                        Ok(11)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+
+        // The blob should be evicted
+        manager.cache.run_pending_tasks().await;
+        assert!(!manager.in_cache(puffin_file_name, blob_key));
+        assert!(!manager.dir_or_file_exists(puffin_file_name, blob_key).await);
+
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"Hello world");
+
+        let dir_key = "dir_key";
+        let files_in_dir = [
+            ("file_a", "Hello, world!".as_bytes()),
+            ("file_b", "Hello, Rust!".as_bytes()),
+            ("file_c", "你好，世界！".as_bytes()),
+            ("subdir/file_d", "Hello, Puffin!".as_bytes()),
+            ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
+        ];
+
+        // First time to get the directory
+        let dir_path = manager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|writer_provider| {
+                    Box::pin(async move {
+                        let mut size = 0;
+                        for (rel_path, content) in &files_in_dir {
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
+                            writer.write_all(content).await.unwrap();
+                            size += content.len() as u64;
+                        }
+                        Ok(size)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+
+        for (rel_path, content) in &files_in_dir {
+            let file_path = dir_path.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
+
+        // Drop the guard to release the directory
+        drop(dir_path);
+        // The directory should be evicted, and the directory should be removed
+        manager.cache.run_pending_tasks().await;
+        assert!(!manager.in_cache(puffin_file_name, dir_key));
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        assert!(!manager.dir_or_file_exists(puffin_file_name, dir_key).await);
+
+        // Second time to get the directory
+        let dir_path = manager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|writer_provider| {
+                    Box::pin(async move {
+                        let mut size = 0;
+                        for (rel_path, content) in &files_in_dir {
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
+                            writer.write_all(content).await.unwrap();
+                            size += content.len() as u64;
+                        }
+                        Ok(size)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+
+        for (rel_path, content) in &files_in_dir {
+            let file_path = dir_path.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
+
+        // Still hold the guard, so the directory should not be removed even if it's evicted
+        manager.cache.run_pending_tasks().await;
+        assert!(!manager.in_cache(puffin_file_name, dir_key));
+        assert!(manager.dir_or_file_exists(puffin_file_name, dir_key).await);
+
+        // Third time to get the directory. The returned directory should be the same as
+        // the previous one because the manager will get it from `unreleased_dir`.
+        let dir_path_from_trush = manager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|_| Box::pin(async move { Ok(0) })),
+            )
+            .await
+            .unwrap();
+
+        // Still hold the guard, so the directory should not be removed even if it's evicted
+        manager.cache.run_pending_tasks().await;
+        assert!(!manager.in_cache(puffin_file_name, blob_key));
+        assert!(manager.dir_or_file_exists(puffin_file_name, dir_key).await);
+
+        for (rel_path, content) in &files_in_dir {
+            let file_path = dir_path_from_trush.path().join(rel_path);
+            let mut file = tokio::fs::File::open(&file_path).await.unwrap();
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, *content);
+        }
+
+        drop(dir_path_from_trush);
+        assert!(manager.dir_or_file_exists(puffin_file_name, dir_key).await);
+
+        // Drop the directory
+        drop(dir_path);
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        assert!(!manager.dir_or_file_exists(puffin_file_name, dir_key).await);
+    }
+
+    #[tokio::test]
+    async fn test_get_blob_concurrency_on_fail() {
+        let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
+        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
+
+        let puffin_file_name = "test_get_blob_concurrency_on_fail";
+        let key = "key";
+
+        let manager = Arc::new(manager);
+        let handles = (0..10)
+            .map(|_| {
+                let manager = manager.clone();
+                let task = async move {
+                    let failed_init = Box::new(|_| {
+                        async {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            BlobNotFoundSnafu { blob: "whatever" }.fail()
+                        }
+                        .boxed()
+                    });
+                    manager.get_blob(puffin_file_name, key, failed_init).await
+                };
+
+                tokio::spawn(task)
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let r = handle.await.unwrap();
+            assert!(r.is_err());
+        }
+
+        assert!(!manager.in_cache(puffin_file_name, key));
+        assert!(!manager.dir_or_file_exists(puffin_file_name, key).await);
+    }
+
+    #[tokio::test]
+    async fn test_get_dir_concurrency_on_fail() {
+        let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
+        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
+
+        let puffin_file_name = "test_get_dir_concurrency_on_fail";
+        let key = "key";
+
+        let manager = Arc::new(manager);
+        let handles = (0..10)
+            .map(|_| {
+                let manager = manager.clone();
+                let task = async move {
+                    let failed_init = Box::new(|_| {
+                        async {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            BlobNotFoundSnafu { blob: "whatever" }.fail()
+                        }
+                        .boxed()
+                    });
+                    manager.get_dir(puffin_file_name, key, failed_init).await
+                };
+
+                tokio::spawn(task)
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let r = handle.await.unwrap();
+            assert!(r.is_err());
+        }
+
+        assert!(!manager.in_cache(puffin_file_name, key));
+        assert!(!manager.dir_or_file_exists(puffin_file_name, key).await);
     }
 }

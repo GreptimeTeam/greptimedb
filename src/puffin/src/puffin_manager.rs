@@ -85,5 +85,5 @@ pub trait PuffinReader {
 /// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.
 /// Users should hold the `DirGuard` until they are done with the directory.
 pub trait DirGuard {
-    fn path(&self) -> PathBuf;
+    fn path(&self) -> &PathBuf;
 }
