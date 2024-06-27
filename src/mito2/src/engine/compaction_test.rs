@@ -171,7 +171,7 @@ async fn test_compaction_region_with_overlapping() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
+        .insert_option("compaction.twcs.max_active_window_runs", "2")
         .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
@@ -277,7 +277,7 @@ async fn test_readonly_during_compaction() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "1")
+        .insert_option("compaction.twcs.max_active_window_runs", "1")
         .build();
 
     let column_schemas = request

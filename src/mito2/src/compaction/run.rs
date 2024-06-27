@@ -226,16 +226,19 @@ fn merge_all_runs<T: Item>(runs: Vec<SortedRun<T>>) -> SortedRun<T> {
         .flat_map(|r| r.items.into_iter())
         .collect::<Vec<_>>();
 
-    all_items.sort_unstable_by(|l, r| l.start.cmp(&r.start).then(l.end.cmp(&r.end).reverse()));
+    sort_ranged_items(&mut all_items);
 
     let mut res = SortedRun::default();
-    let mut current_item = all_items[0].clone();
+    let mut iter = all_items.into_iter();
+    // safety: all_items is not empty
+    let mut current_item = iter.next().unwrap();
 
-    for item in all_items.into_iter().skip(1) {
+    for item in iter {
         if current_item.overlap(&item) {
             current_item = current_item.merge(item);
         } else {
-            res.push_item(std::mem::replace(&mut current_item, item));
+            res.push_item(current_item);
+            current_item = item;
         }
     }
     res.push_item(current_item);
