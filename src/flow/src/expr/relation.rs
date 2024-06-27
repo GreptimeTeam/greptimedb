@@ -23,7 +23,7 @@ mod accum;
 mod func;
 
 /// Describes an aggregation expression.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct AggregateExpr {
     /// Names the aggregation function.
     pub func: AggregateFunc,
@@ -32,6 +32,5 @@ pub struct AggregateExpr {
     /// so it only used in generate KeyValPlan from AggregateExpr
     pub expr: ScalarExpr,
     /// Should the aggregation be applied only to distinct results in each group.
-    #[serde(default)]
     pub distinct: bool,
 }

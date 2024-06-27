@@ -40,7 +40,7 @@ pub type Spine = BTreeMap<Timestamp, Batch>;
 /// If a key is expired, any future updates to it should be ignored.
 ///
 /// Note that key is expired by it's event timestamp (contained in the key), not by the time it's inserted (system timestamp).
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct KeyExpiryManager {
     /// A map from event timestamp to key, used for expire keys.
     event_ts_to_key: BTreeMap<Timestamp, BTreeSet<Row>>,
@@ -157,7 +157,7 @@ impl KeyExpiryManager {
 ///
 /// Note the two way arrow between reduce operator and arrange, it's because reduce operator need to query existing state
 /// and also need to update existing state.
-#[derive(Debug, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Arrangement {
     /// A name or identifier for the arrangement which can be used for debugging or logging purposes.
     /// This field is not critical to the functionality but aids in monitoring and management of arrangements.
