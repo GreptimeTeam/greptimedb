@@ -26,7 +26,7 @@ use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{find_sorted_runs, reduce_runs};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
-use crate::sst::file::{overlaps, FileHandle, FileId};
+use crate::sst::file::{overlaps, FileHandle, FileId, Level};
 use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
@@ -94,7 +94,8 @@ impl TwcsPicker {
                         output_level: LEVEL_COMPACTED, // always compact to l1
                         inputs,
                         filter_deleted,
-                    output_time_range: None, // we do not enforce output time range in twcs compactions.});
+                        output_time_range: None, // we do not enforce output time range in twcs compactions.});
+                    });
                 }
             } else {
                 debug!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
