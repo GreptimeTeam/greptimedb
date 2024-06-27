@@ -297,7 +297,7 @@ impl ScanRegion {
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
-            .with_merge_mode(self.version.options.merge_mode);
+            .with_merge_mode(self.version.options.merge_mode());
         Ok(input)
     }
 

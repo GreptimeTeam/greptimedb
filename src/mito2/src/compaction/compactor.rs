@@ -137,8 +137,8 @@ pub async fn open_compaction_region(
         let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
             .builder_for_options(
                 req.region_options.memtable.as_ref(),
-                !req.region_options.append_mode,
-                req.region_options.merge_mode,
+                req.region_options.need_dedup(),
+                req.region_options.merge_mode(),
             );
 
         // Initial memtable id is 0.
@@ -283,7 +283,7 @@ impl Compactor for DefaultCompactor {
                 .index_options
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
-            let merge_mode = compaction_region.current_version.options.merge_mode;
+            let merge_mode = compaction_region.current_version.options.merge_mode();
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),

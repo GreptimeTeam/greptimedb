@@ -24,7 +24,7 @@ use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use serde_with::{serde_as, with_prefix, DisplayFromStr};
+use serde_with::{serde_as, with_prefix, DisplayFromStr, NoneAsEmptyString};
 use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
 use strum::EnumString;
@@ -69,7 +69,32 @@ pub struct RegionOptions {
     pub memtable: Option<MemtableOptions>,
     /// The mode to merge duplicate rows.
     /// Only takes effect when `append_mode` is `false`.
-    pub merge_mode: MergeMode,
+    pub merge_mode: Option<MergeMode>,
+}
+
+impl RegionOptions {
+    /// Validates options.
+    pub fn validate(&self) -> Result<()> {
+        if self.append_mode {
+            ensure!(
+                self.merge_mode.is_none(),
+                InvalidRegionOptionsSnafu {
+                    reason: "merge_mode is not allowed when append_mode is enabled",
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if deduplication is needed.
+    pub fn need_dedup(&self) -> bool {
+        !self.append_mode
+    }
+
+    /// Returns the `merge_mode` if it is set, otherwise returns the default `MergeMode`.
+    pub fn merge_mode(&self) -> MergeMode {
+        self.merge_mode.unwrap_or_default()
+    }
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -105,7 +130,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             None
         };
 
-        Ok(RegionOptions {
+        let opts = RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
@@ -114,7 +139,10 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             index_options,
             memtable,
             merge_mode: options.merge_mode,
-        })
+        };
+        opts.validate()?;
+
+        Ok(opts)
     }
 }
 
@@ -196,8 +224,8 @@ struct RegionOptionsWithoutEnum {
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
-    #[serde_as(as = "DisplayFromStr")]
-    merge_mode: MergeMode,
+    #[serde_as(as = "NoneAsEmptyString")]
+    merge_mode: Option<MergeMode>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -501,11 +529,11 @@ mod tests {
     fn test_with_merge_mode() {
         let map = make_map(&[("merge_mode", "last_row")]);
         let options = RegionOptions::try_from(&map).unwrap();
-        assert_eq!(MergeMode::LastRow, options.merge_mode);
+        assert_eq!(MergeMode::LastRow, options.merge_mode());
 
         let map = make_map(&[("merge_mode", "last_non_null")]);
         let options = RegionOptions::try_from(&map).unwrap();
-        assert_eq!(MergeMode::LastNonNull, options.merge_mode);
+        assert_eq!(MergeMode::LastNonNull, options.merge_mode());
 
         let map = make_map(&[("merge_mode", "unknown")]);
         let err = RegionOptions::try_from(&map).unwrap_err();
@@ -559,7 +587,7 @@ mod tests {
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
             })),
-            merge_mode: MergeMode::LastNonNull,
+            merge_mode: Some(MergeMode::LastNonNull),
         };
         assert_eq!(expect, options);
     }
