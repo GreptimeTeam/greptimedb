@@ -241,7 +241,7 @@ impl CompactionScheduler {
             current_version,
             access_layer,
             request_sender,
-            mut waiters,
+            waiters,
             start_time,
             cache_manager,
             manifest_ctx,
@@ -285,7 +285,7 @@ impl CompactionScheduler {
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
-        if current_version.options.compaction.remote_compaction() {
+        let waiters = if current_version.options.compaction.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
@@ -298,29 +298,36 @@ impl CompactionScheduler {
                         RemoteJob::CompactionJob(remote_compaction_job),
                         Box::new(DefaultNotifier {
                             request_sender: request_sender.clone(),
-                            waiters: std::mem::take(&mut waiters),
+                            waiters,
                         }),
                     )
                     .await;
 
-                if let Ok(job_id) = result {
-                    info!(
-                        "Scheduled remote compaction job {:?} for region {}",
-                        job_id, region_id
-                    );
+                match result {
+                    Ok(job_id) => {
+                        info!(
+                            "Scheduled remote compaction job {:?} for region {}",
+                            job_id, region_id
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
 
-                    // The remote compaction job is scheduled successfully.
-                    return Ok(());
-                } else {
-                    error!("Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id)
+                        // Return the waiters back to the caller for local compaction.
+                        e.waiters_in_remote_job_scheduler()
+                    }
                 }
             } else {
                 debug!(
                     "Remote compaction is not enabled, fallback to local compaction for region {}",
                     region_id
                 );
+                waiters
             }
-        }
+        } else {
+            waiters
+        };
 
         // Create a local compaction task.
         let mut local_compaction_task = Box::new(CompactionTaskImpl {

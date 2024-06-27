@@ -33,6 +33,7 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionState;
+use crate::request::OutputTx;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -759,6 +760,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         reason: String,
+
+        // Keep the waiters in the error so that we can notify them when fallback to the local compaction.
+        waiters: Vec<OutputTx>,
     },
 
     #[snafu(display("Failed to parse job id"))]
@@ -790,6 +794,14 @@ impl Error {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
             _ => false,
+        }
+    }
+
+    /// Returns the waiters in the remote job scheduler.
+    pub(crate) fn waiters_in_remote_job_scheduler(self) -> Vec<OutputTx> {
+        match self {
+            Error::RemoteJobScheduler { waiters, .. } => waiters,
+            _ => vec![],
         }
     }
 }

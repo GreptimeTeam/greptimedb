@@ -24,8 +24,9 @@ use uuid::Uuid;
 
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
-use crate::error::{ParseJobIdSnafu, Result};
+use crate::error::{CompactRegionSnafu, Error, ParseJobIdSnafu, Result};
 use crate::manifest::action::RegionEdit;
+use crate::metrics::COMPACTION_FAILURE_COUNT;
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
@@ -72,10 +73,11 @@ impl JobId {
     pub fn parse_str(input: &str) -> Result<JobId> {
         Uuid::parse_str(input).map(JobId).context(ParseJobIdSnafu)
     }
+}
 
-    /// Covert job id to string.
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
+impl From<JobId> for String {
+    fn from(job_id: JobId) -> String {
+        job_id.0.to_string()
     }
 }
 
@@ -116,6 +118,15 @@ pub(crate) struct DefaultNotifier {
     pub(crate) waiters: Vec<OutputTx>,
 }
 
+impl DefaultNotifier {
+    fn on_failure(&mut self, err: Arc<Error>, region_id: RegionId) {
+        COMPACTION_FAILURE_COUNT.inc();
+        for waiter in self.waiters.drain(..) {
+            waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Notifier for DefaultNotifier {
     async fn notify(&mut self, result: RemoteJobResult) {
@@ -129,10 +140,18 @@ impl Notifier for DefaultNotifier {
                             start_time: result.start_time,
                             edit,
                         }),
-                        Err(err) => BackgroundNotify::CompactionFailed(CompactionFailed {
-                            region_id: result.region_id,
-                            err: Arc::new(err),
-                        }),
+                        Err(err) => {
+                            error!(
+                                "Compaction failed for region {}: {:?}",
+                                result.region_id, err
+                            );
+                            let err = Arc::new(err);
+                            self.on_failure(err.clone(), result.region_id);
+                            BackgroundNotify::CompactionFailed(CompactionFailed {
+                                region_id: result.region_id,
+                                err,
+                            })
+                        }
                     }
                 };
 
