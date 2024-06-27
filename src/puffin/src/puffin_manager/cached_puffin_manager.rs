@@ -12,5 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod metrics;
-pub mod wal_bench;
+mod dir_meta;
+mod reader;
+mod writer;
+
+pub use reader::CachedPuffinReader;
+pub use writer::CachedPuffinWriter;

@@ -77,7 +77,7 @@ impl Indexer {
 
     /// Finish the index creation.
     /// Returns the number of bytes written if success or None if failed.
-    pub async fn finish(&mut self) -> Option<usize> {
+    pub async fn finish(&mut self) -> Option<u64> {
         if let Some(mut creator) = self.inner.take() {
             match creator.finish().await {
                 Ok((row_count, byte_count)) => {

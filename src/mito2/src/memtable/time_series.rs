@@ -36,12 +36,15 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
+use crate::error::{
+    ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result,
+    UnsupportedOperationSnafu,
+};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
-    MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -224,6 +227,13 @@ impl Memtable for TimeSeriesMemtable {
         res
     }
 
+    fn write_bulk(&self, _part: BulkPart) -> Result<()> {
+        UnsupportedOperationSnafu {
+            err_msg: "TimeSeriesMemtable does not support write_bulk",
+        }
+        .fail()
+    }
+
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
@@ -242,6 +252,30 @@ impl Memtable for TimeSeriesMemtable {
             .series_set
             .iter_series(projection, filters, self.dedup)?;
         Ok(Box::new(iter))
+    }
+
+    fn ranges(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> Vec<MemtableRange> {
+        let projection = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            self.region_metadata
+                .field_columns()
+                .map(|c| c.column_id)
+                .collect()
+        };
+        let builder = Box::new(TimeSeriesIterBuilder {
+            series_set: self.series_set.clone(),
+            projection,
+            predicate,
+            dedup: self.dedup,
+        });
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder));
+
+        vec![MemtableRange::new(context)]
     }
 
     fn is_empty(&self) -> bool {
@@ -308,6 +342,7 @@ impl Default for LocalStats {
 
 type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 
+#[derive(Clone)]
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
@@ -813,6 +848,24 @@ impl From<ValueBuilder> for Values {
             op_type,
             fields,
         }
+    }
+}
+
+struct TimeSeriesIterBuilder {
+    series_set: SeriesSet,
+    projection: HashSet<ColumnId>,
+    predicate: Option<Predicate>,
+    dedup: bool,
+}
+
+impl IterBuilder for TimeSeriesIterBuilder {
+    fn build(&self) -> Result<BoxedBatchIterator> {
+        let iter = self.series_set.iter_series(
+            self.projection.clone(),
+            self.predicate.clone(),
+            self.dedup,
+        )?;
+        Ok(Box::new(iter))
     }
 }
 

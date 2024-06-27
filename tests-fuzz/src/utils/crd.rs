@@ -12,26 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::{CastSnafu, Result};
-use crate::kafka::EntryId;
-
-/// A wrapper of kafka offset.
-pub(crate) struct Offset(pub i64);
-
-impl TryFrom<Offset> for EntryId {
-    type Error = crate::error::Error;
-
-    fn try_from(offset: Offset) -> Result<Self> {
-        EntryId::try_from(offset.0).map_err(|_| CastSnafu.build())
-    }
-}
-
-impl TryFrom<EntryId> for Offset {
-    type Error = crate::error::Error;
-
-    fn try_from(entry_id: EntryId) -> Result<Self> {
-        i64::try_from(entry_id)
-            .map(Offset)
-            .map_err(|_| CastSnafu.build())
-    }
-}
+mod common;
+mod pod;

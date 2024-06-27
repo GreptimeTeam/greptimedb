@@ -206,10 +206,15 @@ impl WorkerHandle {
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
-        if let Err(err) = self.shutdown_blocking() {
-            common_telemetry::error!("Fail to shutdown worker: {:?}", err)
+        let ret = futures::executor::block_on(async { self.shutdown().await });
+        if let Err(ret) = ret {
+            common_telemetry::error!(
+                ret;
+                "While dropping Worker Handle, failed to shutdown worker, worker might be in inconsistent state."
+            );
+        } else {
+            info!("Flow Worker shutdown due to Worker Handle dropped.")
         }
-        info!("Flow Worker shutdown due to Worker Handle dropped.")
     }
 }
 
@@ -496,6 +501,19 @@ mod test {
     use crate::plan::Plan;
     use crate::repr::{RelationType, Row};
 
+    #[test]
+    fn drop_handle() {
+        let (tx, rx) = oneshot::channel();
+        let worker_thread_handle = std::thread::spawn(move || {
+            let (handle, mut worker) = create_worker();
+            tx.send(handle).unwrap();
+            worker.run();
+        });
+        let handle = rx.blocking_recv().unwrap();
+        drop(handle);
+        worker_thread_handle.join().unwrap();
+    }
+
     #[tokio::test]
     pub async fn test_simple_get_with_worker_and_handle() {
         let (tx, rx) = oneshot::channel();
@@ -532,7 +550,7 @@ mod test {
         tx.send((Row::empty(), 0, 0)).unwrap();
         handle.run_available(0).await.unwrap();
         assert_eq!(sink_rx.recv().await.unwrap().0, Row::empty());
-        handle.shutdown().await.unwrap();
+        drop(handle);
         worker_thread_handle.join().unwrap();
     }
 }

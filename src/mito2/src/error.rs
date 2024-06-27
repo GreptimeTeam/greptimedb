@@ -697,6 +697,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Partition {} out of range, {} in total", given, all))]
+    PartitionOutOfRange {
+        given: usize,
+        all: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to iter data part"))]
     ReadDataPart {
         #[snafu(source)]
@@ -744,6 +752,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: Arc<Error>,
+    },
+
+    #[snafu(display("Operation is not supported: {}", err_msg))]
+    UnsupportedOperation {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -796,7 +811,8 @@ impl ErrorExt for Error {
             | ColumnNotFound { .. }
             | InvalidMetadata { .. }
             | InvalidRegionOptions { .. }
-            | InvalidWalReadRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidWalReadRequest { .. }
+            | PartitionOutOfRange { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 
@@ -862,6 +878,7 @@ impl ErrorExt for Error {
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
+            UnsupportedOperation { .. } => StatusCode::Unsupported,
         }
     }
 

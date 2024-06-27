@@ -109,6 +109,18 @@ pub struct FileMeta {
     pub available_indexes: SmallVec<[IndexType; 4]>,
     /// Size of the index file.
     pub index_file_size: u64,
+    /// Number of rows in the file.
+    ///
+    /// For historical reasons, this field might be missing in old files. Thus
+    /// the default value `0` doesn't means the file doesn't contains any rows,
+    /// but instead means the number of rows is unknown.
+    pub num_rows: u64,
+    /// Number of row groups in the file.
+    ///
+    /// For historical reasons, this field might be missing in old files. Thus
+    /// the default value `0` doesn't means the file doesn't contains any rows,
+    /// but instead means the number of rows is unknown.
+    pub num_row_groups: u64,
 }
 
 /// Type of index.
@@ -265,6 +277,8 @@ mod tests {
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
+            num_rows: 0,
+            num_row_groups: 0,
         }
     }
 

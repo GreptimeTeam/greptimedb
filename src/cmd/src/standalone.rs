@@ -31,6 +31,7 @@ use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::StandalonePeerLookupService;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
@@ -49,12 +50,13 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::server::Services;
 use frontend::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
+    InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -203,7 +205,7 @@ impl StandaloneOptions {
             wal: cloned_opts.wal.into(),
             storage: cloned_opts.storage,
             region_engine: cloned_opts.region_engine,
-            rpc_addr: cloned_opts.grpc.addr,
+            grpc: cloned_opts.grpc,
             ..Default::default()
         }
     }
@@ -350,7 +352,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
+            let datanode_grpc_addr = DatanodeOptions::default().grpc.addr;
             if addr.eq(&datanode_grpc_addr) {
                 return IllegalConfigSnafu {
                     msg: format!(
@@ -556,6 +558,7 @@ impl StartCommand {
                     table_metadata_allocator,
                     flow_metadata_manager,
                     flow_metadata_allocator,
+                    peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
                 },
                 procedure_manager,
                 true,

@@ -54,7 +54,7 @@ const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
-type ByteCount = usize;
+type ByteCount = u64;
 type RowCount = usize;
 
 /// Creates SST index.
@@ -271,8 +271,9 @@ impl SstIndexCreator {
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
         let blob = Blob {
             blob_type: INDEX_BLOB_TYPE.to_string(),
-            data: rx.compat(),
+            compressed_data: rx.compat(),
             properties: HashMap::default(),
+            compression_codec: None,
         };
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
 
@@ -292,7 +293,7 @@ impl SstIndexCreator {
             .fail()?,
 
             (Ok(_), e @ Err(_)) => e?,
-            (e @ Err(_), Ok(_)) => e?,
+            (e @ Err(_), Ok(_)) => e.map(|_| ())?,
             _ => {}
         }
 

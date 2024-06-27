@@ -101,6 +101,8 @@ impl VersionControlBuilder {
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
                 index_file_size: 0,
+                num_rows: 0,
+                num_row_groups: 0,
             },
         );
         self
@@ -190,6 +192,8 @@ pub(crate) fn apply_edit(
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
                 index_file_size: 0,
+                num_rows: 0,
+                num_row_groups: 0,
             }
         })
         .collect();

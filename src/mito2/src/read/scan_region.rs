@@ -35,7 +35,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
-use crate::memtable::MemtableRef;
+use crate::memtable::{MemtableRange, MemtableRef};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
@@ -68,8 +68,8 @@ impl Scanner {
     /// Returns a [RegionScanner] to scan the region.
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
-            Scanner::Seq(seq_scan) => Ok(Arc::new(seq_scan)),
-            Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
+            Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
+            Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),
         }
     }
 }
@@ -631,9 +631,8 @@ pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
 /// It contains memtables and file ranges to scan.
 #[derive(Default)]
 pub(crate) struct ScanPart {
-    /// Memtables to scan.
-    /// We scan the whole memtable now. We might scan a range of the memtable in the future.
-    pub(crate) memtables: Vec<MemtableRef>,
+    /// Memtable ranges to scan.
+    pub(crate) memtable_ranges: Vec<MemtableRange>,
     /// File ranges to scan.
     pub(crate) file_ranges: FileRangesGroup,
     /// Optional time range of the part (inclusive).
@@ -644,8 +643,8 @@ impl fmt::Debug for ScanPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ScanPart({} memtables, {} file ranges",
-            self.memtables.len(),
+            "ScanPart({} memtable ranges, {} file ranges",
+            self.memtable_ranges.len(),
             self.file_ranges
                 .iter()
                 .map(|ranges| ranges.len())
@@ -671,7 +670,7 @@ impl ScanPart {
 
     /// Merges given `part` to this part.
     pub(crate) fn merge(&mut self, mut part: ScanPart) {
-        self.memtables.append(&mut part.memtables);
+        self.memtable_ranges.append(&mut part.memtable_ranges);
         self.file_ranges.append(&mut part.file_ranges);
         let Some(part_range) = part.time_range else {
             return;
@@ -688,7 +687,9 @@ impl ScanPart {
     /// Returns true if the we can split the part into multiple parts
     /// and preserving order.
     pub(crate) fn can_split_preserve_order(&self) -> bool {
-        self.memtables.is_empty() && self.file_ranges.len() == 1 && self.file_ranges[0].len() > 1
+        self.memtable_ranges.is_empty()
+            && self.file_ranges.len() == 1
+            && self.file_ranges[0].len() > 1
     }
 }
 
@@ -739,10 +740,10 @@ impl ScanPartList {
         self.0.as_ref().map_or(0, |parts| parts.len())
     }
 
-    /// Returns the number of memtables.
-    pub(crate) fn num_memtables(&self) -> usize {
+    /// Returns the number of memtable ranges.
+    pub(crate) fn num_mem_ranges(&self) -> usize {
         self.0.as_ref().map_or(0, |parts| {
-            parts.iter().map(|part| part.memtables.len()).sum()
+            parts.iter().map(|part| part.memtable_ranges.len()).sum()
         })
     }
 
@@ -792,9 +793,9 @@ impl StreamContext {
             Ok(inner) => match t {
                 DisplayFormatType::Default => write!(
                     f,
-                    "partition_count={} ({} memtables, {} file ranges)",
+                    "partition_count={} ({} memtable ranges, {} file ranges)",
                     inner.len(),
-                    inner.num_memtables(),
+                    inner.num_mem_ranges(),
                     inner.num_file_ranges()
                 ),
                 DisplayFormatType::Verbose => write!(f, "{:?}", &*inner),

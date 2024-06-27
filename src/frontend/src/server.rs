@@ -21,7 +21,7 @@ use common_config::{Configurable, Mode};
 use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::event::LogValidatorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
@@ -36,7 +36,6 @@ use snafu::ResultExt;
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
 use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::GrpcOptions;
 
 pub struct Services<T, U>
 where

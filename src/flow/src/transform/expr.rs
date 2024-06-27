@@ -14,6 +14,9 @@
 
 #![warn(unused_imports)]
 
+use std::sync::Arc;
+
+use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
@@ -24,15 +27,17 @@ use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::Expression;
 
 use crate::adapter::error::{
-    DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
+    DatafusionSnafu, DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu,
+    PlanSnafu,
 };
 use crate::expr::{
-    BinaryFunc, ScalarExpr, TypedExpr, UnaryFunc, UnmaterializableFunc, VariadicFunc,
+    BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr, UnaryFunc,
+    UnmaterializableFunc, VariadicFunc,
 };
-use crate::repr::{ColumnType, RelationType};
+use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::literal::{from_substrait_literal, from_substrait_type};
 use crate::transform::{substrait_proto, FunctionExtensions};
-// TODO: found proper place for this
+// TODO(discord9): found proper place for this
 /// ref to `arrow_schema::datatype` for type name
 fn typename_to_cdt(name: &str) -> CDT {
     match name {
@@ -54,11 +59,113 @@ fn typename_to_cdt(name: &str) -> CDT {
     }
 }
 
+/// Convert [`ScalarFunction`] to corresponding Datafusion's [`PhysicalExpr`]
+pub(crate) fn from_scalar_fn_to_df_fn_impl(
+    f: &ScalarFunction,
+    input_schema: &RelationDesc,
+    extensions: &FunctionExtensions,
+) -> Result<Arc<dyn PhysicalExpr>, Error> {
+    let e = Expression {
+        rex_type: Some(RexType::ScalarFunction(f.clone())),
+    };
+    let schema = input_schema.to_df_schema()?;
+
+    let df_expr = futures::executor::block_on(async {
+        // TODO(discord9): consider coloring everything async....
+        substrait::df_logical_plan::consumer::from_substrait_rex(
+            &datafusion::prelude::SessionContext::new(),
+            &e,
+            &schema,
+            &extensions.inner_ref(),
+        )
+        .await
+    });
+    let expr = df_expr.map_err(|err| {
+        DatafusionSnafu {
+            raw: err,
+            context: "Failed to convert substrait scalar function to datafusion scalar function",
+        }
+        .build()
+    })?;
+    let phy_expr =
+        datafusion::physical_expr::create_physical_expr(&expr, &schema, &Default::default())
+            .map_err(|err| {
+                DatafusionSnafu {
+                    raw: err,
+                    context: "Failed to create physical expression from logical expression",
+                }
+                .build()
+            })?;
+    Ok(phy_expr)
+}
+
+/// Return an [`Expression`](wrapped in a [`FunctionArgument`]) that references the i-th column of the input relation
+pub(crate) fn proto_col(i: usize) -> substrait_proto::proto::FunctionArgument {
+    use substrait_proto::proto::expression;
+    let expr = Expression {
+        rex_type: Some(expression::RexType::Selection(Box::new(
+            expression::FieldReference {
+                reference_type: Some(expression::field_reference::ReferenceType::DirectReference(
+                    expression::ReferenceSegment {
+                        reference_type: Some(
+                            expression::reference_segment::ReferenceType::StructField(Box::new(
+                                expression::reference_segment::StructField {
+                                    field: i as i32,
+                                    child: None,
+                                },
+                            )),
+                        ),
+                    },
+                )),
+                root_type: None,
+            },
+        ))),
+    };
+    substrait_proto::proto::FunctionArgument {
+        arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
+            expr,
+        )),
+    }
+}
+
+/// rewrite ScalarFunction's arguments to Columns 0..n so nested exprs are still handled by us instead of datafusion
+fn rewrite_scalar_function(f: &ScalarFunction) -> ScalarFunction {
+    let mut f_rewrite = f.clone();
+    for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
+        *raw_expr = proto_col(idx);
+    }
+    f_rewrite
+}
+
 impl TypedExpr {
+    pub fn from_substrait_to_datafusion_scalar_func(
+        f: &ScalarFunction,
+        arg_exprs_typed: Vec<TypedExpr>,
+        extensions: &FunctionExtensions,
+    ) -> Result<TypedExpr, Error> {
+        let (arg_exprs, arg_types): (Vec<_>, Vec<_>) =
+            arg_exprs_typed.into_iter().map(|e| (e.expr, e.typ)).unzip();
+
+        let f_rewrite = rewrite_scalar_function(f);
+
+        let input_schema = RelationType::new(arg_types).into_unnamed();
+        let raw_fn =
+            RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
+
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn)?;
+        let expr = ScalarExpr::CallDf {
+            df_scalar_fn: df_func,
+            exprs: arg_exprs,
+        };
+        // df already know it's own schema, so not providing here
+        let ret_type = expr.typ(&[])?;
+        Ok(TypedExpr::new(expr, ret_type))
+    }
+
     /// Convert ScalarFunction into Flow's ScalarExpr
     pub fn from_substrait_scalar_func(
         f: &ScalarFunction,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let fn_name =
@@ -182,7 +289,12 @@ impl TypedExpr {
                         ret_type,
                     ))
                 } else {
-                    not_impl_err!("Unsupported function {fn_name} with {arg_len} arguments")
+                    let try_as_df = Self::from_substrait_to_datafusion_scalar_func(
+                        f,
+                        arg_typed_exprs,
+                        extensions,
+                    )?;
+                    Ok(try_as_df)
                 }
             }
         }
@@ -191,7 +303,7 @@ impl TypedExpr {
     /// Convert IfThen into Flow's ScalarExpr
     pub fn from_substrait_ifthen_rex(
         if_then: &IfThen,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         let ifs: Vec<_> = if_then
@@ -246,7 +358,7 @@ impl TypedExpr {
     /// Convert Substrait Rex into Flow's ScalarExpr
     pub fn from_substrait_rex(
         e: &Expression,
-        input_schema: &RelationType,
+        input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
         match &e.rex_type {
@@ -277,7 +389,7 @@ impl TypedExpr {
                         }
                         None => {
                             let column = x.field as usize;
-                            let column_type = input_schema.column_types[column].clone();
+                            let column_type = input_schema.typ().column_types[column].clone();
                             Ok(TypedExpr::new(ScalarExpr::Column(column), column_type))
                         }
                     },
@@ -322,8 +434,6 @@ impl TypedExpr {
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
-
     use common_time::{DateTime, Interval};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
@@ -334,6 +444,7 @@ mod test {
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+
     /// test if `WHERE` condition can be converted to Flow's ScalarExpr in mfp's filter
     #[tokio::test]
     async fn test_where_and() {
@@ -547,47 +658,17 @@ mod test {
                 )),
             }
         }
-        fn col(i: usize) -> substrait_proto::proto::FunctionArgument {
-            use substrait_proto::proto::expression;
-            let expr = Expression {
-                rex_type: Some(expression::RexType::Selection(Box::new(
-                    expression::FieldReference {
-                        reference_type: Some(
-                            expression::field_reference::ReferenceType::DirectReference(
-                                expression::ReferenceSegment {
-                                    reference_type: Some(
-                                        expression::reference_segment::ReferenceType::StructField(
-                                            Box::new(expression::reference_segment::StructField {
-                                                field: i as i32,
-                                                child: None,
-                                            }),
-                                        ),
-                                    ),
-                                },
-                            ),
-                        ),
-                        root_type: None,
-                    },
-                ))),
-            };
-            substrait_proto::proto::FunctionArgument {
-                arg_type: Some(substrait_proto::proto::function_argument::ArgType::Value(
-                    expr,
-                )),
-            }
-        }
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0)],
+            arguments: vec![proto_col(0)],
             options: vec![],
             output_type: None,
             ..Default::default()
         };
-        let input_schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "is_null".to_string())]),
-        };
+        let input_schema =
+            RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]).into_unnamed();
+        let extensions = FunctionExtensions::from_iter([(0, "is_null".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(
@@ -603,7 +684,7 @@ mod test {
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), col(1)],
+            arguments: vec![proto_col(0), proto_col(1)],
             options: vec![],
             output_type: None,
             ..Default::default()
@@ -611,10 +692,9 @@ mod test {
         let input_schema = RelationType::new(vec![
             ColumnType::new(CDT::uint32_datatype(), false),
             ColumnType::new(CDT::uint32_datatype(), false),
-        ]);
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "add".to_string())]),
-        };
+        ])
+        .into_unnamed();
+        let extensions = FunctionExtensions::from_iter([(0, "add".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(
@@ -631,7 +711,7 @@ mod test {
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
+            arguments: vec![proto_col(0), lit("1 second"), lit("2021-07-01 00:00:00")],
             options: vec![],
             output_type: None,
             ..Default::default()
@@ -639,10 +719,9 @@ mod test {
         let input_schema = RelationType::new(vec![
             ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
             ColumnType::new(CDT::string_datatype(), false),
-        ]);
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
-        };
+        ])
+        .into_unnamed();
+        let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(
@@ -660,7 +739,7 @@ mod test {
 
         let f = substrait_proto::proto::expression::ScalarFunction {
             function_reference: 0,
-            arguments: vec![col(0), lit("1 second")],
+            arguments: vec![proto_col(0), lit("1 second")],
             options: vec![],
             output_type: None,
             ..Default::default()
@@ -668,10 +747,9 @@ mod test {
         let input_schema = RelationType::new(vec![
             ColumnType::new(CDT::timestamp_nanosecond_datatype(), false),
             ColumnType::new(CDT::string_datatype(), false),
-        ]);
-        let extensions = FunctionExtensions {
-            anchor_to_name: HashMap::from([(0, "tumble".to_string())]),
-        };
+        ])
+        .into_unnamed();
+        let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
         let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
 
         assert_eq!(

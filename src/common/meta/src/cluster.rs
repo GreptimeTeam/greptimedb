@@ -99,6 +99,7 @@ pub struct NodeInfo {
 pub enum Role {
     Datanode,
     Frontend,
+    Flownode,
     Metasrv,
 }
 
@@ -106,6 +107,7 @@ pub enum Role {
 pub enum NodeStatus {
     Datanode(DatanodeStatus),
     Frontend(FrontendStatus),
+    Flownode(FlownodeStatus),
     Metasrv(MetasrvStatus),
     Standalone,
 }
@@ -116,6 +118,7 @@ impl NodeStatus {
         match self {
             NodeStatus::Datanode(_) => "DATANODE",
             NodeStatus::Frontend(_) => "FRONTEND",
+            NodeStatus::Flownode(_) => "FLOWNODE",
             NodeStatus::Metasrv(_) => "METASRV",
             NodeStatus::Standalone => "STANDALONE",
         }
@@ -138,6 +141,10 @@ pub struct DatanodeStatus {
 /// The status of a frontend.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FrontendStatus {}
+
+/// The status of a flownode.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FlownodeStatus {}
 
 /// The status of a metasrv.
 #[derive(Debug, Serialize, Deserialize)]
@@ -235,7 +242,8 @@ impl From<Role> for i32 {
         match role {
             Role::Datanode => 0,
             Role::Frontend => 1,
-            Role::Metasrv => 2,
+            Role::Flownode => 2,
+            Role::Metasrv => 99,
         }
     }
 }
@@ -247,7 +255,8 @@ impl TryFrom<i32> for Role {
         match role {
             0 => Ok(Self::Datanode),
             1 => Ok(Self::Frontend),
-            2 => Ok(Self::Metasrv),
+            2 => Ok(Self::Flownode),
+            99 => Ok(Self::Metasrv),
             _ => InvalidRoleSnafu { role }.fail(),
         }
     }

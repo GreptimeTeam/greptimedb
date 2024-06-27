@@ -8,17 +8,19 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+async-compression = "0.4.11"
 async-trait.workspace = true
+async-walkdir = "2.0.0"
 bitflags.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
+lz4_flex = "0.11"
 pin-project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
+uuid.workspace = true

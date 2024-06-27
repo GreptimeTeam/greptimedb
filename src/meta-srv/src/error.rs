@@ -39,6 +39,14 @@ pub enum Error {
         peer_id: u64,
     },
 
+    #[snafu(display("Failed to lookup peer: {}", peer_id))]
+    LookupPeer {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+        peer_id: u64,
+    },
+
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         #[snafu(implicit)]
@@ -274,7 +282,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid datanode lease key: {}", key))]
+    #[snafu(display("Invalid lease key: {}", key))]
     InvalidLeaseKey {
         key: String,
         #[snafu(implicit)]
@@ -295,7 +303,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode lease key from utf8"))]
+    #[snafu(display("Failed to parse lease key from utf8"))]
     LeaseKeyFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -303,7 +311,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode lease value from utf8"))]
+    #[snafu(display("Failed to parse lease value from utf8"))]
     LeaseValueFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -311,7 +319,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode stat key from utf8"))]
+    #[snafu(display("Failed to parse stat key from utf8"))]
     StatKeyFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -319,7 +327,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode stat value from utf8"))]
+    #[snafu(display("Failed to parse stat value from utf8"))]
     StatValueFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
@@ -972,6 +980,7 @@ impl ErrorExt for Error {
             }
 
             Error::Other { source, .. } => source.status_code(),
+            Error::LookupPeer { source, .. } => source.status_code(),
         }
     }
 

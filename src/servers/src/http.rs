@@ -222,7 +222,7 @@ impl HttpRecordsOutput {
 }
 
 impl HttpRecordsOutput {
-    pub(crate) fn try_new(
+    pub fn try_new(
         schema: SchemaRef,
         recordbatches: Vec<RecordBatch>,
     ) -> std::result::Result<HttpRecordsOutput, Error> {
@@ -234,19 +234,20 @@ impl HttpRecordsOutput {
                 metrics: Default::default(),
             })
         } else {
-            let mut rows =
-                Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
+            let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
+            let mut rows = Vec::with_capacity(num_rows);
+            let num_cols = schema.column_schemas().len();
+            rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
 
+            let mut finished_row_cursor = 0;
             for recordbatch in recordbatches {
-                for row in recordbatch.rows() {
-                    let value_row = row
-                        .into_iter()
-                        .map(Value::try_from)
-                        .collect::<std::result::Result<Vec<Value>, _>>()
-                        .context(ToJsonSnafu)?;
-
-                    rows.push(value_row);
+                for col in recordbatch.columns() {
+                    for row_idx in 0..recordbatch.num_rows() {
+                        let value = Value::try_from(col.get_ref(row_idx)).context(ToJsonSnafu)?;
+                        rows[row_idx + finished_row_cursor].push(value);
+                    }
                 }
+                finished_row_cursor += recordbatch.num_rows();
             }
 
             Ok(HttpRecordsOutput {
@@ -674,20 +675,30 @@ impl HttpServer {
     }
 
     pub fn build(&self, router: Router) -> Router {
+        let timeout_layer = if self.options.timeout != Duration::default() {
+            Some(ServiceBuilder::new().layer(TimeoutLayer::new(self.options.timeout)))
+        } else {
+            info!("HTTP server timeout is disabled");
+            None
+        };
+        let body_limit_layer = if self.options.body_limit != ReadableSize(0) {
+            Some(
+                ServiceBuilder::new()
+                    .layer(DefaultBodyLimit::max(self.options.body_limit.0 as usize)),
+            )
+        } else {
+            info!("HTTP server body limit is disabled");
+            None
+        };
+
         router
             // middlewares
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    .layer(TimeoutLayer::new(self.options.timeout))
-                    .layer(DefaultBodyLimit::max(
-                        self.options
-                            .body_limit
-                            .0
-                            .try_into()
-                            .unwrap_or_else(|_| DEFAULT_BODY_LIMIT.as_bytes() as usize),
-                    ))
+                    .option_layer(timeout_layer)
+                    .option_layer(body_limit_layer)
                     // auth layer
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),

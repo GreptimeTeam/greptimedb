@@ -322,6 +322,7 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | information_schema | schemata                              | catalog_name                      | 1                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
 | greptime      | information_schema | schemata                              | default_character_set_name        | 3                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
 | greptime      | information_schema | schemata                              | default_collation_name            | 4                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
+| greptime      | information_schema | schemata                              | options                           | 6                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | Yes         | string          |                |        |
 | greptime      | information_schema | schemata                              | schema_name                       | 2                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
 | greptime      | information_schema | schemata                              | sql_path                          | 5                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | Yes         | string          |                |        |
 | greptime      | information_schema | session_status                        | variable_name                     | 1                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string          | FIELD         |                | No          | string          |                |        |
@@ -528,16 +529,17 @@ desc table schemata;
 | default_character_set_name | String |     | NO   |         | FIELD         |
 | default_collation_name     | String |     | NO   |         | FIELD         |
 | sql_path                   | String |     | YES  |         | FIELD         |
+| options                    | String |     | YES  |         | FIELD         |
 +----------------------------+--------+-----+------+---------+---------------+
 
 select * from schemata where catalog_name = 'greptime' and schema_name != 'public' order by catalog_name, schema_name;
 
-+--------------+--------------------+----------------------------+------------------------+----------+
-| catalog_name | schema_name        | default_character_set_name | default_collation_name | sql_path |
-+--------------+--------------------+----------------------------+------------------------+----------+
-| greptime     | greptime_private   | utf8                       | utf8_bin               |          |
-| greptime     | information_schema | utf8                       | utf8_bin               |          |
-+--------------+--------------------+----------------------------+------------------------+----------+
++--------------+--------------------+----------------------------+------------------------+----------+---------+
+| catalog_name | schema_name        | default_character_set_name | default_collation_name | sql_path | options |
++--------------+--------------------+----------------------------+------------------------+----------+---------+
+| greptime     | greptime_private   | utf8                       | utf8_bin               |          |         |
+| greptime     | information_schema | utf8                       | utf8_bin               |          |         |
++--------------+--------------------+----------------------------+------------------------+----------+---------+
 
 -- test engines
 select * from engines;

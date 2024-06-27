@@ -17,6 +17,8 @@ pub mod csv;
 pub mod date;
 pub mod dissect;
 pub mod epoch;
+pub mod gsub;
+pub mod join;
 pub mod letter;
 pub mod regex;
 pub mod urlencoding;
@@ -29,6 +31,8 @@ use csv::CsvProcessor;
 use date::DateProcessor;
 use dissect::DissectProcessor;
 use epoch::EpochProcessor;
+use gsub::GsubProcessor;
+use join::JoinProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
 use urlencoding::UrlEncodingProcessor;
@@ -40,7 +44,9 @@ const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
 const IGNORE_MISSING_NAME: &str = "ignore_missing";
 const METHOD_NAME: &str = "method";
+const PATTERN_NAME: &str = "pattern";
 const PATTERNS_NAME: &str = "patterns";
+const SEPARATOR_NAME: &str = "separator";
 
 // const IF_NAME: &str = "if";
 // const IGNORE_FAILURE_NAME: &str = "ignore_failure";
@@ -163,6 +169,8 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> 
         date::PROCESSOR_DATE => Arc::new(DateProcessor::try_from(value)?),
         dissect::PROCESSOR_DISSECT => Arc::new(DissectProcessor::try_from(value)?),
         epoch::PROCESSOR_EPOCH => Arc::new(EpochProcessor::try_from(value)?),
+        gsub::PROCESSOR_GSUB => Arc::new(GsubProcessor::try_from(value)?),
+        join::PROCESSOR_JOIN => Arc::new(JoinProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => Arc::new(LetterProcessor::try_from(value)?),
         regex::PROCESSOR_REGEX => Arc::new(RegexProcessor::try_from(value)?),
         urlencoding::PROCESSOR_URL_ENCODING => Arc::new(UrlEncodingProcessor::try_from(value)?),

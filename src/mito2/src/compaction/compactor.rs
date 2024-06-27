@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::compact_request;
 use common_telemetry::info;
 use object_store::manager::ObjectStoreManager;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -53,6 +53,7 @@ use crate::sst::parquet::WriteOptions;
 pub struct CompactionRegion {
     pub region_id: RegionId,
     pub region_options: RegionOptions,
+    pub region_dir: String,
 
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) region_metadata: RegionMetadataRef,
@@ -60,28 +61,26 @@ pub struct CompactionRegion {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
+    pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
 }
 
-/// CompactorRequest represents the request to compact a region.
+/// OpenCompactionRegionRequest represents the request to open a compaction region.
 #[derive(Debug, Clone)]
-pub struct CompactorRequest {
+pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub region_dir: String,
-    pub region_options: HashMap<String, String>,
-    pub compaction_options: compact_request::Options,
-    pub picker_output: PickerOutput,
+    pub region_options: RegionOptions,
 }
 
 /// Open a compaction region from a compaction request.
 /// It's simple version of RegionOpener::open().
 pub async fn open_compaction_region(
-    req: &CompactorRequest,
+    req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManager,
 ) -> Result<CompactionRegion> {
-    let region_options = RegionOptions::try_from(&req.region_options)?;
     let object_store = {
-        let name = &region_options.storage;
+        let name = &req.region_options.storage;
         if let Some(name) = name {
             object_store_manager
                 .find(name)
@@ -137,8 +136,8 @@ pub async fn open_compaction_region(
     let current_version = {
         let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
             .builder_for_options(
-                region_options.memtable.as_ref(),
-                !region_options.append_mode,
+                req.region_options.memtable.as_ref(),
+                !req.region_options.append_mode,
             );
 
         // Initial memtable id is 0.
@@ -146,7 +145,7 @@ pub async fn open_compaction_region(
             region_metadata.clone(),
             memtable_builder.clone(),
             0,
-            region_options.compaction.time_window(),
+            req.region_options.compaction.time_window(),
         ));
 
         let version = VersionBuilder::new(region_metadata.clone(), mutable)
@@ -155,26 +154,34 @@ pub async fn open_compaction_region(
             .flushed_sequence(manifest.flushed_sequence)
             .truncated_entry_id(manifest.truncated_entry_id)
             .compaction_time_window(manifest.compaction_time_window)
-            .options(region_options.clone())
+            .options(req.region_options.clone())
             .build();
         let version_control = Arc::new(VersionControl::new(version));
         version_control.current().version
     };
 
     Ok(CompactionRegion {
-        region_options: region_options.clone(),
-        manifest_ctx,
-        access_layer,
-        current_version,
         region_id: req.region_id,
-        cache_manager: Arc::new(CacheManager::default()),
+        region_options: req.region_options.clone(),
+        region_dir: req.region_dir.clone(),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
+        cache_manager: Arc::new(CacheManager::default()),
+        access_layer,
+        manifest_ctx,
+        current_version,
+        file_purger: Some(file_purger),
     })
 }
 
+impl CompactionRegion {
+    pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
+        self.file_purger.clone()
+    }
+}
+
 /// `[MergeOutput]` represents the output of merging SST files.
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct MergeOutput {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
@@ -313,6 +320,8 @@ impl Compactor for DefaultCompactor {
                             .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
                             .unwrap_or_default(),
                         index_file_size: sst_info.index_file_size,
+                        num_rows: sst_info.num_rows as u64,
+                        num_row_groups: sst_info.num_row_groups,
                     });
                 Ok(file_meta_opt)
             });

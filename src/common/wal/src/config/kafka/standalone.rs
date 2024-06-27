@@ -43,11 +43,10 @@ pub struct StandaloneKafkaConfig {
     /// The compression algorithm used to compress kafka records.
     #[serde(skip)]
     pub compression: Compression,
+    /// TODO(weny): Remove the alias once we release v0.9.
     /// The max size of a single producer batch.
-    pub max_batch_size: ReadableSize,
-    /// The linger duration of a kafka batch producer.
-    #[serde(with = "humantime_serde")]
-    pub linger: Duration,
+    #[serde(alias = "max_batch_size")]
+    pub max_batch_bytes: ReadableSize,
     /// The consumer wait timeout.
     #[serde(with = "humantime_serde")]
     pub consumer_wait_timeout: Duration,
@@ -70,8 +69,7 @@ impl Default for StandaloneKafkaConfig {
             create_topic_timeout: Duration::from_secs(30),
             compression: Compression::NoCompression,
             // Warning: Kafka has a default limit of 1MB per message in a topic.
-            max_batch_size: ReadableSize::mb(1),
-            linger: Duration::from_millis(200),
+            max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
         }

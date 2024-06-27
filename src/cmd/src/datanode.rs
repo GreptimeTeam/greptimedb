@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_config::Configurable;
-use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
+use common_telemetry::{info, warn};
 use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -155,6 +155,7 @@ impl StartCommand {
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
+    #[allow(deprecated)]
     fn merge_with_cli_options(
         &self,
         global_options: &GlobalOptions,
@@ -176,11 +177,32 @@ impl StartCommand {
         };
 
         if let Some(addr) = &self.rpc_addr {
-            opts.rpc_addr.clone_from(addr);
+            opts.grpc.addr.clone_from(addr);
+        } else if let Some(addr) = &opts.rpc_addr {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead.");
+            opts.grpc.addr.clone_from(addr);
         }
 
-        if self.rpc_hostname.is_some() {
-            opts.rpc_hostname.clone_from(&self.rpc_hostname);
+        if let Some(hostname) = &self.rpc_hostname {
+            opts.grpc.hostname.clone_from(hostname);
+        } else if let Some(hostname) = &opts.rpc_hostname {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead.");
+            opts.grpc.hostname.clone_from(hostname);
+        }
+
+        if let Some(runtime_size) = opts.rpc_runtime_size {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_runtime_size`, please use `grpc.runtime_size` instead.");
+            opts.grpc.runtime_size = runtime_size;
+        }
+
+        if let Some(max_recv_message_size) = opts.rpc_max_recv_message_size {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_recv_message_size`, please use `grpc.max_recv_message_size` instead.");
+            opts.grpc.max_recv_message_size = max_recv_message_size;
+        }
+
+        if let Some(max_send_message_size) = opts.rpc_max_send_message_size {
+            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_send_message_size`, please use `grpc.max_send_message_size` instead.");
+            opts.grpc.max_send_message_size = max_send_message_size;
         }
 
         if let Some(node_id) = self.node_id {
@@ -303,15 +325,45 @@ mod tests {
     use crate::options::GlobalOptions;
 
     #[test]
+    fn test_deprecated_cli_options() {
+        common_telemetry::init_default_ut_logging();
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            mode = "distributed"
+            enable_memory_catalog = false
+            node_id = 42
+            
+            rpc_addr = "127.0.0.1:4001"
+            rpc_hostname = "192.168.0.1"
+            [grpc]
+            addr = "127.0.0.1:3001"
+            hostname = "127.0.0.1"
+            runtime_size = 8
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let cmd = StartCommand {
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let options = cmd.load_options(&Default::default()).unwrap().component;
+        assert_eq!("127.0.0.1:4001".to_string(), options.grpc.addr);
+        assert_eq!("192.168.0.1".to_string(), options.grpc.hostname);
+    }
+
+    #[test]
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
-            rpc_addr = "127.0.0.1:3001"
-            rpc_hostname = "127.0.0.1"
-            rpc_runtime_size = 8
+            
+            [grpc]
+            addr = "127.0.0.1:3001"
+            hostname = "127.0.0.1"
+            runtime_size = 8
 
             [heartbeat]
             interval = "300ms"
@@ -358,7 +410,7 @@ mod tests {
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
 
-        assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.addr);
         assert_eq!(Some(42), options.node_id);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
@@ -475,8 +527,8 @@ mod tests {
             enable_memory_catalog = false
             node_id = 42
             rpc_addr = "127.0.0.1:3001"
-            rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
+            rpc_hostname = "10.103.174.219"
 
             [meta_client]
             timeout = "3s"
@@ -572,6 +624,7 @@ mod tests {
                     opts.http.addr,
                     DatanodeOptions::default().component.http.addr
                 );
+                assert_eq!(opts.grpc.hostname, "10.103.174.219");
             },
         );
     }

@@ -28,11 +28,13 @@ use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use smallvec::smallvec;
 use snafu::ResultExt;
-use store_api::region_engine::{RegionScanner, ScannerPartitioning, ScannerProperties};
+use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
+use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
-use crate::memtable::MemtableRef;
+use crate::memtable::{MemtableRange, MemtableRef};
 use crate::read::compat::CompatBatch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{
@@ -56,9 +58,8 @@ pub struct UnorderedScan {
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
     pub(crate) fn new(input: ScanInput) -> Self {
-        let properties = ScannerProperties::new(ScannerPartitioning::Unknown(
-            input.parallelism.parallelism.max(1),
-        ));
+        let properties =
+            ScannerProperties::new_with_partitions(input.parallelism.parallelism.max(1));
         let stream_ctx = Arc::new(StreamContext::new(input));
 
         Self {
@@ -69,7 +70,7 @@ impl UnorderedScan {
 
     /// Scans the region and returns a stream.
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
-        let part_num = self.properties.partitioning().num_partitions();
+        let part_num = self.properties.num_partitions();
         let streams = (0..part_num)
             .map(|i| self.scan_partition(i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
@@ -133,6 +134,11 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
+    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        self.properties = ScannerProperties::new(ranges);
+        Ok(())
+    }
+
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut metrics = ScannerMetrics {
             prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
@@ -151,13 +157,10 @@ impl RegionScanner for UnorderedScan {
 
             let mapper = &stream_ctx.input.mapper;
             let memtable_sources = part
-                .memtables
+                .memtable_ranges
                 .iter()
                 .map(|mem| {
-                    let iter = mem.iter(
-                        Some(mapper.column_ids()),
-                        stream_ctx.input.predicate.clone(),
-                    )?;
+                    let iter = mem.build_iter()?;
                     Ok(Source::Iter(iter))
                 })
                 .collect::<Result<Vec<_>>>()
@@ -240,8 +243,12 @@ async fn maybe_init_parts(
         let now = Instant::now();
         let mut distributor = UnorderedDistributor::default();
         input.prune_file_ranges(&mut distributor).await?;
-        part_list
-            .set_parts(distributor.build_parts(&input.memtables, input.parallelism.parallelism));
+        distributor.append_mem_ranges(
+            &input.memtables,
+            Some(input.mapper.column_ids()),
+            input.predicate.clone(),
+        );
+        part_list.set_parts(distributor.build_parts(input.parallelism.parallelism));
 
         metrics.observe_init_part(now.elapsed());
     }
@@ -253,6 +260,7 @@ async fn maybe_init_parts(
 /// is no output ordering guarantee of each partition.
 #[derive(Default)]
 struct UnorderedDistributor {
+    mem_ranges: Vec<MemtableRange>,
     file_ranges: Vec<FileRange>,
 }
 
@@ -267,35 +275,52 @@ impl FileRangeCollector for UnorderedDistributor {
 }
 
 impl UnorderedDistributor {
+    /// Appends memtable ranges to the distributor.
+    fn append_mem_ranges(
+        &mut self,
+        memtables: &[MemtableRef],
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) {
+        for mem in memtables {
+            let mut mem_ranges = mem.ranges(projection, predicate.clone());
+            if mem_ranges.is_empty() {
+                continue;
+            }
+            self.mem_ranges.append(&mut mem_ranges);
+        }
+    }
+
     /// Distributes file ranges and memtables across partitions according to the `parallelism`.
     /// The output number of parts may be `<= parallelism`.
     ///
     /// [ScanPart] created by this distributor only contains one group of file ranges.
-    fn build_parts(self, memtables: &[MemtableRef], parallelism: usize) -> Vec<ScanPart> {
+    fn build_parts(self, parallelism: usize) -> Vec<ScanPart> {
         if parallelism <= 1 {
             // Returns a single part.
             let part = ScanPart {
-                memtables: memtables.to_vec(),
+                memtable_ranges: self.mem_ranges.clone(),
                 file_ranges: smallvec![self.file_ranges],
                 time_range: None,
             };
             return vec![part];
         }
 
-        let mems_per_part = ((memtables.len() + parallelism - 1) / parallelism).max(1);
+        let mems_per_part = ((self.mem_ranges.len() + parallelism - 1) / parallelism).max(1);
         let ranges_per_part = ((self.file_ranges.len() + parallelism - 1) / parallelism).max(1);
         common_telemetry::debug!(
-                "Parallel scan is enabled, parallelism: {}, {} memtables, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
+                "Parallel scan is enabled, parallelism: {}, {} mem_ranges, {} file_ranges, mems_per_part: {}, ranges_per_part: {}",
                 parallelism,
-                memtables.len(),
+                self.mem_ranges.len(),
                 self.file_ranges.len(),
                 mems_per_part,
                 ranges_per_part
             );
-        let mut scan_parts = memtables
+        let mut scan_parts = self
+            .mem_ranges
             .chunks(mems_per_part)
             .map(|mems| ScanPart {
-                memtables: mems.to_vec(),
+                memtable_ranges: mems.to_vec(),
                 file_ranges: smallvec![Vec::new()], // Ensures there is always one group.
                 time_range: None,
             })
@@ -303,7 +328,7 @@ impl UnorderedDistributor {
         for (i, ranges) in self.file_ranges.chunks(ranges_per_part).enumerate() {
             if i == scan_parts.len() {
                 scan_parts.push(ScanPart {
-                    memtables: Vec::new(),
+                    memtable_ranges: Vec::new(),
                     file_ranges: smallvec![ranges.to_vec()],
                     time_range: None,
                 });

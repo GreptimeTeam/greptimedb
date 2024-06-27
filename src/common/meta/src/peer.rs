@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use api::v1::meta::Peer as PbPeer;
 use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
+use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[derive(Debug, Default, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
@@ -62,5 +66,52 @@ impl Peer {
 impl Display for Peer {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "peer-{}({})", self.id, self.addr)
+    }
+}
+
+/// can query peer given a node id
+#[async_trait::async_trait]
+pub trait PeerLookupService {
+    async fn datanode(&self, cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>, Error>;
+    async fn flownode(&self, cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>, Error>;
+}
+
+pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;
+
+/// always return `Peer::new(0, "")` for any query
+pub struct StandalonePeerLookupService {
+    default_peer: Peer,
+}
+
+impl StandalonePeerLookupService {
+    pub fn new() -> Self {
+        Self {
+            default_peer: Peer::new(0, ""),
+        }
+    }
+}
+
+impl Default for StandalonePeerLookupService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerLookupService for StandalonePeerLookupService {
+    async fn datanode(
+        &self,
+        _cluster_id: ClusterId,
+        _id: DatanodeId,
+    ) -> Result<Option<Peer>, Error> {
+        Ok(Some(self.default_peer.clone()))
+    }
+
+    async fn flownode(
+        &self,
+        _cluster_id: ClusterId,
+        _id: FlownodeId,
+    ) -> Result<Option<Peer>, Error> {
+        Ok(Some(self.default_peer.clone()))
     }
 }

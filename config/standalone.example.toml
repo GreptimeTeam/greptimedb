@@ -15,16 +15,17 @@ read_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 write_rt_size = 8
 ## The number of threads to execute the runtime for global background operations.
-bg_rt_size = 8
+bg_rt_size = 4
 
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
-## HTTP request timeout.
+## HTTP request timeout. Set to 0 to disable timeout.
 timeout = "30s"
 ## HTTP request body limit.
-## Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
 body_limit = "64MB"
 
 ## The gRPC server options.
@@ -175,11 +176,7 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
 ## **It's only used when the provider is `kafka`**.
-max_batch_size = "1MB"
-
-## The linger duration of a kafka batch producer.
-## **It's only used when the provider is `kafka`**.
-linger = "200ms"
+max_batch_bytes = "1MB"
 
 ## The consumer wait timeout.
 ## **It's only used when the provider is `kafka`**.

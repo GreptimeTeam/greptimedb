@@ -136,7 +136,7 @@ where
 
         let index_size = self.indexer.finish().await;
         let inverted_index_available = index_size.is_some();
-        let index_file_size = index_size.unwrap_or(0) as u64;
+        let index_file_size = index_size.unwrap_or(0);
 
         if stats.num_rows == 0 {
             return Ok(None);
@@ -163,6 +163,7 @@ where
             time_range,
             file_size,
             num_rows: stats.num_rows,
+            num_row_groups: parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(Arc::new(parquet_metadata)),
             inverted_index_available,
             index_file_size,

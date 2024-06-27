@@ -5,6 +5,8 @@ SELECT INTERVAL '1.5 year';
 
 SELECT INTERVAL '-2 months';
 
+SELECT '3 hours'::INTERVAL;
+
 SELECT INTERVAL '1 year 2 months 3 days 4 hours' + INTERVAL '1 year';
 
 SELECT INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';
@@ -65,6 +67,23 @@ SELECT TIMESTAMP '1992-09-20 11:30:00.123456' + interval_value as new_value from
 
 -- TIMESTAMP CONSTANT - INTERVAL
 SELECT TIMESTAMP '1992-09-20 11:30:00.123456' - interval_value as new_value from intervals;
+
+-- Interval shortened names
+SELECT INTERVAL '55h';
+
+SELECT INTERVAL '-2mon';
+
+SELECT INTERVAL '-1h5m';
+
+SELECT INTERVAL '-1h-5m';
+
+SELECT INTERVAL '1y2w3d4h';
+
+SELECT '3y2mon'::INTERVAL;
+
+SELECT INTERVAL '7 days' - INTERVAL '1d';
+
+SELECT INTERVAL '2h' + INTERVAL '1h';
 
 
 -- Interval type does not support aggregation functions.
