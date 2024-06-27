@@ -523,6 +523,7 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
             if self.current_batch.is_none() {
                 // The iterator is exhausted.
                 self.iter = None;
+                return Ok(None);
             }
         }
 
