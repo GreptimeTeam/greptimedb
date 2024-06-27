@@ -22,7 +22,7 @@ use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::DdlContext;
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::FlowMetadataManager;
@@ -282,24 +282,6 @@ impl MetasrvBuilder {
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
-        let ddl_manager = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager,
-                    cache_invalidator,
-                    memory_region_keeper: memory_region_keeper.clone(),
-                    table_metadata_manager: table_metadata_manager.clone(),
-                    table_metadata_allocator: table_metadata_allocator.clone(),
-                    flow_metadata_manager: flow_metadata_manager.clone(),
-                    flow_metadata_allocator: flow_metadata_allocator.clone(),
-                    peer_lookup_service: peer_lookup_service.clone(),
-                },
-                procedure_manager.clone(),
-                true,
-            )
-            .context(error::InitDdlManagerSnafu)?,
-        );
-
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             procedure_manager.clone(),
             DefaultContextFactory::new(
@@ -318,7 +300,7 @@ impl MetasrvBuilder {
             .fail();
         }
 
-        let (region_failover_handler, region_supervisor_ticker) =
+        let (region_failover_handler, region_supervisor_ticker, region_failure_detector_controller) =
             if options.enable_region_failover && is_remote_wal {
                 let region_supervisor = RegionSupervisor::new(
                     options.failure_detector,
@@ -327,16 +309,38 @@ impl MetasrvBuilder {
                     selector.clone(),
                     region_migration_manager.clone(),
                     leader_cached_kv_backend.clone() as _,
-                    peer_lookup_service,
+                    peer_lookup_service.clone(),
                 );
                 let region_supervisor_ticker = region_supervisor.ticker();
+                let region_failure_detector_controller =
+                    region_supervisor.failure_detector_controller();
                 (
                     Some(RegionFailureHandler::new(region_supervisor)),
                     Some(region_supervisor_ticker),
+                    region_failure_detector_controller as _,
                 )
             } else {
-                (None, None)
+                (None, None, Arc::new(NoopRegionFailureDetectorControl) as _)
             };
+
+        let ddl_manager = Arc::new(
+            DdlManager::try_new(
+                DdlContext {
+                    node_manager,
+                    cache_invalidator,
+                    memory_region_keeper: memory_region_keeper.clone(),
+                    table_metadata_manager: table_metadata_manager.clone(),
+                    table_metadata_allocator: table_metadata_allocator.clone(),
+                    flow_metadata_manager: flow_metadata_manager.clone(),
+                    flow_metadata_allocator: flow_metadata_allocator.clone(),
+                    peer_lookup_service,
+                    region_failure_detector_controller,
+                },
+                procedure_manager.clone(),
+                true,
+            )
+            .context(error::InitDdlManagerSnafu)?,
+        );
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,

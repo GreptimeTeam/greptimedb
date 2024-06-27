@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common_meta::ddl::{RegionFailureDetectorController, RegionFailureDetectorControllerRef};
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::PeerLookupServiceRef;
@@ -188,17 +189,6 @@ pub struct RegionSupervisor {
     peer_lookup: PeerLookupServiceRef,
 }
 
-pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;
-
-#[async_trait::async_trait]
-pub trait RegionFailureDetectorController {
-    /// Registers failure detectors for the given identifiers.
-    async fn register_failure_detectors(&self, ident: Vec<Ident>);
-
-    /// Deregisters failure detectors for the given identifiers.
-    async fn deregister_failure_detectors(&self, ident: Vec<Ident>);
-}
-
 /// Controller for managing failure detectors for regions.
 #[derive(Debug, Clone)]
 pub struct RegionFailureDetectorControl {
@@ -228,17 +218,6 @@ impl RegionFailureDetectorController for RegionFailureDetectorControl {
             error!("RegionSupervisor is stop receiving heartbeat");
         }
     }
-}
-
-/// A noop implementation of [`RegionFailureDetectorController`].
-#[derive(Debug, Clone)]
-pub struct NoopRegionFailureDetectorControl;
-
-#[async_trait::async_trait]
-impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
-    async fn register_failure_detectors(&self, _ident: Vec<Ident>) {}
-
-    async fn deregister_failure_detectors(&self, _ident: Vec<Ident>) {}
 }
 
 /// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].

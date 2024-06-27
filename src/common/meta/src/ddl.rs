@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::tracing_context::W3cTrace;
-use store_api::storage::{RegionNumber, TableId};
+use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
@@ -30,7 +30,7 @@ use crate::peer::PeerLookupServiceRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
-use crate::ClusterId;
+use crate::{ClusterId, DatanodeId};
 
 pub mod alter_logical_tables;
 pub mod alter_table;
@@ -102,6 +102,28 @@ pub struct TableMetadata {
     pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
+pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;
+
+#[async_trait::async_trait]
+pub trait RegionFailureDetectorController: Send + Sync {
+    /// Registers failure detectors for the given identifiers.
+    async fn register_failure_detectors(&self, ident: Vec<(ClusterId, DatanodeId, RegionId)>);
+
+    /// Deregisters failure detectors for the given identifiers.
+    async fn deregister_failure_detectors(&self, ident: Vec<(ClusterId, DatanodeId, RegionId)>);
+}
+
+/// A noop implementation of [`RegionFailureDetectorController`].
+#[derive(Debug, Clone)]
+pub struct NoopRegionFailureDetectorControl;
+
+#[async_trait::async_trait]
+impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
+    async fn register_failure_detectors(&self, _ident: Vec<(ClusterId, DatanodeId, RegionId)>) {}
+
+    async fn deregister_failure_detectors(&self, _ident: Vec<(ClusterId, DatanodeId, RegionId)>) {}
+}
+
 /// The context of ddl.
 #[derive(Clone)]
 pub struct DdlContext {
@@ -121,4 +143,6 @@ pub struct DdlContext {
     pub flow_metadata_allocator: FlowMetadataAllocatorRef,
     /// look up peer by id.
     pub peer_lookup_service: PeerLookupServiceRef,
+    /// controller of region failure detector.
+    pub region_failure_detector_controller: RegionFailureDetectorControllerRef,
 }
