@@ -52,8 +52,8 @@ pub struct MokaCacheManager {
     /// The cache maintaining the cache key to the size of the file or directory.
     cache: Cache<String, CacheValue>,
 
-    /// The unreleased directories that are waiting to be released. The value is the count of
-    /// references to the directory.
+    /// The unreleased directories that are waiting to be released.
+    /// The value is the count of references to the directory.
     unreleased_dirs: Arc<Mutex<HashMap<String, usize>>>,
 }
 
@@ -301,6 +301,8 @@ impl MokaCacheManager {
         init_fn: Box<dyn InitDirFn + Send + Sync + '_>,
     ) -> Result<u64> {
         // If the `target_path` already exists, reuse it.
+        // It's ok since we have protected the directory before
+        // calling `write_dir` by incrementing the reference count.
         if fs::try_exists(target_path).await.context(MetadataSnafu)? {
             return Self::get_dir_size(target_path).await;
         }
