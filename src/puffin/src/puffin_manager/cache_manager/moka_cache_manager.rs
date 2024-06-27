@@ -177,26 +177,19 @@ impl CacheManager for MokaCacheManager {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let dir_path = self.base_dir.join(&cache_key);
 
-        let dir_exists = {
+        {
+            // Prevent the directory from being removed by a snap eviction.
             let mut unreleased_dirs = self.unreleased_dirs.lock().await;
-
-            // Prevent the directory from being removed by a snap eviction
-            let rc = unreleased_dirs
+            unreleased_dirs
                 .entry(cache_key.clone())
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
-
-            *rc > 1
         }; // End of `unreleased_dirs`
 
         let res = self
             .cache
             .try_get_with(cache_key.clone(), async {
-                let size = if dir_exists {
-                    Self::get_dir_size(&dir_path).await?
-                } else {
-                    Self::write_dir(&dir_path, init_fn).await?
-                };
+                let size = Self::write_dir(&dir_path, init_fn).await?;
                 Ok(CacheValue::Dir(size))
             })
             .await
@@ -210,8 +203,8 @@ impl CacheManager for MokaCacheManager {
                 } else {
                     unreleased_dirs.remove(&cache_key);
 
-                    // Attempt to remove the directory, considering the possibility that the error
-                    // originates from `get_dir_size` and the final `RcDirGuard` has just been dropped.
+                    // Attempt to remove the directory, considering the possibility that the target directory exists;
+                    // the error originates from getting its size and the final `RcDirGuard` has just been dropped.
                     let deleted_path = dir_path.with_extension(DELETED_EXTENSION);
                     if let Err(err) = fs::rename(&dir_path, &deleted_path).await {
                         if err.kind() == ErrorKind::NotFound {
