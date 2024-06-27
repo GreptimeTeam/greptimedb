@@ -760,7 +760,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         reason: String,
-
         // Keep the waiters in the error so that we can notify them when fallback to the local compaction.
         waiters: Vec<OutputTx>,
     },

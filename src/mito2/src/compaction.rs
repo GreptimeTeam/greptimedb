@@ -291,6 +291,7 @@ impl CompactionScheduler {
                     compaction_region: compaction_region.clone(),
                     picker_output: picker_output.clone(),
                     start_time,
+                    waiters,
                 };
 
                 let result = remote_job_scheduler
@@ -298,7 +299,6 @@ impl CompactionScheduler {
                         RemoteJob::CompactionJob(remote_compaction_job),
                         Box::new(DefaultNotifier {
                             request_sender: request_sender.clone(),
-                            waiters,
                         }),
                     )
                     .await;

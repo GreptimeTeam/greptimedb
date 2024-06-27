@@ -61,7 +61,7 @@ pub trait RemoteJobScheduler: Send + Sync + 'static {
 #[async_trait::async_trait]
 pub trait Notifier: Send + Sync + 'static {
     /// Notify the mito engine that a remote job is completed.
-    async fn notify(&mut self, result: RemoteJobResult);
+    async fn notify(&self, result: RemoteJobResult, waiters: Vec<OutputTx>);
 }
 
 /// Unique id for a remote job.
@@ -82,19 +82,19 @@ impl From<JobId> for String {
 }
 
 /// RemoteJob is a job that can be executed remotely. For example, a remote compaction job.
-#[derive(Clone)]
 #[allow(dead_code)]
 pub enum RemoteJob {
     CompactionJob(CompactionJob),
 }
 
 /// CompactionJob is a remote job that compacts a set of files in a compaction service.
-#[derive(Clone)]
 #[allow(dead_code)]
 pub struct CompactionJob {
     pub compaction_region: CompactionRegion,
     pub picker_output: PickerOutput,
     pub start_time: Instant,
+    /// Send the result of the compaction job to these waiters.
+    pub waiters: Vec<OutputTx>,
 }
 
 /// RemoteJobResult is the result of a remote job.
@@ -114,14 +114,14 @@ pub struct CompactionJobResult {
 
 /// DefaultNotifier is a default implementation of Notifier that sends WorkerRequest to the mito engine.
 pub(crate) struct DefaultNotifier {
+    /// The sender to send WorkerRequest to the mito engine. This is used to notify the mito engine when a remote job is completed.
     pub(crate) request_sender: Sender<WorkerRequest>,
-    pub(crate) waiters: Vec<OutputTx>,
 }
 
 impl DefaultNotifier {
-    fn on_failure(&mut self, err: Arc<Error>, region_id: RegionId) {
+    fn on_failure(&self, err: Arc<Error>, region_id: RegionId, mut waiters: Vec<OutputTx>) {
         COMPACTION_FAILURE_COUNT.inc();
-        for waiter in self.waiters.drain(..) {
+        for waiter in waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
         }
     }
@@ -129,14 +129,14 @@ impl DefaultNotifier {
 
 #[async_trait::async_trait]
 impl Notifier for DefaultNotifier {
-    async fn notify(&mut self, result: RemoteJobResult) {
+    async fn notify(&self, result: RemoteJobResult, waiters: Vec<OutputTx>) {
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {
                     match result.region_edit {
                         Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
-                            senders: std::mem::take(&mut self.waiters),
+                            senders: waiters,
                             start_time: result.start_time,
                             edit,
                         }),
@@ -146,7 +146,7 @@ impl Notifier for DefaultNotifier {
                                 result.region_id, err
                             );
                             let err = Arc::new(err);
-                            self.on_failure(err.clone(), result.region_id);
+                            self.on_failure(err.clone(), result.region_id, waiters);
                             BackgroundNotify::CompactionFailed(CompactionFailed {
                                 region_id: result.region_id,
                                 err,
