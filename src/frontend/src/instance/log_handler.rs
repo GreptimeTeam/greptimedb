@@ -19,8 +19,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
-use pipeline::table::{PipelineInfo, PipelineVersion};
-use pipeline::{GreptimeTransformer, Pipeline};
+use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
@@ -69,9 +68,14 @@ impl LogHandler for Instance {
             .context(PipelineSnafu)
     }
 
-    async fn delete_pipeline(&self, name: &str, ctx: QueryContextRef) -> ServerResult<()> {
+    async fn delete_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
         self.pipeline_operator
-            .delete_pipeline(name, ctx)
+            .delete_pipeline(name, version, ctx)
             .await
             .context(PipelineSnafu)
     }

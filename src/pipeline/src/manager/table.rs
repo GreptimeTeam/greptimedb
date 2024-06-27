@@ -25,7 +25,7 @@ use common_recordbatch::util as record_util;
 use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::{and, col, lit};
+use datafusion::logical_expr::col;
 use datafusion_common::{TableReference, ToDFSchema};
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlanBuilder};
 use datatypes::prelude::ScalarVector;
@@ -44,36 +44,24 @@ use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, CompilePipelineSnafu,
-    ExecuteInternalStatementSnafu, InsertPipelineSnafu, PipelineNotFoundSnafu, Result,
+    ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
+    PipelineNotFoundSnafu, Result,
 };
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
+use crate::manager::{PipelineInfo, PipelineVersion, PIPELINE_TABLE_NAME};
+use crate::util::{build_plan_filter, generate_pipeline_cache_key};
 
-/// Pipeline version. An optional timestamp with nanosecond precision.
-/// If the version is None, it means the latest version of the pipeline.
-/// User can specify the version by providing a timestamp string formatted as iso8601.
-/// When it used in cache key, it will be converted to i64 meaning the number of nanoseconds since the epoch.
-pub type PipelineVersion = Option<TimestampNanosecond>;
-
-pub type PipelineTableRef = Arc<PipelineTable>;
-
-pub type PipelineRef = Arc<Pipeline<GreptimeTransformer>>;
-
-/// Pipeline info. A tuple of timestamp and pipeline reference.
-pub type PipelineInfo = (Timestamp, PipelineRef);
-
-pub const PIPELINE_TABLE_NAME: &str = "pipelines";
-
-pub const PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME: &str = "name";
-pub const PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME: &str = "schema";
-pub const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type";
-pub const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
-pub const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
+pub(crate) const PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME: &str = "name";
+pub(crate) const PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME: &str = "schema";
+const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type";
+const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
+pub(crate) const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
 
 /// Pipeline table cache size.
-pub const PIPELINES_CACHE_SIZE: u64 = 10000;
+const PIPELINES_CACHE_SIZE: u64 = 10000;
 /// Pipeline table cache time to live.
-pub const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
+const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 
 /// PipelineTable is a table that stores the pipeline schema and content.
 /// Every catalog has its own pipeline table.
@@ -216,36 +204,6 @@ impl PipelineTable {
             .map_err(|e| CompilePipelineSnafu { reason: e }.build())
     }
 
-    fn generate_pipeline_cache_key(schema: &str, name: &str, version: PipelineVersion) -> String {
-        match version {
-            Some(version) => format!("{}/{}/{}", schema, name, i64::from(version)),
-            None => format!("{}/{}/latest", schema, name),
-        }
-    }
-
-    fn remove_pipeline_cache_with_schema_and_name(&self, schema: &str, name: &str) {
-        let key_prefix = format!("{}/{}", schema, name);
-        let keys = self
-            .pipelines
-            .iter()
-            .filter(|en| en.0.starts_with(&key_prefix))
-            .map(|en| (*en.0).clone())
-            .collect::<Vec<String>>();
-        for key in keys.iter() {
-            self.pipelines.remove(key);
-        }
-    }
-
-    fn get_compiled_pipeline_from_cache(
-        &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
-    ) -> Option<Arc<Pipeline<GreptimeTransformer>>> {
-        self.pipelines
-            .get(&Self::generate_pipeline_cache_key(schema, name, version))
-    }
-
     /// Insert a pipeline into the pipeline table.
     async fn insert_pipeline_to_pipeline_table(
         &self,
@@ -307,18 +265,21 @@ impl PipelineTable {
         name: &str,
         version: PipelineVersion,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
-        if let Some(pipeline) = self.get_compiled_pipeline_from_cache(schema, name, version) {
+        if let Some(pipeline) = self
+            .pipelines
+            .get(&generate_pipeline_cache_key(schema, name, version))
+        {
             return Ok(pipeline);
         }
 
         let pipeline = self
-            .find_pipeline_by_name(schema, name, version)
+            .find_pipeline(schema, name, version)
             .await?
             .context(PipelineNotFoundSnafu { name, version })?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.pipelines.insert(
-            Self::generate_pipeline_cache_key(schema, name, version),
+            generate_pipeline_cache_key(schema, name, version),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
@@ -341,11 +302,11 @@ impl PipelineTable {
 
         {
             self.pipelines.insert(
-                Self::generate_pipeline_cache_key(schema, name, None),
+                generate_pipeline_cache_key(schema, name, None),
                 compiled_pipeline.clone(),
             );
             self.pipelines.insert(
-                Self::generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
+                generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
                 compiled_pipeline.clone(),
             );
         }
@@ -353,9 +314,20 @@ impl PipelineTable {
         Ok((version, compiled_pipeline))
     }
 
-    pub async fn delete_pipeline_by_name(&self, schema: &str, name: &str) -> Result<()> {
+    pub async fn delete_pipeline(
+        &self,
+        schema: &str,
+        name: &str,
+        version: PipelineVersion,
+    ) -> Result<()> {
+        // 0. version is ensured at the http api level not None
+        ensure!(
+            version.is_some(),
+            InvalidPipelineVersionSnafu { version: "None" }
+        );
+
         // 1. check pipeline exist in catalog
-        let pipeline = self.find_pipeline_by_name(schema, name, None).await?;
+        let pipeline = self.find_pipeline(schema, name, version).await?;
         if pipeline.is_none() {
             return Ok(());
         }
@@ -383,10 +355,7 @@ impl PipelineTable {
         // create scan plan
         let logical_plan = LogicalPlanBuilder::scan(table_name.clone(), table_source, None)
             .context(BuildDfLogicalPlanSnafu)?
-            .filter(and(
-                col("schema").eq(lit(schema)),
-                col("name").eq(lit(name)),
-            ))
+            .filter(build_plan_filter(schema, name, version))
             .context(BuildDfLogicalPlanSnafu)?
             .build()
             .context(BuildDfLogicalPlanSnafu)?;
@@ -407,15 +376,21 @@ impl PipelineTable {
             .await
             .context(ExecuteInternalStatementSnafu)?;
 
-        // cloud be deleting multiple rows
-        info!("delete pipeline: {:?}, output: {:?}", name, output);
-        // remove all caches
-        self.remove_pipeline_cache_with_schema_and_name(schema, name);
+        info!(
+            "delete pipeline: {:?}, version: {:?}, output: {:?}",
+            name, version, output
+        );
+
+        // remove cache with version and latest
+        self.pipelines
+            .remove(&generate_pipeline_cache_key(schema, name, version));
+        self.pipelines
+            .remove(&generate_pipeline_cache_key(schema, name, None));
 
         Ok(())
     }
 
-    async fn find_pipeline_by_name(
+    async fn find_pipeline(
         &self,
         schema: &str,
         name: &str,
@@ -431,22 +406,10 @@ impl PipelineTable {
 
         let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
         let table_source = Arc::new(DefaultTableSource::new(table_provider));
-        let schema_and_name_filter = and(
-            col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
-            col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name)),
-        );
-        let filter = if let Some(v) = version {
-            and(
-                schema_and_name_filter,
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).eq(lit(v.0.to_iso8601_string())),
-            )
-        } else {
-            schema_and_name_filter
-        };
 
         let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
             .context(BuildDfLogicalPlanSnafu)?
-            .filter(filter)
+            .filter(build_plan_filter(schema, name, version))
             .context(BuildDfLogicalPlanSnafu)?
             .project(vec![
                 col(PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME),

@@ -19,7 +19,7 @@ use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
 use prost::Message;
-use serde_json::json;
+use serde_json::{json, Value};
 use servers::http::error_result::ErrorResponse;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
@@ -1039,7 +1039,21 @@ transform:
         .await;
 
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(res.text().await, "ok");
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    let content: Value = content.unwrap();
+    let pipeline_name = content.get("name");
+    assert!(pipeline_name.is_some());
+    assert_eq!(pipeline_name.unwrap(), "test");
+
+    let version = content.get("version");
+    assert!(version.is_some());
+    let version = version.unwrap().as_str();
+    assert!(version.is_some());
+    let version = version.unwrap();
 
     // 2. write data
     let data_body = r#"
@@ -1062,8 +1076,13 @@ transform:
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    let encoded: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
+
     // 3. remove pipeline
-    let res = client.delete("/v1/events/pipelines/test").send().await;
+    let res = client
+        .delete(format!("/v1/events/pipelines/test?version={}", encoded).as_str())
+        .send()
+        .await;
 
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.text().await, "ok");

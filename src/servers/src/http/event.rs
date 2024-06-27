@@ -24,13 +24,11 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
-use common_time::{Timestamp, Timezone};
-use datatypes::timestamp::TimestampNanosecond;
 use http::{HeaderMap, HeaderValue};
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
-use pipeline::table::PipelineVersion;
-use pipeline::Value as PipelineValue;
+use pipeline::util::to_pipeline_version;
+use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Value};
@@ -133,15 +131,8 @@ pub async fn add_pipeline(
                 HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
             let mut headers = HeaderMap::new();
             headers.append(CONTENT_TYPE, json_header);
-            // Safety check: unwrap is safe here because we have checked the format of the timestamp
-            let version = pipeline
-                .0
-                .as_formatted_string(
-                    "%Y-%m-%d %H:%M:%S%.fZ",
-                    // Safety check: unwrap is safe here because we have checked the format of the timezone
-                    Some(Timezone::from_tz_string("UTC").unwrap()).as_ref(),
-                )
-                .unwrap();
+
+            let version = pipeline.0.to_timezone_aware_string(None);
             (
                 headers,
                 json!({"version": version, "name": pipeline_name}).to_string(),
@@ -157,6 +148,7 @@ pub async fn add_pipeline(
 pub async fn delete_pipeline(
     State(state): State<LogState>,
     Extension(query_ctx): Extension<QueryContextRef>,
+    Query(query_params): Query<LogIngesterQueryParams>,
     Path(pipeline_name): Path<String>,
 ) -> Result<String> {
     let handler = state.log_handler;
@@ -167,8 +159,14 @@ pub async fn delete_pipeline(
         }
     );
 
+    let version = query_params.version.context(InvalidParameterSnafu {
+        reason: "version is required",
+    })?;
+
+    let version = to_pipeline_version(Some(version)).context(PipelineSnafu)?;
+
     handler
-        .delete_pipeline(&pipeline_name, query_ctx)
+        .delete_pipeline(&pipeline_name, version, query_ctx)
         .await
         .map(|_| "ok".to_string())
         .map_err(|e| {
@@ -240,18 +238,7 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let version = match query_params.version {
-        Some(version) => {
-            let ts = Timestamp::from_str_utc(&version).map_err(|e| {
-                InvalidParameterSnafu {
-                    reason: format!("invalid pipeline version: {} with error: {}", &version, e),
-                }
-                .build()
-            })?;
-            Some(TimestampNanosecond(ts))
-        }
-        None => None,
-    };
+    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 

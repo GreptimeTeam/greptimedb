@@ -12,6 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use common_time::Timestamp;
+use datatypes::timestamp::TimestampNanosecond;
+
+use crate::table::PipelineTable;
+use crate::{GreptimeTransformer, Pipeline};
+
 pub mod error;
 pub mod pipeline_operator;
 pub mod table;
+pub mod util;
+
+const PIPELINE_TABLE_NAME: &str = "pipelines";
+
+/// Pipeline version. An optional timestamp with nanosecond precision.
+/// If the version is None, it means the latest version of the pipeline.
+/// User can specify the version by providing a timestamp string formatted as iso8601.
+/// When it used in cache key, it will be converted to i64 meaning the number of nanoseconds since the epoch.
+pub type PipelineVersion = Option<TimestampNanosecond>;
+
+/// Pipeline info. A tuple of timestamp and pipeline reference.
+pub type PipelineInfo = (Timestamp, PipelineRef);
+
+pub type PipelineTableRef = Arc<PipelineTable>;
+pub type PipelineRef = Arc<Pipeline<GreptimeTransformer>>;
