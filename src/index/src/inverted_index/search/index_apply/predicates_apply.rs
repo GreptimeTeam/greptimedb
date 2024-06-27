@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::mem::size_of;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common_base::BitVec;
@@ -48,13 +49,17 @@ impl IndexApplier for PredicatesIndexApplier {
         context: SearchContext,
         reader: &mut (dyn InvertedIndexReader + 'a),
     ) -> Result<ApplyOutput> {
+        let get_meta_start = Instant::now();
         let metadata = reader.metadata().await?;
+        let get_meta_cost = get_meta_start.elapsed();
         let mut output = ApplyOutput {
             matched_segment_ids: BitVec::EMPTY,
             total_row_count: metadata.total_row_count as _,
             segment_row_count: metadata.segment_row_count as _,
         };
 
+        let mut get_fst_cost = Duration::ZERO;
+        let mut apply_fst_cost = Duration::ZERO;
         let mut bitmap = Self::bitmap_full_range(&metadata);
         // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
         for (name, fst_applier) in &self.fst_appliers {
@@ -76,14 +81,22 @@ impl IndexApplier for PredicatesIndexApplier {
                 }
             };
 
+            let get_fst_start = Instant::now();
             let fst = reader.fst(meta).await?;
+            get_fst_cost += get_fst_start.elapsed();
+            let apply_fst_start = Instant::now();
             let values = fst_applier.apply(&fst);
+            apply_fst_cost += apply_fst_start.elapsed();
 
             let mut mapper = FstValuesMapper::new(&mut *reader, meta);
+            let get_fst_start = Instant::now();
             let bm = mapper.map_values(&values).await?;
+            get_fst_cost += get_fst_start.elapsed();
 
             bitmap &= bm;
         }
+
+        common_telemetry::debug!("PredicatesIndexApplier apply, get metadata cost: {:?}, get_fst_cost: {:?}, apply_fst_cost: {:?}", get_meta_cost, get_fst_cost, apply_fst_cost);
 
         output.matched_segment_ids = bitmap;
         Ok(output)

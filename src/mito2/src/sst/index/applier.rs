@@ -15,6 +15,7 @@
 pub mod builder;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::{AsyncRead, AsyncSeek};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
@@ -93,7 +94,9 @@ impl SstIndexApplier {
 
         match self.cached_puffin_reader(file_id).await? {
             Some(mut puffin_reader) => {
+                let start = Instant::now();
                 let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+                common_telemetry::debug!("Build index blob reader cost: {:?}", start.elapsed());
                 let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
                 self.index_applier
                     .apply(context, &mut index_reader)
@@ -101,8 +104,10 @@ impl SstIndexApplier {
                     .context(ApplyIndexSnafu)
             }
             None => {
+                let start = Instant::now();
                 let mut puffin_reader = self.remote_puffin_reader(file_id).await?;
                 let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+                common_telemetry::debug!("Build index blob reader cost: {:?}", start.elapsed());
                 let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
                 self.index_applier
                     .apply(context, &mut index_reader)
