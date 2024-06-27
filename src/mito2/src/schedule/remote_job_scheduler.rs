@@ -29,7 +29,24 @@ use crate::request::{
 
 pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 
+#[cfg_attr(doc, aquamarine::aquamarine)]
 /// RemoteJobScheduler is a trait that defines the API to schedule remote jobs.
+/// For example, a compaction job can be scheduled remotely as the following workflow:
+/// ```mermaid
+///   participant User
+///   participant MitoEngine
+///   participant CompactionScheduler
+///   participant Plugins
+///   participant RemoteJobScheduler
+///
+///   User->>MitoEngine: Initiates compaction
+///   MitoEngine->>CompactionScheduler: schedule_compaction()
+///   CompactionScheduler->>Plugins: Handle plugins
+///   CompactionScheduler->>RemoteJobScheduler: schedule(CompactionJob)
+///   RemoteJobScheduler-->>CompactionScheduler: Returns Job UUID
+///   CompactionScheduler-->>MitoEngine: Task scheduled with Job UUID
+///   MitoEngine-->>User: Compaction task scheduled
+/// ```
 #[async_trait::async_trait]
 pub trait RemoteJobScheduler: Send + Sync + 'static {
     /// Sends a job to the scheduler and returns a UUID for the job.
@@ -109,8 +126,8 @@ impl Notifier for DefaultNotifier {
                     .await
                 {
                     error!(
-                        "Failed to notify compaction job status for region {}, request: {:?}",
-                        result.region_id, e.0
+                        "Failed to notify compaction job status for region {}, error: {:?}",
+                        result.region_id, e
                     );
                 }
             }
