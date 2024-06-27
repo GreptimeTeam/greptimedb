@@ -141,7 +141,7 @@ impl RegionScanner for UnorderedScan {
 
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
@@ -220,7 +220,6 @@ impl fmt::Debug for UnorderedScan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnorderedScan")
             .field("parts", &self.stream_ctx.parts)
-            .field("prepare_scan_cost", &self.stream_ctx.prepare_scan_cost)
             .finish()
     }
 }
