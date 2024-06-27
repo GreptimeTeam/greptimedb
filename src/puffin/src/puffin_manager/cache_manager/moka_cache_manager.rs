@@ -82,6 +82,7 @@ impl MokaCacheManager {
                         }
                         CacheValue::Dir(_) => {
                             let deleted_path = path.with_extension(DELETED_EXTENSION);
+
                             {
                                 let unreleased_dirs = unreleased_dirs.lock().await;
                                 if unreleased_dirs.contains_key(key.as_ref()) {
@@ -95,7 +96,13 @@ impl MokaCacheManager {
                                     if err.kind() == ErrorKind::NotFound {
                                         return;
                                     }
-                                    warn!(err; "Failed to rename evicted directory to deleted path.");
+
+                                    // Remove the deleted directory if the rename fails and retry
+                                    let _ = fs::remove_dir_all(&deleted_path).await;
+                                    if let Err(err) = fs::rename(&path, &deleted_path).await {
+                                        warn!(err; "Failed to rename evicted directory to deleted path.");
+                                        return;
+                                    }
                                 }
                             } // End of `unreleased_dirs`
                             debug!("Removing directory due to eviction. Path: {path:?}");
@@ -202,6 +209,28 @@ impl CacheManager for MokaCacheManager {
                     *count -= 1;
                 } else {
                     unreleased_dirs.remove(&cache_key);
+
+                    let deleted_path = dir_path.with_extension(DELETED_EXTENSION);
+
+                    // Attempt to remove the directory, considering the possibility that the error
+                    // originates from `get_dir_size` and the final `RcDirGuard` has just been dropped.
+                    if let Err(err) = fs::rename(&dir_path, &deleted_path).await {
+                        if err.kind() == ErrorKind::NotFound {
+                            return Err(res.unwrap_err());
+                        }
+
+                        // Remove the deleted directory if the rename fails and retry
+                        let _ = fs::remove_dir_all(&deleted_path).await;
+                        if let Err(err) = fs::rename(&dir_path, &deleted_path).await {
+                            warn!(err; "Failed to rename the dangling directory to deleted path.");
+                            return Err(res.unwrap_err());
+                        }
+                    }
+
+                    drop(unreleased_dirs);
+                    if let Err(err) = fs::remove_dir_all(&deleted_path).await {
+                        warn!(err; "Failed to remove the dangling directory.");
+                    }
                 }
             }
         } // End of `unreleased_dirs`
@@ -255,6 +284,8 @@ impl MokaCacheManager {
         // To guarantee the atomicity of writing the file, we need to write
         // the file to a temporary file first...
         let tmp_path = target_path.with_extension(TMP_EXTENSION);
+        let _ = fs::remove_file(&tmp_path).await;
+
         let writer = Box::new(
             fs::File::create(&tmp_path)
                 .await
@@ -274,15 +305,21 @@ impl MokaCacheManager {
         target_path: &PathBuf,
         init_fn: Box<dyn InitDirFn + Send + Sync + '_>,
     ) -> Result<u64> {
+        // If the `target_path` already exists, reuse it.
+        if fs::try_exists(target_path).await.context(MetadataSnafu)? {
+            return Self::get_dir_size(target_path).await;
+        }
+
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
-        let tmp_root = target_path.with_extension(TMP_EXTENSION);
+        let tmp_base = target_path.with_extension(TMP_EXTENSION);
+        let _ = fs::remove_dir_all(&tmp_base).await;
 
-        let writer_provider = Box::new(MokaDirWriterProvider(tmp_root.clone()));
+        let writer_provider = Box::new(MokaDirWriterProvider(tmp_base.clone()));
         let size = init_fn(writer_provider).await?;
 
         // ...then rename the temporary directory to the target path
-        fs::rename(&tmp_root, target_path)
+        fs::rename(&tmp_base, target_path)
             .await
             .context(RenameSnafu)?;
         Ok(size)
@@ -415,8 +452,13 @@ impl Drop for RcDirGuard {
                 }
 
                 debug!("Removing directory due to releasing. Path: {path:?}");
-                if let Err(err) = fs::rename(&path, &deleted_path).await {
-                    warn!(err; "Failed to rename released directory to deleted path.")
+                if fs::rename(&path, &deleted_path).await.is_err() {
+                    // Remove the deleted directory if the rename fails and retry
+                    let _ = fs::remove_dir_all(&deleted_path).await;
+                    if let Err(err) = fs::rename(&path, &deleted_path).await {
+                        warn!(err; "Failed to rename released directory to deleted path.");
+                        return;
+                    }
                 }
             } // End of `unreleased_dirs`
 
