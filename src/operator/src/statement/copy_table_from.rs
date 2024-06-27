@@ -156,6 +156,8 @@ impl StatementExecutor {
                     .await
                     .context(error::ReadObjectSnafu { path: &path })?
                     .into_futures_async_read(0..meta.content_length())
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?
                     .compat();
                 let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default())
                     .await
@@ -301,6 +303,8 @@ impl StatementExecutor {
                     .await
                     .context(error::ReadObjectSnafu { path })?
                     .into_futures_async_read(0..meta.content_length())
+                    .await
+                    .context(error::ReadObjectSnafu { path })?
                     .compat();
                 let builder =
                     ParquetRecordBatchStreamBuilder::new_with_metadata(reader, metadata.clone());

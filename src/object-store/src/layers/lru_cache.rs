@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use opendal::raw::oio::ReadDyn;
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
@@ -75,7 +73,7 @@ pub struct LruCacheAccess<I> {
 
 impl<I: Access> LayeredAccess for LruCacheAccess<I> {
     type Inner = I;
-    type Reader = Arc<dyn ReadDyn>;
+    type Reader = Box<dyn ReadDyn>;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;

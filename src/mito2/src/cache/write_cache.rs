@@ -188,7 +188,9 @@ impl WriteCache {
             .reader(&cache_path)
             .await
             .context(error::OpenDalSnafu)?
-            .into_futures_async_read(0..cached_value.content_length());
+            .into_futures_async_read(0..cached_value.content_length())
+            .await
+            .context(error::OpenDalSnafu)?;
 
         let mut writer = remote_store
             .writer_with(upload_path)

@@ -18,8 +18,8 @@ use common_telemetry::debug;
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{Read, ReadDyn, Reader};
-use opendal::raw::{Access, BytesRange, OpRead, OpStat, RpRead};
+use opendal::raw::oio::{Read, Reader};
+use opendal::raw::{Access, OpRead, RpRead};
 use opendal::{Buffer, Error as OpendalError, ErrorKind, Operator, Result};
 
 use crate::metrics::{
@@ -51,9 +51,9 @@ fn can_cache(path: &str) -> bool {
     !path.ends_with("_last_checkpoint")
 }
 
-/// Generate an unique cache key for the read path and range.
-fn read_cache_key(path: &str, range: BytesRange) -> String {
-    format!("{:x}.cache-{}", md5::compute(path), range.to_header())
+/// Generate a unique cache key for the read path and range.
+fn read_cache_key(path: &str) -> String {
+    format!("{:x}.cache", md5::compute(path))
 }
 
 /// Local read cache for files in object storage
@@ -161,14 +161,14 @@ impl ReadCache {
     /// Read from a specific path using the OpRead operation.
     /// It will attempt to retrieve the data from the local cache.
     /// If the data is not found in the local cache,
-    /// it will fallback to retrieving it from remote object storage
+    /// it will fall back to retrieving it from remote object storage
     /// and cache the result locally.
     pub(crate) async fn read<I>(
         &self,
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Arc<dyn ReadDyn>)>
+    ) -> Result<(RpRead, Reader)>
     where
         I: Access,
     {
@@ -176,17 +176,14 @@ impl ReadCache {
             return inner.read(path, args).await.map(to_output_reader);
         }
 
-        // FIXME: remove this block after opendal v0.47 released.
-        let meta = inner.stat(path, OpStat::new()).await?;
         let (rp, reader) = inner.read(path, args).await?;
         let reader: ReadCacheReader<I> = ReadCacheReader {
             path: Arc::new(path.to_string()),
             inner_reader: reader,
-            size: meta.into_metadata().content_length(),
             file_cache: self.file_cache.clone(),
             mem_cache: self.mem_cache.clone(),
         };
-        Ok((rp, Arc::new(reader)))
+        Ok((rp, Box::new(reader)))
     }
 }
 
@@ -195,14 +192,6 @@ pub struct ReadCacheReader<I: Access> {
     path: Arc<String>,
     /// Remote file reader.
     inner_reader: I::Reader,
-    /// FIXME: remove this field after opendal v0.47 released.
-    ///
-    /// OpenDAL's read_at takes `offset, limit` which means the underlying storage
-    /// services could return less data than limit. We store size here as a workaround.
-    ///
-    /// This API has been refactor into `offset, size` instead. After opendal v0.47 released,
-    /// we don't need this anymore.
-    size: u64,
     /// Local file cache backend
     file_cache: Operator,
     /// Local memory cache to track local cache files
@@ -211,11 +200,11 @@ pub struct ReadCacheReader<I: Access> {
 
 impl<I: Access> ReadCacheReader<I> {
     /// TODO: we can return the Buffer directly to avoid another read from cache.
-    async fn read_remote(&self, offset: u64, limit: usize) -> Result<ReadResult> {
+    async fn read_remote(&mut self) -> Result<ReadResult> {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
-        let buf = self.inner_reader.read_at(offset, limit).await?;
-        let result = self.try_write_cache(buf, offset).await;
+        let buf = self.inner_reader.read_all().await?;
+        let result = self.try_write_cache(buf).await;
 
         match result {
             Ok(read_bytes) => {
@@ -243,29 +232,27 @@ impl<I: Access> ReadCacheReader<I> {
         }
     }
 
-    async fn try_write_cache(&self, buf: Buffer, offset: u64) -> Result<usize> {
+    async fn try_write_cache(&self, buf: Buffer) -> Result<usize> {
         let size = buf.len();
-        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(size as _)));
+        let read_key = read_cache_key(&self.path);
         self.file_cache.write(&read_key, buf).await?;
         Ok(size)
     }
 }
 
 impl<I: Access> Read for ReadCacheReader<I> {
-    async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
-        let size = self.size.min(offset + limit as u64) - offset;
-        let read_key = read_cache_key(&self.path, BytesRange::new(offset, Some(size as _)));
-
-        let read_result = self
-            .mem_cache
-            .try_get_with(read_key.clone(), self.read_remote(offset, limit))
+    async fn read(&mut self) -> Result<Buffer> {
+        let read_key = read_cache_key(&self.path);
+        let mem_cache = self.mem_cache.clone();
+        let read_result = mem_cache
+            .try_get_with(read_key.clone(), self.read_remote())
             .await
-            .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
+            .map_err(|e| OpendalError::new(e.kind(), e.to_string()))?;
 
         match read_result {
             ReadResult::Success(_) => {
                 // There is a concurrent issue here, the local cache may be purged
-                // while reading, we have to fallback to remote read
+                // while reading, we have to fall back to remote read
                 match self.file_cache.read(&read_key).await {
                     Ok(ret) => {
                         OBJECT_STORE_LRU_CACHE_HIT
@@ -275,7 +262,7 @@ impl<I: Access> Read for ReadCacheReader<I> {
                     }
                     Err(_) => {
                         OBJECT_STORE_LRU_CACHE_MISS.inc();
-                        self.inner_reader.read_at(offset, limit).await
+                        self.inner_reader.read().await
                     }
                 }
             }
@@ -286,7 +273,7 @@ impl<I: Access> Read for ReadCacheReader<I> {
 
                 Err(OpendalError::new(
                     ErrorKind::NotFound,
-                    &format!("File not found: {}", self.path),
+                    format!("File not found: {}", self.path),
                 ))
             }
         }
@@ -294,7 +281,7 @@ impl<I: Access> Read for ReadCacheReader<I> {
 }
 
 fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
-    (input.0, Arc::new(input.1))
+    (input.0, Box::new(input.1))
 }
 
 #[cfg(test)]
