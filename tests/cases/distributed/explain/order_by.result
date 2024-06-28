@@ -21,7 +21,6 @@ EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[integers.i % Int64(2)@0 as integers.i % Int64(2)], aggr=[]_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -68,7 +67,6 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
