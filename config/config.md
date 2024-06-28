@@ -259,7 +259,7 @@
 | `failure_detector` | -- | -- | -- |
 | `failure_detector.threshold` | Float | `8.0` | -- |
 | `failure_detector.min_std_deviation` | String | `100ms` | -- |
-| `failure_detector.acceptable_heartbeat_pause` | String | `3000ms` | -- |
+| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | -- |
 | `failure_detector.first_heartbeat_estimate` | String | `1000ms` | -- |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
