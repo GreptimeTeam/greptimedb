@@ -19,8 +19,8 @@
 | `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. |
-| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`. |
+| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
@@ -166,10 +166,11 @@
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. |
-| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`. |
+| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
@@ -314,7 +315,7 @@
 | `rpc_max_send_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
-| `grpc.hostname` | String | `127.0.0.1` | The hostname to advertise to the metasrv. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |

@@ -32,6 +32,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -53,11 +54,12 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
+use crate::region::options::MergeMode;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileHandle, FileId, Level};
+use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
@@ -284,6 +286,7 @@ impl CompactionScheduler {
             cache_manager: cache_manager.clone(),
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
+            file_purger: None,
         };
 
         let picker_output = {
@@ -441,31 +444,49 @@ pub struct CompactionOutput {
     pub output_time_range: Option<TimestampRange>,
 }
 
-/// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
-async fn build_sst_reader(
+/// SerializedCompactionOutput is a serialized version of [CompactionOutput] by replacing [FileHandle] with [FileMeta].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedCompactionOutput {
+    output_file_id: FileId,
+    output_level: Level,
+    inputs: Vec<FileMeta>,
+    filter_deleted: bool,
+    output_time_range: Option<TimestampRange>,
+}
+
+/// Builders to create [BoxedBatchReader] for compaction.
+struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
     cache: Option<CacheManagerRef>,
-    inputs: &[FileHandle],
+    inputs: &'a [FileHandle],
     append_mode: bool,
     filter_deleted: bool,
     time_range: Option<TimestampRange>,
-) -> Result<BoxedBatchReader> {
-    let mut scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
-        .with_files(inputs.to_vec())
-        .with_append_mode(append_mode)
-        .with_cache(cache)
-        .with_filter_deleted(filter_deleted)
-        // We ignore file not found error during compaction.
-        .with_ignore_file_not_found(true);
+    merge_mode: MergeMode,
+}
 
-    // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
-    // by converting time ranges into predicate.
-    if let Some(time_range) = time_range {
-        scan_input = scan_input.with_predicate(time_range_to_predicate(time_range, &metadata)?);
+impl<'a> CompactionSstReaderBuilder<'a> {
+    /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
+    async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
+        let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
+            .with_files(self.inputs.to_vec())
+            .with_append_mode(self.append_mode)
+            .with_cache(self.cache)
+            .with_filter_deleted(self.filter_deleted)
+            // We ignore file not found error during compaction.
+            .with_ignore_file_not_found(true)
+            .with_merge_mode(self.merge_mode);
+
+        // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
+        // by converting time ranges into predicate.
+        if let Some(time_range) = self.time_range {
+            scan_input =
+                scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
+        }
+
+        SeqScan::new(scan_input).build_reader().await
     }
-
-    SeqScan::new(scan_input).build_reader().await
 }
 
 /// Converts time range to predicates so that rows outside the range will be filtered.

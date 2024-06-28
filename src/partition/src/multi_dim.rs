@@ -66,7 +66,7 @@ impl MultiDimPartitionRule {
         };
 
         let mut checker = RuleChecker::new(&rule);
-        checker.check(&rule)?;
+        checker.check()?;
 
         Ok(rule)
     }
@@ -189,8 +189,8 @@ impl<'a> RuleChecker<'a> {
         }
     }
 
-    pub fn check(&mut self, rule: &MultiDimPartitionRule) -> Result<()> {
-        for expr in &rule.exprs {
+    pub fn check(&mut self) -> Result<()> {
+        for expr in &self.rule.exprs {
             self.walk_expr(expr)?
         }
 

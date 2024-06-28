@@ -140,7 +140,7 @@ pub async fn sql_to_flow_plan(
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan)?;
+    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan).await?;
 
     Ok(flow_plan)
 }

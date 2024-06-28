@@ -40,6 +40,7 @@ use datatypes::schema::RawSchema;
 use datatypes::value::Value;
 use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+use partition::multi_dim::MultiDimPartitionRule;
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
@@ -69,9 +70,9 @@ use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu, EmptyDdlExprSnafu,
     ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionColumnsSnafu,
-    InvalidPartitionRuleSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu,
-    ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
+    InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu,
+    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
@@ -230,9 +231,7 @@ impl StatementExecutor {
         );
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)?;
-
         validate_partition_columns(create_table, &partition_cols)?;
-
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
@@ -1102,6 +1101,18 @@ fn parse_partitions(
     let partition_columns = find_partition_columns(&partitions)?;
     let partition_entries =
         find_partition_entries(create_table, &partitions, &partition_columns, query_ctx)?;
+
+    // Validates partition
+    let mut exprs = vec![];
+    for partition in &partition_entries {
+        for bound in partition {
+            if let PartitionBound::Expr(expr) = bound {
+                exprs.push(expr.clone());
+            }
+        }
+    }
+    MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs)
+        .context(InvalidPartitionSnafu)?;
 
     Ok((
         partition_entries

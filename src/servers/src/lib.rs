@@ -20,6 +20,7 @@
 use datatypes::schema::Schema;
 use query::plan::LogicalPlan;
 
+pub mod addrs;
 pub mod configurator;
 pub mod error;
 pub mod export_metrics;

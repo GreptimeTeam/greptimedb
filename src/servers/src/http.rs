@@ -670,20 +670,30 @@ impl HttpServer {
     }
 
     pub fn build(&self, router: Router) -> Router {
+        let timeout_layer = if self.options.timeout != Duration::default() {
+            Some(ServiceBuilder::new().layer(TimeoutLayer::new(self.options.timeout)))
+        } else {
+            info!("HTTP server timeout is disabled");
+            None
+        };
+        let body_limit_layer = if self.options.body_limit != ReadableSize(0) {
+            Some(
+                ServiceBuilder::new()
+                    .layer(DefaultBodyLimit::max(self.options.body_limit.0 as usize)),
+            )
+        } else {
+            info!("HTTP server body limit is disabled");
+            None
+        };
+
         router
             // middlewares
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    .layer(TimeoutLayer::new(self.options.timeout))
-                    .layer(DefaultBodyLimit::max(
-                        self.options
-                            .body_limit
-                            .0
-                            .try_into()
-                            .unwrap_or_else(|_| DEFAULT_BODY_LIMIT.as_bytes() as usize),
-                    ))
+                    .option_layer(timeout_layer)
+                    .option_layer(body_limit_layer)
                     // auth layer
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
