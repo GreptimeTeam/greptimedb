@@ -778,6 +778,7 @@ enable = true
 
 [influxdb]
 enable = true
+auto_align_precision = true
 
 [prom_store]
 enable = true
