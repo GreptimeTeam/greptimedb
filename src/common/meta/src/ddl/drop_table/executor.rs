@@ -156,7 +156,10 @@ impl DropTableExecutor {
         ctx.table_metadata_manager
             .destroy_table_metadata(self.table_id, &self.table, table_route_value)
             .await?;
-        // Notifies the region supervisor to remove failure detectors.
+        // Notifies the RegionSupervisor to remove failure detectors.
+        //
+        // Once the regions were dropped, subsequent heartbeats no longer include these regions.
+        // Therefore, we should remove the failure detectors for these dropped regions.
         if let Some(ident) = ident {
             ctx.region_failure_detector_controller
                 .deregister_failure_detectors(ident)

@@ -289,7 +289,10 @@ impl CreateTableProcedure {
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
-        // Notifies region supervisor to detector failures of new created regions.
+        // Notifies RegionSupervisor to register failure detector of new created regions.
+        //
+        // The datanode may crash without sending a heartbeat that contains information about newly created regions,
+        // which may prevent the RegionSupervisor from detecting failures in these newly created regions.
         self.context
             .region_failure_detector_controller
             .register_failure_detectors(ident)

@@ -104,13 +104,16 @@ pub struct TableMetadata {
 
 pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;
 
+/// Used for actively registering Region failure detectors.
+///
+/// Ensuring the Region Supervisor can detect Region failures without relying on the first heartbeat from the datanode.
 #[async_trait::async_trait]
 pub trait RegionFailureDetectorController: Send + Sync {
     /// Registers failure detectors for the given identifiers.
-    async fn register_failure_detectors(&self, ident: Vec<(ClusterId, DatanodeId, RegionId)>);
+    async fn register_failure_detectors(&self, idents: Vec<(ClusterId, DatanodeId, RegionId)>);
 
     /// Deregisters failure detectors for the given identifiers.
-    async fn deregister_failure_detectors(&self, ident: Vec<(ClusterId, DatanodeId, RegionId)>);
+    async fn deregister_failure_detectors(&self, idents: Vec<(ClusterId, DatanodeId, RegionId)>);
 }
 
 /// A noop implementation of [`RegionFailureDetectorController`].

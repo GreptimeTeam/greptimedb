@@ -53,6 +53,10 @@ impl UpdateMetadata {
         let cluster_id = ctx.persistent_ctx.cluster_id;
         let datanode_id = ctx.persistent_ctx.from_peer.id;
         let region_id = ctx.persistent_ctx.region_id;
+        // Notifies RegionSupervisor to register failure detectors of failed region.
+        //
+        // The original failure detector was removed once the procedure was triggered.
+        // Now, we need to register the failure detector for the failed region.
         ctx.region_failure_detector_controller
             .register_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
             .await;
