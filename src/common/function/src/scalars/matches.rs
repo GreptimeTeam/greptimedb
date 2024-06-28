@@ -429,11 +429,32 @@ impl Tokenizer {
                 '-' => tokens.push(Token::Negative),
                 '(' => tokens.push(Token::OpenParen),
                 ')' => tokens.push(Token::CloseParen),
-                ' ' => {}
+                ' ' => {
+                    if let Some(last_token) = tokens.last() {
+                        match last_token {
+                            Token::Must | Token::Negative => {
+                                return InvalidFuncArgsSnafu {
+                                    err_msg: format!("Unexpected space after {:?}", last_token),
+                                }
+                                .fail();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 '\"' => {
                     self.step_next();
                     let phase = self.consume_next_phase(true, pattern)?;
                     tokens.push(Token::Phase(phase));
+                    // consume a writespace (or EOF) after quotes
+                    if let Some(ending_separator) = self.consume_next(pattern) {
+                        if ending_separator != ' ' {
+                            return InvalidFuncArgsSnafu {
+                                err_msg: "Expect a space after quotes ('\"')",
+                            }
+                            .fail();
+                        }
+                    }
                 }
                 _ => {
                     let phase = self.consume_next_phase(false, pattern)?;
@@ -526,7 +547,7 @@ mod test {
         use Token::*;
         let cases = [
             (
-                "a + b - c",
+                "a +b -c",
                 vec![
                     Phase("a".to_string()),
                     Must,
@@ -586,18 +607,18 @@ mod test {
     #[test]
     fn invalid_matches_tokenizer() {
         let cases = [
-            (r#""He said "hello""#, "Unclosed quotes ('\"')"),
-            (r#""He said hello"#, "Unclosed quotes ('\"')"),
+            (r#""He said "hello""#, "Expect a space after quotes"),
+            (r#""He said hello"#, "Unclosed quotes"),
+            (r#"a + b - c"#, "Unexpected space after"),
+            (r#"ab "c"def"#, "Expect a space after quotes"),
         ];
 
         for (query, expected) in cases {
             let tokenizer = Tokenizer::default();
             let result = tokenizer.tokenize(query);
             assert!(result.is_err(), "{query}");
-            assert!(
-                result.unwrap_err().to_string().contains(expected),
-                "{query}"
-            );
+            let actual_error = result.unwrap_err().to_string();
+            assert!(actual_error.contains(expected), "{query}, {actual_error}");
         }
     }
 
@@ -669,7 +690,7 @@ mod test {
                 },
             ),
             (
-                "a + b - c",
+                "a +b -c",
                 PatternAst::Binary {
                     lhs: Box::new(PatternAst::Binary {
                         lhs: Box::new(PatternAst::Literal {
