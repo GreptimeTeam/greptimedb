@@ -259,6 +259,7 @@ pub struct InvertedIndexOptions {
     /// The column ids that should be ignored when building the inverted index.
     /// The column ids are separated by commas. For example, "1,2,3".
     #[serde(deserialize_with = "deserialize_ignore_column_ids")]
+    #[serde(serialize_with = "serialize_ignore_column_ids")]
     pub ignore_column_ids: Vec<ColumnId>,
 
     /// The number of rows in a segment.
@@ -332,6 +333,18 @@ where
         column_ids.push(column_id);
     }
     Ok(column_ids)
+}
+
+fn serialize_ignore_column_ids<S>(column_ids: &[ColumnId], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let s = column_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    serializer.serialize_str(&s)
 }
 
 /// Converts the `options` map to a json object.
@@ -590,5 +603,37 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_region_options_serde() {
+        let options = RegionOptions {
+            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            compaction: CompactionOptions::Twcs(TwcsOptions {
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
+                time_window: Some(Duration::from_secs(3600 * 2)),
+            }),
+            storage: Some("S3".to_string()),
+            append_mode: false,
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![1, 2, 3],
+                    segment_row_count: 512,
+                },
+            },
+            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
+                index_max_keys_per_shard: 2048,
+                data_freeze_threshold: 2048,
+                fork_dictionary_bytes: ReadableSize::mb(128),
+            })),
+            merge_mode: Some(MergeMode::LastNonNull),
+        };
+        let region_options_json_str = serde_json::to_string(&options).unwrap();
+        let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
+        assert_eq!(options, got);
     }
 }
