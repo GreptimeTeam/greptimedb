@@ -25,7 +25,7 @@ use crate::statements::create::{
 };
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
-use crate::statements::drop::{DropDatabase, DropFlow, DropTable};
+use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
@@ -55,14 +55,16 @@ pub enum Statement {
     CreateTableLike(CreateTableLike),
     // CREATE FLOW
     CreateFlow(CreateFlow),
-    // DROP FLOW
-    DropFlow(DropFlow),
     // CREATE VIEW ... AS
     CreateView(CreateView),
     // DROP TABLE
     DropTable(DropTable),
     // DROP DATABASE
     DropDatabase(DropDatabase),
+    // DROP FLOW
+    DropFlow(DropFlow),
+    // DROP View
+    DropView(DropView),
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
     /// ALTER TABLE
@@ -119,6 +121,7 @@ impl Display for Statement {
             Statement::DropFlow(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
+            Statement::DropView(s) => s.fmt(f),
             Statement::CreateDatabase(s) => s.fmt(f),
             Statement::Alter(s) => s.fmt(f),
             Statement::ShowDatabases(s) => s.fmt(f),

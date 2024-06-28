@@ -491,6 +491,9 @@ pub fn check_permission(
                 validate_param(table_name, query_ctx)?;
             }
         }
+        Statement::DropView(stmt) => {
+            validate_param(&stmt.view_name, query_ctx)?;
+        }
         Statement::ShowTables(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }

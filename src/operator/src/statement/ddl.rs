@@ -29,7 +29,8 @@ use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{
-    CreateFlowTask, DdlTask, DropFlowTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
+    CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse,
 };
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_query::Output;
@@ -636,6 +637,72 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_flow(expr),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn drop_view(
+        &self,
+        catalog: String,
+        schema: String,
+        view: String,
+        drop_if_exists: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        let view_info = if let Some(view) = self
+            .catalog_manager
+            .table(&catalog, &schema, &view)
+            .await
+            .context(CatalogSnafu)?
+        {
+            view.table_info()
+        } else if drop_if_exists {
+            // DROP VIEW IF EXISTS meets view not found - ignored
+            return Ok(Output::new_with_affected_rows(0));
+        } else {
+            return TableNotFoundSnafu {
+                table_name: format_full_table_name(&catalog, &schema, &view),
+            }
+            .fail();
+        };
+
+        // Ensure the exists one is view, we can't drop other table types
+        ensure!(
+            view_info.table_type == TableType::View,
+            error::InvalidViewSnafu {
+                msg: "not a view",
+                view_name: format_full_table_name(&catalog, &schema, &view),
+            }
+        );
+
+        let view_id = view_info.table_id();
+
+        let task = DropViewTask {
+            catalog,
+            schema,
+            view,
+            view_id,
+            drop_if_exists,
+        };
+
+        self.drop_view_procedure(task, query_context).await?;
+
+        Ok(Output::new_with_affected_rows(0))
+    }
+
+    async fn drop_view_procedure(
+        &self,
+        expr: DropViewTask,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_drop_view(expr),
         };
 
         self.procedure_executor
