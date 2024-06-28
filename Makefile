@@ -170,6 +170,10 @@ FUZZ_TARGET ?= fuzz_alter_table
 fuzz:
 	cargo fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
 
+.PHONY: fuzz-ls
+fuzz-ls:
+	cargo fuzz list --fuzz-dir tests-fuzz 
+
 .PHONY: check
 check: ## Cargo check all the targets.
 	cargo check --workspace --all-targets --all-features
