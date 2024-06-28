@@ -234,16 +234,13 @@ impl ParserContext {
             self.parse_one_impl(&mut tokens)?;
         }
 
-        if self.stack.is_empty() {
-            return InvalidFuncArgsSnafu {
-                err_msg: "Empty pattern",
-            }
-            .fail();
-        }
+        ensure!(!self.stack.is_empty(), InvalidFuncArgsSnafu {
+            err_msg: "Empty pattern",
+        });
 
         // conjoin them together
         let mut builder = PatternAstBuilder::from_existing(self.stack.remove(0));
-        for ast in self.stack.into_iter() {
+        for ast in self.stack {
             builder.or(ast);
         }
 
