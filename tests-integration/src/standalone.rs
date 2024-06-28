@@ -151,17 +151,16 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let flow_builder = FlownodeBuilder::new(
-            1, // for standalone mode this value is default to one
             Default::default(),
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
         );
-        let flownode = Arc::new(flow_builder.build().await);
+        let flownode = Arc::new(flow_builder.build().await.unwrap());
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.clone(),
+            flow_server: flownode.flow_worker_manager(),
         });
 
         let table_id_sequence = Arc::new(
@@ -218,10 +217,11 @@ impl GreptimeDbStandaloneBuilder {
         .await
         .unwrap();
 
-        flownode
+        let flow_manager = flownode.flow_worker_manager();
+        flow_manager
             .set_frontend_invoker(Box::new(instance.clone()))
             .await;
-        let _node_handle = flownode.run_background();
+        let _node_handle = flow_manager.run_background();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

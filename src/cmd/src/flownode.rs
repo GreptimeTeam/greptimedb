@@ -12,19 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
+use common_base::Plugins;
 use common_config::Configurable;
+use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
-use flow::FlownodeInstance;
+use flow::{FlownodeBuilder, FlownodeInstance};
+use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result,
+    ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -200,7 +211,7 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
-        let mut opts = opts.component;
+        let opts = opts.component;
 
         let node_id = opts
             .node_id
@@ -209,8 +220,77 @@ impl StartCommand {
         let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
             msg: "'meta_client_options'",
         })?;
-        // TODO(discord9): construct a new MetaClient
 
-        todo!()
+        let meta_client = Arc::new(
+            flow::heartbeat::new_metasrv_client(node_id, meta_config)
+                .await
+                .context(StartFlownodeSnafu)?,
+        );
+
+        let cache_max_capacity = meta_config.metadata_cache_max_capacity;
+        let cache_ttl = meta_config.metadata_cache_ttl;
+        let cache_tti = meta_config.metadata_cache_tti;
+
+        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
+        let cached_meta_backend = Arc::new(cached_meta_backend);
+
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
+            CacheRegistryBuilder::default()
+                .add_cache(cached_meta_backend.clone())
+                .build(),
+        );
+        let fundamental_cache_registry =
+            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let layered_cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .context(BuildCacheRegistrySnafu)?
+            .build(),
+        );
+
+        let catalog_manager = KvBackendCatalogManager::new(
+            opts.mode,
+            Some(meta_client.clone()),
+            cached_meta_backend.clone(),
+            layered_cache_registry.clone(),
+        );
+
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(cached_meta_backend));
+        table_metadata_manager
+            .init()
+            .await
+            .context(InitMetadataSnafu)?;
+
+        let executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(InvalidateTableCacheHandler::new(
+                layered_cache_registry.clone(),
+            )),
+        ]);
+
+        let heartbeat_task = flow::heartbeat::HeartbeatTask::new(
+            &opts,
+            meta_client.clone(),
+            opts.heartbeat.clone(),
+            Arc::new(executor),
+        );
+
+        let flownode_builder = FlownodeBuilder::new(
+            opts,
+            Plugins::new(),
+            table_metadata_manager,
+            catalog_manager,
+        )
+        .with_heartbeat_task(heartbeat_task);
+
+        let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
+
+        Ok(Instance::new(flownode, guard))
     }
 }

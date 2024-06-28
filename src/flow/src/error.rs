@@ -176,6 +176,20 @@ pub enum Error {
         location: Location,
         source: servers::error::Error,
     },
+
+    #[snafu(display("Failed to initialize meta client"))]
+    MetaClientInit {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to parse address {}", addr))]
+    ParseAddr {
+        addr: String,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
+    },
 }
 
 /// Result type for flow module
@@ -206,6 +220,8 @@ impl ErrorExt for Error {
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
                 source.status_code()
             }
+            Self::MetaClientInit { source, .. } => source.status_code(),
+            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -27,13 +27,13 @@ mod adapter;
 mod compute;
 mod error;
 mod expr;
-mod heartbeat;
+pub mod heartbeat;
 mod plan;
 mod repr;
 mod server;
 mod transform;
 mod utils;
 
-pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeBuilder, FlownodeOptions};
+pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
 pub use error::{Error, Result};
-pub use server::{FlownodeInstance, FlownodeServer};
+pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer};

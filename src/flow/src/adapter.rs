@@ -21,8 +21,6 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
-use catalog::CatalogManagerRef;
-use common_base::Plugins;
 use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
@@ -35,15 +33,16 @@ use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::Itertools;
 use meta_client::MetaClientOptions;
-use query::{QueryEngine, QueryEngineFactory};
+use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
+use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
-use tokio::sync::{oneshot, watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
@@ -53,7 +52,7 @@ use crate::compute::ErrCollector;
 use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::repr::{self, DiffRow, Row};
-use crate::transform::{register_function_to_query_engine, sql_to_flow_plan};
+use crate::transform::sql_to_flow_plan;
 
 mod flownode_impl;
 mod parse_expr;
@@ -87,6 +86,7 @@ pub struct FlownodeOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
+    pub heartbeat: HeartbeatOptions,
 }
 
 impl Default for FlownodeOptions {
@@ -98,70 +98,12 @@ impl Default for FlownodeOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
+            heartbeat: HeartbeatOptions::default(),
         }
     }
 }
 
 impl Configurable for FlownodeOptions {}
-
-/// Flownode Builder
-pub struct FlownodeBuilder {
-    flow_node_id: u32,
-    opts: FlownodeOptions,
-    plugins: Plugins,
-    table_meta: TableMetadataManagerRef,
-    catalog_manager: CatalogManagerRef,
-}
-
-impl FlownodeBuilder {
-    /// init flownode builder
-    pub fn new(
-        flow_node_id: u32,
-        opts: FlownodeOptions,
-        plugins: Plugins,
-        table_meta: TableMetadataManagerRef,
-        catalog_manager: CatalogManagerRef,
-    ) -> Self {
-        Self {
-            flow_node_id,
-            opts,
-            plugins,
-            table_meta,
-            catalog_manager,
-        }
-    }
-
-    /// TODO(discord9): error handling&&build a FlownodeInstance instead
-    pub async fn build(self) -> FlowWorkerManager {
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in flownode only translate plan with resolved table source.
-            self.catalog_manager.clone(),
-            None,
-            None,
-            None,
-            false,
-            self.plugins.clone(),
-        );
-        let query_engine = query_engine_factory.query_engine();
-
-        register_function_to_query_engine(&query_engine);
-
-        let (tx, rx) = oneshot::channel();
-
-        let node_id = Some(self.flow_node_id);
-
-        let _handle = std::thread::spawn(move || {
-            let (flow_node_manager, mut worker) =
-                FlowWorkerManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
-            let _ = tx.send(flow_node_manager);
-            info!("Flow Worker started in new thread");
-            worker.run();
-        });
-        let man = rx.await.unwrap();
-        info!("Flow Node Manager started");
-        man
-    }
-}
 
 /// Arc-ed FlowNodeManager, cheaper to clone
 pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
