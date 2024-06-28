@@ -58,7 +58,7 @@ lazy_static! {
     )
         .unwrap();
     pub static ref METRIC_META_PROCEDURE_DROP_VIEW: HistogramVec = register_histogram_vec!(
-        "greptime_meta_procedure_drop_VIEW",
+        "greptime_meta_procedure_drop_view",
         "meta procedure drop view",
         &["step"]
     )

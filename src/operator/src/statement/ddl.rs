@@ -645,6 +645,7 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
+    /// Drop a view
     #[tracing::instrument(skip_all)]
     pub(crate) async fn drop_view(
         &self,
@@ -695,6 +696,7 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    /// Submit [DropViewTask] to procedure executor.
     async fn drop_view_procedure(
         &self,
         expr: DropViewTask,
