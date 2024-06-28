@@ -30,6 +30,7 @@ use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditResult, TruncateResult,
     WorkerRequest,
 };
+use crate::sst::location;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -244,6 +245,13 @@ async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
                 )
             }
         );
+
+        // TODO(LFC): Fill the file in write cache, too.
+        let layer = region.access_layer.clone();
+        let path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+        common_runtime::spawn_bg(async move {
+            let _ = layer.object_store().read(&path).await;
+        });
     }
 
     info!("Applying {edit:?} to region {}", region_id);
