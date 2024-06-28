@@ -99,8 +99,8 @@ impl InfluxdbRequest {
                 .context(CatalogSnafu)?
                 .map(|x| x.schema())
                 .and_then(|schema| {
-                    schema.timestamp_column().map(|x| {
-                        x.data_type
+                    schema.timestamp_column().map(|col| {
+                        col.data_type
                             .as_timestamp()
                             .expect("Time index column is not of timestamp type!")
                             .unit()
