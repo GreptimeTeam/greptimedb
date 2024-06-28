@@ -52,6 +52,7 @@ impl InfluxdbRequest {
         self,
         catalog_manager: &CatalogManagerRef,
         ctx: &QueryContextRef,
+        auto_align_precision: bool,
     ) -> Result<RowInsertRequests, Error> {
         let lines = parse_lines(&self.lines)
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
@@ -92,23 +93,28 @@ impl InfluxdbRequest {
             });
             row_writer::write_fields(table_data, fields, &mut one_row)?;
 
-            // Align to the table's time index unit.
-            let target_unit = catalog_manager
-                .table(ctx.current_catalog(), ctx.current_schema(), table_name)
-                .await
-                .context(CatalogSnafu)?
-                .map(|x| x.schema())
-                .and_then(|schema| {
-                    schema.timestamp_column().map(|col| {
-                        col.data_type
-                            .as_timestamp()
-                            .expect("Time index column is not of timestamp type!")
-                            .unit()
+            // Align to the table's time index unit if needed.
+            let target_unit = if auto_align_precision {
+                catalog_manager
+                    .table(ctx.current_catalog(), ctx.current_schema(), table_name)
+                    .await
+                    .context(CatalogSnafu)?
+                    .map(|x| x.schema())
+                    .and_then(|schema| {
+                        schema.timestamp_column().map(|col| {
+                            col.data_type
+                                .as_timestamp()
+                                .expect("Time index column is not of timestamp type!")
+                                .unit()
+                        })
                     })
-                })
-                // If Influxdb table is not found, it must be not created yet, use the "smallest"
-                // time unit: nanosecond.
-                .unwrap_or(TimeUnit::Nanosecond);
+                    // If Influxdb table is not found, it must be not created yet, use the "smallest"
+                    // time unit: nanosecond.
+                    .unwrap_or(TimeUnit::Nanosecond)
+            } else {
+                TimeUnit::Nanosecond
+            };
+
             row_writer::write_ts_to(
                 table_data,
                 INFLUXDB_TIMESTAMP_COLUMN_NAME,
@@ -158,7 +164,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
         let catalog_manager = MemoryCatalogManager::new() as _;
         let requests = influxdb_req
-            .to_row_insert_requests(&catalog_manager, &QueryContext::arc())
+            .to_row_insert_requests(&catalog_manager, &QueryContext::arc(), false)
             .await
             .unwrap();
         assert_eq!(2, requests.inserts.len());

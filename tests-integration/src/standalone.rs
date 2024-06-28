@@ -207,6 +207,7 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let instance = FrontendBuilder::new(
+            opts.frontend_options(),
             kv_backend.clone(),
             cache_registry,
             catalog_manager,

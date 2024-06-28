@@ -504,6 +504,7 @@ impl StartCommand {
         .await?;
 
         let mut frontend = FrontendBuilder::new(
+            fe_opts.clone(),
             kv_backend,
             layered_cache_registry,
             catalog_manager,
@@ -522,12 +523,12 @@ impl StartCommand {
         // TODO(discord9): unify with adding `start` and `shutdown` method to flownode too.
         let _handle = flownode.clone().run_background();
 
-        let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), fe_plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
         frontend
-            .build_servers(fe_opts, servers)
+            .build_servers(servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance {

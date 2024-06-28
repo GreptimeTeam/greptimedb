@@ -117,6 +117,11 @@ enable = true
 [influxdb]
 ## Whether to enable InfluxDB protocol in HTTP API.
 enable = true
+## If set to true, the timestamps in InfluxDB lines will be automatically converted to the
+## time index precision of their tables. Otherwise, the timestamps are fixed to nanosecond
+## precision. This option can be used if the InfluxDB table you created has a different
+## time index precision than nanosecond.
+auto_align_precision = false
 
 ## Prometheus remote storage options
 [prom_store]

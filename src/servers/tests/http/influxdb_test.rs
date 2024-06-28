@@ -57,7 +57,7 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output> {
         let catalog_manager = MemoryCatalogManager::new() as _;
         let requests = request
-            .to_row_insert_requests(&catalog_manager, &ctx)
+            .to_row_insert_requests(&catalog_manager, &ctx, false)
             .await?;
         for expr in requests.inserts {
             let _ = self

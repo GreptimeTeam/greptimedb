@@ -384,6 +384,7 @@ impl GreptimeDbClusterBuilder {
         );
 
         let instance = FrontendBuilder::new(
+            FrontendOptions::default(),
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,

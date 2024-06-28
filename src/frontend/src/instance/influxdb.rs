@@ -42,7 +42,11 @@ impl InfluxdbLineProtocolHandler for Instance {
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request
-            .to_row_insert_requests(self.catalog_manager(), &ctx)
+            .to_row_insert_requests(
+                self.catalog_manager(),
+                &ctx,
+                self.options.influxdb.auto_align_precision,
+            )
             .await?;
         self.handle_row_inserts(requests, ctx)
             .await
