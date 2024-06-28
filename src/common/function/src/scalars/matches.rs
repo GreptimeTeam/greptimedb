@@ -234,9 +234,12 @@ impl ParserContext {
             self.parse_one_impl(&mut tokens)?;
         }
 
-        ensure!(!self.stack.is_empty(), InvalidFuncArgsSnafu {
-            err_msg: "Empty pattern",
-        });
+        ensure!(
+            !self.stack.is_empty(),
+            InvalidFuncArgsSnafu {
+                err_msg: "Empty pattern",
+            }
+        );
 
         // conjoin them together
         let mut builder = PatternAstBuilder::from_existing(self.stack.remove(0));
@@ -420,6 +423,7 @@ impl Tokenizer {
     pub fn tokenize(mut self, pattern: &str) -> Result<Vec<Token>> {
         let mut tokens = vec![];
         while self.cursor < pattern.len() {
+            // TODO: collect pattern into Vec<char> if this tokenizer is bottleneck in the future
             let c = pattern.chars().nth(self.cursor).unwrap();
             match c {
                 '+' => tokens.push(Token::Must),
