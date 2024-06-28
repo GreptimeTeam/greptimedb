@@ -248,7 +248,7 @@ pub(crate) mod tests {
     #[test]
     fn test_extract_full_table_names() {
         let ctx = QueryContextBuilder::default()
-            .current_schema("test".to_string())
+            .current_schema_raw("test".to_string())
             .build();
 
         let (table_names, plan) =

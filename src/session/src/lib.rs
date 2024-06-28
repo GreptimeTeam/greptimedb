@@ -17,9 +17,8 @@ pub mod session_config;
 pub mod table_name;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -32,11 +31,11 @@ use crate::context::{Channel, ConnInfo, QueryContextRef};
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
-    catalog: ArcSwap<String>,
-    schema: ArcSwap<String>,
-    user_info: ArcSwap<UserInfoRef>,
+    catalog: Arc<RwLock<String>>,
+    schema: Arc<RwLock<String>>,
+    user_info: Arc<RwLock<UserInfoRef>>,
     conn_info: ConnInfo,
-    timezone: ArcSwap<Timezone>,
+    timezone: Arc<RwLock<Timezone>>,
     configuration_variables: Arc<ConfigurationVariables>,
 }
 
@@ -49,80 +48,70 @@ impl Session {
         configuration_variables: ConfigurationVariables,
     ) -> Self {
         Session {
-            catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.into())),
-            schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
-            user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
+            catalog: Arc::new(RwLock::new(DEFAULT_CATALOG_NAME.into())),
+            schema: Arc::new(RwLock::new(DEFAULT_SCHEMA_NAME.into())),
+            user_info: Arc::new(RwLock::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
-            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
+            timezone: Arc::new(RwLock::new(get_timezone(None).clone())),
             configuration_variables: Arc::new(configuration_variables),
         }
     }
 
-    #[inline]
     pub fn new_query_context(&self) -> QueryContextRef {
         QueryContextBuilder::default()
-            .current_user(ArcSwap::new(Arc::new(Some(
-                self.user_info.load().as_ref().clone(),
-            ))))
-            .current_catalog(self.catalog.load().to_string())
-            .current_schema(self.schema.load().to_string())
+            .current_user(self.user_info.clone())
+            // catalog is not allowed for update in query context so we use
+            // string here
+            .current_catalog(self.catalog.read().unwrap().clone())
+            .current_schema(self.schema.clone())
             .sql_dialect(self.conn_info.channel.dialect())
             .configuration_parameter(self.configuration_variables.clone())
-            .timezone(self.timezone())
+            .timezone(self.timezone.clone())
             .build()
             .into()
     }
 
-    #[inline]
     pub fn conn_info(&self) -> &ConnInfo {
         &self.conn_info
     }
 
-    #[inline]
     pub fn mut_conn_info(&mut self) -> &mut ConnInfo {
         &mut self.conn_info
     }
 
-    #[inline]
-    pub fn timezone(&self) -> Arc<Timezone> {
-        self.timezone.load().clone()
+    pub fn timezone(&self) -> Timezone {
+        self.timezone.read().unwrap().clone()
     }
 
-    #[inline]
     pub fn set_timezone(&self, tz: Timezone) {
-        let _ = self.timezone.swap(Arc::new(tz));
+        *self.timezone.write().unwrap() = tz;
     }
 
-    #[inline]
     pub fn user_info(&self) -> UserInfoRef {
-        self.user_info.load().clone().as_ref().clone()
+        self.user_info.read().unwrap().clone()
     }
 
-    #[inline]
     pub fn set_user_info(&self, user_info: UserInfoRef) {
-        self.user_info.store(Arc::new(user_info));
+        *self.user_info.write().unwrap() = user_info;
     }
 
-    #[inline]
     pub fn set_catalog(&self, catalog: String) {
-        self.catalog.store(Arc::new(catalog));
+        *self.catalog.write().unwrap() = catalog;
     }
 
-    #[inline]
     pub fn catalog(&self) -> String {
-        self.catalog.load().as_ref().clone()
+        self.catalog.read().unwrap().clone()
     }
 
     pub fn schema(&self) -> String {
-        self.schema.load().as_ref().clone()
+        self.schema.read().unwrap().clone()
     }
 
-    #[inline]
     pub fn set_schema(&self, schema: String) {
-        self.schema.store(Arc::new(schema));
+        *self.schema.write().unwrap() = schema;
     }
 
     pub fn get_db_string(&self) -> String {
-        build_db_string(self.catalog.load().as_ref(), self.schema.load().as_ref())
+        build_db_string(&self.catalog(), &self.schema())
     }
 }

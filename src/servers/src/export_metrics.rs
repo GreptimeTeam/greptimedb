@@ -246,7 +246,11 @@ pub async fn write_system_metric_by_handler(
     );
     // Pass the first tick. Because the first tick completes immediately.
     interval.tick().await;
-    let ctx = Arc::new(QueryContextBuilder::default().current_schema(db).build());
+    let ctx = Arc::new(
+        QueryContextBuilder::default()
+            .current_schema_raw(db)
+            .build(),
+    );
     loop {
         interval.tick().await;
         let metric_families = prometheus::gather();
