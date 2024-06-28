@@ -17,53 +17,22 @@ mod test {
     use std::sync::Arc;
 
     use client::OutputData;
+    use common_grpc::precision::Precision;
     use common_recordbatch::RecordBatches;
-    use frontend::instance::Instance;
+    use common_test_util::recordbatch::check_output_stream;
+    use rstest::rstest;
+    use rstest_reuse::apply;
     use servers::influxdb::InfluxdbRequest;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::InfluxdbLineProtocolHandler;
     use session::context::QueryContext;
 
-    use crate::standalone::GreptimeDbStandaloneBuilder;
-    use crate::tests;
+    use crate::tests::test_util::{both_instances_cases, distributed, standalone, MockInstance};
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_put_influxdb_lines() {
-        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_put_influxdb_lines")
-            .build()
-            .await;
-        let instance = &standalone.instance;
+    #[apply(both_instances_cases)]
+    async fn test_put_influxdb_lines_without_time_column(instance: Arc<dyn MockInstance>) {
+        let instance = instance.frontend();
 
-        test_put_influxdb_lines(instance).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_put_influxdb_lines() {
-        let instance =
-            tests::create_distributed_instance("test_distributed_put_influxdb_lines").await;
-        test_put_influxdb_lines(&instance.frontend()).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_put_influxdb_lines_without_time_column() {
-        let standalone = GreptimeDbStandaloneBuilder::new(
-            "test_standalone_put_influxdb_lines_without_time_column",
-        )
-        .build()
-        .await;
-        test_put_influxdb_lines_without_time_column(&standalone.instance).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_put_influxdb_lines_without_time_column() {
-        let instance = tests::create_distributed_instance(
-            "test_distributed_put_influxdb_lines_without_time_column",
-        )
-        .await;
-        test_put_influxdb_lines_without_time_column(&instance.frontend()).await;
-    }
-
-    async fn test_put_influxdb_lines_without_time_column(instance: &Arc<Instance>) {
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024
 monitor1,host=host2 memory=1027";
@@ -92,7 +61,10 @@ monitor1,host=host2 memory=1027";
         assert_eq!(total, 2);
     }
 
-    async fn test_put_influxdb_lines(instance: &Arc<Instance>) {
+    #[apply(both_instances_cases)]
+    async fn test_put_influxdb_lines(instance: Arc<dyn MockInstance>) {
+        let instance = instance.frontend();
+
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
 monitor1,host=host2 memory=1027 1663840496400340001";
@@ -123,5 +95,65 @@ monitor1,host=host2 memory=1027 1663840496400340001";
 | 2022-09-22T09:54:56.400340001 | host2 |      | 1027.0 |
 +-------------------------------+-------+------+--------+"
         );
+    }
+
+    #[apply(both_instances_cases)]
+    async fn test_put_influxdb_lines_with_already_created_table(instance: Arc<dyn MockInstance>) {
+        // First create a table with millisecond time index.
+        let sql = "create table monitor (
+                            ts timestamp time index,
+                            host string primary key,
+                            cpu double,
+                            memory double,
+                        )";
+        instance.exec_sql(sql).await;
+
+        // Insert some influxdb lines with millisecond precision.
+        let lines = r"
+monitor,host=127.0.0.1 cpu=0.1,memory=1.0 1719460800001
+monitor,host=127.0.0.2 cpu=0.2,memory=2.0 1719460800002
+monitor,host=127.0.0.1 cpu=0.3,memory=3.0 1719460800003";
+        let request = InfluxdbRequest {
+            precision: Some(Precision::Millisecond),
+            lines: lines.to_string(),
+        };
+        instance
+            .frontend()
+            .exec(request, QueryContext::arc())
+            .await
+            .unwrap();
+
+        // Insert other influxdb lines with nanosecond precision.
+        let lines = r"
+monitor,host=127.0.0.1 cpu=0.4,memory=4.0 1719460800004000000
+monitor,host=127.0.0.2 cpu=0.5,memory=5.0 1719460800005000000
+monitor,host=127.0.0.1 cpu=0.6,memory=6.0 1719460800006000000";
+        let request = InfluxdbRequest {
+            precision: Some(Precision::Nanosecond),
+            lines: lines.to_string(),
+        };
+        instance
+            .frontend()
+            .exec(request, QueryContext::arc())
+            .await
+            .unwrap();
+
+        // Check the data.
+        let output = instance
+            .exec_sql("SELECT ts, host, cpu, memory FROM monitor ORDER BY ts")
+            .await
+            .data;
+        let expected = "\
++-------------------------+-----------+-----+--------+
+| ts                      | host      | cpu | memory |
++-------------------------+-----------+-----+--------+
+| 2024-06-27T04:00:00.001 | 127.0.0.1 | 0.1 | 1.0    |
+| 2024-06-27T04:00:00.002 | 127.0.0.2 | 0.2 | 2.0    |
+| 2024-06-27T04:00:00.003 | 127.0.0.1 | 0.3 | 3.0    |
+| 2024-06-27T04:00:00.004 | 127.0.0.1 | 0.4 | 4.0    |
+| 2024-06-27T04:00:00.005 | 127.0.0.2 | 0.5 | 5.0    |
+| 2024-06-27T04:00:00.006 | 127.0.0.1 | 0.6 | 6.0    |
++-------------------------+-----------+-----+--------+";
+        check_output_stream(output, expected).await;
     }
 }

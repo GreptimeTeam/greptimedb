@@ -15,10 +15,10 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use axum::{http, Router};
+use catalog::memory::MemoryCatalogManager;
 use common_query::Output;
 use common_test_util::ports;
 use query::parser::PromQuery;
@@ -55,7 +55,10 @@ impl GrpcQueryHandler for DummyInstance {
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output> {
-        let requests: RowInsertRequests = request.try_into()?;
+        let catalog_manager = MemoryCatalogManager::new() as _;
+        let requests = request
+            .to_row_insert_requests(&catalog_manager, &ctx)
+            .await?;
         for expr in requests.inserts {
             let _ = self
                 .tx

@@ -15,7 +15,7 @@
 mod instance_kafka_wal_test;
 mod instance_test;
 mod promql_test;
-mod test_util;
+pub mod test_util;
 
 use std::collections::HashMap;
 use std::sync::Arc;

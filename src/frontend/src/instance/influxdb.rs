@@ -41,7 +41,9 @@ impl InfluxdbLineProtocolHandler for Instance {
         let interceptor_ref = self.plugins.get::<LineProtocolInterceptorRef<Error>>();
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
-        let requests = request.try_into()?;
+        let requests = request
+            .to_row_insert_requests(self.catalog_manager(), &ctx)
+            .await?;
         self.handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
