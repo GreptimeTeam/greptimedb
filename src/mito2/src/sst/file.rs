@@ -200,6 +200,10 @@ impl FileHandle {
     pub fn meta_ref(&self) -> &FileMeta {
         &self.inner.meta
     }
+
+    pub fn size(&self) -> u64 {
+        self.inner.meta.file_size
+    }
 }
 
 /// Inner data of [FileHandle].

@@ -16,10 +16,10 @@ use std::fmt::{Debug, Display};
 
 use datatypes::value::Value;
 
-use crate::ir::Column;
+use crate::ir::{Column, Ident};
 
 pub struct InsertIntoExpr {
-    pub table_name: String,
+    pub table_name: Ident,
     pub omit_column_list: bool,
     pub columns: Vec<Column>,
     pub values_list: Vec<RowValues>,

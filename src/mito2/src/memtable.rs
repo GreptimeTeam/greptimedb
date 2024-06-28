@@ -34,7 +34,7 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
-use crate::region::options::MemtableOptions;
+use crate::region::options::{MemtableOptions, MergeMode};
 
 pub mod bulk;
 pub mod key_values;
@@ -251,11 +251,13 @@ impl MemtableBuilderProvider {
         &self,
         options: Option<&MemtableOptions>,
         dedup: bool,
+        merge_mode: MergeMode,
     ) -> MemtableBuilderRef {
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
+                merge_mode,
             )),
             Some(MemtableOptions::PartitionTree(opts)) => {
                 Arc::new(PartitionTreeMemtableBuilder::new(
@@ -264,15 +266,16 @@ impl MemtableBuilderProvider {
                         data_freeze_threshold: opts.data_freeze_threshold,
                         fork_dictionary_bytes: opts.fork_dictionary_bytes,
                         dedup,
+                        merge_mode,
                     },
                     self.write_buffer_manager.clone(),
                 ))
             }
-            None => self.default_memtable_builder(dedup),
+            None => self.default_memtable_builder(dedup, merge_mode),
         }
     }
 
-    fn default_memtable_builder(&self, dedup: bool) -> MemtableBuilderRef {
+    fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();
@@ -285,6 +288,7 @@ impl MemtableBuilderProvider {
             MemtableConfig::TimeSeries => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
+                merge_mode,
             )),
         }
     }

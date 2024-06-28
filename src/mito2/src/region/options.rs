@@ -24,14 +24,27 @@ use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use serde_with::{serde_as, with_prefix, DisplayFromStr};
+use serde_with::{serde_as, with_prefix, DisplayFromStr, NoneAsEmptyString};
 use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
+use strum::EnumString;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
+
+/// Mode to handle duplicate rows while merging.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MergeMode {
+    /// Keeps the last row.
+    #[default]
+    LastRow,
+    /// Keeps the last non-null field for each row.
+    LastNonNull,
+}
 
 /// Options that affect the entire region.
 ///
@@ -54,6 +67,34 @@ pub struct RegionOptions {
     pub index_options: IndexOptions,
     /// Memtable options.
     pub memtable: Option<MemtableOptions>,
+    /// The mode to merge duplicate rows.
+    /// Only takes effect when `append_mode` is `false`.
+    pub merge_mode: Option<MergeMode>,
+}
+
+impl RegionOptions {
+    /// Validates options.
+    pub fn validate(&self) -> Result<()> {
+        if self.append_mode {
+            ensure!(
+                self.merge_mode.is_none(),
+                InvalidRegionOptionsSnafu {
+                    reason: "merge_mode is not allowed when append_mode is enabled",
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if deduplication is needed.
+    pub fn need_dedup(&self) -> bool {
+        !self.append_mode
+    }
+
+    /// Returns the `merge_mode` if it is set, otherwise returns the default `MergeMode`.
+    pub fn merge_mode(&self) -> MergeMode {
+        self.merge_mode.unwrap_or_default()
+    }
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -89,7 +130,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             None
         };
 
-        Ok(RegionOptions {
+        let opts = RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
@@ -97,7 +138,11 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             wal_options,
             index_options,
             memtable,
-        })
+            merge_mode: options.merge_mode,
+        };
+        opts.validate()?;
+
+        Ok(opts)
     }
 }
 
@@ -130,12 +175,12 @@ impl Default for CompactionOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwcsOptions {
-    /// Max num of files that can be kept in active writing time window.
+    /// Max num of sorted runs that can be kept in active writing time window.
     #[serde_as(as = "DisplayFromStr")]
-    pub max_active_window_files: usize,
+    pub max_active_window_runs: usize,
     /// Max num of files that can be kept in inactive time window.
     #[serde_as(as = "DisplayFromStr")]
-    pub max_inactive_window_files: usize,
+    pub max_inactive_window_runs: usize,
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
@@ -160,8 +205,8 @@ impl TwcsOptions {
 impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
-            max_active_window_files: 4,
-            max_inactive_window_files: 1,
+            max_active_window_runs: 1,
+            max_inactive_window_runs: 1,
             time_window: None,
         }
     }
@@ -179,6 +224,8 @@ struct RegionOptionsWithoutEnum {
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
+    #[serde_as(as = "NoneAsEmptyString")]
+    merge_mode: Option<MergeMode>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -188,6 +235,7 @@ impl Default for RegionOptionsWithoutEnum {
             ttl: options.ttl,
             storage: options.storage,
             append_mode: options.append_mode,
+            merge_mode: options.merge_mode,
         }
     }
 }
@@ -381,7 +429,7 @@ mod tests {
     #[test]
     fn test_without_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.max_active_window_files", "8"),
+            ("compaction.twcs.max_active_window_runs", "8"),
             ("compaction.twcs.time_window", "2h"),
         ]);
         let err = RegionOptions::try_from(&map).unwrap_err();
@@ -391,14 +439,14 @@ mod tests {
     #[test]
     fn test_with_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.max_active_window_files", "8"),
+            ("compaction.twcs.max_active_window_runs", "8"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                max_active_window_files: 8,
+                max_active_window_runs: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
@@ -478,18 +526,33 @@ mod tests {
     }
 
     #[test]
+    fn test_with_merge_mode() {
+        let map = make_map(&[("merge_mode", "last_row")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(MergeMode::LastRow, options.merge_mode());
+
+        let map = make_map(&[("merge_mode", "last_non_null")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(MergeMode::LastNonNull, options.merge_mode());
+
+        let map = make_map(&[("merge_mode", "unknown")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
     fn test_with_all() {
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: "test_topic".to_string(),
         });
         let map = make_map(&[
             ("ttl", "7d"),
-            ("compaction.twcs.max_active_window_files", "8"),
-            ("compaction.twcs.max_inactive_window_files", "2"),
+            ("compaction.twcs.max_active_window_runs", "8"),
+            ("compaction.twcs.max_inactive_window_runs", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("storage", "S3"),
-            ("append_mode", "true"),
+            ("append_mode", "false"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
             ("index.inverted_index.segment_row_count", "512"),
             (
@@ -500,17 +563,18 @@ mod tests {
             ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
             ("memtable.partition_tree.data_freeze_threshold", "2048"),
             ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
+            ("merge_mode", "last_non_null"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7)),
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                max_active_window_files: 8,
-                max_inactive_window_files: 2,
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
             storage: Some("S3".to_string()),
-            append_mode: true,
+            append_mode: false,
             wal_options,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -523,6 +587,7 @@ mod tests {
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
             })),
+            merge_mode: Some(MergeMode::LastNonNull),
         };
         assert_eq!(expect, options);
     }
