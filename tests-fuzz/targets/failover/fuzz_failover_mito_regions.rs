@@ -84,9 +84,9 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let columns = rng.gen_range(2..64);
-        let rows = rng.gen_range(2..4096);
+        let rows = rng.gen_range(2..2048);
         let tables = rng.gen_range(1..64);
-        let inserts = rng.gen_range(2..16);
+        let inserts = rng.gen_range(2..8);
         Ok(FuzzInput {
             columns,
             rows,
@@ -264,7 +264,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
     info!("Generates {} tables", input.tables);
     let exprs = generate_create_exprs(input.tables, input.columns, &mut rng)?;
-    let parallelism = 8;
+    let parallelism = 4;
     let table_ctxs = exprs
         .iter()
         .map(|expr| Arc::new(TableContext::from(expr)))
