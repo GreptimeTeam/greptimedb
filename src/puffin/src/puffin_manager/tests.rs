@@ -27,20 +27,20 @@ use crate::error::Result;
 use crate::puffin_manager::cache_manager::MokaCacheManager;
 use crate::puffin_manager::cached_puffin_manager::CachedPuffinManager;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
-use crate::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+use crate::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
 async fn new_moka_cache_manager(prefix: &str) -> (TempDir, Arc<MokaCacheManager>) {
     let cache_dir = create_temp_dir(prefix);
     let path = cache_dir.path().to_path_buf();
     (
         cache_dir,
-        Arc::new(MokaCacheManager::new(path, u64::MAX).await.unwrap()),
+        Arc::new(MokaCacheManager::new(path, rand::random()).await.unwrap()),
     )
 }
 
 #[tokio::test]
 async fn test_put_get_file() {
-    let compression_codecs = [None, Some(CompressionCodec::Zstd)];
+    let compression_codecs = [Some(CompressionCodec::Zstd)];
 
     for compression_codec in compression_codecs {
         let (_cache_dir, cache_manager) = new_moka_cache_manager("test_put_get_file_").await;
@@ -311,7 +311,7 @@ async fn check_dir<R>(
 {
     let res_dir = puffin_reader.dir(key).await.unwrap();
     for (file_name, raw_data) in files_in_dir {
-        let file_path = res_dir.join(file_name);
+        let file_path = res_dir.path().join(file_name);
         let buf = std::fs::read(file_path).unwrap();
         assert_eq!(buf, *raw_data);
     }

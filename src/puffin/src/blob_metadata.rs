@@ -56,7 +56,7 @@ pub struct BlobMetadata {
     pub length: i64,
 
     /// See [`CompressionCodec`]. If omitted, the data is assumed to be uncompressed.
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression_codec: Option<CompressionCodec>,
@@ -107,7 +107,7 @@ mod tests {
             .sequence_number(200)
             .offset(300)
             .length(400)
-            .compression_codec(CompressionCodec::Lz4)
+            .compression_codec(Some(CompressionCodec::Lz4))
             .properties(properties)
             .build()
             .unwrap();

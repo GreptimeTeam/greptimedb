@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use snafu::ResultExt;
 
-use crate::blob_metadata::{BlobMetadata, BlobMetadataBuilder};
+use crate::blob_metadata::{BlobMetadata, BlobMetadataBuilder, CompressionCodec};
 use crate::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
 use crate::file_format::writer::footer::FooterWriter;
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinSyncWriter};
@@ -57,12 +57,14 @@ impl<W> PuffinFileWriter<W> {
     fn create_blob_metadata(
         &self,
         typ: String,
+        compression_codec: Option<CompressionCodec>,
         properties: HashMap<String, String>,
         size: u64,
     ) -> BlobMetadata {
         BlobMetadataBuilder::default()
             .blob_type(typ)
             .properties(properties)
+            .compression_codec(compression_codec)
             .offset(self.written_bytes as _)
             .length(size as _)
             .build()
@@ -80,7 +82,12 @@ impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
 
         let size = io::copy(&mut blob.compressed_data, &mut self.writer).context(WriteSnafu)?;
 
-        let blob_metadata = self.create_blob_metadata(blob.blob_type, blob.properties, size);
+        let blob_metadata = self.create_blob_metadata(
+            blob.blob_type,
+            blob.compression_codec,
+            blob.properties,
+            size,
+        );
         self.blob_metadata.push(blob_metadata);
 
         self.written_bytes += size;
@@ -113,7 +120,12 @@ impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
             .await
             .context(WriteSnafu)?;
 
-        let blob_metadata = self.create_blob_metadata(blob.blob_type, blob.properties, size);
+        let blob_metadata = self.create_blob_metadata(
+            blob.blob_type,
+            blob.compression_codec,
+            blob.properties,
+            size,
+        );
         self.blob_metadata.push(blob_metadata);
 
         self.written_bytes += size;

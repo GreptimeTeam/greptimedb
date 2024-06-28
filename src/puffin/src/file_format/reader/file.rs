@@ -132,15 +132,6 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
     }
 
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader> {
-        // TODO(zhongzc): support decompression
-        let compression = blob_metadata.compression_codec.as_ref();
-        ensure!(
-            compression.is_none(),
-            UnsupportedDecompressionSnafu {
-                decompression: compression.unwrap().to_string()
-            }
-        );
-
         Ok(PartialReader::new(
             &mut self.source,
             blob_metadata.offset as _,
