@@ -30,6 +30,7 @@ use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
     TruncateResult, WorkerRequest,
 };
+use crate::sst::location;
 use crate::worker::RegionWorkerLoop;
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
@@ -288,6 +289,15 @@ impl<S> RegionWorkerLoop<S> {
 /// Checks the edit, writes and applies it.
 async fn edit_region(region: &MitoRegionRef, edit: RegionEdit) -> Result<()> {
     let region_id = region.region_id;
+    for file_meta in &edit.files_to_add {
+        // TODO(LFC): Fill the file in write cache, too.
+        let layer = region.access_layer.clone();
+        let path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+        common_runtime::spawn_bg(async move {
+            let _ = layer.object_store().read(&path).await;
+        });
+    }
+
     info!("Applying {edit:?} to region {}", region_id);
 
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
