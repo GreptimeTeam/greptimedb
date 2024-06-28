@@ -680,7 +680,7 @@ mod tests {
 
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
-            .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
+            .timezone_raw(Timezone::from_tz_string("+08:00").unwrap())
             .build()
             .into();
         let expr = create_to_expr(&create_table, &ctx).unwrap();
@@ -735,7 +735,7 @@ mod tests {
         //
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
-            .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
+            .timezone_raw(Timezone::from_tz_string("+08:00").unwrap())
             .build()
             .into();
         let expr = to_alter_expr(alter_table, &ctx).unwrap();

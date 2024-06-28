@@ -108,7 +108,7 @@ async fn do_auth<T>(
     let query_ctx = Arc::new(QueryContext::with(&catalog, &schema));
 
     let Some(user_provider) = user_provider else {
-        query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+        query_ctx.set_current_user(auth::userinfo_by_name(None));
         let _ = req.extensions_mut().insert(query_ctx);
         return Ok(());
     };
@@ -124,7 +124,7 @@ async fn do_auth<T>(
         .await
         .map_err(|e| tonic::Status::unauthenticated(e.to_string()))?;
 
-    query_ctx.set_current_user(Some(user_info));
+    query_ctx.set_current_user(user_info);
     let _ = req.extensions_mut().insert(query_ctx);
 
     Ok(())
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(expected_catalog, ctx.current_catalog());
         assert_eq!(expected_schema, ctx.current_schema());
 
-        let user_info = ctx.current_user().unwrap();
+        let user_info = ctx.current_user();
         assert_eq!(expected_user_name, user_info.username());
     }
 }

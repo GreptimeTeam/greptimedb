@@ -494,7 +494,6 @@ fn idents_to_full_database_name(
 mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use common_time::range::TimestampRange;
     use common_time::{Timestamp, Timezone};
@@ -509,7 +508,7 @@ mod tests {
 
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
-            .timezone(Arc::new(Timezone::from_tz_string("Asia/Shanghai").unwrap()))
+            .timezone_raw(Timezone::from_tz_string("Asia/Shanghai").unwrap())
             .build()
             .into();
         let map = OptionMap::from(
