@@ -136,10 +136,10 @@ impl DropTableExecutor {
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let ident = if table_route_value.is_physical() {
+        let idents = if table_route_value.is_physical() {
             // Safety: checked.
             let regions = table_route_value.region_routes().unwrap();
-            let ident = regions
+            let idents = regions
                 .iter()
                 .flat_map(|region| {
                     region
@@ -148,7 +148,7 @@ impl DropTableExecutor {
                         .map(|peer| (self.cluster_id, peer.id, region.region.id))
                 })
                 .collect::<Vec<_>>();
-            Some(ident)
+            Some(idents)
         } else {
             None
         };
@@ -160,7 +160,7 @@ impl DropTableExecutor {
         //
         // Once the regions were dropped, subsequent heartbeats no longer include these regions.
         // Therefore, we should remove the failure detectors for these dropped regions.
-        if let Some(ident) = ident {
+        if let Some(ident) = idents {
             ctx.region_failure_detector_controller
                 .deregister_failure_detectors(ident)
                 .await;

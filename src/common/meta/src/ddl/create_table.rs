@@ -274,7 +274,7 @@ impl CreateTableProcedure {
         // Safety: the table_route must be allocated.
         let physical_table_route = self.table_route()?.clone();
 
-        let ident = physical_table_route
+        let idents = physical_table_route
             .region_routes
             .iter()
             .map(|region| {
@@ -295,7 +295,7 @@ impl CreateTableProcedure {
         // which may prevent the RegionSupervisor from detecting failures in these newly created regions.
         self.context
             .region_failure_detector_controller
-            .register_failure_detectors(ident)
+            .register_failure_detectors(idents)
             .await;
         info!("Created table metadata for table {table_id}");
 
