@@ -16,6 +16,11 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
+/// Waits for a condition to be met by repeatedly checking it within a given timeout period.
+///
+/// This function repeatedly calls the `check` function and applies the `condition` function to the result.
+/// If the condition is met within the timeout period, the function returns. Otherwise, it waits for the retry
+/// interval and checks again, until the timeout period elapses.
 pub async fn wait_condition_fn<F, T, U>(
     timeout: Duration,
     check: F,

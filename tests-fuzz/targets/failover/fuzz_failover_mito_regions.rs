@@ -14,7 +14,6 @@
 
 #![no_main]
 
-use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,15 +22,12 @@ use arbitrary::{Arbitrary, Unstructured};
 use common_telemetry::info;
 use common_time::util::current_time_millis;
 use futures::future::try_join_all;
-use humantime::parse_duration;
-use kube::Api;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::{ChaCha20Rng, ChaChaRng};
 use snafu::{ensure, ResultExt};
 use sqlx::{Executor, MySql, Pool};
-use store_api::storage::RegionId;
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -48,11 +44,12 @@ use tests_fuzz::ir::{
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::cluster_info::{fetch_nodes, PEER_TYPE_DATANODE};
-use tests_fuzz::utils::crd::common::{Mode, SelectorBuilder};
-use tests_fuzz::utils::crd::pod::{Action, PodChaos, PodChaosSpecBuilder};
-use tests_fuzz::utils::partition::{count_partitions, fetch_partitions, Partition};
-use tests_fuzz::utils::wait::wait_condition_fn;
+use tests_fuzz::utils::cluster_info::wait_for_all_datanode_online;
+use tests_fuzz::utils::partition::{
+    fetch_partitions, pretty_print_region_distribution, region_distribution,
+    wait_for_all_regions_evicted, Partition,
+};
+use tests_fuzz::utils::pod_failure::{inject_datanode_pod_failure, recover_pod_failure};
 use tests_fuzz::utils::{
     compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
     GT_FUZZ_CLUSTER_NAME, GT_FUZZ_CLUSTER_NAMESPACE,
@@ -194,43 +191,6 @@ fn generate_insert_exprs<R: Rng + 'static>(
     Ok(exprs)
 }
 
-async fn inject_pod_failure(
-    ctx: &FuzzContext,
-    datanode_id: u64,
-    duration_secs: usize,
-) -> Result<String> {
-    let mut selector = BTreeMap::new();
-    let pod_name = format!("{}-datanode-{}", ctx.cluster_name, datanode_id);
-    selector.insert(
-        "statefulset.kubernetes.io/pod-name".into(),
-        pod_name.clone(),
-    );
-    let selector = SelectorBuilder::default()
-        .label_selectors(selector)
-        .build()
-        .unwrap();
-
-    let spec = PodChaosSpecBuilder::default()
-        .duration(format!("{duration_secs}s"))
-        .selector(selector)
-        .action(Action::PodFailure)
-        .mode(Mode::One)
-        .build()
-        .unwrap();
-    let chaos_name = format!("{pod_name}-pod-failure");
-    let cr = PodChaos::new(&chaos_name, spec);
-    let api: Api<PodChaos> = Api::namespaced(ctx.kube.clone(), &ctx.namespace);
-    api.create(&Default::default(), &cr).await.unwrap();
-
-    Ok(chaos_name)
-}
-
-async fn recover_pod_failure(ctx: &FuzzContext, name: &str) -> Result<()> {
-    let api: Api<PodChaos> = Api::namespaced(ctx.kube.clone(), &ctx.namespace);
-    api.delete(name, &Default::default()).await.unwrap();
-    Ok(())
-}
-
 async fn execute_insert_exprs<R: Rng + 'static>(
     ctx: &FuzzContext,
     inserts: Vec<Vec<InsertIntoExpr>>,
@@ -300,24 +260,6 @@ async fn collect_table_partitions(
     Ok(partitions)
 }
 
-fn region_distribution(partitions: Vec<Partition>) -> BTreeMap<u64, Vec<RegionId>> {
-    let mut distribution: BTreeMap<u64, Vec<RegionId>> = BTreeMap::new();
-    for partition in partitions {
-        distribution
-            .entry(partition.datanode_id)
-            .or_default()
-            .push(RegionId::from_u64(partition.region_id));
-    }
-
-    distribution
-}
-
-fn pretty_print_region_distribution(distribution: &BTreeMap<u64, Vec<RegionId>>) {
-    for (node, regions) in distribution {
-        info!("Datanode: {node}, num of regions: {}", regions.len());
-    }
-}
-
 async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
     info!("Generates {} tables", input.tables);
@@ -351,64 +293,26 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     // Injects pod failures
     info!("Injects pod failures to datanode: {selected_datanode}, regions: {selected_regions:?}");
-    let chaos_name = inject_pod_failure(&ctx, selected_datanode, 360).await?;
+    let chaos_name = inject_datanode_pod_failure(
+        ctx.kube.clone(),
+        &ctx.namespace,
+        &ctx.cluster_name,
+        selected_datanode,
+        360,
+    )
+    .await?;
 
     // Waits for num of regions on `selected_datanode` become to 0.
-    let greptime = ctx.greptime.clone();
-    wait_condition_fn(
+    wait_for_all_regions_evicted(
+        ctx.greptime.clone(),
+        selected_datanode,
         Duration::from_secs(300),
-        || {
-            let greptime = greptime.clone();
-            Box::pin(async move {
-                let partition = count_partitions(&greptime, selected_datanode)
-                    .await
-                    .unwrap();
-                info!(
-                    "Datanode: {selected_datanode}, num of partitions: {}",
-                    partition.count
-                );
-                partition.count
-            })
-        },
-        |count| count == 0,
-        Duration::from_secs(5),
     )
     .await;
 
     // Recovers pod failures
-    recover_pod_failure(&ctx, &chaos_name).await?;
-
-    // Waits for all datanode online
-    wait_condition_fn(
-        Duration::from_secs(60),
-        || {
-            let greptime = greptime.clone();
-            Box::pin(async move {
-                let nodes = fetch_nodes(&greptime)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .flat_map(|node| {
-                        if node.peer_type == PEER_TYPE_DATANODE {
-                            Some(node)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                info!("Waits for all datanode online: {nodes:?}");
-                nodes
-            })
-        },
-        |nodes| {
-            nodes
-                .into_iter()
-                .map(|node| parse_duration(&node.active_time.unwrap()).unwrap())
-                .all(|duration| duration < Duration::from_secs(3))
-        },
-        Duration::from_secs(5),
-    )
-    .await;
+    recover_pod_failure(ctx.kube.clone(), &ctx.namespace, &chaos_name).await?;
+    wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(60)).await;
 
     // Validates value rows
     info!("Validates num of values");

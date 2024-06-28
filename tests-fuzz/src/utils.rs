@@ -17,6 +17,7 @@ pub mod config;
 pub mod crd;
 pub mod health;
 pub mod partition;
+pub mod pod_failure;
 #[cfg(feature = "unstable")]
 pub mod process;
 pub mod wait;

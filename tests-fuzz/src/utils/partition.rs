@@ -12,10 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use common_telemetry::info;
 use snafu::ResultExt;
 use sqlx::database::HasArguments;
-use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, Type};
+use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, MySql, Pool, Type};
+use store_api::storage::RegionId;
 
+use super::wait::wait_condition_fn;
 use crate::error::{self, Result};
 use crate::ir::Ident;
 
@@ -68,4 +74,58 @@ on a.greptime_partition_id = b.region_id where a.table_name= ? order by datanode
         .fetch_all(e)
         .await
         .context(error::ExecuteQuerySnafu { sql })
+}
+
+/// Creates a distribution map of regions to datanodes based on the provided partitions.
+///
+/// This function iterates over the provided partitions and groups the regions by their associated datanode IDs.
+pub fn region_distribution(partitions: Vec<Partition>) -> BTreeMap<u64, Vec<RegionId>> {
+    let mut distribution: BTreeMap<u64, Vec<RegionId>> = BTreeMap::new();
+    for partition in partitions {
+        distribution
+            .entry(partition.datanode_id)
+            .or_default()
+            .push(RegionId::from_u64(partition.region_id));
+    }
+
+    distribution
+}
+
+/// Pretty prints the region distribution for each datanode.
+///
+/// This function logs the number of regions for each datanode in the distribution map.
+pub fn pretty_print_region_distribution(distribution: &BTreeMap<u64, Vec<RegionId>>) {
+    for (node, regions) in distribution {
+        info!("Datanode: {node}, num of regions: {}", regions.len());
+    }
+}
+
+/// Waits until all regions are evicted from the specified datanode.
+///
+/// This function repeatedly checks the number of partitions on the specified datanode and waits until
+/// the count reaches zero or the timeout period elapses. It logs the number of partitions on each check.
+pub async fn wait_for_all_regions_evicted(
+    greptime: Pool<MySql>,
+    selected_datanode: u64,
+    timeout: Duration,
+) {
+    wait_condition_fn(
+        timeout,
+        || {
+            let greptime = greptime.clone();
+            Box::pin(async move {
+                let partition = count_partitions(&greptime, selected_datanode)
+                    .await
+                    .unwrap();
+                info!(
+                    "Datanode: {selected_datanode}, num of partitions: {}",
+                    partition.count
+                );
+                partition.count
+            })
+        },
+        |count| count == 0,
+        Duration::from_secs(5),
+    )
+    .await;
 }
