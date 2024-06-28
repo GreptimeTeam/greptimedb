@@ -187,7 +187,7 @@ impl ContextFactory for DefaultContextFactory {
             volatile_ctx: self.volatile_ctx,
             table_metadata_manager: self.table_metadata_manager,
             opening_region_keeper: self.opening_region_keeper,
-            region_failure_detector_controller: self.region_failure_detector_controller.clone(),
+            region_failure_detector_controller: self.region_failure_detector_controller,
             mailbox: self.mailbox,
             server_addr: self.server_addr,
         }
