@@ -51,7 +51,7 @@ fn can_cache(path: &str) -> bool {
     !path.ends_with("_last_checkpoint")
 }
 
-/// Generate an unique cache key for the read path and range.
+/// Generate a unique cache key for the read path and range.
 fn read_cache_key(path: &str, args: &OpRead) -> String {
     format!(
         "{:x}.cache-{}",
@@ -175,7 +175,7 @@ impl<C: Access> ReadCache<C> {
     /// Read from a specific path using the OpRead operation.
     /// It will attempt to retrieve the data from the local cache.
     /// If the data is not found in the local cache,
-    /// it will fallback to retrieving it from remote object storage
+    /// it will fall back to retrieving it from remote object storage
     /// and cache the result locally.
     pub(crate) async fn read_from_cache<I>(
         &self,
@@ -204,7 +204,7 @@ impl<C: Access> ReadCache<C> {
         match read_result {
             ReadResult::Success(_) => {
                 // There is a concurrent issue here, the local cache may be purged
-                // while reading, we have to fallback to remote read
+                // while reading, we have to fall back to remote read
                 match self.file_cache.read(&read_key, OpRead::default()).await {
                     Ok(ret) => {
                         OBJECT_STORE_LRU_CACHE_HIT
