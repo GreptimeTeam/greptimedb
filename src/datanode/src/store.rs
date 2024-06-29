@@ -20,6 +20,7 @@ mod gcs;
 mod oss;
 mod s3;
 
+use std::sync::Arc;
 use std::time::Duration;
 use std::{env, path};
 
@@ -28,7 +29,7 @@ use common_telemetry::info;
 use object_store::layers::{LruCacheLayer, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{HttpClient, ObjectStore};
+use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -108,11 +109,9 @@ async fn create_object_store_with_cache(
         clean_temp_dir(&atomic_temp_dir)?;
         let mut builder = Fs::default();
         builder.root(path).atomic_write_dir(&atomic_temp_dir);
-        let cache_store = ObjectStore::new(builder)
-            .context(error::InitBackendSnafu)?
-            .finish();
+        let cache_store = builder.build().context(error::InitBackendSnafu)?;
 
-        let cache_layer = LruCacheLayer::new(cache_store, cache_capacity.0 as usize)
+        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
             .await
             .context(error::InitBackendSnafu)?;
 

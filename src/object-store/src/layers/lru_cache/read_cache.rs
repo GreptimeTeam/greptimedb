@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use common_telemetry::debug;
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{Read, Reader};
-use opendal::raw::{Access, OpRead, RpRead};
-use opendal::{Buffer, Error as OpendalError, ErrorKind, Operator, Result};
+use opendal::raw::oio::{List, Read, ReadDyn, Reader, Write};
+use opendal::raw::{Access, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
+use opendal::{Error as OpendalError, ErrorKind, Result};
 
 use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
@@ -51,23 +51,36 @@ fn can_cache(path: &str) -> bool {
     !path.ends_with("_last_checkpoint")
 }
 
-/// Generate a unique cache key for the read path and range.
-fn read_cache_key(path: &str) -> String {
-    format!("{:x}.cache", md5::compute(path))
+/// Generate an unique cache key for the read path and range.
+fn read_cache_key(path: &str, args: &OpRead) -> String {
+    format!(
+        "{:x}.cache-{}",
+        md5::compute(path),
+        args.range().to_header()
+    )
 }
 
 /// Local read cache for files in object storage
-#[derive(Clone, Debug)]
-pub(crate) struct ReadCache {
+#[derive(Debug)]
+pub(crate) struct ReadCache<C> {
     /// Local file cache backend
-    file_cache: Operator,
+    file_cache: Arc<C>,
     /// Local memory cache to track local cache files
     mem_cache: Cache<String, ReadResult>,
 }
 
-impl ReadCache {
+impl<C> Clone for ReadCache<C> {
+    fn clone(&self) -> Self {
+        Self {
+            file_cache: self.file_cache.clone(),
+            mem_cache: self.mem_cache.clone(),
+        }
+    }
+}
+
+impl<C: Access> ReadCache<C> {
     /// Create a [`ReadCache`] with capacity in bytes.
-    pub(crate) fn new(file_cache: Operator, capacity: usize) -> Self {
+    pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
         let eviction_listener =
             move |read_key: Arc<String>, read_result: ReadResult, cause| -> ListenerFuture {
@@ -79,7 +92,7 @@ impl ReadCache {
                     if let ReadResult::Success(size) = read_result {
                         OBJECT_STORE_LRU_CACHE_BYTES.sub(size as i64);
 
-                        let result = file_cache_cloned.delete(&read_key).await;
+                        let result = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
                         debug!(
                             "Deleted local cache file `{}`, result: {:?}, cause: {:?}.",
                             read_key, result, cause
@@ -104,7 +117,7 @@ impl ReadCache {
     }
 
     /// Returns the cache's entry count and total approximate entry size in bytes.
-    pub(crate) async fn stat(&self) -> (u64, u64) {
+    pub(crate) async fn cache_stat(&self) -> (u64, u64) {
         self.mem_cache.run_pending_tasks().await;
 
         (self.mem_cache.entry_count(), self.mem_cache.weighted_size())
@@ -129,17 +142,17 @@ impl ReadCache {
     /// Recover existing cache items from `file_cache` to `mem_cache`.
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
-        let mut pager = self.file_cache.lister("/").await?;
+        let (_, mut pager) = self.file_cache.list("/", OpList::default()).await?;
 
-        while let Some(entry) = pager.next().await.transpose()? {
+        while let Some(entry) = pager.next().await? {
             let read_key = entry.path();
 
             // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
             // because it's private field.
             let size = {
-                let stat = self.file_cache.stat(read_key).await?;
+                let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
 
-                stat.content_length()
+                stat.into_metadata().content_length()
             };
 
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
@@ -149,26 +162,27 @@ impl ReadCache {
                 .await;
         }
 
-        Ok(self.stat().await)
+        Ok(self.cache_stat().await)
     }
 
     /// Returns true when the read cache contains the specific file.
     pub(crate) async fn contains_file(&self, path: &str) -> bool {
         self.mem_cache.run_pending_tasks().await;
-        self.mem_cache.contains_key(path) && self.file_cache.stat(path).await.is_ok()
+        self.mem_cache.contains_key(path)
+            && self.file_cache.stat(path, OpStat::default()).await.is_ok()
     }
 
     /// Read from a specific path using the OpRead operation.
     /// It will attempt to retrieve the data from the local cache.
     /// If the data is not found in the local cache,
-    /// it will fall back to retrieving it from remote object storage
+    /// it will fallback to retrieving it from remote object storage
     /// and cache the result locally.
-    pub(crate) async fn read<I>(
+    pub(crate) async fn read_from_cache<I>(
         &self,
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Reader)>
+    ) -> Result<(RpRead, Box<dyn ReadDyn>)>
     where
         I: Access,
     {
@@ -176,35 +190,82 @@ impl ReadCache {
             return inner.read(path, args).await.map(to_output_reader);
         }
 
-        let (rp, reader) = inner.read(path, args).await?;
-        let reader: ReadCacheReader<I> = ReadCacheReader {
-            path: Arc::new(path.to_string()),
-            inner_reader: reader,
-            file_cache: self.file_cache.clone(),
-            mem_cache: self.mem_cache.clone(),
-        };
-        Ok((rp, Box::new(reader)))
+        let read_key = read_cache_key(path, &args);
+
+        let read_result = self
+            .mem_cache
+            .try_get_with(
+                read_key.clone(),
+                self.read_remote(inner, &read_key, path, args.clone()),
+            )
+            .await
+            .map_err(|e| OpendalError::new(e.kind(), e.to_string()))?;
+
+        match read_result {
+            ReadResult::Success(_) => {
+                // There is a concurrent issue here, the local cache may be purged
+                // while reading, we have to fallback to remote read
+                match self.file_cache.read(&read_key, OpRead::default()).await {
+                    Ok(ret) => {
+                        OBJECT_STORE_LRU_CACHE_HIT
+                            .with_label_values(&["success"])
+                            .inc();
+                        Ok(to_output_reader(ret))
+                    }
+                    Err(_) => {
+                        OBJECT_STORE_LRU_CACHE_MISS.inc();
+                        inner.read(path, args).await.map(to_output_reader)
+                    }
+                }
+            }
+            ReadResult::NotFound => {
+                OBJECT_STORE_LRU_CACHE_HIT
+                    .with_label_values(&["not_found"])
+                    .inc();
+
+                Err(OpendalError::new(
+                    ErrorKind::NotFound,
+                    format!("File not found: {path}"),
+                ))
+            }
+        }
     }
-}
 
-pub struct ReadCacheReader<I: Access> {
-    /// Path of the file
-    path: Arc<String>,
-    /// Remote file reader.
-    inner_reader: I::Reader,
-    /// Local file cache backend
-    file_cache: Operator,
-    /// Local memory cache to track local cache files
-    mem_cache: Cache<String, ReadResult>,
-}
+    async fn try_write_cache<I>(&self, mut reader: I::Reader, read_key: &str) -> Result<usize>
+    where
+        I: Access,
+    {
+        let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
+        let mut total = 0;
+        loop {
+            let bytes = reader.read().await?;
+            if bytes.is_empty() {
+                break;
+            }
 
-impl<I: Access> ReadCacheReader<I> {
-    /// TODO: we can return the Buffer directly to avoid another read from cache.
-    async fn read_remote(&mut self) -> Result<ReadResult> {
+            total += bytes.len();
+            writer.write(bytes).await?;
+        }
+        // Call `close` to ensure data is written.
+        writer.close().await?;
+        Ok(total)
+    }
+
+    /// Read the file from remote storage. If success, write the content into local cache.
+    async fn read_remote<I>(
+        &self,
+        inner: &I,
+        read_key: &str,
+        path: &str,
+        args: OpRead,
+    ) -> Result<ReadResult>
+    where
+        I: Access,
+    {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
-        let buf = self.inner_reader.read_all().await?;
-        let result = self.try_write_cache(buf).await;
+        let (_, reader) = inner.read(path, args).await?;
+        let result = self.try_write_cache::<I>(reader, read_key).await;
 
         match result {
             Ok(read_bytes) => {
@@ -228,53 +289,6 @@ impl<I: Access> ReadCacheReader<I> {
                     .with_label_values(&[e.kind().to_string().as_str()])
                     .inc();
                 Err(e)
-            }
-        }
-    }
-
-    async fn try_write_cache(&self, buf: Buffer) -> Result<usize> {
-        let size = buf.len();
-        let read_key = read_cache_key(&self.path);
-        self.file_cache.write(&read_key, buf).await?;
-        Ok(size)
-    }
-}
-
-impl<I: Access> Read for ReadCacheReader<I> {
-    async fn read(&mut self) -> Result<Buffer> {
-        let read_key = read_cache_key(&self.path);
-        let mem_cache = self.mem_cache.clone();
-        let read_result = mem_cache
-            .try_get_with(read_key.clone(), self.read_remote())
-            .await
-            .map_err(|e| OpendalError::new(e.kind(), e.to_string()))?;
-
-        match read_result {
-            ReadResult::Success(_) => {
-                // There is a concurrent issue here, the local cache may be purged
-                // while reading, we have to fall back to remote read
-                match self.file_cache.read(&read_key).await {
-                    Ok(ret) => {
-                        OBJECT_STORE_LRU_CACHE_HIT
-                            .with_label_values(&["success"])
-                            .inc();
-                        Ok(ret)
-                    }
-                    Err(_) => {
-                        OBJECT_STORE_LRU_CACHE_MISS.inc();
-                        self.inner_reader.read().await
-                    }
-                }
-            }
-            ReadResult::NotFound => {
-                OBJECT_STORE_LRU_CACHE_HIT
-                    .with_label_values(&["not_found"])
-                    .inc();
-
-                Err(OpendalError::new(
-                    ErrorKind::NotFound,
-                    format!("File not found: {}", self.path),
-                ))
             }
         }
     }
