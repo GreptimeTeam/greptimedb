@@ -34,7 +34,7 @@ async fn test_scan_without_filtering_deleted() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "10")
+        .insert_option("compaction.twcs.max_active_window_runs", "10")
         .build();
 
     let column_schemas = rows_schema(&request);

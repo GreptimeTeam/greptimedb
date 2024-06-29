@@ -12,18 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cluster_info;
 pub mod config;
 pub mod crd;
 pub mod health;
+pub mod partition;
+pub mod pod_failure;
 #[cfg(feature = "unstable")]
 pub mod process;
+pub mod wait;
 
 use std::env;
 
 use common_telemetry::info;
+use common_telemetry::tracing::log::LevelFilter;
 use snafu::ResultExt;
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::{MySql, Pool};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use sqlx::{ConnectOptions, MySql, Pool};
 
 use crate::error::{self, Result};
 use crate::ir::Ident;
@@ -51,12 +56,9 @@ pub async fn init_greptime_connections_via_env() -> Connections {
 /// Connects to GreptimeDB.
 pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
     let mysql = if let Some(addr) = mysql {
-        Some(
-            MySqlPoolOptions::new()
-                .connect(&format!("mysql://{addr}/public"))
-                .await
-                .unwrap(),
-        )
+        let mut opts: MySqlConnectOptions = format!("mysql://{addr}/public").parse().unwrap();
+        opts.log_statements(LevelFilter::Off);
+        Some(MySqlPoolOptions::new().connect_with(opts).await.unwrap())
     } else {
         None
     };
@@ -88,6 +90,9 @@ pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
         root_dir,
     }
 }
+
+pub const GT_FUZZ_CLUSTER_NAMESPACE: &str = "GT_FUZZ_CLUSTER_NAMESPACE";
+pub const GT_FUZZ_CLUSTER_NAME: &str = "GT_FUZZ_CLUSTER_NAME";
 
 /// Flushes memtable to SST file.
 pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {

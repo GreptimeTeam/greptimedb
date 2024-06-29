@@ -100,8 +100,8 @@ async fn test_append_mode_compaction() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.max_active_window_runs", "2")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("append_mode", "true")
         .build();
     let region_dir = request.region_dir.clone();
@@ -167,7 +167,7 @@ async fn test_append_mode_compaction() {
 +-------+---------+---------------------+";
     // Scans in parallel.
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
-    assert_eq!(1, scanner.num_files());
+    assert_eq!(2, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

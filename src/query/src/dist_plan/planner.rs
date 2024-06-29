@@ -107,6 +107,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             &schema,
             self.region_query_handler.clone(),
             query_ctx,
+            session_state.config().target_partitions(),
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
