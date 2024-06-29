@@ -3771,6 +3771,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-version",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
