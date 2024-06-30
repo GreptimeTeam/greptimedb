@@ -66,7 +66,7 @@ impl<'a> StatementToRegion<'a> {
         let table_info = table.table_info();
 
         ensure!(
-            schema != "information_schema",
+            !catalog::consts::is_readonly_schema(schema.as_str()),
             SchemaReadOnlySnafu { name: schema }
         );
 

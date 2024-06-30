@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
+use catalog::consts::is_readonly_schema;
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -152,7 +153,7 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
         ensure!(
-            create_table.schema_name != "information_schema",
+            !is_readonly_schema(create_table.schema_name.as_str()),
             SchemaReadOnlySnafu {
                 name: create_table.schema_name.clone()
             }
@@ -653,7 +654,7 @@ impl StatementExecutor {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
             ensure!(
-                table_name.schema_name != "information_schema",
+                !is_readonly_schema(table_name.schema_name.as_str()),
                 SchemaReadOnlySnafu {
                     name: table_name.schema_name.clone()
                 }
@@ -709,7 +710,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            schema != "information_schema",
+            !is_readonly_schema(schema.as_str()),
             SchemaReadOnlySnafu { name: schema }
         );
 
@@ -745,7 +746,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            table_name.schema_name != "information_schema",
+            !is_readonly_schema(table_name.schema_name.as_str()),
             SchemaReadOnlySnafu {
                 name: table_name.schema_name.clone()
             }
@@ -821,7 +822,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            expr.schema_name != "information_schema",
+            !is_readonly_schema(expr.schema_name.as_str()),
             SchemaReadOnlySnafu {
                 name: expr.schema_name.clone()
             }

@@ -327,7 +327,6 @@ impl ErrorExt for Error {
             UnsupportedExpr { .. }
             | Unimplemented { .. }
             | TableNotFound { .. }
-            | TableReadOnly { .. }
             | UnknownTable { .. }
             | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }
@@ -364,6 +363,7 @@ impl ErrorExt for Error {
             TableMutation { source, .. } => source.status_code(),
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
             GetRegionMetadata { .. } => StatusCode::Internal,
+            TableReadOnly { .. } => StatusCode::Unsupported,
         }
     }
 

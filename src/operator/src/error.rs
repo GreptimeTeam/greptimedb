@@ -725,7 +725,6 @@ impl ErrorExt for Error {
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
             | Error::SchemaInUse { .. }
-            | Error::SchemaReadOnly { .. }
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
@@ -749,9 +748,9 @@ impl ErrorExt for Error {
                 StatusCode::TableAlreadyExists
             }
 
-            Error::NotSupported { .. } | Error::ShowCreateTableBaseOnly { .. } => {
-                StatusCode::Unsupported
-            }
+            Error::NotSupported { .. }
+            | Error::ShowCreateTableBaseOnly { .. }
+            | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
 
             Error::TableMetadataManager { source, .. } => source.status_code(),
 

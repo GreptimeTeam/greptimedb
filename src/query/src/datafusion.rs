@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::consts::is_readonly_schema;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
@@ -175,7 +176,7 @@ impl DatafusionQueryEngine {
         let table_schema = table.schema();
 
         ensure!(
-            schema_name != "information_schema",
+            !is_readonly_schema(schema_name.as_str()),
             TableReadOnlySnafu { table: table_name }
         );
 
@@ -223,7 +224,7 @@ impl DatafusionQueryEngine {
         let table_name = table_name.table.to_string();
 
         ensure!(
-            schema_name != "information_schema",
+            !is_readonly_schema(schema_name.as_str()),
             TableReadOnlySnafu { table: table_name }
         );
 

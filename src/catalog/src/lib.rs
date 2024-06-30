@@ -27,6 +27,7 @@ use table::TableRef;
 
 use crate::error::Result;
 
+pub mod consts;
 pub mod error;
 pub mod information_schema;
 pub mod kvbackend;
