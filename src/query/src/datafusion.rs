@@ -50,7 +50,7 @@ pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, UnsupportedExprSnafu,
+    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -173,6 +173,12 @@ impl DatafusionQueryEngine {
         let schema_name = table_name.schema.to_string();
         let table_name = table_name.table.to_string();
         let table_schema = table.schema();
+
+        ensure!(
+            schema_name != "information_schema",
+            TableReadOnlySnafu { table: table_name }
+        );
+
         let ts_column = table_schema
             .timestamp_column()
             .map(|x| &x.name)
@@ -212,10 +218,19 @@ impl DatafusionQueryEngine {
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let catalog_name = table_name.catalog.to_string();
+        let schema_name = table_name.schema.to_string();
+        let table_name = table_name.table.to_string();
+
+        ensure!(
+            schema_name != "information_schema",
+            TableReadOnlySnafu { table: table_name }
+        );
+
         let request = InsertRequest {
-            catalog_name: table_name.catalog.to_string(),
-            schema_name: table_name.schema.to_string(),
-            table_name: table_name.table.to_string(),
+            catalog_name,
+            schema_name,
+            table_name,
             columns_values: column_vectors,
         };
 

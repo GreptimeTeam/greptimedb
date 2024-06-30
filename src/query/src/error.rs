@@ -307,6 +307,13 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("Cannot change read-only table: {}", table))]
+    TableReadOnly {
+        table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -320,6 +327,7 @@ impl ErrorExt for Error {
             UnsupportedExpr { .. }
             | Unimplemented { .. }
             | TableNotFound { .. }
+            | TableReadOnly { .. }
             | UnknownTable { .. }
             | TimeIndexNotFound { .. }
             | ParseTimestamp { .. }

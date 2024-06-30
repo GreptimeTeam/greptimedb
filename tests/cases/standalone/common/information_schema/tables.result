@@ -44,3 +44,7 @@ drop schema abcde;
 
 Affected Rows: 0
 
+drop schema information_schema;
+
+Error: 1004(InvalidArguments), Schema `information_schema` is read-only
+

@@ -29,7 +29,7 @@ use table::TableRef;
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
-    TableNotFoundSnafu,
+    SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
@@ -64,6 +64,11 @@ impl<'a> StatementToRegion<'a> {
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
         let table_info = table.table_info();
+
+        ensure!(
+            schema != "information_schema",
+            SchemaReadOnlySnafu { name: schema }
+        );
 
         let column_names = column_names(stmt, &table_schema);
         let column_count = column_names.len();

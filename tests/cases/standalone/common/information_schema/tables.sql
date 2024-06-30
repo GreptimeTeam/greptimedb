@@ -17,3 +17,5 @@ use public;
 drop schema abc;
 
 drop schema abcde;
+
+drop schema information_schema;
