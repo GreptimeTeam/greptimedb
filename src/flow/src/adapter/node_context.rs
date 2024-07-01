@@ -23,8 +23,8 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use crate::adapter::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::adapter::{FlowId, TableName, TableSource};
+use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
@@ -317,7 +317,6 @@ impl FlownodeContext {
 
     /// Assign a schema to a table
     ///
-    /// TODO(discord9): error handling
     pub fn assign_table_schema(
         &mut self,
         table_name: &TableName,
@@ -327,7 +326,10 @@ impl FlownodeContext {
             .table_repr
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
-            .unwrap();
+            .context(TableNotFoundSnafu {
+                name: format!("Table not found: {:?} in flownode cache", table_name),
+            })?;
+
         self.schema.insert(gid, schema);
         Ok(())
     }

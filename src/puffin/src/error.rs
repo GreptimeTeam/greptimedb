@@ -248,13 +248,6 @@ pub enum Error {
 
     #[snafu(display("Get value from cache"))]
     CacheGet { source: Arc<Error> },
-
-    #[snafu(display("Retries exhausted, retires: {retires}"))]
-    RetriesExhausted {
-        #[snafu(implicit)]
-        location: Location,
-        retires: usize,
-    },
 }
 
 impl ErrorExt for Error {
@@ -285,8 +278,7 @@ impl ErrorExt for Error {
             | BlobNotFound { .. }
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }
-            | WalkDirError { .. }
-            | RetriesExhausted { .. } => StatusCode::Unexpected,
+            | WalkDirError { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
                 StatusCode::Unsupported

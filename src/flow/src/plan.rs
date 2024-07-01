@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use datatypes::arrow::ipc::Map;
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::error::Error;
+use crate::error::Error;
 use crate::expr::{
     AggregateExpr, EvalError, GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr,
     TypedExpr,

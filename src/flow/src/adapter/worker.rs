@@ -24,9 +24,9 @@ use hydroflow::scheduled::graph::Hydroflow;
 use snafu::ensure;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
-use crate::adapter::error::{Error, FlowAlreadyExistSnafu, InternalSnafu, UnexpectedSnafu};
 use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};
+use crate::error::{Error, FlowAlreadyExistSnafu, InternalSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow};

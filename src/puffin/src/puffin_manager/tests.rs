@@ -27,7 +27,9 @@ use crate::error::Result;
 use crate::puffin_manager::cache_manager::MokaCacheManager;
 use crate::puffin_manager::cached_puffin_manager::CachedPuffinManager;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
-use crate::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+use crate::puffin_manager::{
+    BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
+};
 
 async fn new_moka_cache_manager(prefix: &str) -> (TempDir, Arc<MokaCacheManager>) {
     let cache_dir = create_temp_dir(prefix);
@@ -261,11 +263,11 @@ async fn check_blob<R>(
     puffin_reader: &R,
 ) where
     R: PuffinReader,
-    <R as PuffinReader>::Reader: Unpin,
 {
-    let mut file = puffin_reader.blob(key).await.unwrap();
+    let blob = puffin_reader.blob(key).await.unwrap();
+    let mut reader = blob.reader().await.unwrap();
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).await.unwrap();
+    reader.read_to_end(&mut buf).await.unwrap();
     assert_eq!(buf, raw_data);
 
     let mut cached_file = cache_manager.must_get_file(puffin_file_name, key).await;
@@ -307,7 +309,6 @@ async fn check_dir<R>(
     puffin_reader: &R,
 ) where
     R: PuffinReader,
-    <R as PuffinReader>::Reader: Unpin,
 {
     let res_dir = puffin_reader.dir(key).await.unwrap();
     for (file_name, raw_data) in files_in_dir {

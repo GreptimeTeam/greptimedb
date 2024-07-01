@@ -15,26 +15,48 @@
 //! Implementation of grpc service for flow node
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use catalog::CatalogManagerRef;
+use common_base::Plugins;
+use common_meta::ddl::table_meta;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::Flownode;
 use common_telemetry::tracing::info;
 use futures::FutureExt;
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
+use meta_client::client::MetaClient;
+use query::QueryEngineFactory;
+use serde::de::Unexpected;
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::heartbeat_options::HeartbeatOptions;
+use servers::server::Server;
 use snafu::{ensure, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::FlownodeManagerRef;
+use crate::adapter::FlowWorkerManagerRef;
+use crate::error::{ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu};
+use crate::heartbeat::HeartbeatTask;
+use crate::transform::register_function_to_query_engine;
+use crate::{Error, FlowWorkerManager, FlownodeOptions};
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
-    pub manager: FlownodeManagerRef,
+    pub manager: FlowWorkerManagerRef,
+}
+
+impl FlowService {
+    pub fn new(manager: FlowWorkerManagerRef) -> Self {
+        Self { manager }
+    }
 }
 
 #[async_trait::async_trait]
@@ -82,8 +104,17 @@ impl flow_server::Flow for FlowService {
 }
 
 pub struct FlownodeServer {
-    pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
-    pub flow_service: FlowService,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    flow_service: FlowService,
+}
+
+impl FlownodeServer {
+    pub fn new(flow_service: FlowService) -> Self {
+        Self {
+            flow_service,
+            shutdown_tx: Mutex::new(None),
+        }
+    }
 }
 
 impl FlownodeServer {
@@ -134,7 +165,6 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        // TODO(discord9): better place for dataflow to run per second
         let manager_ref = self.flow_service.manager.clone();
         let _handle = manager_ref.clone().run_background();
 
@@ -143,5 +173,128 @@ impl servers::server::Server for FlownodeServer {
 
     fn name(&self) -> &str {
         FLOW_NODE_SERVER_NAME
+    }
+}
+
+/// The flownode server instance.
+pub struct FlownodeInstance {
+    server: FlownodeServer,
+    addr: SocketAddr,
+    heartbeat_task: Option<HeartbeatTask>,
+}
+
+impl FlownodeInstance {
+    pub async fn start(&mut self) -> Result<(), crate::Error> {
+        if let Some(task) = &self.heartbeat_task {
+            task.start().await?;
+        }
+
+        self.addr = self
+            .server
+            .start(self.addr)
+            .await
+            .context(StartServerSnafu)?;
+        Ok(())
+    }
+    pub async fn shutdown(&self) -> Result<(), crate::Error> {
+        self.server.shutdown().await.context(ShutdownServerSnafu)?;
+
+        if let Some(task) = &self.heartbeat_task {
+            task.shutdown();
+        }
+
+        Ok(())
+    }
+
+    pub fn flow_worker_manager(&self) -> FlowWorkerManagerRef {
+        self.server.flow_service.manager.clone()
+    }
+}
+
+/// [`FlownodeInstance`] Builder
+pub struct FlownodeBuilder {
+    opts: FlownodeOptions,
+    plugins: Plugins,
+    table_meta: TableMetadataManagerRef,
+    catalog_manager: CatalogManagerRef,
+    heartbeat_task: Option<HeartbeatTask>,
+}
+
+impl FlownodeBuilder {
+    /// init flownode builder
+    pub fn new(
+        opts: FlownodeOptions,
+        plugins: Plugins,
+        table_meta: TableMetadataManagerRef,
+        catalog_manager: CatalogManagerRef,
+    ) -> Self {
+        Self {
+            opts,
+            plugins,
+            table_meta,
+            catalog_manager,
+            heartbeat_task: None,
+        }
+    }
+
+    pub fn with_heartbeat_task(self, heartbeat_task: HeartbeatTask) -> Self {
+        Self {
+            heartbeat_task: Some(heartbeat_task),
+            ..self
+        }
+    }
+
+    pub async fn build(self) -> Result<FlownodeInstance, Error> {
+        let manager = Arc::new(self.build_manager().await?);
+        let server = FlownodeServer::new(FlowService::new(manager.clone()));
+
+        let heartbeat_task = self.heartbeat_task;
+
+        let addr = self.opts.grpc.addr;
+        let instance = FlownodeInstance {
+            server,
+            addr: addr.parse().context(ParseAddrSnafu { addr })?,
+            heartbeat_task,
+        };
+        Ok(instance)
+    }
+
+    /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,
+    /// nor does it actually start running the worker.
+    async fn build_manager(&self) -> Result<FlowWorkerManager, Error> {
+        let catalog_manager = self.catalog_manager.clone();
+        let table_meta = self.table_meta.clone();
+
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in flownode is only used for translate plan with resolved table source.
+            catalog_manager,
+            None,
+            None,
+            None,
+            false,
+            self.plugins.clone(),
+        );
+        let query_engine = query_engine_factory.query_engine();
+
+        register_function_to_query_engine(&query_engine);
+
+        let (tx, rx) = oneshot::channel();
+
+        let node_id = self.opts.node_id.map(|id| id as u32);
+        let _handle = std::thread::spawn(move || {
+            let (flow_node_manager, mut worker) =
+                FlowWorkerManager::new_with_worker(node_id, query_engine, table_meta);
+            let _ = tx.send(flow_node_manager);
+            info!("Flow Worker started in new thread");
+            worker.run();
+        });
+        let man = rx.await.map_err(|_e| {
+            UnexpectedSnafu {
+                reason: "sender is dropped, failed to create flow node manager",
+            }
+            .build()
+        })?;
+        info!("Flow Node Manager started");
+        Ok(man)
     }
 }

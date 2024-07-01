@@ -259,9 +259,9 @@ EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHER
 | physical_plan | CoalescePartitionsExec_|
 |_|_ProjectionExec: expr=[false as cond]_|
 |_|_CrossJoinExec_|
+|_|_CoalescePartitionsExec_|
 |_|_ProjectionExec: expr=[]_|
 |_|_MergeScanExec: REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[]_|
 |_|_MergeScanExec: REDACTED
 |_|_|

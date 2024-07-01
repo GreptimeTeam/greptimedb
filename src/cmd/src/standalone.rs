@@ -21,11 +21,12 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
+use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -65,9 +66,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
-    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result, ShutdownDatanodeSnafu,
-    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
-    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
+    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -448,13 +449,18 @@ impl StartCommand {
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
         let flow_builder = FlownodeBuilder::new(
-            1,
             Default::default(),
             fe_plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
         );
-        let flownode = Arc::new(flow_builder.build().await);
+        let flownode = Arc::new(
+            flow_builder
+                .build()
+                .await
+                .map_err(BoxedError::new)
+                .context(OtherSnafu)?,
+        );
 
         let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
             .with_kv_backend(kv_backend.clone())
@@ -464,7 +470,7 @@ impl StartCommand {
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.clone(),
+            flow_server: flownode.flow_worker_manager(),
         });
 
         let table_id_sequence = Arc::new(
@@ -516,11 +522,12 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         // flow server need to be able to use frontend to write insert requests back
-        flownode
+        let flow_worker_manager = flownode.flow_worker_manager();
+        flow_worker_manager
             .set_frontend_invoker(Box::new(frontend.clone()))
             .await;
         // TODO(discord9): unify with adding `start` and `shutdown` method to flownode too.
-        let _handle = flownode.clone().run_background();
+        let _handle = flow_worker_manager.run_background();
 
         let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
             .build()
@@ -559,6 +566,7 @@ impl StartCommand {
                     flow_metadata_manager,
                     flow_metadata_allocator,
                     peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager,
                 true,

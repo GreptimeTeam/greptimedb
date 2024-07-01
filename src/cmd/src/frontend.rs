@@ -283,6 +283,7 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
+        // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
             .cache_max_capacity(cache_max_capacity)
             .cache_ttl(cache_ttl)

@@ -15,6 +15,7 @@
 mod buckets;
 pub mod compactor;
 pub mod picker;
+mod run;
 mod task;
 #[cfg(test)]
 mod test_util;

@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::PeerLookupServiceRef;
@@ -29,13 +30,13 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{interval, MissedTickBehavior};
 
-use super::failure_detector::RegionFailureDetector;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::node_stat::Stat;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::RegionMigrationProcedureTask;
+use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
 
 /// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
@@ -75,10 +76,22 @@ impl From<&Stat> for DatanodeHeartbeat {
 ///   of the supervisor during tests.
 pub(crate) enum Event {
     Tick,
+    RegisterFailureDetectors(Vec<DetectingRegion>),
+    DeregisterFailureDetectors(Vec<DetectingRegion>),
     HeartbeatArrived(DatanodeHeartbeat),
     Clear,
     #[cfg(test)]
     Dump(tokio::sync::oneshot::Sender<RegionFailureDetector>),
+}
+
+#[cfg(test)]
+impl Event {
+    pub(crate) fn into_region_failure_detectors(self) -> Vec<DetectingRegion> {
+        match self {
+            Self::RegisterFailureDetectors(detecting_regions) => detecting_regions,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl Debug for Event {
@@ -87,6 +100,14 @@ impl Debug for Event {
             Self::Tick => write!(f, "Tick"),
             Self::HeartbeatArrived(arg0) => f.debug_tuple("HeartbeatArrived").field(arg0).finish(),
             Self::Clear => write!(f, "Clear"),
+            Self::RegisterFailureDetectors(arg0) => f
+                .debug_tuple("RegisterFailureDetectors")
+                .field(arg0)
+                .finish(),
+            Self::DeregisterFailureDetectors(arg0) => f
+                .debug_tuple("DeregisterFailureDetectors")
+                .field(arg0)
+                .finish(),
             #[cfg(test)]
             Self::Dump(_) => f.debug_struct("Dump").finish(),
         }
@@ -109,6 +130,14 @@ pub struct RegionSupervisorTicker {
 }
 
 impl RegionSupervisorTicker {
+    pub(crate) fn new(tick_interval: Duration, sender: Sender<Event>) -> Self {
+        Self {
+            tick_handle: Mutex::new(None),
+            tick_interval,
+            sender,
+        }
+    }
+
     /// Starts the ticker.
     pub fn start(&self) {
         let mut handle = self.tick_handle.lock().unwrap();
@@ -160,12 +189,8 @@ pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
 pub struct RegionSupervisor {
     /// Used to detect the failure of regions.
     failure_detector: RegionFailureDetector,
-    /// The interval of tick
-    tick_interval: Duration,
     /// Receives [Event]s.
     receiver: Receiver<Event>,
-    /// [Event] Sender.
-    sender: Sender<Event>,
     /// The context of [`SelectorRef`]
     selector_context: SelectorContext,
     /// Candidate node selector.
@@ -178,66 +203,83 @@ pub struct RegionSupervisor {
     peer_lookup: PeerLookupServiceRef,
 }
 
+/// Controller for managing failure detectors for regions.
+#[derive(Debug, Clone)]
+pub struct RegionFailureDetectorControl {
+    sender: Sender<Event>,
+}
+
+impl RegionFailureDetectorControl {
+    pub(crate) fn new(sender: Sender<Event>) -> Self {
+        Self { sender }
+    }
+}
+
+#[async_trait::async_trait]
+impl RegionFailureDetectorController for RegionFailureDetectorControl {
+    async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        if let Err(err) = self
+            .sender
+            .send(Event::RegisterFailureDetectors(detecting_regions))
+            .await
+        {
+            error!(err; "RegionSupervisor is stop receiving heartbeat");
+        }
+    }
+
+    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        if let Err(err) = self
+            .sender
+            .send(Event::DeregisterFailureDetectors(detecting_regions))
+            .await
+        {
+            error!(err; "RegionSupervisor is stop receiving heartbeat");
+        }
+    }
+}
+
 /// [`HeartbeatAcceptor`] forwards heartbeats to [`RegionSupervisor`].
 pub(crate) struct HeartbeatAcceptor {
     sender: Sender<Event>,
 }
 
 impl HeartbeatAcceptor {
+    pub(crate) fn new(sender: Sender<Event>) -> Self {
+        Self { sender }
+    }
+
     /// Accepts heartbeats from datanodes.
     pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
-        if let Err(e) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(e; "RegionSupervisor is stop receiving heartbeat");
+        if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
+            error!(err; "RegionSupervisor is stop receiving heartbeat");
         }
     }
 }
 
-#[cfg(test)]
 impl RegionSupervisor {
-    /// Returns the [Event] sender.
-    pub(crate) fn sender(&self) -> Sender<Event> {
-        self.sender.clone()
+    /// Returns a a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
+    pub(crate) fn channel() -> (Sender<Event>, Receiver<Event>) {
+        tokio::sync::mpsc::channel(1024)
     }
-}
 
-impl RegionSupervisor {
     pub(crate) fn new(
+        event_receiver: Receiver<Event>,
         options: PhiAccrualFailureDetectorOptions,
-        tick_interval: Duration,
         selector_context: SelectorContext,
         selector: SelectorRef,
         region_migration_manager: RegionMigrationManagerRef,
         kv_backend: KvBackendRef,
         peer_lookup: PeerLookupServiceRef,
     ) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
         Self {
             failure_detector: RegionFailureDetector::new(options),
-            tick_interval,
-            receiver: rx,
-            sender: tx,
+            receiver: event_receiver,
             selector_context,
             selector,
             region_migration_manager,
             kv_backend,
             peer_lookup,
         }
-    }
-
-    /// Returns the [`HeartbeatAcceptor`].
-    pub(crate) fn heartbeat_acceptor(&self) -> HeartbeatAcceptor {
-        HeartbeatAcceptor {
-            sender: self.sender.clone(),
-        }
-    }
-
-    /// Returns the [`RegionSupervisorTicker`].
-    pub(crate) fn ticker(&self) -> RegionSupervisorTickerRef {
-        Arc::new(RegionSupervisorTicker {
-            tick_interval: self.tick_interval,
-            sender: self.sender.clone(),
-            tick_handle: Mutex::new(None),
-        })
     }
 
     /// Runs the main loop.
@@ -248,6 +290,12 @@ impl RegionSupervisor {
                     let regions = self.detect_region_failure();
                     self.handle_region_failures(regions).await;
                 }
+                Event::RegisterFailureDetectors(detecting_regions) => {
+                    self.register_failure_detectors(detecting_regions).await
+                }
+                Event::DeregisterFailureDetectors(detecting_regions) => {
+                    self.deregister_failure_detectors(detecting_regions).await
+                }
                 Event::HeartbeatArrived(heartbeat) => self.on_heartbeat_arrived(heartbeat),
                 Event::Clear => self.clear(),
                 #[cfg(test)]
@@ -257,6 +305,21 @@ impl RegionSupervisor {
             }
         }
         info!("RegionSupervisor is stopped!");
+    }
+
+    async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        let ts_millis = current_time_millis();
+        for region in detecting_regions {
+            // The corresponding region has `acceptable_heartbeat_pause_millis` to send heartbeat from datanode.
+            self.failure_detector
+                .maybe_init_region_failure_detector(region, ts_millis);
+        }
+    }
+
+    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        for region in detecting_regions {
+            self.failure_detector.remove(&region)
+        }
     }
 
     async fn handle_region_failures(&self, mut regions: Vec<(ClusterId, DatanodeId, RegionId)>) {
@@ -376,8 +439,10 @@ impl RegionSupervisor {
     /// Updates the state of corresponding failure detectors.
     fn on_heartbeat_arrived(&self, heartbeat: DatanodeHeartbeat) {
         for region_id in heartbeat.regions {
-            let ident = (heartbeat.cluster_id, heartbeat.datanode_id, region_id);
-            let mut detector = self.failure_detector.region_failure_detector(ident);
+            let detecting_region = (heartbeat.cluster_id, heartbeat.datanode_id, region_id);
+            let mut detector = self
+                .failure_detector
+                .region_failure_detector(detecting_region);
             detector.heartbeat(heartbeat.timestamp);
         }
     }
@@ -393,22 +458,25 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use common_meta::ddl::RegionFailureDetectorController;
     use common_meta::peer::Peer;
     use common_meta::test_util::NoopPeerLookupService;
     use common_time::util::current_time_millis;
     use rand::Rng;
     use store_api::storage::RegionId;
+    use tokio::sync::mpsc::Sender;
     use tokio::sync::oneshot;
     use tokio::time::sleep;
 
     use crate::procedure::region_migration::manager::RegionMigrationManager;
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
-        DatanodeHeartbeat, Event, RegionSupervisor, RegionSupervisorTicker,
+        DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
+        RegionSupervisorTicker,
     };
     use crate::selector::test_utils::{new_test_selector_context, RandomNodeSelector};
 
-    pub(crate) fn new_test_supervisor() -> RegionSupervisor {
+    pub(crate) fn new_test_supervisor() -> (RegionSupervisor, Sender<Event>) {
         let env = TestingEnv::new();
         let selector_context = new_test_selector_context();
         let selector = Arc::new(RandomNodeSelector::new(vec![Peer::empty(1)]));
@@ -419,22 +487,25 @@ pub(crate) mod tests {
         ));
         let kv_backend = env.kv_backend();
         let peer_lookup = Arc::new(NoopPeerLookupService);
+        let (tx, rx) = RegionSupervisor::channel();
 
-        RegionSupervisor::new(
-            Default::default(),
-            Duration::from_secs(1),
-            selector_context,
-            selector,
-            region_migration_manager,
-            kv_backend,
-            peer_lookup,
+        (
+            RegionSupervisor::new(
+                rx,
+                Default::default(),
+                selector_context,
+                selector,
+                region_migration_manager,
+                kv_backend,
+                peer_lookup,
+            ),
+            tx,
         )
     }
 
     #[tokio::test]
     async fn test_heartbeat() {
-        let mut supervisor = new_test_supervisor();
-        let sender = supervisor.sender();
+        let (mut supervisor, sender) = new_test_supervisor();
         tokio::spawn(async move { supervisor.run().await });
 
         sender
@@ -525,5 +596,38 @@ pub(crate) mod tests {
                 assert_matches!(event, Event::Tick | Event::Clear);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_region_failure_detector_controller() {
+        let (mut supervisor, sender) = new_test_supervisor();
+        let controller = RegionFailureDetectorControl::new(sender.clone());
+        tokio::spawn(async move { supervisor.run().await });
+        let detecting_region = (0, 1, RegionId::new(1, 1));
+        controller
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        let detector = rx.await.unwrap();
+        let region_detector = detector.region_failure_detector(detecting_region).clone();
+
+        // Registers failure detector again
+        controller
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        let detector = rx.await.unwrap();
+        let got = detector.region_failure_detector(detecting_region).clone();
+        assert_eq!(region_detector, got);
+
+        controller
+            .deregister_failure_detectors(vec![detecting_region])
+            .await;
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        assert!(rx.await.unwrap().is_empty());
     }
 }

@@ -301,6 +301,12 @@ impl ExecutionPlan for RangeManipulateExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
+        let exec_input = children[0].clone();
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(self.output_schema.clone()),
+            exec_input.properties().partitioning.clone(),
+            exec_input.properties().execution_mode,
+        );
         Ok(Arc::new(Self {
             start: self.start,
             end: self.end,
@@ -312,7 +318,7 @@ impl ExecutionPlan for RangeManipulateExec {
             output_schema: self.output_schema.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
-            properties: self.properties.clone(),
+            properties,
         }))
     }
 
