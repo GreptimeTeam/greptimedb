@@ -52,11 +52,14 @@ impl FileFormat for ParquetFormat {
             .stat(path)
             .await
             .context(error::ReadObjectSnafu { path })?;
+
         let mut reader = store
             .reader(path)
             .await
             .context(error::ReadObjectSnafu { path })?
             .into_futures_async_read(0..meta.content_length())
+            .await
+            .context(error::ReadObjectSnafu { path })?
             .compat();
 
         let metadata = reader
@@ -129,6 +132,7 @@ impl LazyParquetFileReader {
                 .reader(&self.path)
                 .await?
                 .into_futures_async_read(0..meta.content_length())
+                .await?
                 .compat();
             self.reader = Some(reader);
         }

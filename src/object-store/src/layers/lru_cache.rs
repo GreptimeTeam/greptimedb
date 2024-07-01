@@ -14,26 +14,26 @@
 
 use std::sync::Arc;
 
-use opendal::raw::oio::ReadDyn;
+use opendal::raw::oio::Reader;
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
 };
-use opendal::{Operator, Result};
+use opendal::Result;
 mod read_cache;
 use common_telemetry::info;
 use read_cache::ReadCache;
 
 /// An opendal layer with local LRU file cache supporting.
 #[derive(Clone)]
-pub struct LruCacheLayer {
+pub struct LruCacheLayer<C: Access> {
     // The read cache
-    read_cache: ReadCache,
+    read_cache: ReadCache<C>,
 }
 
-impl LruCacheLayer {
+impl<C: Access> LruCacheLayer<C> {
     /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
-    pub async fn new(file_cache: Operator, capacity: usize) -> Result<Self> {
+    pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
         let (entries, bytes) = read_cache.recover_cache().await?;
 
@@ -52,12 +52,12 @@ impl LruCacheLayer {
 
     /// Returns the read cache statistics info `(EntryCount, SizeInBytes)`.
     pub async fn read_cache_stat(&self) -> (u64, u64) {
-        self.read_cache.stat().await
+        self.read_cache.cache_stat().await
     }
 }
 
-impl<I: Access> Layer<I> for LruCacheLayer {
-    type LayeredAccess = LruCacheAccess<I>;
+impl<I: Access, C: Access> Layer<I> for LruCacheLayer<C> {
+    type LayeredAccess = LruCacheAccess<I, C>;
 
     fn layer(&self, inner: I) -> Self::LayeredAccess {
         LruCacheAccess {
@@ -68,14 +68,14 @@ impl<I: Access> Layer<I> for LruCacheLayer {
 }
 
 #[derive(Debug)]
-pub struct LruCacheAccess<I> {
+pub struct LruCacheAccess<I, C> {
     inner: I,
-    read_cache: ReadCache,
+    read_cache: ReadCache<C>,
 }
 
-impl<I: Access> LayeredAccess for LruCacheAccess<I> {
+impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
     type Inner = I;
-    type Reader = Arc<dyn ReadDyn>;
+    type Reader = Reader;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;
@@ -87,7 +87,9 @@ impl<I: Access> LayeredAccess for LruCacheAccess<I> {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.read_cache.read(&self.inner, path, args).await
+        self.read_cache
+            .read_from_cache(&self.inner, path, args)
+            .await
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {

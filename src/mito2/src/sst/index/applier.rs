@@ -28,8 +28,8 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::error::{
-    ApplyIndexSnafu, PuffinBlobTypeNotFoundSnafu, PuffinReadBlobSnafu, PuffinReadMetadataSnafu,
-    Result,
+    ApplyIndexSnafu, OpenDalSnafu, PuffinBlobTypeNotFoundSnafu, PuffinReadBlobSnafu,
+    PuffinReadMetadataSnafu, Result,
 };
 use crate::metrics::{
     INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
@@ -128,11 +128,19 @@ impl SstIndexApplier {
             return Ok(None);
         };
 
-        Ok(file_cache
+        let Some(reader) = file_cache
             .reader(IndexKey::new(self.region_id, file_id, FileType::Puffin))
             .await
-            .map(|v| v.into_futures_async_read(0..indexed_value.file_size as u64))
-            .map(PuffinFileReader::new))
+        else {
+            return Ok(None);
+        };
+
+        let reader = reader
+            .into_futures_async_read(0..indexed_value.file_size as u64)
+            .await
+            .context(OpenDalSnafu)?;
+
+        Ok(Some(PuffinFileReader::new(reader)))
     }
 
     /// Helper function to create a [`PuffinFileReader`] from the remote index file.
