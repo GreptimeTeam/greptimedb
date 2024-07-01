@@ -230,12 +230,6 @@ impl MokaCacheManager {
         // To guarantee the atomicity of writing the file, we need to write
         // the file to a temporary file first...
         let tmp_path = target_path.with_extension(TMP_EXTENSION);
-        if let Err(err) = fs::remove_file(&tmp_path).await {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                return Err(err).context(RemoveSnafu);
-            }
-        }
-
         let writer = Box::new(
             fs::File::create(&tmp_path)
                 .await
@@ -258,12 +252,6 @@ impl MokaCacheManager {
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
         let tmp_base = target_path.with_extension(TMP_EXTENSION);
-        if let Err(err) = fs::remove_dir_all(&tmp_base).await {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                return Err(err).context(RemoveSnafu);
-            }
-        }
-
         let writer_provider = Box::new(MokaDirWriterProvider(tmp_base.clone()));
         let size = init_fn(writer_provider).await?;
 
