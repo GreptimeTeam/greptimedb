@@ -30,6 +30,7 @@ use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertReq
 use itertools::Itertools;
 use meta_client::client::MetaClient;
 use query::QueryEngineFactory;
+use serde::de::Unexpected;
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::Server;
@@ -40,7 +41,7 @@ use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::FlowWorkerManagerRef;
-use crate::error::{ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu};
+use crate::error::{ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu};
 use crate::heartbeat::HeartbeatTask;
 use crate::transform::register_function_to_query_engine;
 use crate::{Error, FlowWorkerManager, FlownodeOptions};
@@ -175,6 +176,7 @@ impl servers::server::Server for FlownodeServer {
     }
 }
 
+/// The flownode server instance.
 pub struct FlownodeInstance {
     server: FlownodeServer,
     addr: SocketAddr,
@@ -198,7 +200,7 @@ impl FlownodeInstance {
         self.server.shutdown().await.context(ShutdownServerSnafu)?;
 
         if let Some(task) = &self.heartbeat_task {
-            task.close()?;
+            task.shutdown()?;
         }
 
         Ok(())
@@ -209,7 +211,7 @@ impl FlownodeInstance {
     }
 }
 
-/// Flownode Builder
+/// [`FlownodeInstance`] Builder
 pub struct FlownodeBuilder {
     opts: FlownodeOptions,
     plugins: Plugins,
@@ -243,7 +245,7 @@ impl FlownodeBuilder {
     }
 
     pub async fn build(self) -> Result<FlownodeInstance, Error> {
-        let manager = Arc::new(self.build_manager().await);
+        let manager = Arc::new(self.build_manager().await?);
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
         let heartbeat_task = self.heartbeat_task;
@@ -257,8 +259,9 @@ impl FlownodeBuilder {
         Ok(instance)
     }
 
-    /// TODO(discord9): error handling
-    async fn build_manager(&self) -> FlowWorkerManager {
+    /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,
+    /// nor does it actually start running the worker.
+    async fn build_manager(&self) -> Result<FlowWorkerManager, Error> {
         let catalog_manager = self.catalog_manager.clone();
         let table_meta = self.table_meta.clone();
 
@@ -285,8 +288,13 @@ impl FlownodeBuilder {
             info!("Flow Worker started in new thread");
             worker.run();
         });
-        let man = rx.await.unwrap();
+        let man = rx.await.map_err(|_e| {
+            UnexpectedSnafu {
+                reason: "sender is dropped, failed to create flow node manager",
+            }
+            .build()
+        })?;
         info!("Flow Node Manager started");
-        man
+        Ok(man)
     }
 }

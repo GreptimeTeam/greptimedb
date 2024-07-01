@@ -87,7 +87,7 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
-    #[snafu(display("Failed to startflownode"))]
+    #[snafu(display("Failed to start flownode"))]
     StartFlownode {
         #[snafu(implicit)]
         location: Location,

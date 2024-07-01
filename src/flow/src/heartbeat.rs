@@ -71,8 +71,8 @@ impl HeartbeatTask {
     }
 
     pub async fn start(&self) -> Result<(), Error> {
-        let running = self.running.clone();
-        if running
+        if self
+            .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -99,9 +99,10 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    pub fn close(&self) -> Result<(), Error> {
-        let running = self.running.clone();
-        if running
+    pub fn shutdown(&self) -> Result<(), Error> {
+        info!("Close heartbeat task for flownode");
+        if self
+            .running
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -236,10 +237,10 @@ impl HeartbeatTask {
 
 /// Create metasrv client instance and spawn heartbeat loop.
 pub async fn new_metasrv_client(
+    cluster_id: u64,
     node_id: u64,
     meta_config: &MetaClientOptions,
 ) -> Result<MetaClient, Error> {
-    let cluster_id = 0; // TODO(hl): read from config
     let member_id = node_id;
     let config = ChannelConfig::new()
         .timeout(meta_config.timeout)

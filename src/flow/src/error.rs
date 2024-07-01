@@ -197,7 +197,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        match &self {
+        match self {
             Self::Eval { .. } | &Self::JoinTask { .. } | &Self::Datafusion { .. } => {
                 StatusCode::Internal
             }
@@ -212,10 +212,10 @@ impl ErrorExt for Error {
             | &Self::Plan { .. }
             | &Self::Datatypes { .. } => StatusCode::PlanQuery,
             Self::NoProtoType { .. } | Self::Unexpected { .. } => StatusCode::Unexpected,
-            &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
+            Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
-            &Self::External { source, .. } => source.status_code(),
+            Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
                 source.status_code()

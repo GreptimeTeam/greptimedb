@@ -81,6 +81,7 @@ pub type TableName = [String; 3];
 #[serde(default)]
 pub struct FlownodeOptions {
     pub mode: Mode,
+    pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
     pub grpc: GrpcOptions,
     pub meta_client: Option<MetaClientOptions>,
@@ -93,6 +94,7 @@ impl Default for FlownodeOptions {
     fn default() -> Self {
         Self {
             mode: servers::Mode::Standalone,
+            cluster_id: None,
             node_id: None,
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
             meta_client: None,

@@ -213,6 +213,10 @@ impl StartCommand {
 
         let opts = opts.component;
 
+        let cluster_id = opts.cluster_id.context(MissingConfigSnafu {
+            msg: "'cluster_id'",
+        })?;
+
         let node_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
@@ -222,7 +226,7 @@ impl StartCommand {
         })?;
 
         let meta_client = Arc::new(
-            flow::heartbeat::new_metasrv_client(node_id, meta_config)
+            flow::heartbeat::new_metasrv_client(cluster_id, node_id, meta_config)
                 .await
                 .context(StartFlownodeSnafu)?,
         );
@@ -231,6 +235,7 @@ impl StartCommand {
         let cache_ttl = meta_config.metadata_cache_ttl;
         let cache_tti = meta_config.metadata_cache_tti;
 
+        // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
             .cache_max_capacity(cache_max_capacity)
             .cache_ttl(cache_ttl)
