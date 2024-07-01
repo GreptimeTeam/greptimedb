@@ -22,7 +22,7 @@ use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Plan as SubPlan, ProjectRel, Rel};
 
-use crate::adapter::error::{
+use crate::error::{
     Error, InternalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
 };
 use crate::expr::{MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc};

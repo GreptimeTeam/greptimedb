@@ -32,7 +32,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 use substrait::df_logical_plan::consumer::name_to_op;
 
-use crate::adapter::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
+use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
     CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, OverflowSnafu,
     TryFromValueSnafu, TypeMismatchSnafu,

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use async_compression::futures::bufread::ZstdEncoder;
 use async_trait::async_trait;
 use futures::io::BufReader;
-use futures::{AsyncRead, AsyncSeek, AsyncWrite, StreamExt};
+use futures::{AsyncRead, AsyncWrite, StreamExt};
 use snafu::{ensure, ResultExt};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use uuid::Uuid;
@@ -31,15 +31,15 @@ use crate::error::{
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
 use crate::puffin_manager::cache_manager::CacheManagerRef;
 use crate::puffin_manager::cached_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
-use crate::puffin_manager::{PuffinWriter, PutOptions};
+use crate::puffin_manager::{BlobGuard, DirGuard, PuffinWriter, PutOptions};
 
 /// `CachedPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
-pub struct CachedPuffinWriter<CR, W> {
+pub struct CachedPuffinWriter<B, D, W> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
     /// The cache manager.
-    cache_manager: CacheManagerRef<CR>,
+    cache_manager: CacheManagerRef<B, D>,
 
     /// The underlying `PuffinFileWriter`.
     puffin_file_writer: PuffinFileWriter<W>,
@@ -48,11 +48,11 @@ pub struct CachedPuffinWriter<CR, W> {
     blob_keys: HashSet<String>,
 }
 
-impl<CR, W> CachedPuffinWriter<CR, W> {
+impl<B, D, W> CachedPuffinWriter<B, D, W> {
     #[allow(unused)]
     pub(crate) fn new(
         puffin_file_name: String,
-        cache_manager: CacheManagerRef<CR>,
+        cache_manager: CacheManagerRef<B, D>,
         writer: W,
     ) -> Self {
         Self {
@@ -65,9 +65,10 @@ impl<CR, W> CachedPuffinWriter<CR, W> {
 }
 
 #[async_trait]
-impl<CR, W> PuffinWriter for CachedPuffinWriter<CR, W>
+impl<B, D, W> PuffinWriter for CachedPuffinWriter<B, D, W>
 where
-    CR: AsyncRead + AsyncSeek,
+    B: BlobGuard,
+    D: DirGuard,
     W: AsyncWrite + Unpin + Send,
 {
     async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>

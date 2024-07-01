@@ -21,9 +21,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::adapter::error::{
-    DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu,
-};
+use crate::error::{DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
 use crate::expr::{MapFilterProject, SafeMfpPlan, ScalarExpr};
 
 /// a set of column indices that are "keys" for the collection.

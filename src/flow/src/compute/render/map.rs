@@ -19,10 +19,10 @@ use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
 use snafu::OptionExt;
 
-use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
 use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
+use crate::error::{Error, PlanSnafu};
 use crate::expr::{EvalError, MapFilterProject, MfpPlan, ScalarExpr};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, DiffRow, KeyValDiffRow, Row};

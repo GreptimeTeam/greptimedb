@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod moka_cache_manager;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use futures::{AsyncRead, AsyncSeek, AsyncWrite};
+use futures::AsyncWrite;
 
 use crate::error::Result;
+use crate::puffin_manager::{BlobGuard, DirGuard};
 
 pub type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -39,34 +42,41 @@ pub type DirWriterProviderRef = Box<dyn DirWriterProvider + Send>;
 ///
 /// `CacheManager` will provide a `BoxWriter` that the caller of `get_blob`
 /// can use to write the blob into the cache.
-pub trait InitBlobFn = FnOnce(BoxWriter) -> WriteResult;
+pub trait InitBlobFn = Fn(BoxWriter) -> WriteResult;
 
 /// Function that initializes a directory.
 ///
 /// `CacheManager` will provide a `DirWriterProvider` that the caller of `get_dir`
 /// can use to write files inside the directory into the cache.
-pub trait InitDirFn = FnOnce(DirWriterProviderRef) -> WriteResult;
+pub trait InitDirFn = Fn(DirWriterProviderRef) -> WriteResult;
 
 /// `CacheManager` manages the cache for the puffin files.
 #[async_trait]
 pub trait CacheManager {
-    type Reader: AsyncRead + AsyncSeek;
+    type Blob: BlobGuard;
+    type Dir: DirGuard;
 
     /// Retrieves a blob, initializing it if necessary using the provided `init_fn`.
+    ///
+    /// The returned `BlobGuard` is used to access the blob reader.
+    /// The caller is responsible for holding the `BlobGuard` until they are done with the blob.
     async fn get_blob<'a>(
         &self,
         puffin_file_name: &str,
         key: &str,
-        init_factory: Box<dyn InitBlobFn + Send + 'a>,
-    ) -> Result<Self::Reader>;
+        init_factory: Box<dyn InitBlobFn + Send + Sync + 'a>,
+    ) -> Result<Self::Blob>;
 
     /// Retrieves a directory, initializing it if necessary using the provided `init_fn`.
+    ///
+    /// The returned `DirGuard` is used to access the directory in the filesystem.
+    /// The caller is responsible for holding the `DirGuard` until they are done with the directory.
     async fn get_dir<'a>(
         &self,
         puffin_file_name: &str,
         key: &str,
-        init_fn: Box<dyn InitDirFn + Send + 'a>,
-    ) -> Result<PathBuf>;
+        init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
+    ) -> Result<Self::Dir>;
 
     /// Stores a directory in the cache.
     async fn put_dir(
@@ -78,4 +88,4 @@ pub trait CacheManager {
     ) -> Result<()>;
 }
 
-pub type CacheManagerRef<R> = Arc<dyn CacheManager<Reader = R> + Send + Sync>;
+pub type CacheManagerRef<B, D> = Arc<dyn CacheManager<Blob = B, Dir = D> + Send + Sync>;
