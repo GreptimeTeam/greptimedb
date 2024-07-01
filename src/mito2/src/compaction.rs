@@ -308,7 +308,7 @@ impl CompactionScheduler {
                 match result {
                     Ok(job_id) => {
                         info!(
-                            "Scheduled remote compaction job {:?} for region {}",
+                            "Scheduled remote compaction job {} for region {}",
                             job_id, region_id
                         );
                         return Ok(());

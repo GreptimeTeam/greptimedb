@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -75,9 +76,9 @@ impl JobId {
     }
 }
 
-impl From<JobId> for String {
-    fn from(job_id: JobId) -> String {
-        job_id.0.to_string()
+impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -170,5 +171,17 @@ impl Notifier for DefaultNotifier {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_job_id() {
+        let id = Uuid::new_v4().to_string();
+        let job_id = JobId::parse_str(&id).unwrap();
+        assert_eq!(job_id.to_string(), id);
     }
 }
