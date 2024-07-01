@@ -30,7 +30,7 @@ pub trait PuffinSyncReader<'a> {
     fn metadata(&'a mut self) -> Result<FileMetadata>;
 
     /// Reads particular blob data based on given metadata.
-    /// 
+    ///
     /// Data read from the reader is compressed leaving the caller to decompress the data.
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader>;
 }
@@ -44,7 +44,7 @@ pub trait PuffinAsyncReader<'a> {
     async fn metadata(&'a mut self) -> Result<FileMetadata>;
 
     /// Reads particular blob data based on given metadata.
-    /// 
+    ///
     /// Data read from the reader is compressed leaving the caller to decompress the data.
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader>;
 }
