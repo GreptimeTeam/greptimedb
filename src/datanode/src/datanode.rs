@@ -136,7 +136,6 @@ impl Datanode {
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
                 .close()
-                .await
                 .map_err(BoxedError::new)
                 .context(ShutdownInstanceSnafu)?;
         }

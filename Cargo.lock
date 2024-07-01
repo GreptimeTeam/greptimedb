@@ -3966,6 +3966,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "common-version",
  "datafusion 38.0.0",
  "datafusion-common 38.0.0",
  "datafusion-expr 38.0.0",

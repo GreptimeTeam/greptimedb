@@ -158,7 +158,7 @@ impl HeartbeatTask {
         ctx: HeartbeatResponseHandlerContext,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
-        trace!("heartbeat response: {:?}", ctx.response);
+        trace!("Heartbeat response: {:?}", ctx.response);
         handler_executor
             .handle(ctx)
             .await
@@ -245,7 +245,7 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         let build_info = common_version::build_info();
-                        let region_stats = Self::load_region_stats(&region_server_clone).await;
+                        let region_stats = Self::load_region_stats(&region_server_clone);
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
@@ -313,30 +313,23 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let regions = region_server.reportable_regions();
-
-        let mut region_stats = Vec::new();
-        for stat in regions {
-            let approximate_bytes = region_server
-                .region_disk_usage(stat.region_id)
-                .await
-                .unwrap_or(0);
-            let region_stat = RegionStat {
+    fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
+        region_server
+            .reportable_regions()
+            .into_iter()
+            .map(|stat| RegionStat {
                 region_id: stat.region_id.as_u64(),
                 engine: stat.engine,
                 role: RegionRole::from(stat.role).into(),
-                approximate_bytes,
-                // TODO(ruihang): scratch more info
+                // TODO(jeremy): w/rcus
                 rcus: 0,
                 wcus: 0,
-            };
-            region_stats.push(region_stat);
-        }
-        region_stats
+                approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
+            })
+            .collect()
     }
 
-    pub async fn close(&self) -> Result<()> {
+    pub fn close(&self) -> Result<()> {
         let running = self.running.clone();
         if running
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
