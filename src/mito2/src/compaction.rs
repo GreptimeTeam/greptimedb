@@ -317,7 +317,7 @@ impl CompactionScheduler {
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
 
                         // Return the waiters back to the caller for local compaction.
-                        e.waiters_in_remote_job_scheduler()
+                        e.waiters
                     }
                 }
             } else {

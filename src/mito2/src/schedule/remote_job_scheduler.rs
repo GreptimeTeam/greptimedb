@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use common_telemetry::error;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{Location, ResultExt, Snafu};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
@@ -55,7 +55,21 @@ pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
 #[async_trait::async_trait]
 pub trait RemoteJobScheduler: Send + Sync + 'static {
     /// Sends a job to the scheduler and returns a UUID for the job.
-    async fn schedule(&self, job: RemoteJob, notifier: Box<dyn Notifier>) -> Result<JobId>;
+    async fn schedule(
+        &self,
+        job: RemoteJob,
+        notifier: Box<dyn Notifier>,
+    ) -> Result<JobId, RemoteJobSchedulerError>;
+}
+
+#[derive(Snafu, Debug)]
+#[snafu(display("Internal error occurred in remote job scheduler: {}", reason))]
+pub struct RemoteJobSchedulerError {
+    #[snafu(implicit)]
+    location: Location,
+    pub reason: String,
+    // Keep the waiters in the error so that we can notify them when fallback to the local compaction.
+    pub waiters: Vec<OutputTx>,
 }
 
 /// Notifier is used to notify the mito engine when a remote job is completed.
