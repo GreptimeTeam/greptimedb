@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use opendal::raw::oio::{Reader};
+use opendal::raw::oio::Reader;
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
