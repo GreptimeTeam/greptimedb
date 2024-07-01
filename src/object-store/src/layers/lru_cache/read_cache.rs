@@ -18,7 +18,7 @@ use common_telemetry::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{List, Read, ReadDyn, Reader, Write};
+use opendal::raw::oio::{List, Read, Reader, Write};
 use opendal::raw::{Access, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, Result};
 
