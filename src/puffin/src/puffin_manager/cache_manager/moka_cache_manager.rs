@@ -121,7 +121,7 @@ impl CacheManager for MokaCacheManager {
         let v = self
             .cache
             .try_get_with(cache_key.clone(), async {
-                if let Some(v) = self.recycle_bin.get(&cache_key).await {
+                if let Some(v) = self.recycle_bin.remove(&cache_key).await {
                     return Ok(v);
                 }
 
@@ -156,7 +156,7 @@ impl CacheManager for MokaCacheManager {
         let v = self
             .cache
             .try_get_with(cache_key.clone(), async {
-                if let Some(v) = self.recycle_bin.get(&cache_key).await {
+                if let Some(v) = self.recycle_bin.remove(&cache_key).await {
                     return Ok(v);
                 }
 
@@ -191,7 +191,7 @@ impl CacheManager for MokaCacheManager {
 
         self.cache
             .try_get_with(cache_key.clone(), async move {
-                if let Some(v) = self.recycle_bin.get(&cache_key).await {
+                if let Some(v) = self.recycle_bin.remove(&cache_key).await {
                     return Ok(v);
                 }
 
