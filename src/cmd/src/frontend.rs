@@ -337,6 +337,7 @@ impl StartCommand {
         let client = NodeClients::new(channel_config);
 
         let mut instance = FrontendBuilder::new(
+            opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
@@ -350,12 +351,12 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
+        let servers = Services::new(opts, Arc::new(instance.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
         instance
-            .build_servers(opts, servers)
+            .build_servers(servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance::new(instance, guard))
