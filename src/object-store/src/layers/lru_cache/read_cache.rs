@@ -182,7 +182,7 @@ impl<C: Access> ReadCache<C> {
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Box<dyn ReadDyn>)>
+    ) -> Result<(RpRead, Reader)>
     where
         I: Access,
     {

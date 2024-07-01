@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use opendal::raw::oio::ReadDyn;
+use opendal::raw::oio::{ReadDyn, Reader};
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
@@ -75,7 +75,7 @@ pub struct LruCacheAccess<I, C> {
 
 impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
     type Inner = I;
-    type Reader = Box<dyn ReadDyn>;
+    type Reader = Reader;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;
