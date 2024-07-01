@@ -26,7 +26,7 @@ use common_time::Timestamp;
 use datafusion::physical_plan::DisplayFormatType;
 use smallvec::SmallVec;
 use store_api::region_engine::RegionScannerRef;
-use store_api::storage::ScanRequest;
+use store_api::storage::{ScanRequest, TopHint};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -209,8 +209,8 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.version.options.append_mode {
-            // If table uses append mode, we use unordered scan in query.
+        if self.version.options.append_mode && self.request.top_hint.is_none() {
+            // If table uses append mode and there is no top hint, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
         } else {
@@ -297,7 +297,8 @@ impl ScanRegion {
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
-            .with_merge_mode(self.version.options.merge_mode());
+            .with_merge_mode(self.version.options.merge_mode())
+            .with_top_hint(self.request.top_hint);
         Ok(input)
     }
 
@@ -405,6 +406,8 @@ pub(crate) struct ScanInput {
     pub(crate) filter_deleted: bool,
     /// Mode to merge duplicate rows.
     pub(crate) merge_mode: MergeMode,
+    /// Optional top hint.
+    pub(crate) top_hint: Option<TopHint>,
 }
 
 impl ScanInput {
@@ -426,6 +429,7 @@ impl ScanInput {
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::default(),
+            top_hint: None,
         }
     }
 
@@ -509,6 +513,13 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
         self.merge_mode = merge_mode;
+        self
+    }
+
+    /// Sets the top hint.
+    #[must_use]
+    pub(crate) fn with_top_hint(mut self, top_hint: Option<TopHint>) -> Self {
+        self.top_hint = top_hint;
         self
     }
 

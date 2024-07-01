@@ -25,5 +25,5 @@ pub use datatypes::schema::{
 };
 
 pub use self::descriptors::*;
-pub use self::requests::ScanRequest;
+pub use self::requests::{ScanRequest, TopHint};
 pub use self::types::SequenceNumber;

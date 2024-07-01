@@ -29,13 +29,14 @@ use datatypes::schema::SchemaRef;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, TopHint};
 use table::predicate::Predicate;
 use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::memtable::MemtableRef;
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
+use crate::read::first_last::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
@@ -210,8 +211,8 @@ impl SeqScan {
         let reader = builder.build().await?;
 
         let dedup = !stream_ctx.input.append_mode;
-        if dedup {
-            let reader = match stream_ctx.input.merge_mode {
+        let reader = if dedup {
+            match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::new(DedupReader::new(
                     reader,
                     LastRow::new(stream_ctx.input.filter_deleted),
@@ -220,12 +221,19 @@ impl SeqScan {
                     reader,
                     LastNonNull::new(stream_ctx.input.filter_deleted),
                 )) as _,
-            };
-            Ok(Some(reader))
+            }
         } else {
-            let reader = Box::new(reader);
-            Ok(Some(reader))
-        }
+            Box::new(reader) as _
+        };
+
+        let Some(top) = &stream_ctx.input.top_hint else {
+            return Ok(Some(reader));
+        };
+        let reader = match top {
+            TopHint::LastRow => Box::new(LastRowReader::new(reader)) as _,
+        };
+
+        Ok(Some(reader))
     }
 
     /// Scans the given partition when the part list is set properly.
