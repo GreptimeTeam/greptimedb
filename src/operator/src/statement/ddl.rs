@@ -18,10 +18,9 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
-use catalog::consts::is_readonly_schema;
 use catalog::CatalogManagerRef;
 use chrono::Utc;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
@@ -153,7 +152,7 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
         ensure!(
-            !is_readonly_schema(create_table.schema_name.as_str()),
+            !is_readonly_schema(&create_table.schema_name),
             SchemaReadOnlySnafu {
                 name: create_table.schema_name.clone()
             }
@@ -654,7 +653,7 @@ impl StatementExecutor {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
             ensure!(
-                !is_readonly_schema(table_name.schema_name.as_str()),
+                !is_readonly_schema(&table_name.schema_name),
                 SchemaReadOnlySnafu {
                     name: table_name.schema_name.clone()
                 }
@@ -710,7 +709,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            !is_readonly_schema(schema.as_str()),
+            !is_readonly_schema(&schema),
             SchemaReadOnlySnafu { name: schema }
         );
 
@@ -746,7 +745,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            !is_readonly_schema(table_name.schema_name.as_str()),
+            !is_readonly_schema(&table_name.schema_name),
             SchemaReadOnlySnafu {
                 name: table_name.schema_name.clone()
             }
@@ -822,7 +821,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            !is_readonly_schema(expr.schema_name.as_str()),
+            !is_readonly_schema(&expr.schema_name),
             SchemaReadOnlySnafu {
                 name: expr.schema_name.clone()
             }
