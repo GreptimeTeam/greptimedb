@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use api::v1::region::compact_request;
 use common_telemetry::info;
-use object_store::manager::ObjectStoreManager;
+use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
@@ -77,7 +77,7 @@ pub struct OpenCompactionRegionRequest {
 pub async fn open_compaction_region(
     req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
-    object_store_manager: ObjectStoreManager,
+    object_store_manager: ObjectStoreManagerRef,
 ) -> Result<CompactionRegion> {
     let object_store = {
         let name = &req.region_options.storage;

@@ -23,9 +23,9 @@ use snafu::OptionExt;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
+use crate::error::{Error, PlanSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, GlobalId};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};

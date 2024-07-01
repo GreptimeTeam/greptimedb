@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::io::Error as IoError;
+use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -74,6 +75,30 @@ pub enum Error {
 
     #[snafu(display("Failed to read metadata"))]
     Metadata {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create"))]
+    Create {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to rename"))]
+    Rename {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to remove"))]
+    Remove {
         #[snafu(source)]
         error: IoError,
         #[snafu(implicit)]
@@ -220,6 +245,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Get value from cache"))]
+    CacheGet { source: Arc<Error> },
 }
 
 impl ErrorExt for Error {
@@ -235,6 +263,9 @@ impl ErrorExt for Error {
             | Close { .. }
             | Open { .. }
             | Metadata { .. }
+            | Create { .. }
+            | Remove { .. }
+            | Rename { .. }
             | SerializeJson { .. }
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }
@@ -254,6 +285,8 @@ impl ErrorExt for Error {
             }
 
             DuplicateBlob { .. } => StatusCode::InvalidArguments,
+
+            CacheGet { source } => source.status_code(),
         }
     }
 

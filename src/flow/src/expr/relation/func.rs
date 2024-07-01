@@ -24,7 +24,7 @@ use smallvec::smallvec;
 use snafu::{OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 
-use crate::adapter::error::{DatafusionSnafu, Error, InvalidQuerySnafu};
+use crate::error::{DatafusionSnafu, Error, InvalidQuerySnafu};
 use crate::expr::error::{EvalError, TryFromValueSnafu, TypeMismatchSnafu};
 use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::expr::signature::{GenericFn, Signature};

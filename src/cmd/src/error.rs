@@ -87,6 +87,20 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to start flownode"))]
+    StartFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        source: flow::Error,
+    },
+
+    #[snafu(display("Failed to shutdown flownode"))]
+    ShutdownFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        source: flow::Error,
+    },
+
     #[snafu(display("Failed to start frontend"))]
     StartFrontend {
         #[snafu(implicit)]
@@ -380,6 +394,9 @@ impl ErrorExt for Error {
             Error::BuildRuntime { source, .. } => source.status_code(),
 
             Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
+            Self::StartFlownode { source, .. } | Self::ShutdownFlownode { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

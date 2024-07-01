@@ -25,7 +25,7 @@ use substrait_proto::proto::expression::{IfThen, RexType, ScalarFunction};
 use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::Expression;
 
-use crate::adapter::error::{
+use crate::error::{
     DatafusionSnafu, DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu,
     PlanSnafu,
 };
