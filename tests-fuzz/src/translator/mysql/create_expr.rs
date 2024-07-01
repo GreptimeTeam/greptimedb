@@ -133,11 +133,11 @@ impl CreateTableExprTranslator {
 
     fn format_table_options(input: &CreateTableExpr) -> String {
         let mut output = vec![];
-        if !input.engine.is_empty() {
-            output.push(format!("ENGINE={}", input.engine));
-        }
         if let Some(partition) = Self::format_partition(input) {
             output.push(partition);
+        }
+        if !input.engine.is_empty() {
+            output.push(format!("ENGINE={}", input.engine));
         }
 
         output.join("\n")
@@ -242,12 +242,12 @@ disk_util DOUBLE,
 ts TIMESTAMP(3) TIME INDEX,
 PRIMARY KEY(host, idc)
 )
-ENGINE=mito
 PARTITION ON COLUMNS(idc) (
 idc < 10,
 idc >= 10 AND idc < 50,
 idc >= 50
-);",
+)
+ENGINE=mito;",
             output
         );
     }

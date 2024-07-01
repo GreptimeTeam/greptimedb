@@ -21,10 +21,11 @@ pub(crate) mod select_expr;
 
 use core::fmt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub use alter_expr::AlterTableExpr;
+use common_time::timestamp::TimeUnit;
 use common_time::{Date, DateTime, Timestamp};
 pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
 use datatypes::data_type::ConcreteDataType;
@@ -100,12 +101,13 @@ pub struct MySQLTsColumnTypeGenerator;
 pub struct PartibleColumnTypeGenerator;
 pub struct StringColumnTypeGenerator;
 
+/// FIXME(weny): Waits for https://github.com/GreptimeTeam/greptimedb/issues/4247
 macro_rules! generate_values {
     ($data_type:ty, $bounds:expr) => {{
-        let base = <$data_type>::MIN;
+        let base = 0 as $data_type;
         let step = <$data_type>::MAX / ($bounds as $data_type + 1 as $data_type) as $data_type;
         (1..=$bounds)
-            .map(|i| Value::from(base + step * i as $data_type + step * i as $data_type))
+            .map(|i| Value::from(base + step * i as $data_type as $data_type))
             .collect::<Vec<Value>>()
     }};
 }
@@ -119,10 +121,17 @@ pub fn generate_partition_bounds(datatype: &ConcreteDataType, bounds: usize) -> 
         ConcreteDataType::Float32(_) => generate_values!(f32, bounds),
         ConcreteDataType::Float64(_) => generate_values!(f64, bounds),
         ConcreteDataType::String(_) => {
-            let range = 'z' as u8 - 'A' as u8;
+            let base = b'A';
+            let range = b'z' - b'A';
             let step = range / (bounds as u8 + 1);
             (1..=bounds)
-                .map(|i| Value::from(char::from(step * i as u8).to_string()))
+                .map(|i| {
+                    Value::from(
+                        char::from(base + step * i as u8)
+                            .escape_default()
+                            .to_string(),
+                    )
+                })
                 .collect()
         }
         _ => unimplemented!("unsupported type: {datatype}"),
@@ -155,15 +164,19 @@ pub fn generate_random_value<R: Rng>(
 
 /// Generate monotonically increasing timestamps for MySQL.
 pub fn generate_unique_timestamp_for_mysql<R: Rng>(base: i64) -> TsValueGenerator<R> {
-    let base = Arc::new(AtomicI64::new(base));
+    let base = Timestamp::new_millisecond(base);
+    let clock = Arc::new(Mutex::new(base));
 
     Box::new(move |_rng, ts_type| -> Value {
-        let value = base.fetch_add(1, Ordering::Relaxed);
+        let mut clock = clock.lock().unwrap();
+        let ts = clock.add_duration(Duration::from_secs(1)).unwrap();
+        *clock = ts;
+
         let v = match ts_type {
-            TimestampType::Second(_) => Timestamp::new_second(1 + value),
-            TimestampType::Millisecond(_) => Timestamp::new_millisecond(1000 + value),
-            TimestampType::Microsecond(_) => Timestamp::new_microsecond(1_000_000 + value),
-            TimestampType::Nanosecond(_) => Timestamp::new_nanosecond(1_000_000_000 + value),
+            TimestampType::Second(_) => ts.convert_to(TimeUnit::Second).unwrap(),
+            TimestampType::Millisecond(_) => ts.convert_to(TimeUnit::Millisecond).unwrap(),
+            TimestampType::Microsecond(_) => ts.convert_to(TimeUnit::Microsecond).unwrap(),
+            TimestampType::Nanosecond(_) => ts.convert_to(TimeUnit::Nanosecond).unwrap(),
         };
         Value::from(v)
     })
@@ -521,6 +534,31 @@ pub fn replace_default(
         new_rows.push(new_row);
     }
     new_rows
+}
+
+/// Sorts a vector of rows based on the values in the specified primary key columns.
+pub fn sort_by_primary_keys(rows: &mut [RowValues], primary_keys_idx: Vec<usize>) {
+    rows.sort_by(|a, b| {
+        let a_keys: Vec<_> = primary_keys_idx.iter().map(|&i| &a[i]).collect();
+        let b_keys: Vec<_> = primary_keys_idx.iter().map(|&i| &b[i]).collect();
+        for (a_key, b_key) in a_keys.iter().zip(b_keys.iter()) {
+            match a_key.cmp(b_key) {
+                Some(std::cmp::Ordering::Equal) => continue,
+                non_eq => return non_eq.unwrap(),
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
+/// Formats a slice of columns into a comma-separated string of column names.
+pub fn format_columns(columns: &[Column]) -> String {
+    columns
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .to_string()
 }
 
 #[cfg(test)]
