@@ -76,7 +76,7 @@ impl BroadcastChannel {
             },
             BroadcastChannel::Frontend => Range {
                 start: format!("{}-", Role::Frontend as i32),
-                end: format!("{}-", Role::Frontend as i32 + 1),
+                end: format!("{}-", Role::Flownode as i32),
             },
             BroadcastChannel::Flownode => Range {
                 start: format!("{}-", Role::Flownode as i32),
