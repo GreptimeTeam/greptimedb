@@ -257,6 +257,11 @@ impl HeartbeatAcceptor {
 }
 
 impl RegionSupervisor {
+    /// Returns a a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
+    pub(crate) fn channel() -> (Sender<Event>, Receiver<Event>) {
+        tokio::sync::mpsc::channel(1024)
+    }
+
     pub(crate) fn new(
         event_receiver: Receiver<Event>,
         options: PhiAccrualFailureDetectorOptions,
@@ -480,7 +485,7 @@ pub(crate) mod tests {
         ));
         let kv_backend = env.kv_backend();
         let peer_lookup = Arc::new(NoopPeerLookupService);
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (tx, rx) = RegionSupervisor::channel();
 
         (
             RegionSupervisor::new(

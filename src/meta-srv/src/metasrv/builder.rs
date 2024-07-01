@@ -294,7 +294,7 @@ impl MetasrvBuilder {
             .fail();
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
             Option<std::sync::Arc<RegionSupervisorTicker>>,
