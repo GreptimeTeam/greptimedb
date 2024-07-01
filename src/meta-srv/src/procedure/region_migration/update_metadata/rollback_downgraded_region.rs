@@ -169,9 +169,9 @@ mod tests {
         assert_eq!(rx.len(), 0);
         state.rollback_downgraded_region(&mut ctx).await.unwrap();
         let event = rx.try_recv().unwrap();
-        let idents = event.into_region_failure_detectors();
+        let detecting_regions = event.into_region_failure_detectors();
         assert_eq!(
-            idents,
+            detecting_regions,
             vec![(
                 ctx.persistent_ctx.cluster_id,
                 from_peer.id,

@@ -88,7 +88,7 @@ pub(crate) enum Event {
 impl Event {
     pub(crate) fn into_region_failure_detectors(self) -> Vec<DetectingRegion> {
         match self {
-            Self::RegisterFailureDetectors(ident) => ident,
+            Self::RegisterFailureDetectors(detecting_regions) => detecting_regions,
             _ => unreachable!(),
         }
     }
@@ -217,20 +217,20 @@ impl RegionFailureDetectorControl {
 
 #[async_trait::async_trait]
 impl RegionFailureDetectorController for RegionFailureDetectorControl {
-    async fn register_failure_detectors(&self, ident: Vec<DetectingRegion>) {
+    async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
         if let Err(err) = self
             .sender
-            .send(Event::RegisterFailureDetectors(ident))
+            .send(Event::RegisterFailureDetectors(detecting_regions))
             .await
         {
             error!(err; "RegionSupervisor is stop receiving heartbeat");
         }
     }
 
-    async fn deregister_failure_detectors(&self, ident: Vec<DetectingRegion>) {
+    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
         if let Err(err) = self
             .sender
-            .send(Event::DeregisterFailureDetectors(ident))
+            .send(Event::DeregisterFailureDetectors(detecting_regions))
             .await
         {
             error!(err; "RegionSupervisor is stop receiving heartbeat");
@@ -290,11 +290,11 @@ impl RegionSupervisor {
                     let regions = self.detect_region_failure();
                     self.handle_region_failures(regions).await;
                 }
-                Event::RegisterFailureDetectors(ident) => {
-                    self.register_failure_detectors(ident).await
+                Event::RegisterFailureDetectors(detecting_regions) => {
+                    self.register_failure_detectors(detecting_regions).await
                 }
-                Event::DeregisterFailureDetectors(ident) => {
-                    self.deregister_failure_detectors(ident).await
+                Event::DeregisterFailureDetectors(detecting_regions) => {
+                    self.deregister_failure_detectors(detecting_regions).await
                 }
                 Event::HeartbeatArrived(heartbeat) => self.on_heartbeat_arrived(heartbeat),
                 Event::Clear => self.clear(),
@@ -439,8 +439,10 @@ impl RegionSupervisor {
     /// Updates the state of corresponding failure detectors.
     fn on_heartbeat_arrived(&self, heartbeat: DatanodeHeartbeat) {
         for region_id in heartbeat.regions {
-            let ident = (heartbeat.cluster_id, heartbeat.datanode_id, region_id);
-            let mut detector = self.failure_detector.region_failure_detector(ident);
+            let detecting_region = (heartbeat.cluster_id, heartbeat.datanode_id, region_id);
+            let mut detector = self
+                .failure_detector
+                .region_failure_detector(detecting_region);
             detector.heartbeat(heartbeat.timestamp);
         }
     }
@@ -601,23 +603,29 @@ pub(crate) mod tests {
         let (mut supervisor, sender) = new_test_supervisor();
         let controller = RegionFailureDetectorControl::new(sender.clone());
         tokio::spawn(async move { supervisor.run().await });
-        let ident = (0, 1, RegionId::new(1, 1));
-        controller.register_failure_detectors(vec![ident]).await;
+        let detecting_region = (0, 1, RegionId::new(1, 1));
+        controller
+            .register_failure_detectors(vec![detecting_region])
+            .await;
 
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         let detector = rx.await.unwrap();
-        let region_detector = detector.region_failure_detector(ident).clone();
+        let region_detector = detector.region_failure_detector(detecting_region).clone();
 
         // Registers failure detector again
-        controller.register_failure_detectors(vec![ident]).await;
+        controller
+            .register_failure_detectors(vec![detecting_region])
+            .await;
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         let detector = rx.await.unwrap();
-        let got = detector.region_failure_detector(ident).clone();
+        let got = detector.region_failure_detector(detecting_region).clone();
         assert_eq!(region_detector, got);
 
-        controller.deregister_failure_detectors(vec![ident]).await;
+        controller
+            .deregister_failure_detectors(vec![detecting_region])
+            .await;
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         assert!(rx.await.unwrap().is_empty());

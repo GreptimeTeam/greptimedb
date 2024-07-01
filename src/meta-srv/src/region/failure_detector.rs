@@ -48,25 +48,25 @@ impl RegionFailureDetector {
         }
     }
 
-    /// Returns [`PhiAccrualFailureDetector`] of the specific [`Ident`].
+    /// Returns [`PhiAccrualFailureDetector`] of the specific [`DetectingRegion`].
     pub(crate) fn region_failure_detector(
         &self,
-        ident: DetectingRegion,
+        detecting_region: DetectingRegion,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
         self.detectors
-            .entry(ident)
+            .entry(detecting_region)
             .or_insert_with(|| PhiAccrualFailureDetector::from_options(self.options))
     }
 
-    /// Returns A mutable reference to the [`PhiAccrualFailureDetector`] for the specified [`Ident`].
+    /// Returns A mutable reference to the [`PhiAccrualFailureDetector`] for the specified [`DetectingRegion`].
     /// If a detector already exists for the region, it is returned. Otherwise, a new
     /// detector is created and initialized with the provided timestamp.
     pub(crate) fn maybe_init_region_failure_detector(
         &self,
-        ident: DetectingRegion,
+        detecting_region: DetectingRegion,
         ts_millis: i64,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
-        self.detectors.entry(ident).or_insert_with(|| {
+        self.detectors.entry(detecting_region).or_insert_with(|| {
             let mut detector = PhiAccrualFailureDetector::from_options(self.options);
             detector.heartbeat(ts_millis);
             detector
@@ -81,8 +81,8 @@ impl RegionFailureDetector {
     }
 
     /// Removes the specific [PhiAccrualFailureDetector] if exists.
-    pub(crate) fn remove(&self, ident: &DetectingRegion) {
-        self.detectors.remove(ident);
+    pub(crate) fn remove(&self, region: &DetectingRegion) {
+        self.detectors.remove(region);
     }
 
     /// Removes all [PhiAccrualFailureDetector]s.
@@ -90,10 +90,10 @@ impl RegionFailureDetector {
         self.detectors.clear()
     }
 
-    /// Returns true if the specific `ident` exists.
+    /// Returns true if the specific [`DetectingRegion`] exists.
     #[cfg(test)]
-    pub(crate) fn contains(&self, ident: &DetectingRegion) -> bool {
-        self.detectors.contains_key(ident)
+    pub(crate) fn contains(&self, region: &DetectingRegion) -> bool {
+        self.detectors.contains_key(region)
     }
 
     /// Returns the length
@@ -129,9 +129,9 @@ mod tests {
     #[test]
     fn test_default_failure_detector_container() {
         let container = RegionFailureDetector::new(Default::default());
-        let ident = (0, 2, RegionId::new(1, 1));
-        let _ = container.region_failure_detector(ident);
-        assert!(container.contains(&ident));
+        let detecting_region = (0, 2, RegionId::new(1, 1));
+        let _ = container.region_failure_detector(detecting_region);
+        assert!(container.contains(&detecting_region));
 
         {
             let mut iter = container.iter();
