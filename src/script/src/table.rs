@@ -337,7 +337,7 @@ fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
 fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
     QueryContextBuilder::default()
         .current_catalog(table_info.catalog_name.to_string())
-        .current_schema(table_info.schema_name.to_string())
+        .current_schema_raw(table_info.schema_name.to_string())
         .build()
         .into()
 }

@@ -44,7 +44,7 @@ impl Function for DatabaseFunction {
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let db = func_ctx.query_ctx.current_schema();
 
-        Ok(Arc::new(StringVector::from_slice(&[db])) as _)
+        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
     }
 }
 
@@ -78,7 +78,7 @@ mod tests {
         ));
 
         let query_ctx = QueryContextBuilder::default()
-            .current_schema("test_db".to_string())
+            .current_schema_raw("test_db".to_string())
             .build()
             .into();
 

@@ -144,7 +144,7 @@ impl<'a> StatementToRegion<'a> {
         match &obj_name.0[..] {
             [table] => Ok((
                 self.ctx.current_catalog().to_owned(),
-                self.ctx.current_schema().to_owned(),
+                self.ctx.current_schema(),
                 table.value.clone(),
             )),
             [schema, table] => Ok((

@@ -428,7 +428,7 @@ async fn retrieve_series_from_query_result(
     let table = manager
         .table(
             query_ctx.current_catalog(),
-            query_ctx.current_schema(),
+            &query_ctx.current_schema(),
             table_name,
         )
         .await
@@ -622,7 +622,7 @@ pub(crate) fn try_update_catalog_schema(
         Arc::new(
             QueryContextBuilder::from_existing(&ctx)
                 .current_catalog(catalog.to_string())
-                .current_schema(schema.to_string())
+                .current_schema_raw(schema.to_string())
                 .build(),
         )
     } else {
@@ -779,7 +779,7 @@ async fn retrieve_field_names(
 
     if matches.is_empty() {
         // query all tables if no matcher is provided
-        while let Some(table) = manager.tables(catalog, schema).next().await {
+        while let Some(table) = manager.tables(catalog, &schema).next().await {
             let table = table.context(CatalogSnafu)?;
             for column in table.field_columns() {
                 field_columns.insert(column.name);
@@ -790,7 +790,7 @@ async fn retrieve_field_names(
 
     for table_name in matches {
         let table = manager
-            .table(catalog, schema, &table_name)
+            .table(catalog, &schema, &table_name)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
