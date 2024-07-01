@@ -1,10 +1,12 @@
 # Configurations
 
-- [Standalone Mode](#standalone-mode)
-- [Distributed Mode](#distributed-mode)
+- [Configurations](#configurations)
+  - [Standalone Mode](#standalone-mode)
+  - [Distributed Mode](#distributed-mode)
     - [Frontend](#frontend)
     - [Metasrv](#metasrv)
     - [Datanode](#datanode)
+    - [Flownode](#flownode)
 
 ## Standalone Mode
 
@@ -23,3 +25,7 @@
 ### Datanode
 
 {{ toml2docs "./datanode.example.toml" }}
+
+### Flownode
+
+{{ toml2docs "./flownode.example.toml"}}

@@ -37,6 +37,7 @@ use servers::server::Server;
 use snafu::{ensure, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
@@ -120,6 +121,10 @@ impl FlownodeServer {
 impl FlownodeServer {
     pub fn create_flow_service(&self) -> flow_server::FlowServer<impl flow_server::Flow> {
         flow_server::FlowServer::new(self.flow_service.clone())
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd)
     }
 }
 

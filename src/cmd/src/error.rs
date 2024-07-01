@@ -346,6 +346,15 @@ pub enum Error {
         location: Location,
         source: meta_client::error::Error,
     },
+
+    #[snafu(display("Tonic transport error: {error:?} with msg: {msg:?}"))]
+    TonicTransport {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tonic::transport::Error,
+        msg: Option<String>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -405,6 +414,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::TonicTransport { .. } => StatusCode::Internal,
         }
     }
 
