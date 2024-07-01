@@ -5,6 +5,8 @@ SELECT INTERVAL '1.5 year';
 
 SELECT INTERVAL '-2 months';
 
+SELECT '3 hours'::INTERVAL;
+
 SELECT INTERVAL '1 year 2 months 3 days 4 hours' + INTERVAL '1 year';
 
 SELECT INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';
@@ -76,6 +78,8 @@ SELECT INTERVAL '-1h5m';
 SELECT INTERVAL '-1h-5m';
 
 SELECT INTERVAL '1y2w3d4h';
+
+SELECT '3y2mon'::INTERVAL;
 
 SELECT INTERVAL '7 days' - INTERVAL '1d';
 

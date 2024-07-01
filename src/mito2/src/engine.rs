@@ -39,6 +39,8 @@ mod flush_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
+mod merge_mode_test;
+#[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod parallel_test;

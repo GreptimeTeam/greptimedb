@@ -25,7 +25,7 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -559,6 +559,7 @@ impl StartCommand {
                     flow_metadata_manager,
                     flow_metadata_allocator,
                     peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager,
                 true,

@@ -114,7 +114,7 @@ pub mod test_data {
     use common_catalog::consts::MITO2_ENGINE;
     use common_meta::ddl::flow_meta::FlowMetadataAllocator;
     use common_meta::ddl::table_meta::TableMetadataAllocator;
-    use common_meta::ddl::DdlContext;
+    use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -226,6 +226,7 @@ pub mod test_data {
             flow_metadata_allocator,
             memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
             peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         }
     }
 }

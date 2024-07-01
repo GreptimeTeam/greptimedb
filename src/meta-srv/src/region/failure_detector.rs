@@ -14,27 +14,24 @@
 
 use std::ops::DerefMut;
 
-use common_meta::{ClusterId, DatanodeId};
+use common_meta::ddl::DetectingRegion;
 use dashmap::mapref::multiple::RefMulti;
 use dashmap::DashMap;
-use store_api::storage::RegionId;
 
 use crate::failure_detector::{PhiAccrualFailureDetector, PhiAccrualFailureDetectorOptions};
-
-pub(crate) type Ident = (ClusterId, DatanodeId, RegionId);
 
 /// Detects the region failures.
 pub(crate) struct RegionFailureDetector {
     options: PhiAccrualFailureDetectorOptions,
-    detectors: DashMap<Ident, PhiAccrualFailureDetector>,
+    detectors: DashMap<DetectingRegion, PhiAccrualFailureDetector>,
 }
 
 pub(crate) struct FailureDetectorEntry<'a> {
-    e: RefMulti<'a, Ident, PhiAccrualFailureDetector>,
+    e: RefMulti<'a, DetectingRegion, PhiAccrualFailureDetector>,
 }
 
 impl FailureDetectorEntry<'_> {
-    pub(crate) fn region_ident(&self) -> &Ident {
+    pub(crate) fn region_ident(&self) -> &DetectingRegion {
         self.e.key()
     }
 
@@ -51,14 +48,29 @@ impl RegionFailureDetector {
         }
     }
 
-    /// Returns [PhiAccrualFailureDetector] of the specific ([DatanodeId],[RegionId]).
+    /// Returns [`PhiAccrualFailureDetector`] of the specific [`DetectingRegion`].
     pub(crate) fn region_failure_detector(
         &self,
-        ident: Ident,
+        detecting_region: DetectingRegion,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
         self.detectors
-            .entry(ident)
+            .entry(detecting_region)
             .or_insert_with(|| PhiAccrualFailureDetector::from_options(self.options))
+    }
+
+    /// Returns A mutable reference to the [`PhiAccrualFailureDetector`] for the specified [`DetectingRegion`].
+    /// If a detector already exists for the region, it is returned. Otherwise, a new
+    /// detector is created and initialized with the provided timestamp.
+    pub(crate) fn maybe_init_region_failure_detector(
+        &self,
+        detecting_region: DetectingRegion,
+        ts_millis: i64,
+    ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
+        self.detectors.entry(detecting_region).or_insert_with(|| {
+            let mut detector = PhiAccrualFailureDetector::from_options(self.options);
+            detector.heartbeat(ts_millis);
+            detector
+        })
     }
 
     /// Returns a [FailureDetectorEntry] iterator.
@@ -69,8 +81,8 @@ impl RegionFailureDetector {
     }
 
     /// Removes the specific [PhiAccrualFailureDetector] if exists.
-    pub(crate) fn remove(&self, ident: &Ident) {
-        self.detectors.remove(ident);
+    pub(crate) fn remove(&self, region: &DetectingRegion) {
+        self.detectors.remove(region);
     }
 
     /// Removes all [PhiAccrualFailureDetector]s.
@@ -78,10 +90,10 @@ impl RegionFailureDetector {
         self.detectors.clear()
     }
 
-    /// Returns true if the specific `ident` exists.
+    /// Returns true if the specific [`DetectingRegion`] exists.
     #[cfg(test)]
-    pub(crate) fn contains(&self, ident: &Ident) -> bool {
-        self.detectors.contains_key(ident)
+    pub(crate) fn contains(&self, region: &DetectingRegion) -> bool {
+        self.detectors.contains_key(region)
     }
 
     /// Returns the length
@@ -110,14 +122,16 @@ impl RegionFailureDetector {
 #[cfg(test)]
 mod tests {
 
+    use store_api::storage::RegionId;
+
     use super::*;
 
     #[test]
     fn test_default_failure_detector_container() {
         let container = RegionFailureDetector::new(Default::default());
-        let ident = (0, 2, RegionId::new(1, 1));
-        let _ = container.region_failure_detector(ident);
-        assert!(container.contains(&ident));
+        let detecting_region = (0, 2, RegionId::new(1, 1));
+        let _ = container.region_failure_detector(detecting_region);
+        assert!(container.contains(&detecting_region));
 
         {
             let mut iter = container.iter();

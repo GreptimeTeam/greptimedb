@@ -151,7 +151,7 @@ impl MitoConfig {
     /// Sanitize incorrect configurations.
     ///
     /// Returns an error if there is a configuration that unable to sanitize.
-    pub(crate) fn sanitize(&mut self, data_home: &str) -> Result<()> {
+    pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);

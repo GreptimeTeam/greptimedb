@@ -221,6 +221,7 @@ mod tests {
         // It always starts from Logical
         let mut state = DropDatabaseCursor::new(DropTableTarget::Logical);
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -256,6 +257,7 @@ mod tests {
         // It always starts from Logical
         let mut state = DropDatabaseCursor::new(DropTableTarget::Logical);
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -284,6 +286,7 @@ mod tests {
         let ddl_context = new_ddl_context(node_manager);
         let mut state = DropDatabaseCursor::new(DropTableTarget::Physical);
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,

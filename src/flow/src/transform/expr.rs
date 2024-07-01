@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
-use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
@@ -60,7 +59,7 @@ fn typename_to_cdt(name: &str) -> CDT {
 }
 
 /// Convert [`ScalarFunction`] to corresponding Datafusion's [`PhysicalExpr`]
-pub(crate) fn from_scalar_fn_to_df_fn_impl(
+pub(crate) async fn from_scalar_fn_to_df_fn_impl(
     f: &ScalarFunction,
     input_schema: &RelationDesc,
     extensions: &FunctionExtensions,
@@ -70,7 +69,7 @@ pub(crate) fn from_scalar_fn_to_df_fn_impl(
     };
     let schema = input_schema.to_df_schema()?;
 
-    let df_expr = futures::executor::block_on(async {
+    let df_expr =
         // TODO(discord9): consider coloring everything async....
         substrait::df_logical_plan::consumer::from_substrait_rex(
             &datafusion::prelude::SessionContext::new(),
@@ -79,7 +78,7 @@ pub(crate) fn from_scalar_fn_to_df_fn_impl(
             &extensions.inner_ref(),
         )
         .await
-    });
+    ;
     let expr = df_expr.map_err(|err| {
         DatafusionSnafu {
             raw: err,
@@ -138,7 +137,7 @@ fn rewrite_scalar_function(f: &ScalarFunction) -> ScalarFunction {
 }
 
 impl TypedExpr {
-    pub fn from_substrait_to_datafusion_scalar_func(
+    pub async fn from_substrait_to_datafusion_scalar_func(
         f: &ScalarFunction,
         arg_exprs_typed: Vec<TypedExpr>,
         extensions: &FunctionExtensions,
@@ -152,7 +151,7 @@ impl TypedExpr {
         let raw_fn =
             RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
 
-        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn)?;
+        let df_func = DfScalarFunction::try_from_raw_fn(raw_fn).await?;
         let expr = ScalarExpr::CallDf {
             df_scalar_fn: df_func,
             exprs: arg_exprs,
@@ -163,7 +162,7 @@ impl TypedExpr {
     }
 
     /// Convert ScalarFunction into Flow's ScalarExpr
-    pub fn from_substrait_scalar_func(
+    pub async fn from_substrait_scalar_func(
         f: &ScalarFunction,
         input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
@@ -178,16 +177,19 @@ impl TypedExpr {
                     ),
                 })?;
         let arg_len = f.arguments.len();
-        let arg_typed_exprs: Vec<TypedExpr> = f
-            .arguments
-            .iter()
-            .map(|arg| match &arg.arg_type {
-                Some(ArgType::Value(e)) => {
-                    TypedExpr::from_substrait_rex(e, input_schema, extensions)
-                }
-                _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
-            })
-            .try_collect()?;
+        let arg_typed_exprs: Vec<TypedExpr> = {
+            let mut rets = Vec::new();
+            for arg in f.arguments.iter() {
+                let ret = match &arg.arg_type {
+                    Some(ArgType::Value(e)) => {
+                        TypedExpr::from_substrait_rex(e, input_schema, extensions).await
+                    }
+                    _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
+                }?;
+                rets.push(ret);
+            }
+            rets
+        };
 
         // literal's type is determined by the function and type of other args
         let (arg_exprs, arg_types): (Vec<_>, Vec<_>) = arg_typed_exprs
@@ -293,7 +295,8 @@ impl TypedExpr {
                         f,
                         arg_typed_exprs,
                         extensions,
-                    )?;
+                    )
+                    .await?;
                     Ok(try_as_df)
                 }
             }
@@ -301,38 +304,44 @@ impl TypedExpr {
     }
 
     /// Convert IfThen into Flow's ScalarExpr
-    pub fn from_substrait_ifthen_rex(
+    pub async fn from_substrait_ifthen_rex(
         if_then: &IfThen,
         input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<TypedExpr, Error> {
-        let ifs: Vec<_> = if_then
-            .ifs
-            .iter()
-            .map(|if_clause| {
+        let ifs: Vec<_> = {
+            let mut ifs = Vec::new();
+            for if_clause in if_then.ifs.iter() {
                 let proto_if = if_clause.r#if.as_ref().with_context(|| InvalidQuerySnafu {
                     reason: "IfThen clause without if",
                 })?;
                 let proto_then = if_clause.then.as_ref().with_context(|| InvalidQuerySnafu {
                     reason: "IfThen clause without then",
                 })?;
-                let cond = TypedExpr::from_substrait_rex(proto_if, input_schema, extensions)?;
-                let then = TypedExpr::from_substrait_rex(proto_then, input_schema, extensions)?;
-                Ok((cond, then))
-            })
-            .try_collect()?;
+                let cond =
+                    TypedExpr::from_substrait_rex(proto_if, input_schema, extensions).await?;
+                let then =
+                    TypedExpr::from_substrait_rex(proto_then, input_schema, extensions).await?;
+                ifs.push((cond, then));
+            }
+            ifs
+        };
         // if no else is presented
-        let els = if_then
+        let els = match if_then
             .r#else
             .as_ref()
             .map(|e| TypedExpr::from_substrait_rex(e, input_schema, extensions))
-            .transpose()?
-            .unwrap_or_else(|| {
-                TypedExpr::new(
-                    ScalarExpr::literal_null(),
-                    ColumnType::new_nullable(CDT::null_datatype()),
-                )
-            });
+        {
+            Some(fut) => Some(fut.await),
+            None => None,
+        }
+        .transpose()?
+        .unwrap_or_else(|| {
+            TypedExpr::new(
+                ScalarExpr::literal_null(),
+                ColumnType::new_nullable(CDT::null_datatype()),
+            )
+        });
 
         fn build_if_then_recur(
             mut next_if_then: impl Iterator<Item = (TypedExpr, TypedExpr)>,
@@ -356,7 +365,8 @@ impl TypedExpr {
         Ok(expr_if)
     }
     /// Convert Substrait Rex into Flow's ScalarExpr
-    pub fn from_substrait_rex(
+    #[async_recursion::async_recursion]
+    pub async fn from_substrait_rex(
         e: &Expression,
         input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
@@ -377,7 +387,7 @@ impl TypedExpr {
                 if !s.options.is_empty() {
                     return not_impl_err!("In list expression is not supported");
                 }
-                TypedExpr::from_substrait_rex(substrait_expr, input_schema, extensions)
+                TypedExpr::from_substrait_rex(substrait_expr, input_schema, extensions).await
             }
             Some(RexType::Selection(field_ref)) => match &field_ref.reference_type {
                 Some(DirectReference(direct)) => match &direct.reference_type.as_ref() {
@@ -400,16 +410,16 @@ impl TypedExpr {
                 _ => not_impl_err!("unsupported field ref type"),
             },
             Some(RexType::ScalarFunction(f)) => {
-                TypedExpr::from_substrait_scalar_func(f, input_schema, extensions)
+                TypedExpr::from_substrait_scalar_func(f, input_schema, extensions).await
             }
             Some(RexType::IfThen(if_then)) => {
-                TypedExpr::from_substrait_ifthen_rex(if_then, input_schema, extensions)
+                TypedExpr::from_substrait_ifthen_rex(if_then, input_schema, extensions).await
             }
             Some(RexType::Cast(cast)) => {
                 let input = cast.input.as_ref().with_context(|| InvalidQuerySnafu {
                     reason: "Cast expression without input",
                 })?;
-                let input = TypedExpr::from_substrait_rex(input, input_schema, extensions)?;
+                let input = TypedExpr::from_substrait_rex(input, input_schema, extensions).await?;
                 let cast_type = from_substrait_type(cast.r#type.as_ref().with_context(|| {
                     InvalidQuerySnafu {
                         reason: "Cast expression without type",
@@ -453,7 +463,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         // optimize binary and to variadic and
         let filter = ScalarExpr::CallVariadic {
@@ -509,7 +519,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::boolean_datatype(), true)])
@@ -534,7 +544,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)])
@@ -572,7 +582,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::int16_datatype(), true)])
@@ -611,7 +621,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), true)])
@@ -641,8 +651,8 @@ mod test {
         assert_eq!(flow_plan.unwrap(), expected);
     }
 
-    #[test]
-    fn test_func_sig() {
+    #[tokio::test]
+    async fn test_func_sig() {
         fn lit(v: impl ToString) -> substrait_proto::proto::FunctionArgument {
             use substrait_proto::proto::expression;
             let expr = Expression {
@@ -669,7 +679,9 @@ mod test {
         let input_schema =
             RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]).into_unnamed();
         let extensions = FunctionExtensions::from_iter([(0, "is_null".to_string())]);
-        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions)
+            .await
+            .unwrap();
 
         assert_eq!(
             res,
@@ -695,7 +707,9 @@ mod test {
         ])
         .into_unnamed();
         let extensions = FunctionExtensions::from_iter([(0, "add".to_string())]);
-        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions)
+            .await
+            .unwrap();
 
         assert_eq!(
             res,
@@ -722,7 +736,9 @@ mod test {
         ])
         .into_unnamed();
         let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
-        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions)
+            .await
+            .unwrap();
 
         assert_eq!(
             res,
@@ -750,7 +766,9 @@ mod test {
         ])
         .into_unnamed();
         let extensions = FunctionExtensions::from_iter(vec![(0, "tumble".to_string())]);
-        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions).unwrap();
+        let res = TypedExpr::from_substrait_scalar_func(&f, &input_schema, &extensions)
+            .await
+            .unwrap();
 
         assert_eq!(
             res,

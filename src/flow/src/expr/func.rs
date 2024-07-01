@@ -43,7 +43,7 @@ use crate::repr::{self, value_to_internal_ts, Row};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling
-#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum UnmaterializableFunc {
     Now,
     CurrentSchema,

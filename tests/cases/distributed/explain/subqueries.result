@@ -94,10 +94,8 @@ order by t.i desc;
 |_|_CoalescePartitionsExec_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: i@0 IS NOT NULL_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[]_|
 |_|_MergeScanExec: REDACTED
 |_|_|

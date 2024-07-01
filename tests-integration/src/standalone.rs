@@ -23,7 +23,7 @@ use common_config::KvBackendConfig;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
-use common_meta::ddl::DdlContext;
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
@@ -199,6 +199,7 @@ impl GreptimeDbStandaloneBuilder {
                     flow_metadata_manager,
                     flow_metadata_allocator,
                     peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager.clone(),
                 register_procedure_loaders,
