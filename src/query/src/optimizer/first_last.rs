@@ -65,7 +65,6 @@ impl TreeNodeVisitor<'_> for TopValueVisitor {
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         if let LogicalPlan::Aggregate(aggregate) = node {
             common_telemetry::info!("group is {:?}", aggregate.group_expr);
-            common_telemetry::info!("aggregate is {:?}", aggregate);
             // TODO(yingwen): Support first value.
             for expr in &aggregate.aggr_expr {
                 let Expr::AggregateFunction(func) = expr else {
