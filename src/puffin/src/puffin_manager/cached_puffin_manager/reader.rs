@@ -28,25 +28,25 @@ use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use crate::puffin_manager::cache_manager::{BoxWriter, CacheManagerRef, DirWriterProviderRef};
 use crate::puffin_manager::cached_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
-use crate::puffin_manager::{DirGuard, PuffinReader};
+use crate::puffin_manager::{BlobGuard, DirGuard, PuffinReader};
 
 /// `CachedPuffinReader` is a `PuffinReader` that provides cached readers for puffin files.
-pub struct CachedPuffinReader<CR, G, AR, AW> {
+pub struct CachedPuffinReader<B, G, AR, AW> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
     /// The cache manager.
-    cache_manager: CacheManagerRef<CR, G>,
+    cache_manager: CacheManagerRef<B, G>,
 
     /// The puffin file accessor.
     puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
 }
 
-impl<CR, G, AR, AW> CachedPuffinReader<CR, G, AR, AW> {
+impl<B, D, AR, AW> CachedPuffinReader<B, D, AR, AW> {
     #[allow(unused)]
     pub(crate) fn new(
         puffin_file_name: String,
-        cache_manager: CacheManagerRef<CR, G>,
+        cache_manager: CacheManagerRef<B, D>,
         puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
     ) -> Self {
         Self {
@@ -58,17 +58,17 @@ impl<CR, G, AR, AW> CachedPuffinReader<CR, G, AR, AW> {
 }
 
 #[async_trait]
-impl<CR, G, AR, AW> PuffinReader for CachedPuffinReader<CR, G, AR, AW>
+impl<B, D, AR, AW> PuffinReader for CachedPuffinReader<B, D, AR, AW>
 where
+    B: BlobGuard,
+    D: DirGuard,
     AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
-    G: DirGuard,
     AW: AsyncWrite + 'static,
-    CR: AsyncRead + AsyncSeek,
 {
-    type Reader = CR;
-    type Dir = G;
+    type Blob = B;
+    type Dir = D;
 
-    async fn blob(&self, key: &str) -> Result<Self::Reader> {
+    async fn blob(&self, key: &str) -> Result<Self::Blob> {
         self.cache_manager
             .get_blob(
                 self.puffin_file_name.as_str(),
@@ -99,12 +99,12 @@ where
     }
 }
 
-impl<CR, G, AR, AW> CachedPuffinReader<CR, G, AR, AW>
+impl<B, G, AR, AW> CachedPuffinReader<B, G, AR, AW>
 where
-    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
+    B: BlobGuard,
     G: DirGuard,
+    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
     AW: AsyncWrite + 'static,
-    CR: AsyncRead + AsyncSeek,
 {
     fn init_blob_to_cache(
         puffin_file_name: String,

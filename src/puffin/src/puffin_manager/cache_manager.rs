@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use futures::{AsyncRead, AsyncSeek, AsyncWrite};
+use futures::AsyncWrite;
 
 use crate::error::Result;
-use crate::puffin_manager::DirGuard;
+use crate::puffin_manager::{BlobGuard, DirGuard};
 
 pub type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -53,16 +53,19 @@ pub trait InitDirFn = Fn(DirWriterProviderRef) -> WriteResult;
 /// `CacheManager` manages the cache for the puffin files.
 #[async_trait]
 pub trait CacheManager {
-    type Reader: AsyncRead + AsyncSeek;
+    type Blob: BlobGuard;
     type Dir: DirGuard;
 
     /// Retrieves a blob, initializing it if necessary using the provided `init_fn`.
+    ///
+    /// The returned `BlobGuard` is used to access the blob reader.
+    /// The caller is responsible for holding the `BlobGuard` until they are done with the blob.
     async fn get_blob<'a>(
         &self,
         puffin_file_name: &str,
         key: &str,
         init_factory: Box<dyn InitBlobFn + Send + Sync + 'a>,
-    ) -> Result<Self::Reader>;
+    ) -> Result<Self::Blob>;
 
     /// Retrieves a directory, initializing it if necessary using the provided `init_fn`.
     ///
@@ -85,4 +88,4 @@ pub trait CacheManager {
     ) -> Result<()>;
 }
 
-pub type CacheManagerRef<R, G> = Arc<dyn CacheManager<Reader = R, Dir = G> + Send + Sync>;
+pub type CacheManagerRef<B, D> = Arc<dyn CacheManager<Blob = B, Dir = D> + Send + Sync>;
