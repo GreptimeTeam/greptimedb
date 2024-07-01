@@ -242,8 +242,8 @@ impl ParserContext {
         );
 
         // conjoin them together
-        let mut builder = PatternAstBuilder::from_existing(self.stack.remove(0));
-        for ast in self.stack {
+        let mut builder = PatternAstBuilder::from_existing(self.stack.pop().unwrap());
+        while let Some(ast) = self.stack.pop() {
             builder.or(ast);
         }
 
@@ -289,7 +289,7 @@ impl ParserContext {
             }
         }
 
-        for operand in operator_stack.into_iter() {
+        while let Some(operand) = operator_stack.pop() {
             if operand == Token::OpenParen {
                 return InvalidFuncArgsSnafu {
                     err_msg: "Unmatched parentheses",
@@ -695,8 +695,29 @@ mod test {
                 PatternAst::Binary {
                     lhs: Box::new(PatternAst::Binary {
                         lhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Negative,
-                            pattern: "c".to_string(),
+                            op: UnaryOp::Optional,
+                            pattern: "a".to_string(),
+                        }),
+                        op: BinaryOp::Or,
+                        rhs: Box::new(PatternAst::Literal {
+                            op: UnaryOp::Must,
+                            pattern: "b".to_string(),
+                        }),
+                    }),
+                    op: BinaryOp::Or,
+                    rhs: Box::new(PatternAst::Literal {
+                        op: UnaryOp::Negative,
+                        pattern: "c".to_string(),
+                    }),
+                },
+            ),
+            (
+                "(+a +b) c",
+                PatternAst::Binary {
+                    lhs: Box::new(PatternAst::Binary {
+                        lhs: Box::new(PatternAst::Literal {
+                            op: UnaryOp::Must,
+                            pattern: "a".to_string(),
                         }),
                         op: BinaryOp::Or,
                         rhs: Box::new(PatternAst::Literal {
@@ -707,28 +728,7 @@ mod test {
                     op: BinaryOp::Or,
                     rhs: Box::new(PatternAst::Literal {
                         op: UnaryOp::Optional,
-                        pattern: "a".to_string(),
-                    }),
-                },
-            ),
-            (
-                "(+a +b) c",
-                PatternAst::Binary {
-                    lhs: Box::new(PatternAst::Binary {
-                        lhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "c".to_string(),
-                        }),
-                        op: BinaryOp::Or,
-                        rhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Must,
-                            pattern: "b".to_string(),
-                        }),
-                    }),
-                    op: BinaryOp::Or,
-                    rhs: Box::new(PatternAst::Literal {
-                        op: UnaryOp::Must,
-                        pattern: "a".to_string(),
+                        pattern: "c".to_string(),
                     }),
                 },
             ),
