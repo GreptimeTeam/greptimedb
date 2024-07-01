@@ -12,22 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::DateTime;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-use common_meta::key::table_route::TableRouteValue;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::ClusterId;
 use common_time::util as time_util;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema};
-use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
-use table::requests::TableOptions;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
@@ -70,69 +61,6 @@ pub(crate) fn create_selector_context() -> SelectorContext {
         meta_peer_client,
         table_id: None,
     }
-}
-
-pub(crate) async fn prepare_table_region_and_info_value(
-    table_metadata_manager: &TableMetadataManagerRef,
-    table: &str,
-) {
-    let table_info = RawTableInfo {
-        ident: TableIdent::new(1),
-        name: table.to_string(),
-        desc: None,
-        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-        meta: RawTableMeta {
-            schema: RawSchema::new(vec![ColumnSchema::new(
-                "a",
-                ConcreteDataType::string_datatype(),
-                true,
-            )]),
-            primary_key_indices: vec![],
-            value_indices: vec![],
-            engine: MITO_ENGINE.to_string(),
-            next_column_id: 1,
-            region_numbers: vec![1, 2, 3, 4],
-            options: TableOptions::default(),
-            created_on: DateTime::default(),
-            partition_key_indices: vec![],
-        },
-        table_type: TableType::Base,
-    };
-
-    let region_route_factory = |region_id: u64, peer: u64| RegionRoute {
-        region: Region {
-            id: region_id.into(),
-            ..Default::default()
-        },
-        leader_peer: Some(Peer {
-            id: peer,
-            addr: String::new(),
-        }),
-        follower_peers: vec![],
-        leader_status: None,
-        leader_down_since: None,
-    };
-
-    // Region distribution:
-    // Datanode => Regions
-    // 1 => 1, 2
-    // 2 => 3
-    // 3 => 4
-    let region_routes = vec![
-        region_route_factory(1, 1),
-        region_route_factory(2, 1),
-        region_route_factory(3, 2),
-        region_route_factory(4, 3),
-    ];
-    table_metadata_manager
-        .create_table_metadata(
-            table_info,
-            TableRouteValue::physical(region_routes),
-            HashMap::default(),
-        )
-        .await
-        .unwrap();
 }
 
 pub(crate) async fn put_datanodes(
