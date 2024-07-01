@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
@@ -230,7 +230,11 @@ impl MokaCacheManager {
         // To guarantee the atomicity of writing the file, we need to write
         // the file to a temporary file first...
         let tmp_path = target_path.with_extension(TMP_EXTENSION);
-        let _ = fs::remove_file(&tmp_path).await;
+        if let Err(err) = fs::remove_file(&tmp_path).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err).context(RemoveSnafu);
+            }
+        }
 
         let writer = Box::new(
             fs::File::create(&tmp_path)
@@ -254,7 +258,11 @@ impl MokaCacheManager {
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
         let tmp_base = target_path.with_extension(TMP_EXTENSION);
-        let _ = fs::remove_dir_all(&tmp_base).await;
+        if let Err(err) = fs::remove_dir_all(&tmp_base).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err).context(RemoveSnafu);
+            }
+        }
 
         let writer_provider = Box::new(MokaDirWriterProvider(tmp_base.clone()));
         let size = init_fn(writer_provider).await?;
@@ -385,6 +393,8 @@ impl MokaCacheManager {
                 }
             }
         }
+
+        info!("The delete routine for moka cache manager is terminated.");
     }
 }
 
