@@ -279,6 +279,7 @@ impl DropTableData {
 
     fn build_executor(&self) -> DropTableExecutor {
         DropTableExecutor::new(
+            self.cluster_id,
             self.task.table_name(),
             self.task.table_id,
             self.task.drop_if_exists,

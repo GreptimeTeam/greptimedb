@@ -22,7 +22,9 @@ use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::DdlContext;
+use common_meta::ddl::{
+    DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
+};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::FlowMetadataManager;
@@ -46,15 +48,16 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_cluster_info_handler::{
-    CollectDatanodeClusterInfoHandler, CollectFrontendClusterInfoHandler,
+    CollectDatanodeClusterInfoHandler, CollectFlownodeClusterInfoHandler,
+    CollectFrontendClusterInfoHandler,
 };
 use crate::handler::collect_stats_handler::CollectStatsHandler;
+use crate::handler::extract_stat_handler::ExtractStatHandler;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
 use crate::handler::keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
 use crate::handler::mailbox_handler::MailboxHandler;
 use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
-use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::publish_heartbeat_handler::PublishHeartbeatHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::response_header_handler::ResponseHeaderHandler;
@@ -68,7 +71,10 @@ use crate::metasrv::{
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublisherRef;
-use crate::region::supervisor::{RegionSupervisor, DEFAULT_TICK_INTERVAL};
+use crate::region::supervisor::{
+    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
+    DEFAULT_TICK_INTERVAL,
+};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
@@ -282,6 +288,60 @@ impl MetasrvBuilder {
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
+        if !is_remote_wal && options.enable_region_failover {
+            return error::UnexpectedSnafu {
+                violated: "Region failover is not supported in the local WAL implementation!",
+            }
+            .fail();
+        }
+
+        let (tx, rx) = RegionSupervisor::channel();
+        let (region_failure_detector_controller, region_supervisor_ticker): (
+            RegionFailureDetectorControllerRef,
+            Option<std::sync::Arc<RegionSupervisorTicker>>,
+        ) = if options.enable_region_failover && is_remote_wal {
+            (
+                Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
+                Some(Arc::new(RegionSupervisorTicker::new(
+                    DEFAULT_TICK_INTERVAL,
+                    tx.clone(),
+                ))),
+            )
+        } else {
+            (Arc::new(NoopRegionFailureDetectorControl) as _, None as _)
+        };
+
+        let region_migration_manager = Arc::new(RegionMigrationManager::new(
+            procedure_manager.clone(),
+            DefaultContextFactory::new(
+                table_metadata_manager.clone(),
+                memory_region_keeper.clone(),
+                region_failure_detector_controller.clone(),
+                mailbox.clone(),
+                options.server_addr.clone(),
+            ),
+        ));
+        region_migration_manager.try_start()?;
+
+        let region_failover_handler = if options.enable_region_failover && is_remote_wal {
+            let region_supervisor = RegionSupervisor::new(
+                rx,
+                options.failure_detector,
+                selector_ctx.clone(),
+                selector.clone(),
+                region_migration_manager.clone(),
+                leader_cached_kv_backend.clone() as _,
+                peer_lookup_service.clone(),
+            );
+
+            Some(RegionFailureHandler::new(
+                region_supervisor,
+                HeartbeatAcceptor::new(tx),
+            ))
+        } else {
+            None
+        };
+
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
@@ -292,51 +352,14 @@ impl MetasrvBuilder {
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator: flow_metadata_allocator.clone(),
-                    peer_lookup_service: peer_lookup_service.clone(),
+                    peer_lookup_service,
+                    region_failure_detector_controller,
                 },
                 procedure_manager.clone(),
                 true,
             )
             .context(error::InitDdlManagerSnafu)?,
         );
-
-        let region_migration_manager = Arc::new(RegionMigrationManager::new(
-            procedure_manager.clone(),
-            DefaultContextFactory::new(
-                table_metadata_manager.clone(),
-                memory_region_keeper.clone(),
-                mailbox.clone(),
-                options.server_addr.clone(),
-            ),
-        ));
-        region_migration_manager.try_start()?;
-
-        if !is_remote_wal && options.enable_region_failover {
-            return error::UnexpectedSnafu {
-                violated: "Region failover is not supported in the local WAL implementation!",
-            }
-            .fail();
-        }
-
-        let (region_failover_handler, region_supervisor_ticker) =
-            if options.enable_region_failover && is_remote_wal {
-                let region_supervisor = RegionSupervisor::new(
-                    options.failure_detector,
-                    DEFAULT_TICK_INTERVAL,
-                    selector_ctx.clone(),
-                    selector.clone(),
-                    region_migration_manager.clone(),
-                    leader_cached_kv_backend.clone() as _,
-                    peer_lookup_service,
-                );
-                let region_supervisor_ticker = region_supervisor.ticker();
-                (
-                    Some(RegionFailureHandler::new(region_supervisor)),
-                    Some(region_supervisor_ticker),
-                )
-            } else {
-                (None, None)
-            };
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -361,9 +384,10 @@ impl MetasrvBuilder {
                 group.add_handler(FlownodeKeepLeaseHandler).await;
                 group.add_handler(CheckLeaderHandler).await;
                 group.add_handler(OnLeaderStartHandler).await;
-                group.add_handler(CollectStatsHandler).await;
+                group.add_handler(ExtractStatHandler).await;
                 group.add_handler(CollectDatanodeClusterInfoHandler).await;
                 group.add_handler(CollectFrontendClusterInfoHandler).await;
+                group.add_handler(CollectFlownodeClusterInfoHandler).await;
                 group.add_handler(MailboxHandler).await;
                 group.add_handler(region_lease_handler).await;
                 group.add_handler(FilterInactiveRegionStatsHandler).await;
@@ -373,7 +397,7 @@ impl MetasrvBuilder {
                 if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
                     group.add_handler(publish_heartbeat_handler).await;
                 }
-                group.add_handler(PersistStatsHandler::default()).await;
+                group.add_handler(CollectStatsHandler::default()).await;
                 group
             }
         };

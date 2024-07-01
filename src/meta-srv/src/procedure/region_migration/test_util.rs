@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
@@ -150,6 +151,7 @@ impl TestingEnv {
             volatile_ctx: Default::default(),
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.to_string(),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         }
     }
 

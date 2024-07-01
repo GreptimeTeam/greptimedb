@@ -110,14 +110,36 @@ impl HeartbeatTask {
         });
     }
 
-    fn build_node_info(start_time_ms: u64) -> NodeInfo {
+    fn create_heartbeat_request(
+        message: Option<OutgoingMessage>,
+        peer: Option<Peer>,
+        start_time_ms: u64,
+    ) -> Option<HeartbeatRequest> {
+        let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
+            Some(Ok(message)) => Some(message),
+            Some(Err(e)) => {
+                error!(e; "Failed to encode mailbox messages");
+                return None;
+            }
+            None => None,
+        };
+
+        Some(HeartbeatRequest {
+            mailbox_message,
+            peer,
+            info: Self::build_node_info(start_time_ms),
+            ..Default::default()
+        })
+    }
+
+    fn build_node_info(start_time_ms: u64) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
 
-        NodeInfo {
+        Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-        }
+        })
     }
 
     fn start_heartbeat_report(
@@ -141,21 +163,7 @@ impl HeartbeatTask {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            match outgoing_message_to_mailbox_message(message) {
-                                Ok(message) => {
-                                    let req = HeartbeatRequest {
-                                        mailbox_message: Some(message),
-                                        peer: self_peer.clone(),
-                                        info: Some(Self::build_node_info(start_time_ms)),
-                                        ..Default::default()
-                                    };
-                                    Some(req)
-                                }
-                                Err(e) => {
-                                    error!(e; "Failed to encode mailbox messages");
-                                    None
-                                }
-                            }
+                            Self::create_heartbeat_request(Some(message), self_peer.clone(), start_time_ms)
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
@@ -163,12 +171,7 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
-                        let req = HeartbeatRequest {
-                            peer: self_peer.clone(),
-                            info: Some(Self::build_node_info(start_time_ms)),
-                            ..Default::default()
-                        };
-                        Some(req)
+                       Self::create_heartbeat_request(None, self_peer.clone(), start_time_ms)
                     }
                 };
 

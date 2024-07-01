@@ -259,6 +259,7 @@ pub struct InvertedIndexOptions {
     /// The column ids that should be ignored when building the inverted index.
     /// The column ids are separated by commas. For example, "1,2,3".
     #[serde(deserialize_with = "deserialize_ignore_column_ids")]
+    #[serde(serialize_with = "serialize_ignore_column_ids")]
     pub ignore_column_ids: Vec<ColumnId>,
 
     /// The number of rows in a segment.
@@ -327,11 +328,26 @@ where
 {
     let s: String = Deserialize::deserialize(deserializer)?;
     let mut column_ids = Vec::new();
+    if s.is_empty() {
+        return Ok(column_ids);
+    }
     for item in s.split(',') {
         let column_id = item.parse().map_err(D::Error::custom)?;
         column_ids.push(column_id);
     }
     Ok(column_ids)
+}
+
+fn serialize_ignore_column_ids<S>(column_ids: &[ColumnId], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let s = column_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    serializer.serialize_str(&s)
 }
 
 /// Converts the `options` map to a json object.
@@ -590,5 +606,95 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_region_options_serde() {
+        let options = RegionOptions {
+            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            compaction: CompactionOptions::Twcs(TwcsOptions {
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
+                time_window: Some(Duration::from_secs(3600 * 2)),
+            }),
+            storage: Some("S3".to_string()),
+            append_mode: false,
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![1, 2, 3],
+                    segment_row_count: 512,
+                },
+            },
+            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
+                index_max_keys_per_shard: 2048,
+                data_freeze_threshold: 2048,
+                fork_dictionary_bytes: ReadableSize::mb(128),
+            })),
+            merge_mode: Some(MergeMode::LastNonNull),
+        };
+        let region_options_json_str = serde_json::to_string(&options).unwrap();
+        let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
+        assert_eq!(options, got);
+    }
+
+    #[test]
+    fn test_region_options_str_serde() {
+        // Notes: use empty string for `ignore_column_ids` to test the empty string case.
+        let region_options_json_str = r#"{
+  "ttl": "7days",
+  "compaction": {
+    "compaction.type": "twcs",
+    "compaction.twcs.max_active_window_runs": "8",
+    "compaction.twcs.max_inactive_window_runs": "2",
+    "compaction.twcs.time_window": "2h"
+  },
+  "storage": "S3",
+  "append_mode": false,
+  "wal_options": {
+    "wal.provider": "kafka",
+    "wal.kafka.topic": "test_topic"
+  },
+  "index_options": {
+    "index.inverted_index.ignore_column_ids": "",
+    "index.inverted_index.segment_row_count": "512"
+  },
+  "memtable": {
+    "memtable.type": "partition_tree",
+    "memtable.partition_tree.index_max_keys_per_shard": "2048",
+    "memtable.partition_tree.data_freeze_threshold": "2048",
+    "memtable.partition_tree.fork_dictionary_bytes": "128MiB"
+  },
+  "merge_mode": "last_non_null"
+}"#;
+        let got: RegionOptions = serde_json::from_str(region_options_json_str).unwrap();
+        let options = RegionOptions {
+            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            compaction: CompactionOptions::Twcs(TwcsOptions {
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
+                time_window: Some(Duration::from_secs(3600 * 2)),
+            }),
+            storage: Some("S3".to_string()),
+            append_mode: false,
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![],
+                    segment_row_count: 512,
+                },
+            },
+            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
+                index_max_keys_per_shard: 2048,
+                data_freeze_threshold: 2048,
+                fork_dictionary_bytes: ReadableSize::mb(128),
+            })),
+            merge_mode: Some(MergeMode::LastNonNull),
+        };
+        assert_eq!(options, got);
     }
 }
