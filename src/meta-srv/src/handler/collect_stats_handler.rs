@@ -41,12 +41,12 @@ impl EpochStats {
     }
 
     #[inline]
-    fn clear(&mut self) {
+    fn clear_stats(&mut self) {
         self.stats.clear();
     }
 
     #[inline]
-    fn push(&mut self, stat: Stat) {
+    fn push_stat(&mut self, stat: Stat) {
         self.stats.push(stat);
     }
 
@@ -97,25 +97,28 @@ impl HeartbeatHandler for CollectStatsHandler {
             match current_stat.node_epoch.cmp(&epoch) {
                 Ordering::Greater => {
                     // This node may have been redeployed.
+                    epoch_stats.clear_stats();
                     epoch_stats.set_epoch(current_stat.node_epoch);
-                    epoch_stats.clear();
+                    epoch_stats.push_stat(current_stat);
                     true
+                }
+                Ordering::Equal => {
+                    epoch_stats.push_stat(current_stat);
+                    false
                 }
                 Ordering::Less => {
                     warn!("Ignore stale heartbeat: {:?}", current_stat);
                     false
                 }
-                Ordering::Equal => false,
             }
         } else {
             epoch_stats.set_epoch(current_stat.node_epoch);
+            epoch_stats.push_stat(current_stat);
             // If the epoch is empty, it indicates that the current node sending the heartbeat
-            // for the first time to the current meta leader, so it is necessary to persist
+            // for the first time to the current meta leader, so it is necessary to save
             // the data to the KV store as soon as possible.
             true
         };
-
-        epoch_stats.push(current_stat);
 
         if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
             return Ok(HandleControl::Continue);
