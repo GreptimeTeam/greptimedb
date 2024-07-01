@@ -190,9 +190,12 @@ impl PatternAst {
 
     fn escape_pattern(pattern: &str) -> String {
         pattern
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
+            .chars()
+            .flat_map(|c| match c {
+                '\\' | '%' | '_' => vec!['\\', c],
+                _ => vec![c],
+            })
+            .collect::<String>()
     }
 }
 
