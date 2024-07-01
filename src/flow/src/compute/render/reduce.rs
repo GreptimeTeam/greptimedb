@@ -22,10 +22,10 @@ use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::state::Scheduler;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
+use crate::error::{Error, PlanSnafu};
 use crate::expr::error::{DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
 use crate::expr::{AggregateExpr, EvalError, ScalarExpr};
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};

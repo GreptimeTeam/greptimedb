@@ -32,7 +32,7 @@ use substrait::error::{DecodeRelSnafu, EncodeRelSnafu};
 use substrait::substrait_proto_df::proto::expression::{RexType, ScalarFunction};
 use substrait::substrait_proto_df::proto::Expression;
 
-use crate::adapter::error::{
+use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
@@ -284,7 +284,7 @@ impl RawDfScalarFn {
         f.encode(&mut buf)
             .context(EncodeRelSnafu)
             .map_err(BoxedError::new)
-            .context(crate::adapter::error::ExternalSnafu)?;
+            .context(crate::error::ExternalSnafu)?;
         Ok(Self {
             f: buf,
             input_schema,
@@ -295,7 +295,7 @@ impl RawDfScalarFn {
         let f = ScalarFunction::decode(&mut self.f.as_ref())
             .context(DecodeRelSnafu)
             .map_err(BoxedError::new)
-            .context(crate::adapter::error::ExternalSnafu)?;
+            .context(crate::error::ExternalSnafu)?;
 
         let input_schema = &self.input_schema;
         let extensions = &self.extensions;
@@ -371,7 +371,7 @@ impl ScalarExpr {
                     })?;
                 let typ = ConcreteDataType::try_from(&arrow_typ)
                     .map_err(BoxedError::new)
-                    .context(crate::adapter::error::ExternalSnafu)?;
+                    .context(crate::error::ExternalSnafu)?;
                 Ok(ColumnType::new_nullable(typ))
             }
         }

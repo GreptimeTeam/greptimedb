@@ -26,8 +26,10 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
+use crate::compaction::compactor::{open_compaction_region, OpenCompactionRegionRequest};
 use crate::config::MitoConfig;
 use crate::error;
+use crate::region::options::RegionOptions;
 use crate::test_util::{
     build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
 };
@@ -404,4 +406,44 @@ async fn test_open_region_wait_for_opening_region_err() {
         rx.await.unwrap().unwrap_err().status_code(),
         StatusCode::RegionNotFound
     );
+}
+
+#[tokio::test]
+async fn test_open_compaction_region() {
+    let mut env = TestEnv::new();
+    let mut mito_config = MitoConfig::default();
+    mito_config
+        .sanitize(&env.data_home().display().to_string())
+        .unwrap();
+
+    let engine = env.create_engine(mito_config.clone()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Close the region.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    let object_store_manager = env.get_object_store_manager().unwrap();
+
+    let req = OpenCompactionRegionRequest {
+        region_id,
+        region_dir: region_dir.clone(),
+        region_options: RegionOptions::default(),
+    };
+
+    let compaction_region =
+        open_compaction_region(&req, &mito_config, object_store_manager.clone())
+            .await
+            .unwrap();
+
+    assert_eq!(region_id, compaction_region.region_id);
 }

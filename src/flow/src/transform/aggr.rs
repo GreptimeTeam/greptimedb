@@ -45,7 +45,7 @@ use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
-use crate::adapter::error::{
+use crate::error::{
     DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
     TableNotFoundSnafu,
 };
