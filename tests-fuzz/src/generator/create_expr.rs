@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use derive_builder::Builder;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::partition::{PartitionBound, PartitionDef};
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -29,7 +30,7 @@ use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::{ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder};
 use crate::ir::{
-    column_options_generator, generate_columns, generate_random_value,
+    column_options_generator, generate_columns, generate_partition_bounds, generate_random_value,
     partible_column_options_generator, primary_key_options_generator, ts_column_options_generator,
     Column, ColumnTypeGenerator, CreateDatabaseExpr, CreateTableExpr, Ident,
     PartibleColumnTypeGenerator, StringColumnTypeGenerator, TsColumnTypeGenerator,
@@ -141,20 +142,12 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
                 .remove(0);
 
                 // Generates partition bounds.
-                let mut partition_bounds = Vec::with_capacity(self.partition);
-                for _ in 0..self.partition - 1 {
-                    partition_bounds.push(PartitionBound::Value(generate_random_value(
-                        rng,
-                        &column.column_type,
-                        None,
-                    )));
-                    partition_bounds.sort();
-                }
-                partition_bounds.push(PartitionBound::MaxValue);
-                builder.partition(PartitionDef::new(
-                    vec![name.value.to_string()],
-                    partition_bounds,
-                ));
+                let partition_def = generate_partition_def(
+                    self.partition,
+                    column.column_type.clone(),
+                    name.clone(),
+                );
+                builder.partition(partition_def);
                 columns.push(column);
             }
             // Generates the ts column.
@@ -201,6 +194,45 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         }
         builder.build().context(error::BuildCreateTableExprSnafu)
     }
+}
+
+fn generate_partition_def(
+    partitions: usize,
+    column_type: ConcreteDataType,
+    column_name: Ident,
+) -> PartitionDef {
+    let bounds = generate_partition_bounds(&column_type, partitions - 1);
+    let mut partition_bounds = Vec::with_capacity(partitions);
+
+    let first_bound = bounds[0].clone();
+    partition_bounds.push(PartitionBound::Expr(PartitionExpr::new(
+        Operand::Column(column_name.to_string()),
+        RestrictedOp::Lt,
+        Operand::Value(first_bound),
+    )));
+    for bound_idx in 1..bounds.len() {
+        partition_bounds.push(PartitionBound::Expr(PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column(column_name.to_string()),
+                RestrictedOp::GtEq,
+                Operand::Value(bounds[bound_idx - 1].clone()),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column(column_name.to_string()),
+                RestrictedOp::Lt,
+                Operand::Value(bounds[bound_idx].clone()),
+            )),
+        )));
+    }
+    let last_bound = bounds.last().unwrap().clone();
+    partition_bounds.push(PartitionBound::Expr(PartitionExpr::new(
+        Operand::Column(column_name.to_string()),
+        RestrictedOp::GtEq,
+        Operand::Value(last_bound),
+    )));
+
+    PartitionDef::new(vec![column_name.to_string()], partition_bounds)
 }
 
 /// Generate a physical table with 2 columns: ts of TimestampType::Millisecond as time index and val of Float64Type.
@@ -400,7 +432,7 @@ mod tests {
             .unwrap();
 
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"tEmporIbUS","quote_style":null},"columns":[{"name":{"value":"IMpEdIT","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey","NotNull"]},{"name":{"value":"natuS","quote_style":null},"column_type":{"Timestamp":{"Nanosecond":null}},"options":["TimeIndex"]},{"name":{"value":"ADIPisCI","quote_style":null},"column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":4864}}]},{"name":{"value":"EXpEdita","quote_style":null},"column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":{"value":"cUlpA","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"MOLeStIAs","quote_style":null},"column_type":{"Boolean":null},"options":["Null"]},{"name":{"value":"cUmquE","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.21569687}}]},{"name":{"value":"toTAm","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"deBitIs","quote_style":null},"column_type":{"Float32":{}},"options":["Null"]},{"name":{"value":"QUi","quote_style":null},"column_type":{"Int64":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["IMpEdIT"],"partition_bounds":[{"Value":{"String":"򟘲"}},{"Value":{"String":"򴥫"}},"MaxValue"]},"engine":"mito2","options":{},"primary_keys":[0,3]}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"columns":[{"name":{"value":"IMpEdIT","quote_style":null},"column_type":{"Float64":{}},"options":["PrimaryKey","NotNull"]},{"name":{"value":"natuS","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"ADIPisCI","quote_style":null},"column_type":{"Float64":{}},"options":["Null"]},{"name":{"value":"EXpEdita","quote_style":null},"column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":4864}}]},{"name":{"value":"cUlpA","quote_style":null},"column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":{"value":"MOLeStIAs","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"cUmquE","quote_style":null},"column_type":{"Boolean":null},"options":["Null"]},{"name":{"value":"toTAm","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.21569687}}]},{"name":{"value":"deBitIs","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"QUi","quote_style":null},"column_type":{"Float32":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["IMpEdIT"],"partition_bounds":[{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"Lt","rhs":{"Value":{"Float64":-5.992310449541051e307}}}},{"Expr":{"lhs":{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"GtEq","rhs":{"Value":{"Float64":-5.992310449541051e307}}}},"op":"And","rhs":{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"Lt","rhs":{"Value":{"Float64":5.992310449541054e307}}}}}},{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"GtEq","rhs":{"Value":{"Float64":5.992310449541054e307}}}}]},"engine":"mito2","options":{},"primary_keys":[0,4]}"#;
         assert_eq!(expected, serialized);
     }
 

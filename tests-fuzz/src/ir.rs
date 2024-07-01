@@ -65,8 +65,6 @@ lazy_static! {
         ConcreteDataType::float32_datatype(),
         ConcreteDataType::float64_datatype(),
         ConcreteDataType::string_datatype(),
-        ConcreteDataType::date_datatype(),
-        ConcreteDataType::datetime_datatype(),
     ];
     pub static ref STRING_DATA_TYPES: Vec<ConcreteDataType> =
         vec![ConcreteDataType::string_datatype()];
@@ -101,6 +99,35 @@ pub struct TsColumnTypeGenerator;
 pub struct MySQLTsColumnTypeGenerator;
 pub struct PartibleColumnTypeGenerator;
 pub struct StringColumnTypeGenerator;
+
+macro_rules! generate_values {
+    ($data_type:ty, $bounds:expr) => {{
+        let base = <$data_type>::MIN;
+        let step = <$data_type>::MAX / ($bounds as $data_type + 1 as $data_type) as $data_type;
+        (1..=$bounds)
+            .map(|i| Value::from(base + step * i as $data_type + step * i as $data_type))
+            .collect::<Vec<Value>>()
+    }};
+}
+
+/// Generates partition bounds.
+pub fn generate_partition_bounds(datatype: &ConcreteDataType, bounds: usize) -> Vec<Value> {
+    match datatype {
+        ConcreteDataType::Int16(_) => generate_values!(i16, bounds),
+        ConcreteDataType::Int32(_) => generate_values!(i32, bounds),
+        ConcreteDataType::Int64(_) => generate_values!(i64, bounds),
+        ConcreteDataType::Float32(_) => generate_values!(f32, bounds),
+        ConcreteDataType::Float64(_) => generate_values!(f64, bounds),
+        ConcreteDataType::String(_) => {
+            let range = 'z' as u8 - 'A' as u8;
+            let step = range / (bounds as u8 + 1);
+            (1..=bounds)
+                .map(|i| Value::from(char::from(step * i as u8).to_string()))
+                .collect()
+        }
+        _ => unimplemented!("unsupported type: {datatype}"),
+    }
+}
 
 /// Generates a random [Value].
 pub fn generate_random_value<R: Rng>(
