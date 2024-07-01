@@ -125,7 +125,7 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     rpc_hostname: Option<String>,
-    #[clap(long, value_delimiter = ',', num_args = 1..)]
+    #[clap(long, aliases = ["metasrv-addr"], value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
