@@ -80,10 +80,10 @@ impl MokaCacheManager {
         let cache = Cache::builder()
             .max_capacity(max_size)
             .weigher(|_: &String, v: &CacheValue| v.weight())
-            .async_eviction_listener(move |key: Arc<String>, v, _| {
+            .async_eviction_listener(move |k, v, _| {
                 let recycle_bin = recycle_bin_cloned.clone();
                 async move {
-                    recycle_bin.insert(key.as_str().to_string(), v).await;
+                    recycle_bin.insert(k.as_str().to_string(), v).await;
                 }
                 .boxed()
             })
@@ -251,13 +251,6 @@ impl MokaCacheManager {
         target_path: &PathBuf,
         init_fn: &(dyn InitDirFn + Send + Sync + '_),
     ) -> Result<u64> {
-        // If the `target_path` already exists, reuse it.
-        // It's ok since we have protected the directory before
-        // calling `write_dir` by incrementing the reference count.
-        if fs::try_exists(target_path).await.context(MetadataSnafu)? {
-            return Self::get_dir_size(target_path).await;
-        }
-
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
         let tmp_base = target_path.with_extension(TMP_EXTENSION);
