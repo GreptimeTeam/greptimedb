@@ -21,11 +21,10 @@ use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 pub use reader::CachedPuffinReader;
 pub use writer::CachedPuffinWriter;
 
-use super::{BlobGuard, DirGuard};
 use crate::error::Result;
 use crate::puffin_manager::cache_manager::CacheManagerRef;
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
-use crate::puffin_manager::PuffinManager;
+use crate::puffin_manager::{BlobGuard, DirGuard, PuffinManager};
 
 /// `CachedPuffinManager` is a `PuffinManager` that provides cached readers and writers for puffin files.
 pub struct CachedPuffinManager<B, D, AR, AW> {
@@ -37,6 +36,7 @@ pub struct CachedPuffinManager<B, D, AR, AW> {
 }
 
 impl<B, D, AR, AW> CachedPuffinManager<B, D, AR, AW> {
+    /// Creates a new `CachedPuffinManager` with the specified `cache_manager` and `puffin_file_accessor`.
     pub fn new(
         cache_manager: CacheManagerRef<B, D>,
         puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,

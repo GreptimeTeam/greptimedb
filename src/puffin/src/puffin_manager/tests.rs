@@ -42,7 +42,7 @@ async fn new_moka_cache_manager(prefix: &str) -> (TempDir, Arc<MokaCacheManager>
 
 #[tokio::test]
 async fn test_put_get_file() {
-    let compression_codecs = [Some(CompressionCodec::Zstd)];
+    let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
     for compression_codec in compression_codecs {
         let (_cache_dir, cache_manager) = new_moka_cache_manager("test_put_get_file_").await;
