@@ -24,7 +24,7 @@ use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::adapter::{FlowId, TableName, TableSource};
-use crate::error::{Error, EvalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
+use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::GlobalId;
 use crate::repr::{DiffRow, RelationDesc, BROADCAST_CAP};
@@ -326,8 +326,8 @@ impl FlownodeContext {
             .table_repr
             .get_by_name(table_name)
             .map(|(_, gid)| gid)
-            .context(UnexpectedSnafu {
-                reason: format!("Table not found: {:?} in flownode cache", table_name),
+            .context(TableNotFoundSnafu {
+                name: format!("Table not found: {:?} in flownode cache", table_name),
             })?;
 
         self.schema.insert(gid, schema);

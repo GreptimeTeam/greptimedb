@@ -100,7 +100,7 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    pub fn shutdown(&self) -> Result<(), Error> {
+    pub fn shutdown(&self) {
         info!("Close heartbeat task for flownode");
         if self
             .running
@@ -109,8 +109,6 @@ impl HeartbeatTask {
         {
             warn!("Call close heartbeat task multiple times");
         }
-
-        Ok(())
     }
 
     fn create_heartbeat_request(
