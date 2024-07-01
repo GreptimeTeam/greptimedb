@@ -57,6 +57,21 @@ impl MetasrvCacheInvalidator {
             .broadcast(&BroadcastChannel::Frontend, msg)
             .await
             .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
+
+        let msg = &MailboxMessage::json_message(
+            subject,
+            &format!("Metasrv@{}", self.info.server_addr),
+            "Flownode broadcast",
+            common_time::util::current_time_millis(),
+            &instruction,
+        )
+        .with_context(|_| meta_error::SerdeJsonSnafu)?;
+
+        self.mailbox
+            .broadcast(&BroadcastChannel::Flownode, msg)
+            .await
+            .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
     }
 }

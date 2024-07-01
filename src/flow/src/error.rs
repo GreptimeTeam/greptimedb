@@ -162,6 +162,34 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to start server"))]
+    StartServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown server"))]
+    ShutdownServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to initialize meta client"))]
+    MetaClientInit {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to parse address {}", addr))]
+    ParseAddr {
+        addr: String,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
+    },
 }
 
 /// Result type for flow module
@@ -184,11 +212,16 @@ impl ErrorExt for Error {
             | &Self::Plan { .. }
             | &Self::Datatypes { .. } => StatusCode::PlanQuery,
             Self::NoProtoType { .. } | Self::Unexpected { .. } => StatusCode::Unexpected,
-            &Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
+            Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
-            &Self::External { .. } => StatusCode::Unknown,
+            Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } => StatusCode::Internal,
+            Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
+                source.status_code()
+            }
+            Self::MetaClientInit { source, .. } => source.status_code(),
+            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
         }
     }
 
