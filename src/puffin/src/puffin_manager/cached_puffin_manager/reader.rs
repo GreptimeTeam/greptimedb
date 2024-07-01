@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
-
 use async_compression::futures::bufread::ZstdDecoder;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -30,25 +28,25 @@ use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use crate::puffin_manager::cache_manager::{BoxWriter, CacheManagerRef, DirWriterProviderRef};
 use crate::puffin_manager::cached_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
-use crate::puffin_manager::PuffinReader;
+use crate::puffin_manager::{BlobGuard, DirGuard, PuffinReader};
 
 /// `CachedPuffinReader` is a `PuffinReader` that provides cached readers for puffin files.
-pub struct CachedPuffinReader<CR, AR, AW> {
+pub struct CachedPuffinReader<B, G, AR, AW> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
     /// The cache manager.
-    cache_manager: CacheManagerRef<CR>,
+    cache_manager: CacheManagerRef<B, G>,
 
     /// The puffin file accessor.
     puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
 }
 
-impl<CR, AR, AW> CachedPuffinReader<CR, AR, AW> {
+impl<B, D, AR, AW> CachedPuffinReader<B, D, AR, AW> {
     #[allow(unused)]
     pub(crate) fn new(
         puffin_file_name: String,
-        cache_manager: CacheManagerRef<CR>,
+        cache_manager: CacheManagerRef<B, D>,
         puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
     ) -> Self {
         Self {
@@ -60,15 +58,17 @@ impl<CR, AR, AW> CachedPuffinReader<CR, AR, AW> {
 }
 
 #[async_trait]
-impl<CR, AR, AW> PuffinReader for CachedPuffinReader<CR, AR, AW>
+impl<B, D, AR, AW> PuffinReader for CachedPuffinReader<B, D, AR, AW>
 where
+    B: BlobGuard,
+    D: DirGuard,
     AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
     AW: AsyncWrite + 'static,
-    CR: AsyncRead + AsyncSeek,
 {
-    type Reader = CR;
+    type Blob = B;
+    type Dir = D;
 
-    async fn blob(&self, key: &str) -> Result<Self::Reader> {
+    async fn blob(&self, key: &str) -> Result<Self::Blob> {
         self.cache_manager
             .get_blob(
                 self.puffin_file_name.as_str(),
@@ -83,7 +83,7 @@ where
             .await
     }
 
-    async fn dir(&self, key: &str) -> Result<PathBuf> {
+    async fn dir(&self, key: &str) -> Result<Self::Dir> {
         self.cache_manager
             .get_dir(
                 self.puffin_file_name.as_str(),
@@ -99,11 +99,12 @@ where
     }
 }
 
-impl<CR, AR, AW> CachedPuffinReader<CR, AR, AW>
+impl<B, G, AR, AW> CachedPuffinReader<B, G, AR, AW>
 where
+    B: BlobGuard,
+    G: DirGuard,
     AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
     AW: AsyncWrite + 'static,
-    CR: AsyncRead + AsyncSeek,
 {
     fn init_blob_to_cache(
         puffin_file_name: String,
