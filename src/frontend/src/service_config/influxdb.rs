@@ -17,20 +17,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InfluxdbOptions {
     pub enable: bool,
-
-    /// If set to true, the timestamps in InfluxDB lines will be automatically converted to the
-    /// time index precision of their tables. Otherwise, the timestamps are fixed to nanosecond
-    /// precision. This option can be used if the InfluxDB table you created has a different
-    /// time index precision than nanosecond.
-    pub auto_align_precision: bool,
 }
 
 impl Default for InfluxdbOptions {
     fn default() -> Self {
-        Self {
-            enable: true,
-            auto_align_precision: false,
-        }
+        Self { enable: true }
     }
 }
 
@@ -42,6 +33,5 @@ mod tests {
     fn test_influxdb_options() {
         let default = InfluxdbOptions::default();
         assert!(default.enable);
-        assert!(!default.auto_align_precision);
     }
 }

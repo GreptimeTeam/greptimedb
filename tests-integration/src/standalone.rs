@@ -39,7 +39,6 @@ use datanode::datanode::DatanodeBuilder;
 use flow::FlownodeBuilder;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
-use frontend::service_config::InfluxdbOptions;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::Mode;
 
@@ -268,10 +267,6 @@ impl GreptimeDbStandaloneBuilder {
             procedure: procedure_config,
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
-            influxdb: InfluxdbOptions {
-                enable: true,
-                auto_align_precision: true,
-            },
             ..StandaloneOptions::default()
         };
 

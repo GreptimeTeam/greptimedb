@@ -14,15 +14,12 @@
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
-use catalog::CatalogManagerRef;
 use common_grpc::precision::Precision;
-use common_time::timestamp::TimeUnit;
 use hyper::Request;
 use influxdb_line_protocol::{parse_lines, FieldValue};
-use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use crate::error::{CatalogSnafu, Error, InfluxdbLineProtocolSnafu};
+use crate::error::{Error, InfluxdbLineProtocolSnafu};
 use crate::row_writer::{self, MultiTableData};
 
 const INFLUXDB_API_PATH_NAME: &str = "influxdb";
@@ -46,20 +43,16 @@ pub struct InfluxdbRequest {
     pub lines: String,
 }
 
-impl InfluxdbRequest {
-    /// Convert InfluxDB line protocol lines to GreptimeDB's GRPC [RowInsertRequests].
-    pub async fn to_row_insert_requests(
-        self,
-        catalog_manager: &CatalogManagerRef,
-        ctx: &QueryContextRef,
-        auto_align_precision: bool,
-    ) -> Result<RowInsertRequests, Error> {
-        let lines = parse_lines(&self.lines)
+impl TryFrom<InfluxdbRequest> for RowInsertRequests {
+    type Error = Error;
+
+    fn try_from(value: InfluxdbRequest) -> Result<Self, Self::Error> {
+        let lines = parse_lines(&value.lines)
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
             .context(InfluxdbLineProtocolSnafu)?;
 
         let mut multi_table_data = MultiTableData::new();
-        let precision = unwrap_or_default_precision(self.precision);
+        let precision = unwrap_or_default_precision(value.precision);
         for line in &lines {
             let table_name = line.series.measurement.as_str();
             let tags = &line.series.tag_set;
@@ -93,34 +86,12 @@ impl InfluxdbRequest {
             });
             row_writer::write_fields(table_data, fields, &mut one_row)?;
 
-            // Align to the table's time index unit if needed.
-            let target_unit = if auto_align_precision {
-                catalog_manager
-                    .table(ctx.current_catalog(), ctx.current_schema(), table_name)
-                    .await
-                    .context(CatalogSnafu)?
-                    .map(|x| x.schema())
-                    .and_then(|schema| {
-                        schema.timestamp_column().map(|col| {
-                            col.data_type
-                                .as_timestamp()
-                                .expect("Time index column is not of timestamp type!")
-                                .unit()
-                        })
-                    })
-                    // If Influxdb table is not found, it must be not created yet, use the "smallest"
-                    // time unit: nanosecond.
-                    .unwrap_or(TimeUnit::Nanosecond)
-            } else {
-                TimeUnit::Nanosecond
-            };
-
-            row_writer::write_ts_to(
+            // timestamp
+            row_writer::write_ts_to_nanos(
                 table_data,
                 INFLUXDB_TIMESTAMP_COLUMN_NAME,
                 ts,
                 precision,
-                target_unit,
                 &mut one_row,
             )?;
 
@@ -143,14 +114,12 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
 #[cfg(test)]
 mod tests {
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Rows, SemanticType};
-    use catalog::memory::MemoryCatalogManager;
-    use session::context::QueryContext;
+    use api::v1::{ColumnDataType, RowInsertRequests, Rows, SemanticType};
 
     use crate::influxdb::InfluxdbRequest;
 
-    #[tokio::test]
-    async fn test_convert_influxdb_lines_to_rows() {
+    #[test]
+    fn test_convert_influxdb_lines_to_rows() {
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
 monitor1,host=host2 memory=1027 1663840496400340001
@@ -162,11 +131,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             lines: lines.to_string(),
         };
 
-        let catalog_manager = MemoryCatalogManager::new() as _;
-        let requests = influxdb_req
-            .to_row_insert_requests(&catalog_manager, &QueryContext::arc(), false)
-            .await
-            .unwrap();
+        let requests: RowInsertRequests = influxdb_req.try_into().unwrap();
         assert_eq!(2, requests.inserts.len());
 
         for request in requests.inserts {

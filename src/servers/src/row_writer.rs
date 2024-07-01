@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use api::helper::{proto_value_type, to_proto_value};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
@@ -22,11 +21,12 @@ use api::v1::{
 };
 use common_grpc::precision::Precision;
 use common_time::timestamp::TimeUnit;
+use common_time::timestamp::TimeUnit::Nanosecond;
 use common_time::Timestamp;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimestampOverflowSnafu, UnexpectedResultSnafu,
+    IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
 };
 
 /// The intermediate data structure for building the write request.
@@ -247,7 +247,7 @@ pub fn write_ts_to_millis(
         name,
         ts,
         precision,
-        TimeUnit::Millisecond,
+        TimestampType::Millis,
         one_row,
     )
 }
@@ -265,18 +265,22 @@ pub fn write_ts_to_nanos(
         name,
         ts,
         precision,
-        TimeUnit::Nanosecond,
+        TimestampType::Nanos,
         one_row,
     )
 }
 
-/// Put the timestamp value into a row of [TableData].
-pub fn write_ts_to(
+enum TimestampType {
+    Millis,
+    Nanos,
+}
+
+fn write_ts_to(
     table_data: &mut TableData,
     name: impl ToString,
     ts: Option<i64>,
     precision: Precision,
-    target_unit: TimeUnit,
+    ts_type: TimestampType,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let TableData {
@@ -286,31 +290,54 @@ pub fn write_ts_to(
     } = table_data;
     let name = name.to_string();
 
-    let precision_unit: TimeUnit = precision.try_into().context(RowWriterSnafu)?;
-    let ts = ts
-        .map(|ts| Timestamp::new(ts, precision_unit))
-        .unwrap_or_else(|| Timestamp::current_time(precision_unit));
-    let ts_value: datatypes::value::Value = ts
-        .convert_to(target_unit)
-        .context(TimestampOverflowSnafu {
-            error: format!("convert {:?} to unit {}", ts, target_unit),
-        })?
-        .into();
+    let ts = match ts {
+        Some(timestamp) => match ts_type {
+            TimestampType::Millis => precision.to_millis(timestamp),
+            TimestampType::Nanos => precision.to_nanos(timestamp),
+        }
+        .with_context(|| TimestampOverflowSnafu {
+            error: format!(
+                "timestamp {} overflow with precision {}",
+                timestamp, precision
+            ),
+        })?,
+        None => {
+            let timestamp = Timestamp::current_time(Nanosecond);
+            let unit: TimeUnit = precision.try_into().context(RowWriterSnafu)?;
+            let timestamp = timestamp
+                .convert_to(unit)
+                .with_context(|| TimePrecisionSnafu {
+                    name: precision.to_string(),
+                })?
+                .into();
+            match ts_type {
+                TimestampType::Millis => precision.to_millis(timestamp),
+                TimestampType::Nanos => precision.to_nanos(timestamp),
+            }
+            .with_context(|| TimestampOverflowSnafu {
+                error: format!(
+                    "timestamp {} overflow with precision {}",
+                    timestamp, precision
+                ),
+            })?
+        }
+    };
 
-    let ts_value = to_proto_value(ts_value).context(UnexpectedResultSnafu {
-        reason: "timestamp value cannot convert to proto value",
-    })?;
-    let datatype = proto_value_type(&ts_value).context(UnexpectedResultSnafu {
-        reason: format!(
-            "cannot get column datatype from timestamp value {:?}",
-            ts_value
+    let (datatype, ts) = match ts_type {
+        TimestampType::Millis => (
+            ColumnDataType::TimestampMillisecond,
+            ValueData::TimestampMillisecondValue(ts),
         ),
-    })?;
+        TimestampType::Nanos => (
+            ColumnDataType::TimestampNanosecond,
+            ValueData::TimestampNanosecondValue(ts),
+        ),
+    };
 
     let index = column_indexes.get(&name);
     if let Some(index) = index {
         check_schema(datatype, SemanticType::Timestamp, &schema[*index])?;
-        one_row[*index] = ts_value;
+        one_row[*index].value_data = Some(ts);
     } else {
         let index = schema.len();
         schema.push(ColumnSchema {
@@ -320,7 +347,7 @@ pub fn write_ts_to(
             ..Default::default()
         });
         column_indexes.insert(name, index);
-        one_row.push(ts_value)
+        one_row.push(ts.into())
     }
 
     Ok(())

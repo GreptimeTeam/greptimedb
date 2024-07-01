@@ -51,7 +51,6 @@
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
-| `influxdb.auto_align_precision` | Bool | `false` | If set to true, the timestamps in InfluxDB lines will be automatically converted to the<br/>time index precision of their tables. Otherwise, the timestamps are fixed to nanosecond<br/>precision. This option can be used if the InfluxDB table you created has a different<br/>time index precision than nanosecond. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -200,7 +199,6 @@
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
-| `influxdb.auto_align_precision` | Bool | `false` | If set to true, the timestamps in InfluxDB lines will be automatically converted to the<br/>time index precision of their tables. Otherwise, the timestamps are fixed to nanosecond<br/>precision. This option can be used if the InfluxDB table you created has a different<br/>time index precision than nanosecond. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |

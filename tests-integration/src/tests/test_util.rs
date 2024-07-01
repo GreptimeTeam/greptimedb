@@ -25,8 +25,6 @@ use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
-use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
@@ -44,12 +42,6 @@ pub trait MockInstance: Sync + Send {
     fn frontend(&self) -> Arc<Instance>;
 
     fn is_distributed_mode(&self) -> bool;
-
-    async fn exec_sql(&self, sql: &str) -> Output {
-        let instance = self.frontend();
-        let mut output = instance.do_query(sql, QueryContext::arc()).await;
-        output.remove(0).unwrap()
-    }
 }
 
 impl MockInstance for GreptimeDbStandalone {

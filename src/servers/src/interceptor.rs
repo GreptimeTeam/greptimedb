@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use api::prom_store::remote::{ReadRequest, WriteRequest};
 use api::v1::greptime_request::Request;
+use api::v1::RowInsertRequests;
+use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use query::parser::PromQuery;
@@ -275,17 +277,31 @@ impl<E: ErrorExt> ScriptInterceptor for Option<ScriptInterceptorRef<E>> {
 
 /// LineProtocolInterceptor can track life cycle of a line protocol request
 /// and customize or abort its execution at given point.
+#[async_trait]
 pub trait LineProtocolInterceptor {
     type Error: ErrorExt;
 
     fn pre_execute(&self, _line: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Called after the lines are converted to the [RowInsertRequests].
+    /// We can then modify the resulting requests if needed.
+    /// Typically used in some backward compatibility situation.
+    async fn post_lines_conversion(
+        &self,
+        requests: RowInsertRequests,
+        query_context: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        let _ = query_context;
+        Ok(requests)
+    }
 }
 
 pub type LineProtocolInterceptorRef<E> =
     Arc<dyn LineProtocolInterceptor<Error = E> + Send + Sync + 'static>;
 
+#[async_trait]
 impl<E: ErrorExt> LineProtocolInterceptor for Option<LineProtocolInterceptorRef<E>> {
     type Error = E;
 
@@ -294,6 +310,18 @@ impl<E: ErrorExt> LineProtocolInterceptor for Option<LineProtocolInterceptorRef<
             this.pre_execute(line, query_ctx)
         } else {
             Ok(())
+        }
+    }
+
+    async fn post_lines_conversion(
+        &self,
+        requests: RowInsertRequests,
+        query_context: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        if let Some(this) = self {
+            this.post_lines_conversion(requests, query_context).await
+        } else {
+            Ok(requests)
         }
     }
 }

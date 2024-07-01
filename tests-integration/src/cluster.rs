@@ -44,7 +44,6 @@ use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHa
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
-use frontend::service_config::InfluxdbOptions;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
@@ -377,13 +376,7 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
         ]);
 
-        let options = FrontendOptions {
-            influxdb: InfluxdbOptions {
-                enable: true,
-                auto_align_precision: true,
-            },
-            ..Default::default()
-        };
+        let options = FrontendOptions::default();
         let heartbeat_task = HeartbeatTask::new(
             &options,
             meta_client.clone(),
