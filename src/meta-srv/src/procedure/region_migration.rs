@@ -242,6 +242,20 @@ impl Context {
         Ok(table_route_value.as_ref().unwrap())
     }
 
+    /// Notifies the RegionSupervisor to register failure detectors of failed region.
+    ///
+    /// The original failure detector was removed once the procedure was triggered.
+    /// Now, we need to register the failure detector for the failed region.
+    pub async fn register_failure_detectors(&self) {
+        let cluster_id = self.persistent_ctx.cluster_id;
+        let datanode_id = self.persistent_ctx.from_peer.id;
+        let region_id = self.persistent_ctx.region_id;
+
+        self.region_failure_detector_controller
+            .register_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
+            .await;
+    }
+
     /// Removes the `table_route` of [VolatileContext], returns true if any.
     pub fn remove_table_route_value(&mut self) -> bool {
         let value = self.volatile_ctx.table_route.take();

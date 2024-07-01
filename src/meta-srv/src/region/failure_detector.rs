@@ -14,27 +14,24 @@
 
 use std::ops::DerefMut;
 
-use common_meta::{ClusterId, DatanodeId};
+use common_meta::ddl::DetectingRegion;
 use dashmap::mapref::multiple::RefMulti;
 use dashmap::DashMap;
-use store_api::storage::RegionId;
 
 use crate::failure_detector::{PhiAccrualFailureDetector, PhiAccrualFailureDetectorOptions};
-
-pub(crate) type Ident = (ClusterId, DatanodeId, RegionId);
 
 /// Detects the region failures.
 pub(crate) struct RegionFailureDetector {
     options: PhiAccrualFailureDetectorOptions,
-    detectors: DashMap<Ident, PhiAccrualFailureDetector>,
+    detectors: DashMap<DetectingRegion, PhiAccrualFailureDetector>,
 }
 
 pub(crate) struct FailureDetectorEntry<'a> {
-    e: RefMulti<'a, Ident, PhiAccrualFailureDetector>,
+    e: RefMulti<'a, DetectingRegion, PhiAccrualFailureDetector>,
 }
 
 impl FailureDetectorEntry<'_> {
-    pub(crate) fn region_ident(&self) -> &Ident {
+    pub(crate) fn region_ident(&self) -> &DetectingRegion {
         self.e.key()
     }
 
@@ -54,7 +51,7 @@ impl RegionFailureDetector {
     /// Returns [`PhiAccrualFailureDetector`] of the specific [`Ident`].
     pub(crate) fn region_failure_detector(
         &self,
-        ident: Ident,
+        ident: DetectingRegion,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
         self.detectors
             .entry(ident)
@@ -66,7 +63,7 @@ impl RegionFailureDetector {
     /// detector is created and initialized with the provided timestamp.
     pub(crate) fn maybe_init_region_failure_detector(
         &self,
-        ident: Ident,
+        ident: DetectingRegion,
         ts_millis: i64,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
         self.detectors.entry(ident).or_insert_with(|| {
@@ -84,7 +81,7 @@ impl RegionFailureDetector {
     }
 
     /// Removes the specific [PhiAccrualFailureDetector] if exists.
-    pub(crate) fn remove(&self, ident: &Ident) {
+    pub(crate) fn remove(&self, ident: &DetectingRegion) {
         self.detectors.remove(ident);
     }
 
@@ -95,7 +92,7 @@ impl RegionFailureDetector {
 
     /// Returns true if the specific `ident` exists.
     #[cfg(test)]
-    pub(crate) fn contains(&self, ident: &Ident) -> bool {
+    pub(crate) fn contains(&self, ident: &DetectingRegion) -> bool {
         self.detectors.contains_key(ident)
     }
 
@@ -124,6 +121,8 @@ impl RegionFailureDetector {
 
 #[cfg(test)]
 mod tests {
+
+    use store_api::storage::RegionId;
 
     use super::*;
 

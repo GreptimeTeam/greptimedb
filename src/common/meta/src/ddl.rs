@@ -104,16 +104,18 @@ pub struct TableMetadata {
 
 pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;
 
+pub type DetectingRegion = (ClusterId, DatanodeId, RegionId);
+
 /// Used for actively registering Region failure detectors.
 ///
 /// Ensuring the Region Supervisor can detect Region failures without relying on the first heartbeat from the datanode.
 #[async_trait::async_trait]
 pub trait RegionFailureDetectorController: Send + Sync {
     /// Registers failure detectors for the given identifiers.
-    async fn register_failure_detectors(&self, idents: Vec<(ClusterId, DatanodeId, RegionId)>);
+    async fn register_failure_detectors(&self, idents: Vec<DetectingRegion>);
 
     /// Deregisters failure detectors for the given identifiers.
-    async fn deregister_failure_detectors(&self, idents: Vec<(ClusterId, DatanodeId, RegionId)>);
+    async fn deregister_failure_detectors(&self, idents: Vec<DetectingRegion>);
 }
 
 /// A noop implementation of [`RegionFailureDetectorController`].
@@ -122,9 +124,9 @@ pub struct NoopRegionFailureDetectorControl;
 
 #[async_trait::async_trait]
 impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
-    async fn register_failure_detectors(&self, _ident: Vec<(ClusterId, DatanodeId, RegionId)>) {}
+    async fn register_failure_detectors(&self, _ident: Vec<DetectingRegion>) {}
 
-    async fn deregister_failure_detectors(&self, _ident: Vec<(ClusterId, DatanodeId, RegionId)>) {}
+    async fn deregister_failure_detectors(&self, _ident: Vec<DetectingRegion>) {}
 }
 
 /// The context of ddl.
@@ -148,4 +150,26 @@ pub struct DdlContext {
     pub peer_lookup_service: PeerLookupServiceRef,
     /// controller of region failure detector.
     pub region_failure_detector_controller: RegionFailureDetectorControllerRef,
+}
+
+impl DdlContext {
+    /// Notifies the RegionSupervisor to register failure detector of new created regions.
+    ///
+    /// The datanode may crash without sending a heartbeat that contains information about newly created regions,
+    /// which may prevent the RegionSupervisor from detecting failures in these newly created regions.
+    pub async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        self.region_failure_detector_controller
+            .register_failure_detectors(detecting_regions)
+            .await;
+    }
+
+    /// Notifies the RegionSupervisor to remove failure detectors.
+    ///
+    /// Once the regions were dropped, subsequent heartbeats no longer include these regions.
+    /// Therefore, we should remove the failure detectors for these dropped regions.
+    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        self.region_failure_detector_controller
+            .deregister_failure_detectors(detecting_regions)
+            .await;
+    }
 }

@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common_meta::ddl::RegionFailureDetectorController;
+use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::MAINTENANCE_KEY;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::PeerLookupServiceRef;
@@ -36,7 +36,7 @@ use crate::handler::node_stat::Stat;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::RegionMigrationProcedureTask;
-use crate::region::failure_detector::{Ident, RegionFailureDetector};
+use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
 
 /// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
@@ -76,8 +76,8 @@ impl From<&Stat> for DatanodeHeartbeat {
 ///   of the supervisor during tests.
 pub(crate) enum Event {
     Tick,
-    RegisterFailureDetectors(Vec<Ident>),
-    DeregisterFailureDetectors(Vec<Ident>),
+    RegisterFailureDetectors(Vec<DetectingRegion>),
+    DeregisterFailureDetectors(Vec<DetectingRegion>),
     HeartbeatArrived(DatanodeHeartbeat),
     Clear,
     #[cfg(test)]
@@ -86,7 +86,7 @@ pub(crate) enum Event {
 
 #[cfg(test)]
 impl Event {
-    pub(crate) fn into_region_failure_detectors(self) -> Vec<Ident> {
+    pub(crate) fn into_region_failure_detectors(self) -> Vec<DetectingRegion> {
         match self {
             Self::RegisterFailureDetectors(ident) => ident,
             _ => unreachable!(),
@@ -217,25 +217,23 @@ impl RegionFailureDetectorControl {
 
 #[async_trait::async_trait]
 impl RegionFailureDetectorController for RegionFailureDetectorControl {
-    async fn register_failure_detectors(&self, ident: Vec<Ident>) {
-        if self
+    async fn register_failure_detectors(&self, ident: Vec<DetectingRegion>) {
+        if let Err(err) = self
             .sender
             .send(Event::RegisterFailureDetectors(ident))
             .await
-            .is_err()
         {
-            error!("RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor is stop receiving heartbeat");
         }
     }
 
-    async fn deregister_failure_detectors(&self, ident: Vec<Ident>) {
-        if self
+    async fn deregister_failure_detectors(&self, ident: Vec<DetectingRegion>) {
+        if let Err(err) = self
             .sender
             .send(Event::DeregisterFailureDetectors(ident))
             .await
-            .is_err()
         {
-            error!("RegionSupervisor is stop receiving heartbeat");
+            error!(err; "RegionSupervisor is stop receiving heartbeat");
         }
     }
 }
@@ -252,8 +250,8 @@ impl HeartbeatAcceptor {
 
     /// Accepts heartbeats from datanodes.
     pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
-        if let Err(e) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(e; "RegionSupervisor is stop receiving heartbeat");
+        if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
+            error!(err; "RegionSupervisor is stop receiving heartbeat");
         }
     }
 }
@@ -304,7 +302,7 @@ impl RegionSupervisor {
         info!("RegionSupervisor is stopped!");
     }
 
-    async fn register_failure_detectors(&self, idents: Vec<Ident>) {
+    async fn register_failure_detectors(&self, idents: Vec<DetectingRegion>) {
         let ts_millis = current_time_millis();
         for ident in idents {
             // The corresponding region has `acceptable_heartbeat_pause_millis` to send heartbeat from datanode.
@@ -313,7 +311,7 @@ impl RegionSupervisor {
         }
     }
 
-    async fn deregister_failure_detectors(&self, idents: Vec<Ident>) {
+    async fn deregister_failure_detectors(&self, idents: Vec<DetectingRegion>) {
         for ident in idents {
             self.failure_detector.remove(&ident)
         }
@@ -482,7 +480,6 @@ pub(crate) mod tests {
         ));
         let kv_backend = env.kv_backend();
         let peer_lookup = Arc::new(NoopPeerLookupService);
-
         let (tx, rx) = tokio::sync::mpsc::channel(1024);
 
         (

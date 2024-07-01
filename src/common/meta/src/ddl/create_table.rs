@@ -33,7 +33,10 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, convert_region_routes_to_detecting_regions, handle_retry_error,
+    region_storage_path,
+};
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
@@ -273,29 +276,16 @@ impl CreateTableProcedure {
         let region_wal_options = self.region_wal_options()?.clone();
         // Safety: the table_route must be allocated.
         let physical_table_route = self.table_route()?.clone();
-
-        let idents = physical_table_route
-            .region_routes
-            .iter()
-            .map(|region| {
-                (
-                    cluster_id,
-                    region.leader_peer.as_ref().unwrap().id,
-                    region.region.id,
-                )
-            })
-            .collect::<Vec<_>>();
+        let detecting_regions = convert_region_routes_to_detecting_regions(
+            cluster_id,
+            &physical_table_route.region_routes,
+        );
         let table_route = TableRouteValue::Physical(physical_table_route);
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
-        // Notifies RegionSupervisor to register failure detector of new created regions.
-        //
-        // The datanode may crash without sending a heartbeat that contains information about newly created regions,
-        // which may prevent the RegionSupervisor from detecting failures in these newly created regions.
         self.context
-            .region_failure_detector_controller
-            .register_failure_detectors(idents)
+            .register_failure_detectors(detecting_regions)
             .await;
         info!("Created table metadata for table {table_id}");
 

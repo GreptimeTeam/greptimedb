@@ -26,7 +26,7 @@ use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, convert_region_routes_to_detecting_regions};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
@@ -136,34 +136,19 @@ impl DropTableExecutor {
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
     ) -> Result<()> {
-        let idents = if table_route_value.is_physical() {
-            // Safety: checked.
-            let regions = table_route_value.region_routes().unwrap();
-            let idents = regions
-                .iter()
-                .flat_map(|region| {
-                    region
-                        .leader_peer
-                        .as_ref()
-                        .map(|peer| (self.cluster_id, peer.id, region.region.id))
-                })
-                .collect::<Vec<_>>();
-            Some(idents)
-        } else {
-            None
-        };
-
         ctx.table_metadata_manager
             .destroy_table_metadata(self.table_id, &self.table, table_route_value)
             .await?;
-        // Notifies the RegionSupervisor to remove failure detectors.
-        //
-        // Once the regions were dropped, subsequent heartbeats no longer include these regions.
-        // Therefore, we should remove the failure detectors for these dropped regions.
-        if let Some(ident) = idents {
-            ctx.region_failure_detector_controller
-                .deregister_failure_detectors(ident)
-                .await;
+
+        let detecting_regions = if table_route_value.is_physical() {
+            // Safety: checked.
+            let regions = table_route_value.region_routes().unwrap();
+            convert_region_routes_to_detecting_regions(self.cluster_id, regions)
+        } else {
+            vec![]
+        };
+        if !detecting_regions.is_empty() {
+            ctx.deregister_failure_detectors(detecting_regions).await;
         }
         Ok(())
     }
