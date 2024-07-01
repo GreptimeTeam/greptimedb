@@ -26,9 +26,10 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
-use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
+use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient, MetaClientBuilder};
+use meta_client::MetaClientOptions;
 use servers::addrs;
 use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
