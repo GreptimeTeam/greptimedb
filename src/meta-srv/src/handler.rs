@@ -43,13 +43,13 @@ use crate::service::mailbox::{
 pub mod check_leader_handler;
 pub mod collect_cluster_info_handler;
 pub mod collect_stats_handler;
+pub mod extract_stat_handler;
 pub mod failure_handler;
 pub mod filter_inactive_region_stats;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod node_stat;
 pub mod on_leader_start_handler;
-pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;
 pub mod response_header_handler;
@@ -440,9 +440,9 @@ mod tests {
 
     use crate::handler::check_leader_handler::CheckLeaderHandler;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
+    use crate::handler::extract_stat_handler::ExtractStatHandler;
     use crate::handler::mailbox_handler::MailboxHandler;
     use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
-    use crate::handler::persist_stats_handler::PersistStatsHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
@@ -518,9 +518,9 @@ mod tests {
         group.add_handler(ResponseHeaderHandler).await;
         group.add_handler(CheckLeaderHandler).await;
         group.add_handler(OnLeaderStartHandler).await;
-        group.add_handler(CollectStatsHandler).await;
+        group.add_handler(ExtractStatHandler).await;
         group.add_handler(MailboxHandler).await;
-        group.add_handler(PersistStatsHandler::default()).await;
+        group.add_handler(CollectStatsHandler::default()).await;
 
         let handlers = group.handlers.read().await;
 
