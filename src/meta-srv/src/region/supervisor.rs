@@ -307,18 +307,18 @@ impl RegionSupervisor {
         info!("RegionSupervisor is stopped!");
     }
 
-    async fn register_failure_detectors(&self, idents: Vec<DetectingRegion>) {
+    async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
         let ts_millis = current_time_millis();
-        for ident in idents {
+        for region in detecting_regions {
             // The corresponding region has `acceptable_heartbeat_pause_millis` to send heartbeat from datanode.
             self.failure_detector
-                .maybe_init_region_failure_detector(ident, ts_millis);
+                .maybe_init_region_failure_detector(region, ts_millis);
         }
     }
 
-    async fn deregister_failure_detectors(&self, idents: Vec<DetectingRegion>) {
-        for ident in idents {
-            self.failure_detector.remove(&ident)
+    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        for region in detecting_regions {
+            self.failure_detector.remove(&region)
         }
     }
 

@@ -147,9 +147,7 @@ impl DropTableExecutor {
         } else {
             vec![]
         };
-        if !detecting_regions.is_empty() {
-            ctx.deregister_failure_detectors(detecting_regions).await;
-        }
+        ctx.deregister_failure_detectors(detecting_regions).await;
         Ok(())
     }
 
