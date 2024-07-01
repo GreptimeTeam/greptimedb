@@ -439,8 +439,14 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::handler::check_leader_handler::CheckLeaderHandler;
+    use crate::handler::collect_cluster_info_handler::{
+        CollectDatanodeClusterInfoHandler, CollectFlownodeClusterInfoHandler,
+        CollectFrontendClusterInfoHandler,
+    };
     use crate::handler::collect_stats_handler::CollectStatsHandler;
     use crate::handler::extract_stat_handler::ExtractStatHandler;
+    use crate::handler::filter_inactive_region_stats::FilterInactiveRegionStatsHandler;
+    use crate::handler::keep_lease_handler::{DatanodeKeepLeaseHandler, FlownodeKeepLeaseHandler};
     use crate::handler::mailbox_handler::MailboxHandler;
     use crate::handler::on_leader_start_handler::OnLeaderStartHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
@@ -516,20 +522,39 @@ mod tests {
     async fn test_handler_name() {
         let group = HeartbeatHandlerGroup::default();
         group.add_handler(ResponseHeaderHandler).await;
+        group.add_handler(DatanodeKeepLeaseHandler).await;
+        group.add_handler(FlownodeKeepLeaseHandler).await;
         group.add_handler(CheckLeaderHandler).await;
         group.add_handler(OnLeaderStartHandler).await;
         group.add_handler(ExtractStatHandler).await;
+        group.add_handler(CollectDatanodeClusterInfoHandler).await;
+        group.add_handler(CollectFrontendClusterInfoHandler).await;
+        group.add_handler(CollectFlownodeClusterInfoHandler).await;
         group.add_handler(MailboxHandler).await;
+        group.add_handler(FilterInactiveRegionStatsHandler).await;
         group.add_handler(CollectStatsHandler::default()).await;
 
         let handlers = group.handlers.read().await;
 
-        assert_eq!(6, handlers.len());
-        assert_eq!("ResponseHeaderHandler", handlers[0].handler.name());
-        assert_eq!("CheckLeaderHandler", handlers[1].handler.name());
-        assert_eq!("OnLeaderStartHandler", handlers[2].handler.name());
-        assert_eq!("CollectStatsHandler", handlers[3].handler.name());
-        assert_eq!("MailboxHandler", handlers[4].handler.name());
-        assert_eq!("PersistStatsHandler", handlers[5].handler.name());
+        assert_eq!(12, handlers.len());
+
+        let names = [
+            "ResponseHeaderHandler",
+            "DatanodeKeepLeaseHandler",
+            "FlownodeKeepLeaseHandler",
+            "CheckLeaderHandler",
+            "OnLeaderStartHandler",
+            "ExtractStatHandler",
+            "CollectDatanodeClusterInfoHandler",
+            "CollectFrontendClusterInfoHandler",
+            "CollectFlownodeClusterInfoHandler",
+            "MailboxHandler",
+            "FilterInactiveRegionStatsHandler",
+            "CollectStatsHandler",
+        ];
+
+        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+            assert_eq!(handler.name, name);
+        }
     }
 }
