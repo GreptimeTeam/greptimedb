@@ -2,6 +2,10 @@ FROM centos:7 as builder
 
 ENV LANG en_US.utf8
 
+# Note: CentOS 7 has reached EOL since 2024-07-01 thus `mirror.centos.org` is no longer available and we need to use `vault.centos.org` instead.
+RUN sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/*.repo
+RUN sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
+
 # Install dependencies
 RUN ulimit -n 1024000 && yum groupinstall -y 'Development Tools'
 RUN yum install -y epel-release  \
