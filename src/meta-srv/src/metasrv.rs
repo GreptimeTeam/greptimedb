@@ -23,6 +23,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -327,6 +328,8 @@ pub struct Metasrv {
     started: Arc<AtomicBool>,
     start_time_ms: u64,
     options: MetasrvOptions,
+    // Used to notify cluster members to invalidate the cache
+    cache_invalidator: CacheInvalidatorRef,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
     in_memory: ResettableKvBackendRef,
@@ -534,6 +537,10 @@ impl Metasrv {
 
     pub fn handler_group(&self) -> &HeartbeatHandlerGroup {
         &self.handler_group
+    }
+
+    pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
+        &self.cache_invalidator
     }
 
     pub fn election(&self) -> Option<&ElectionRef> {

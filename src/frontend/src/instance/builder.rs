@@ -127,11 +127,13 @@ impl FrontendBuilder {
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
                 })?;
+        let flownode_peer_cache = self.layered_cache_registry.get();
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
+            flownode_peer_cache,
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),

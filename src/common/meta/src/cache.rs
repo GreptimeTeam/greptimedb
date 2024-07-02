@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cluster;
 mod container;
 mod flow;
 mod registry;
 mod table;
 
+pub use cluster::{new_flownode_peer_cache, FlownodePeerCache, FlownodePeerCacheRef};
 pub use container::{CacheContainer, Initializer, Invalidator, TokenFilter};
 pub use flow::{new_table_flownode_set_cache, TableFlownodeSetCache, TableFlownodeSetCacheRef};
 pub use registry::{

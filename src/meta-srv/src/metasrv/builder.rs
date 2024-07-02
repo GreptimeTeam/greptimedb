@@ -346,7 +346,7 @@ impl MetasrvBuilder {
             DdlManager::try_new(
                 DdlContext {
                     node_manager,
-                    cache_invalidator,
+                    cache_invalidator: cache_invalidator.clone(),
                     memory_region_keeper: memory_region_keeper.clone(),
                     table_metadata_manager: table_metadata_manager.clone(),
                     table_metadata_allocator: table_metadata_allocator.clone(),
@@ -410,6 +410,7 @@ impl MetasrvBuilder {
             started,
             start_time_ms: common_time::util::current_time_millis() as u64,
             options,
+            cache_invalidator,
             in_memory,
             kv_backend,
             leader_cached_kv_backend,

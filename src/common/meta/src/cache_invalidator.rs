@@ -99,6 +99,10 @@ where
                     let key = FlowInfoKey::new(*flow_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
+                CacheIdent::FlownodeId(_) => {
+                    // Do nothing.
+                    // The Flownode peer info won't be cached in the KvBackend.
+                }
             }
         }
         Ok(())

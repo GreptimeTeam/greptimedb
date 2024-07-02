@@ -164,6 +164,7 @@ pub enum CacheIdent {
     SchemaName(SchemaName),
     CreateFlow(CreateFlow),
     DropFlow(DropFlow),
+    FlownodeId(FlownodeId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::str::FromStr;
+use std::sync::Arc;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::BoxedError;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,7 @@ use crate::error::{
     InvalidRoleSnafu, ParseNumSnafu, Result,
 };
 use crate::peer::Peer;
-use crate::ClusterId;
+use crate::{ClusterId, FlownodeId};
 
 const CLUSTER_NODE_INFO_PREFIX: &str = "__meta_cluster_node_info";
 
@@ -36,16 +37,19 @@ lazy_static! {
     .unwrap();
 }
 
+pub type ClusterInfoRef = Arc<dyn ClusterInfo>;
+
 /// [ClusterInfo] provides information about the cluster.
 #[async_trait::async_trait]
-pub trait ClusterInfo {
-    type Error: ErrorExt;
-
+pub trait ClusterInfo: Sync + Send {
     /// List all nodes by role in the cluster. If `role` is `None`, list all nodes.
     async fn list_nodes(
         &self,
         role: Option<Role>,
-    ) -> std::result::Result<Vec<NodeInfo>, Self::Error>;
+    ) -> std::result::Result<Vec<NodeInfo>, BoxedError>;
+
+    /// Retrieves the [`Peer`] information of a flownode.
+    async fn get_flownode(&self, id: FlownodeId) -> std::result::Result<Option<Peer>, BoxedError>;
 
     // TODO(jeremy): Other info, like region status, etc.
 }
@@ -184,11 +188,11 @@ impl FromStr for NodeInfoKey {
     }
 }
 
-impl TryFrom<Vec<u8>> for NodeInfoKey {
+impl TryFrom<&[u8]> for NodeInfoKey {
     type Error = Error;
 
-    fn try_from(bytes: Vec<u8>) -> Result<Self> {
-        String::from_utf8(bytes)
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        std::str::from_utf8(bytes)
             .context(FromUtf8Snafu {
                 name: "NodeInfoKey",
             })
@@ -217,11 +221,11 @@ impl FromStr for NodeInfo {
     }
 }
 
-impl TryFrom<Vec<u8>> for NodeInfo {
+impl TryFrom<&[u8]> for NodeInfo {
     type Error = Error;
 
-    fn try_from(bytes: Vec<u8>) -> Result<Self> {
-        String::from_utf8(bytes)
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        std::str::from_utf8(bytes)
             .context(FromUtf8Snafu { name: "NodeInfo" })
             .map(|x| x.parse())?
     }
@@ -279,7 +283,7 @@ mod tests {
         };
 
         let key_bytes: Vec<u8> = key.into();
-        let new_key: NodeInfoKey = key_bytes.try_into().unwrap();
+        let new_key: NodeInfoKey = key_bytes.as_slice().try_into().unwrap();
 
         assert_eq!(1, new_key.cluster_id);
         assert_eq!(Datanode, new_key.role);
@@ -306,7 +310,7 @@ mod tests {
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
-        let new_node_info: NodeInfo = node_info_bytes.try_into().unwrap();
+        let new_node_info: NodeInfo = node_info_bytes.as_slice().try_into().unwrap();
 
         assert_matches!(
             new_node_info,

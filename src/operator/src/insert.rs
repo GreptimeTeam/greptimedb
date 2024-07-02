@@ -25,7 +25,7 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
-use common_meta::cache::TableFlownodeSetCacheRef;
+use common_meta::cache::{FlownodePeerCacheRef, TableFlownodeSetCacheRef};
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
@@ -62,6 +62,9 @@ pub struct Inserter {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
+    /// Only available in cluster mode, it not necessary to query peer info in standalone mode.
+    #[allow(dead_code)]
+    flownode_peer_cache: Option<FlownodePeerCacheRef>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -88,12 +91,14 @@ impl Inserter {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
+        flownode_peer_cache: Option<FlownodePeerCacheRef>,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
+            flownode_peer_cache,
         }
     }
 
