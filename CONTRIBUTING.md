@@ -4,10 +4,7 @@ Thanks a lot for considering contributing to GreptimeDB. We believe people like 
 
 You can find our contributors at https://github.com/GreptimeTeam/greptimedb/graphs/contributors. When you dedicate to GreptimeDB for a few months and keep bringing high-quality contributions (code, docs, advocate, etc.), you will be a candidate of a committer.
 
-A committer will be granted both read & write access to GreptimeDB repos. Here is a list of current committers except GreptimeDB team members:
-
-* [Eugene Tolbakov](https://github.com/etolbakov): PromQL support, SQL engine, InfluxDB APIs, and more.
-* [@NiwakaDev](https://github.com/NiwakaDev): SQL engine and storage layer.
+A committer will be granted both read & write access to GreptimeDB repos. Check the [AUTHOR.md](AUTHOR.md) file for all current individual committers.
 
 Please read the guidelines, and they can help you get started. Communicate respectfully with the developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
 
