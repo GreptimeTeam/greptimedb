@@ -65,6 +65,12 @@ impl FileId {
     }
 }
 
+impl From<FileId> for Uuid {
+    fn from(value: FileId) -> Self {
+        value.0
+    }
+}
+
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

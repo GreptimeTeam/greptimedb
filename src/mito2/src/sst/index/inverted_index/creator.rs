@@ -297,6 +297,7 @@ mod tests {
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt64Vector, UInt8Vector};
     use futures::future::BoxFuture;
+    use index::inverted_index::format::reader::cache::InvertedIndexCache;
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin::puffin_manager::PuffinManager;
@@ -414,10 +415,12 @@ mod tests {
 
         move |expr| {
             let _d = &d;
+            let cache = Arc::new(InvertedIndexCache::new(10, 10));
             let applier = SstIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
                 None,
+                Some(cache),
                 &region_metadata,
                 Default::default(),
                 factory.clone(),
