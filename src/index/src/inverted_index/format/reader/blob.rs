@@ -50,6 +50,21 @@ impl<R> InvertedIndexBlobReader<R> {
     }
 }
 
+impl<R> InvertedIndexBlobReader<R>
+where
+    R: AsyncRead + AsyncSeek + Unpin + Send,
+{
+    pub(crate) async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
+        self.source
+            .seek(SeekFrom::Start(offset))
+            .await
+            .context(SeekSnafu)?;
+        let mut buf = vec![0u8; size as usize];
+        self.source.read(&mut buf).await.context(ReadSnafu)?;
+        Ok(buf)
+    }
+}
+
 #[async_trait]
 impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
     async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
@@ -62,25 +77,12 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIn
     }
 
     async fn fst(&mut self, offset: u64, size: u32) -> Result<FstMap> {
-        self.source
-            .seek(SeekFrom::Start(offset))
-            .await
-            .context(SeekSnafu)?;
-        let mut buf = vec![0u8; size as usize];
-        self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
-
-        FstMap::new(buf).context(DecodeFstSnafu)
+        let fst_data = self.seek_read(offset, size).await?;
+        FstMap::new(fst_data).context(DecodeFstSnafu)
     }
 
     async fn bitmap(&mut self, offset: u64, size: u32) -> Result<BitVec> {
-        self.source
-            .seek(SeekFrom::Start(offset))
-            .await
-            .context(SeekSnafu)?;
-        let mut buf = vec![0u8; size as usize];
-        self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
-
-        Ok(BitVec::from_vec(buf))
+        self.seek_read(offset, size).await.map(BitVec::from_vec)
     }
 }
 
