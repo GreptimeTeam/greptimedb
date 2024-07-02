@@ -161,6 +161,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Interval(_)
                 | ConcreteDataType::Duration(_)
                 | ConcreteDataType::Decimal128(_)
+                | ConcreteDataType::Binary(_)
         )
     }
 
@@ -717,6 +718,7 @@ mod tests {
         assert!(!ConcreteDataType::int32_datatype().is_stringifiable());
         assert!(!ConcreteDataType::float32_datatype().is_stringifiable());
         assert!(ConcreteDataType::string_datatype().is_stringifiable());
+        assert!(ConcreteDataType::binary_datatype().is_stringifiable());
         assert!(ConcreteDataType::date_datatype().is_stringifiable());
         assert!(ConcreteDataType::datetime_datatype().is_stringifiable());
         assert!(ConcreteDataType::timestamp_second_datatype().is_stringifiable());
