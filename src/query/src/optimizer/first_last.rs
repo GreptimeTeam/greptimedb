@@ -42,7 +42,7 @@ impl OptimizerRule for FirstLastPushDownRule {
                 .transform_down(&|plan| Self::set_top_hint(plan))?
                 .data;
 
-            common_telemetry::info!("Push down last");
+            common_telemetry::debug!("Push down last");
 
             Ok(Some(new_plan))
         } else {
@@ -98,7 +98,7 @@ impl TreeNodeVisitor<'_> for TopValueVisitor {
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         if let LogicalPlan::Aggregate(aggregate) = node {
-            common_telemetry::info!("group is {:?}", aggregate.group_expr);
+            common_telemetry::debug!("group is {:?}", aggregate.group_expr);
             // TODO(yingwen): Support first value.
             for expr in &aggregate.aggr_expr {
                 let Expr::AggregateFunction(func) = expr else {
@@ -106,7 +106,7 @@ impl TreeNodeVisitor<'_> for TopValueVisitor {
                     self.is_last = None;
                     break;
                 };
-                common_telemetry::info!("func is {:?}", func);
+                common_telemetry::debug!("func is {:?}", func);
                 match func.func_def.name() {
                     "last_value" => {
                         self.is_last = Some(true);
