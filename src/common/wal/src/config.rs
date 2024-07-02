@@ -17,7 +17,7 @@ pub mod raft_engine;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig, StandaloneKafkaConfig};
+use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
 
 /// Wal configurations for metasrv.
@@ -43,25 +43,11 @@ impl Default for DatanodeWalConfig {
     }
 }
 
-/// Wal configurations for standalone.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum StandaloneWalConfig {
-    RaftEngine(RaftEngineConfig),
-    Kafka(StandaloneKafkaConfig),
-}
-
-impl Default for StandaloneWalConfig {
-    fn default() -> Self {
-        Self::RaftEngine(RaftEngineConfig::default())
-    }
-}
-
-impl From<StandaloneWalConfig> for MetasrvWalConfig {
-    fn from(config: StandaloneWalConfig) -> Self {
+impl From<DatanodeWalConfig> for MetasrvWalConfig {
+    fn from(config: DatanodeWalConfig) -> Self {
         match config {
-            StandaloneWalConfig::RaftEngine(_) => Self::RaftEngine,
-            StandaloneWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
+            DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
+            DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
                 num_topics: config.num_topics,
                 selector_type: config.selector_type,
@@ -75,11 +61,11 @@ impl From<StandaloneWalConfig> for MetasrvWalConfig {
     }
 }
 
-impl From<MetasrvWalConfig> for StandaloneWalConfig {
+impl From<MetasrvWalConfig> for DatanodeWalConfig {
     fn from(config: MetasrvWalConfig) -> Self {
         match config {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
-            MetasrvWalConfig::Kafka(config) => Self::Kafka(StandaloneKafkaConfig {
+            MetasrvWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
                 num_topics: config.num_topics,
                 selector_type: config.selector_type,
@@ -94,22 +80,6 @@ impl From<MetasrvWalConfig> for StandaloneWalConfig {
     }
 }
 
-impl From<StandaloneWalConfig> for DatanodeWalConfig {
-    fn from(config: StandaloneWalConfig) -> Self {
-        match config {
-            StandaloneWalConfig::RaftEngine(config) => Self::RaftEngine(config),
-            StandaloneWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
-                broker_endpoints: config.broker_endpoints,
-                compression: config.compression,
-                max_batch_size: config.max_batch_size,
-                linger: config.linger,
-                consumer_wait_timeout: config.consumer_wait_timeout,
-                backoff: config.backoff,
-            }),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -119,7 +89,7 @@ mod tests {
 
     use super::*;
     use crate::config::kafka::common::BackoffConfig;
-    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig, StandaloneKafkaConfig};
+    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
     use crate::TopicSelectorType;
 
     #[test]
@@ -218,12 +188,13 @@ mod tests {
                 base: 2,
                 deadline: Some(Duration::from_secs(60 * 5)),
             },
+            ..Default::default()
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
 
-        // Deserialized to StandaloneWalConfig.
-        let standalone_wal_config: StandaloneWalConfig = toml::from_str(toml_str).unwrap();
-        let expected = StandaloneKafkaConfig {
+        // Deserialized to DatanodeWalConfig.
+        let standalone_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
+        let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 32,
             selector_type: TopicSelectorType::RoundRobin,
@@ -242,6 +213,6 @@ mod tests {
                 deadline: Some(Duration::from_secs(60 * 5)),
             },
         };
-        assert_eq!(standalone_wal_config, StandaloneWalConfig::Kafka(expected));
+        assert_eq!(standalone_wal_config, DatanodeWalConfig::Kafka(expected));
     }
 }

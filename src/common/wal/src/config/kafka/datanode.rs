@@ -19,7 +19,7 @@ use rskafka::client::partition::Compression;
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{backoff_prefix, BackoffConfig};
-use crate::BROKER_ENDPOINT;
+use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 
 /// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,10 +41,25 @@ pub struct DatanodeKafkaConfig {
     /// The backoff config.
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
+    /// Number of topics to be created upon start.
+    pub num_topics: usize,
+    /// Number of partitions per topic.
+    pub num_partitions: i32,
+    /// The type of the topic selector with which to select a topic for a region.
+    pub selector_type: TopicSelectorType,
+    /// The replication factor of each topic.
+    pub replication_factor: i16,
+    /// The timeout of topic creation.
+    #[serde(with = "humantime_serde")]
+    pub create_topic_timeout: Duration,
+    /// Topic name prefix.
+    pub topic_name_prefix: String,
 }
 
 impl Default for DatanodeKafkaConfig {
     fn default() -> Self {
+        let broker_endpoints = [BROKER_ENDPOINT.to_string()];
+        let replication_factor = broker_endpoints.len() as i16;
         Self {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             compression: Compression::NoCompression,
@@ -53,6 +68,12 @@ impl Default for DatanodeKafkaConfig {
             linger: Duration::from_millis(200),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig::default(),
+            num_topics: 64,
+            num_partitions: 1,
+            selector_type: TopicSelectorType::RoundRobin,
+            replication_factor,
+            create_topic_timeout: Duration::from_secs(30),
+            topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
         }
     }
 }

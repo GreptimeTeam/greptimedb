@@ -20,7 +20,7 @@ use common_config::Configurable;
 use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::LoggingOptions;
 use common_wal::config::raft_engine::RaftEngineConfig;
-use common_wal::config::{DatanodeWalConfig, StandaloneWalConfig};
+use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::datanode::DatanodeClientOptions;
@@ -185,7 +185,7 @@ fn test_load_standalone_example_config() {
         },
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
-            wal: StandaloneWalConfig::RaftEngine(RaftEngineConfig {
+            wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some("/tmp/greptimedb/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
                 ..Default::default()
