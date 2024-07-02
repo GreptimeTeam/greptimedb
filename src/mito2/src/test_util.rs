@@ -32,6 +32,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
+use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -256,16 +257,24 @@ impl TestEnv {
         let data_home = self.data_home().display().to_string();
 
         match log_store {
-            LogStoreImpl::RaftEngine(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -274,16 +283,24 @@ impl TestEnv {
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
         let data_home = self.data_home().display().to_string();
         match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -434,6 +451,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -442,6 +460,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -456,6 +475,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -464,6 +484,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -484,16 +505,22 @@ impl TestEnv {
         config.sanitize(&data_home).unwrap();
 
         match log_store {
-            LogStoreImpl::RaftEngine(log_store) => {
-                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => WorkerGroup::start(
+                Arc::new(config),
+                log_store,
+                Arc::new(object_store_manager),
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => WorkerGroup::start(
+                Arc::new(config),
+                log_store,
+                Arc::new(object_store_manager),
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 

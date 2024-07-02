@@ -162,6 +162,12 @@ impl CompactionOptions {
             CompactionOptions::Twcs(opts) => opts.time_window,
         }
     }
+
+    pub(crate) fn remote_compaction(&self) -> bool {
+        match self {
+            CompactionOptions::Twcs(opts) => opts.remote_compaction,
+        }
+    }
 }
 
 impl Default for CompactionOptions {
@@ -184,6 +190,9 @@ pub struct TwcsOptions {
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
+    /// Whether to use remote compaction.
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_compaction: bool,
 }
 
 with_prefix!(prefix_twcs "compaction.twcs.");
@@ -208,6 +217,7 @@ impl Default for TwcsOptions {
             max_active_window_runs: 1,
             max_inactive_window_runs: 1,
             time_window: None,
+            remote_compaction: false,
         }
     }
 }
@@ -567,6 +577,7 @@ mod tests {
             ("compaction.twcs.max_inactive_window_runs", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
+            ("compaction.twcs.remote_compaction", "false"),
             ("storage", "S3"),
             ("append_mode", "false"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
@@ -588,6 +599,7 @@ mod tests {
                 max_active_window_runs: 8,
                 max_inactive_window_runs: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
             }),
             storage: Some("S3".to_string()),
             append_mode: false,
@@ -616,6 +628,7 @@ mod tests {
                 max_active_window_runs: 8,
                 max_inactive_window_runs: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
             }),
             storage: Some("S3".to_string()),
             append_mode: false,
@@ -676,6 +689,7 @@ mod tests {
                 max_active_window_runs: 8,
                 max_inactive_window_runs: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
             }),
             storage: Some("S3".to_string()),
             append_mode: false,

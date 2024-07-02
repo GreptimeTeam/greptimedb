@@ -27,7 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::region::compact_request;
-use common_telemetry::{debug, error};
+use common_base::Plugins;
+use common_telemetry::{debug, error, info};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -59,6 +60,9 @@ use crate::region::options::MergeMode;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
+use crate::schedule::remote_job_scheduler::{
+    CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
+};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::version::LevelMeta;
@@ -103,6 +107,8 @@ pub(crate) struct CompactionScheduler {
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
     listener: WorkerListener,
+    /// Plugins for the compaction scheduler.
+    plugins: Plugins,
 }
 
 impl CompactionScheduler {
@@ -112,6 +118,7 @@ impl CompactionScheduler {
         cache_manager: CacheManagerRef,
         engine_config: Arc<MitoConfig>,
         listener: WorkerListener,
+        plugins: Plugins,
     ) -> Self {
         Self {
             scheduler,
@@ -120,12 +127,13 @@ impl CompactionScheduler {
             cache_manager,
             engine_config,
             listener,
+            plugins,
         }
     }
 
     /// Schedules a compaction for the region.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn schedule_compaction(
+    pub(crate) async fn schedule_compaction(
         &mut self,
         region_id: RegionId,
         compact_options: compact_request::Options,
@@ -153,10 +161,11 @@ impl CompactionScheduler {
         );
         self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request, compact_options)
+            .await
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
-    pub(crate) fn on_compaction_finished(
+    pub(crate) async fn on_compaction_finished(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -175,10 +184,13 @@ impl CompactionScheduler {
             self.listener.clone(),
         );
         // Try to schedule next compaction task for this region.
-        if let Err(e) = self.schedule_compaction_request(
-            request,
-            compact_request::Options::Regular(Default::default()),
-        ) {
+        if let Err(e) = self
+            .schedule_compaction_request(
+                request,
+                compact_request::Options::Regular(Default::default()),
+            )
+            .await
+        {
             error!(e; "Failed to schedule next compaction for region {}", region_id);
         }
     }
@@ -219,48 +231,13 @@ impl CompactionScheduler {
     /// Schedules a compaction request.
     ///
     /// If the region has nothing to compact, it removes the region from the status map.
-    fn schedule_compaction_request(
+    async fn schedule_compaction_request(
         &mut self,
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
+        let picker = new_picker(options.clone(), &request.current_version.options.compaction);
         let region_id = request.region_id();
-        let Some(mut task) = self.build_compaction_task(request, options) else {
-            // Nothing to compact, remove it from the region status map.
-            self.region_status.remove(&region_id);
-            return Ok(());
-        };
-
-        // Submit the compaction task.
-        self.scheduler
-            .schedule(Box::pin(async move {
-                task.run().await;
-            }))
-            .map_err(|e| {
-                error!(e; "Failed to submit compaction request for region {}", region_id);
-                // If failed to submit the job, we need to remove the region from the scheduler.
-                self.region_status.remove(&region_id);
-                e
-            })
-    }
-
-    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
-        // Remove this region.
-        let Some(status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        status.on_failure(err);
-    }
-
-    fn build_compaction_task(
-        &self,
-        req: CompactionRequest,
-        options: compact_request::Options,
-    ) -> Option<Box<dyn CompactionTask>> {
-        let picker = new_picker(options, &req.current_version.options.compaction);
-        let region_id = req.region_id();
         let CompactionRequest {
             engine_config,
             current_version,
@@ -271,7 +248,7 @@ impl CompactionScheduler {
             cache_manager,
             manifest_ctx,
             listener,
-        } = req;
+        } = request;
         debug!(
             "Pick compaction strategy {:?} for region: {}",
             picker, region_id
@@ -304,10 +281,58 @@ impl CompactionScheduler {
             for waiter in waiters {
                 waiter.send(Ok(0));
             }
-            return None;
+            self.region_status.remove(&region_id);
+            return Ok(());
         };
 
-        let task = CompactionTaskImpl {
+        // If specified to run compaction remotely, we schedule the compaction job remotely.
+        // It will fall back to local compaction if there is no remote job scheduler.
+        let waiters = if current_version.options.compaction.remote_compaction() {
+            if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
+                let remote_compaction_job = CompactionJob {
+                    compaction_region: compaction_region.clone(),
+                    picker_output: picker_output.clone(),
+                    start_time,
+                    waiters,
+                };
+
+                let result = remote_job_scheduler
+                    .schedule(
+                        RemoteJob::CompactionJob(remote_compaction_job),
+                        Box::new(DefaultNotifier {
+                            request_sender: request_sender.clone(),
+                        }),
+                    )
+                    .await;
+
+                match result {
+                    Ok(job_id) => {
+                        info!(
+                            "Scheduled remote compaction job {} for region {}",
+                            job_id, region_id
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
+
+                        // Return the waiters back to the caller for local compaction.
+                        e.waiters
+                    }
+                }
+            } else {
+                debug!(
+                    "Remote compaction is not enabled, fallback to local compaction for region {}",
+                    region_id
+                );
+                waiters
+            }
+        } else {
+            waiters
+        };
+
+        // Create a local compaction task.
+        let mut local_compaction_task = Box::new(CompactionTaskImpl {
             request_sender,
             waiters,
             start_time,
@@ -315,9 +340,29 @@ impl CompactionScheduler {
             picker_output,
             compaction_region,
             compactor: Arc::new(DefaultCompactor {}),
+        });
+
+        // Submit the compaction task.
+        self.scheduler
+            .schedule(Box::pin(async move {
+                local_compaction_task.run().await;
+            }))
+            .map_err(|e| {
+                error!(e; "Failed to submit compaction request for region {}", region_id);
+                // If failed to submit the job, we need to remove the region from the scheduler.
+                self.region_status.remove(&region_id);
+                e
+            })
+    }
+
+    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+        // Remove this region.
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
         };
 
-        Some(Box::new(task))
+        // Notifies all pending tasks.
+        status.on_failure(err);
     }
 }
 
@@ -602,6 +647,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
@@ -620,6 +666,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
@@ -659,6 +706,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         // Should schedule 1 compaction.
         assert_eq!(1, scheduler.region_status.len());
@@ -687,6 +735,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
@@ -698,7 +747,9 @@ mod tests {
             .is_some());
 
         // On compaction finished and schedule next compaction.
-        scheduler.on_compaction_finished(region_id, &manifest_ctx);
+        scheduler
+            .on_compaction_finished(region_id, &manifest_ctx)
+            .await;
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
         // 5 files for next compaction.
@@ -718,6 +769,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
             )
+            .await
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());
         assert!(scheduler

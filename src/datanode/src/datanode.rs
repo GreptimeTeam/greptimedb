@@ -343,7 +343,8 @@ impl DatanodeBuilder {
         );
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
-        let engines = Self::build_store_engines(opts, object_store_manager).await?;
+        let engines =
+            Self::build_store_engines(opts, object_store_manager, self.plugins.clone()).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -357,14 +358,19 @@ impl DatanodeBuilder {
     async fn build_store_engines(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
+        plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let mito_engine =
-                        Self::build_mito_engine(opts, object_store_manager.clone(), config.clone())
-                            .await?;
+                    let mito_engine = Self::build_mito_engine(
+                        opts,
+                        object_store_manager.clone(),
+                        config.clone(),
+                        plugins.clone(),
+                    )
+                    .await?;
 
                     let metric_engine = MetricEngine::new(mito_engine.clone());
                     engines.push(Arc::new(mito_engine) as _);
@@ -387,6 +393,7 @@ impl DatanodeBuilder {
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
         config: MitoConfig,
+        plugins: Plugins,
     ) -> Result<MitoEngine> {
         let mito_engine = match &opts.wal {
             DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
@@ -395,6 +402,7 @@ impl DatanodeBuilder {
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                     .await?,
                 object_store_manager,
+                plugins,
             )
             .await
             .context(BuildMitoEngineSnafu)?,
@@ -403,6 +411,7 @@ impl DatanodeBuilder {
                 config,
                 Self::build_kafka_log_store(kafka_config).await?,
                 object_store_manager,
+                plugins,
             )
             .await
             .context(BuildMitoEngineSnafu)?,
