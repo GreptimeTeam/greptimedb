@@ -70,6 +70,12 @@ impl FileRange {
                 .get_top_rows(&(self.file_handle().file_id(), self.row_group_idx));
             if let Some(top_select) = top_selection {
                 top_hint = None;
+                common_telemetry::info!(
+                    "file {}, row group {}, top cache hit, top_select: {:?}",
+                    self.file_handle().file_id(),
+                    self.row_group_idx,
+                    top_select.selection
+                );
                 self.row_selection
                     .as_ref()
                     .map(|row_select| row_select.and_then(&top_select.selection))
