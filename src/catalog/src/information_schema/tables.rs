@@ -304,10 +304,11 @@ impl InformationSchemaTablesBuilder {
         self.update_time.push(None);
         self.check_time.push(None);
 
+        // use mariadb default table version number here
         self.version.push(Some(11));
         self.table_comment.push(table_info.desc.as_deref());
         self.create_options
-            .push(Some(format!("{:?}", table_info.meta.options).as_ref()));
+            .push(Some(table_info.meta.options.to_string().as_ref()));
         self.create_time
             .push(Some(table_info.meta.created_on.timestamp_millis().into()));
 
