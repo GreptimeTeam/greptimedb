@@ -139,6 +139,7 @@ jobs:
     name: Fuzz Test
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
@@ -186,6 +187,7 @@ jobs:
     name: Unstable Fuzz Test
     needs: build-greptime-ci
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       matrix:
         target: [ "unstable_fuzz_create_table_standalone" ]
@@ -278,6 +280,7 @@ jobs:
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
+    timeout-minutes: 60
     strategy:
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
@@ -413,6 +416,7 @@ jobs:
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
+    timeout-minutes: 60
     strategy:
       matrix:
         target: ["fuzz_failover_mito_regions"]
