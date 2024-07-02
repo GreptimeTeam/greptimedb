@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod blob;
+pub mod cache;
 mod footer;
 
 use async_trait::async_trait;
