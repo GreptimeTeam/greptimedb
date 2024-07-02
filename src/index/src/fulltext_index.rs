@@ -23,7 +23,7 @@ pub struct Config {
     /// Analyzer to use for tokenization.
     pub analyzer: Analyzer,
 
-    /// Whether the index should be case sensitive.
+    /// Whether the index should be case-sensitive.
     pub case_sensitive: bool,
 }
 

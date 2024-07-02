@@ -128,16 +128,9 @@ mod tests {
         for memory_limit in memory_limits {
             let temp_dir = create_temp_dir("test_creator_basic_");
 
-            let mut creator =
-                TantivyFulltextIndexCreator::new(temp_dir.path(), Config::default(), memory_limit)
-                    .await
-                    .unwrap();
-
             let texts = vec!["hello", "world", "hello, world", "foo!", "Bar"];
-            for text in texts {
-                creator.push_text(text).await.unwrap();
-            }
-            creator.finish().await.unwrap();
+            let config = Config::default();
+            build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("hello", vec![0u32, 2]),
@@ -145,22 +138,7 @@ mod tests {
                 ("foo", vec![3]),
                 ("bar", vec![4]),
             ];
-
-            let index = Index::open_in_dir(temp_dir.path()).unwrap();
-            let reader = index.reader().unwrap();
-
-            let searcher = reader.searcher();
-            for (query, expected) in cases {
-                let query_parser = QueryParser::for_index(
-                    &index,
-                    vec![index.schema().get_field(TEXT_FIELD_NAME).unwrap()],
-                );
-                let query = query_parser.parse_query(query).unwrap();
-                let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
-                res.sort();
-                assert_eq!(res, expected);
-            }
+            query_and_check(temp_dir.path(), &cases).await;
         }
     }
 
@@ -171,20 +149,12 @@ mod tests {
         for memory_limit in memory_limits {
             let temp_dir = create_temp_dir("test_creator_case_sensitive_");
 
+            let texts = vec!["hello", "world", "hello, world", "foo!", "Bar"];
             let config = Config {
                 case_sensitive: true,
                 ..Config::default()
             };
-            let mut creator =
-                TantivyFulltextIndexCreator::new(temp_dir.path(), config, memory_limit)
-                    .await
-                    .unwrap();
-
-            let texts = vec!["hello", "world", "hello, world", "foo!", "Bar"];
-            for text in texts {
-                creator.push_text(text).await.unwrap();
-            }
-            creator.finish().await.unwrap();
+            build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("hello", vec![0u32, 2]),
@@ -192,21 +162,7 @@ mod tests {
                 ("foo", vec![3]),
                 ("bar", vec![]),
             ];
-
-            let index = Index::open_in_dir(temp_dir.path()).unwrap();
-            let reader = index.reader().unwrap();
-            let searcher = reader.searcher();
-            for (query, expected) in cases {
-                let query_parser = QueryParser::for_index(
-                    &index,
-                    vec![index.schema().get_field(TEXT_FIELD_NAME).unwrap()],
-                );
-                let query = query_parser.parse_query(query).unwrap();
-                let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
-                res.sort();
-                assert_eq!(res, expected);
-            }
+            query_and_check(temp_dir.path(), &cases).await;
         }
     }
 
@@ -217,20 +173,12 @@ mod tests {
         for memory_limit in memory_limits {
             let temp_dir = create_temp_dir("test_creator_chinese_");
 
+            let texts = vec!["你好", "世界", "你好，世界", "你好世界", "foo!", "Bar"];
             let config = Config {
                 analyzer: Analyzer::Chinese,
                 ..Config::default()
             };
-            let mut creator =
-                TantivyFulltextIndexCreator::new(temp_dir.path(), config, memory_limit)
-                    .await
-                    .unwrap();
-
-            let texts = vec!["你好", "世界", "你好，世界", "你好世界", "foo!", "Bar"];
-            for text in texts {
-                creator.push_text(text).await.unwrap();
-            }
-            creator.finish().await.unwrap();
+            build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("你好", vec![0u32, 2, 3]),
@@ -238,21 +186,7 @@ mod tests {
                 ("foo", vec![4]),
                 ("bar", vec![5]),
             ];
-
-            let index = Index::open_in_dir(temp_dir.path()).unwrap();
-            let reader = index.reader().unwrap();
-            let searcher = reader.searcher();
-            for (query, expected) in cases {
-                let query_parser = QueryParser::for_index(
-                    &index,
-                    vec![index.schema().get_field(TEXT_FIELD_NAME).unwrap()],
-                );
-                let query = query_parser.parse_query(query).unwrap();
-                let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
-                res.sort();
-                assert_eq!(res, expected);
-            }
+            query_and_check(temp_dir.path(), &cases).await;
         }
     }
 
@@ -263,20 +197,12 @@ mod tests {
         for memory_limit in memory_limits {
             let temp_dir = create_temp_dir("test_creator_chinese_case_sensitive_");
 
-            let config = Config {
-                analyzer: Analyzer::Chinese,
-                case_sensitive: true,
-            };
-            let mut creator =
-                TantivyFulltextIndexCreator::new(temp_dir.path(), config, memory_limit)
-                    .await
-                    .unwrap();
-
             let texts = vec!["你好", "世界", "你好，世界", "你好世界", "foo!", "Bar"];
-            for text in texts {
-                creator.push_text(text).await.unwrap();
-            }
-            creator.finish().await.unwrap();
+            let config = Config {
+                case_sensitive: true,
+                analyzer: Analyzer::Chinese,
+            };
+            build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("你好", vec![0u32, 2, 3]),
@@ -284,21 +210,34 @@ mod tests {
                 ("foo", vec![4]),
                 ("bar", vec![]),
             ];
+            query_and_check(temp_dir.path(), &cases).await;
+        }
+    }
 
-            let index = Index::open_in_dir(temp_dir.path()).unwrap();
-            let reader = index.reader().unwrap();
-            let searcher = reader.searcher();
-            for (query, expected) in cases {
-                let query_parser = QueryParser::for_index(
-                    &index,
-                    vec![index.schema().get_field(TEXT_FIELD_NAME).unwrap()],
-                );
-                let query = query_parser.parse_query(query).unwrap();
-                let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
-                res.sort();
-                assert_eq!(res, expected);
-            }
+    async fn build_index(texts: &[&str], path: &Path, config: Config, memory_limit: usize) {
+        let mut creator = TantivyFulltextIndexCreator::new(path, config, memory_limit)
+            .await
+            .unwrap();
+        for text in texts {
+            creator.push_text(text).await.unwrap();
+        }
+        creator.finish().await.unwrap();
+    }
+
+    async fn query_and_check(path: &Path, cases: &[(&str, Vec<u32>)]) {
+        let index = Index::open_in_dir(path).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        for (query, expected) in cases {
+            let query_parser = QueryParser::for_index(
+                &index,
+                vec![index.schema().get_field(TEXT_FIELD_NAME).unwrap()],
+            );
+            let query = query_parser.parse_query(query).unwrap();
+            let docs = searcher.search(&query, &DocSetCollector).unwrap();
+            let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
+            res.sort();
+            assert_eq!(res, *expected);
         }
     }
 }
