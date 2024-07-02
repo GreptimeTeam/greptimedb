@@ -51,9 +51,7 @@ use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
-use crate::error::{
-    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, NotStartedSnafu, Result,
-};
+use crate::error::{ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, NotStartedSnafu, Result};
 
 pub type Id = (u64, u64);
 
@@ -263,10 +261,11 @@ impl ProcedureExecutor for MetaClient {
 
 #[async_trait::async_trait]
 impl ClusterInfo for MetaClient {
-    type Error = Error;
-
-    async fn list_nodes(&self, role: Option<ClusterRole>) -> Result<Vec<NodeInfo>> {
-        let cluster_client = self.cluster_client()?;
+    async fn list_nodes(
+        &self,
+        role: Option<ClusterRole>,
+    ) -> std::result::Result<Vec<NodeInfo>, BoxedError> {
+        let cluster_client = self.cluster_client().map_err(BoxedError::new)?;
 
         let (get_metasrv_nodes, nodes_key_prefix) = match role {
             None => (
@@ -283,7 +282,10 @@ impl ClusterInfo for MetaClient {
         let mut nodes = if get_metasrv_nodes {
             let last_activity_ts = -1; // Metasrv does not provide this information.
 
-            let (leader, followers) = cluster_client.get_metasrv_peers().await?;
+            let (leader, followers) = cluster_client
+                .get_metasrv_peers()
+                .await
+                .map_err(BoxedError::new)?;
             followers
                 .into_iter()
                 .map(|node| NodeInfo {
@@ -309,10 +311,12 @@ impl ClusterInfo for MetaClient {
 
         if let Some(prefix) = nodes_key_prefix {
             let req = RangeRequest::new().with_prefix(prefix);
-            let res = cluster_client.range(req).await?;
+            let res = cluster_client.range(req).await.map_err(BoxedError::new)?;
             for kv in res.kvs {
                 nodes.push(
-                    NodeInfo::try_from(kv.value.as_slice()).context(ConvertMetaResponseSnafu)?,
+                    NodeInfo::try_from(kv.value.as_slice())
+                        .context(ConvertMetaResponseSnafu)
+                        .map_err(BoxedError::new)?,
                 );
             }
         }
@@ -320,19 +324,20 @@ impl ClusterInfo for MetaClient {
         Ok(nodes)
     }
 
-    async fn get_flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
-        let cluster_client = self.cluster_client()?;
+    async fn get_flownode(&self, id: FlownodeId) -> std::result::Result<Option<Peer>, BoxedError> {
+        let cluster_client = self.cluster_client().map_err(BoxedError::new)?;
         let req = RangeRequest::new().with_prefix(NodeInfoKey {
             cluster_id: self.id.0,
             role: ClusterRole::Flownode,
             node_id: id,
         });
-        let res = cluster_client.range(req).await?;
+        let res = cluster_client.range(req).await.map_err(BoxedError::new)?;
         res.kvs
             .first()
             .map(|kv| {
                 NodeInfo::try_from(kv.value.as_slice())
                     .context(ConvertMetaResponseSnafu)
+                    .map_err(BoxedError::new)
                     .map(|node| node.peer)
             })
             .transpose()

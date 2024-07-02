@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::str::FromStr;
+use std::sync::Arc;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::BoxedError;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -36,19 +37,19 @@ lazy_static! {
     .unwrap();
 }
 
+pub type ClusterInfoRef = Arc<dyn ClusterInfo>;
+
 /// [ClusterInfo] provides information about the cluster.
 #[async_trait::async_trait]
-pub trait ClusterInfo {
-    type Error: ErrorExt;
-
+pub trait ClusterInfo: Sync + Send {
     /// List all nodes by role in the cluster. If `role` is `None`, list all nodes.
     async fn list_nodes(
         &self,
         role: Option<Role>,
-    ) -> std::result::Result<Vec<NodeInfo>, Self::Error>;
+    ) -> std::result::Result<Vec<NodeInfo>, BoxedError>;
 
     /// Retrieves the [`Peer`] information of a flownode.
-    async fn get_flownode(&self, id: FlownodeId) -> std::result::Result<Option<Peer>, Self::Error>;
+    async fn get_flownode(&self, id: FlownodeId) -> std::result::Result<Option<Peer>, BoxedError>;
 
     // TODO(jeremy): Other info, like region status, etc.
 }
