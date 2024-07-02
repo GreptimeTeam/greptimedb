@@ -15,6 +15,7 @@
 //! Structs and functions for reading ranges from a parquet file. A file range
 //! is usually a row group in a parquet file.
 
+use std::collections::VecDeque;
 use std::ops::BitAnd;
 use std::sync::Arc;
 
@@ -62,39 +63,38 @@ impl FileRange {
 
     /// Returns a reader to read the [FileRange].
     pub(crate) async fn reader(&self, mut top_hint: Option<TopHint>) -> Result<RowGroupReader> {
-        let row_selection = if top_hint.is_some() && self.context.cache_manager().is_some() {
-            let top_selection = self
+        let mut cache_only = false;
+        let mut batches = VecDeque::new();
+        if top_hint.is_some() && self.context.cache_manager().is_some() {
+            let top_rows = self
                 .context
                 .cache_manager()
                 .unwrap()
                 .get_top_rows(&(self.file_handle().file_id(), self.row_group_idx));
-            if let Some(top_select) = top_selection {
+            if let Some(rows) = top_rows {
                 top_hint = None;
+                cache_only = true;
+                batches = VecDeque::from_iter(rows.batches.iter().cloned());
                 // common_telemetry::info!(
                 //     "file {}, row group {}, top cache hit, top_select: {:?}",
                 //     self.file_handle().file_id(),
                 //     self.row_group_idx,
                 //     top_select.selection
                 // );
-                self.row_selection
-                    .as_ref()
-                    .map(|row_select| row_select.and_then(&top_select.selection))
-            } else {
-                self.row_selection.clone()
             }
-        } else {
-            self.row_selection.clone()
-        };
+        }
 
         let parquet_reader = self
             .context
             .reader_builder
-            .build(self.row_group_idx, row_selection)
+            .build(self.row_group_idx, self.row_selection.clone())
             .await?;
 
         Ok(
             RowGroupReader::new(self.row_group_idx, self.context.clone(), parquet_reader)
-                .with_top_hint(top_hint),
+                .with_top_hint(top_hint)
+                .with_cache_only(cache_only)
+                .with_batches(batches),
         )
     }
 

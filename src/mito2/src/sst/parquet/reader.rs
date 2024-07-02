@@ -29,9 +29,11 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Operator};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
+use datatypes::vectors::BooleanVector;
 use itertools::Itertools;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection, RowSelector};
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
@@ -84,8 +86,6 @@ pub struct ParquetReaderBuilder {
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
     expected_metadata: Option<RegionMetadataRef>,
-    /// Top hint.
-    top_hint: Option<TopHint>,
 }
 
 impl ParquetReaderBuilder {
@@ -105,7 +105,6 @@ impl ParquetReaderBuilder {
             cache_manager: None,
             index_applier: None,
             expected_metadata: None,
-            top_hint: None,
         }
     }
 
@@ -150,13 +149,6 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
         self.expected_metadata = expected_metadata;
-        self
-    }
-
-    /// Attaches the top hint to the builder.
-    #[must_use]
-    pub fn top_hint(mut self, top_hint: Option<TopHint>) -> Self {
-        self.top_hint = top_hint;
         self
     }
 
@@ -223,7 +215,6 @@ impl ParquetReaderBuilder {
             projection: projection_mask,
             field_levels,
             cache_manager: self.cache_manager.clone(),
-            top_hint: self.top_hint.clone(),
         };
 
         metrics.build_cost = start.elapsed();
@@ -573,8 +564,6 @@ pub(crate) struct RowGroupReaderBuilder {
     field_levels: FieldLevels,
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
-    /// Top hint.
-    top_hint: Option<TopHint>,
 }
 
 impl RowGroupReaderBuilder {
@@ -872,10 +861,12 @@ pub struct RowGroupReader {
     metrics: ReaderMetrics,
     /// Optional top hint.
     top_hint: Option<TopHint>,
-    /// Selections to keep top rows of each batch.
-    top_selectors: Vec<RowSelector>,
+    /// Last rows.
+    top_rows: Vec<Batch>,
     /// Last key.
     last_key: Option<Vec<u8>>,
+    /// Only returns cached batches.
+    cache_only: bool,
 }
 
 impl RowGroupReader {
@@ -892,14 +883,27 @@ impl RowGroupReader {
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
             top_hint: None,
-            top_selectors: Vec::default(),
+            top_rows: Vec::default(),
             last_key: None,
+            cache_only: false,
         }
     }
 
-    /// Attches top hint.
+    /// Attaches top hint.
     pub(crate) fn with_top_hint(mut self, top_hint: Option<TopHint>) -> Self {
         self.top_hint = top_hint;
+        self
+    }
+
+    /// Attaches cache only.
+    pub(crate) fn with_cache_only(mut self, cache_only: bool) -> Self {
+        self.cache_only = cache_only;
+        self
+    }
+
+    /// Attaches batches.
+    pub(crate) fn with_batches(mut self, batches: VecDeque<Batch>) -> Self {
+        self.batches = batches;
         self
     }
 
@@ -915,16 +919,20 @@ impl RowGroupReader {
 
     /// Tries to fetch next [Batch] from the reader.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        if self.cache_only {
+            return Ok(self.batches.pop_front());
+        }
+
         // TODO(yingwen): Ensure filters is None. Ensure all rows are selected.
         if self.top_hint.is_none() || self.context.cache_manager().is_none() {
             return self.fetch_next_batch().await;
         }
 
-        let Some(batch) = self.fetch_next_batch().await? else {
+        let Some(mut batch) = self.fetch_next_batch().await? else {
             // Update last point cache.
             let top_rows = TopRows {
                 last: true,
-                selection: RowSelection::from(std::mem::take(&mut self.top_selectors)),
+                batches: std::mem::take(&mut self.top_rows),
             };
             self.context.cache_manager().unwrap().put_top_rows(
                 (self.context.file_id(), self.row_group_idx),
@@ -936,9 +944,7 @@ impl RowGroupReader {
 
         if let Some(last_key) = &self.last_key {
             if batch.primary_key() == last_key {
-                if self.top_selectors.pop().is_some() {
-                    self.top_selectors.push(RowSelector::skip(1));
-                }
+                self.top_rows.pop();
             }
         }
         self.last_key = Some(batch.primary_key().to_vec());
@@ -946,11 +952,12 @@ impl RowGroupReader {
         // TODO(yingwen): First or last.
         // TODO(yingwen): Check the range of last timestamp.
         assert!(!batch.is_empty());
-        let skip = batch.num_rows() - 1;
-        if skip > 0 {
-            self.top_selectors.push(RowSelector::skip(skip));
-        }
-        self.top_selectors.push(RowSelector::select(1));
+        let filter = BooleanVector::from_iterator(
+            (0..batch.num_rows()).map(|idx| idx == batch.num_rows() - 1),
+        );
+        // TODO(yingwen): error handling.
+        batch.filter(&filter).unwrap();
+        self.top_rows.push(batch.clone());
 
         Ok(Some(batch))
     }
