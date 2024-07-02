@@ -20,6 +20,8 @@ use api::v1::meta::{
     heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
     Peer, RequestHeader, ResponseHeader, Role,
 };
+use common_meta::cache_invalidator::{CacheInvalidatorRef, Context as CacheContext};
+use common_meta::instruction::CacheIdent;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -45,6 +47,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
         let handler_group = self.handler_group().clone();
+        let cache_invalidator = self.cache_invalidator().clone();
         let ctx = self.new_ctx();
         let _handle = common_runtime::spawn_write(async move {
             let mut pusher_key = None;
@@ -63,7 +66,13 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         };
 
                         if pusher_key.is_none() {
-                            pusher_key = register_pusher(&handler_group, header, tx.clone()).await;
+                            pusher_key = register_pusher(
+                                &handler_group,
+                                &cache_invalidator,
+                                header,
+                                tx.clone(),
+                            )
+                            .await;
                         }
 
                         let res = handler_group
@@ -165,6 +174,7 @@ fn get_node_id(header: &RequestHeader) -> u64 {
 
 async fn register_pusher(
     handler_group: &HeartbeatHandlerGroup,
+    cache_invalidator: &CacheInvalidatorRef,
     header: &RequestHeader,
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
 ) -> Option<String> {
@@ -173,6 +183,29 @@ async fn register_pusher(
     let key = format!("{}-{}", role, node_id);
     let pusher = Pusher::new(sender, header);
     handler_group.register(&key, pusher).await;
+
+    // Broadcasts cache invalidation messages
+    match header.role() {
+        Role::Datanode => {
+            //Do nothing.
+        }
+        Role::Frontend => {
+            //Do nothing.
+        }
+        Role::Flownode => {
+            if let Err(err) = cache_invalidator
+                .invalidate(
+                    &CacheContext {
+                        subject: Some(format!("Registering peer: {}-{}", role, node_id)),
+                    },
+                    &[CacheIdent::FlownodeId(node_id)],
+                )
+                .await
+            {
+                error!(err; "Failed to broadcast flownode peer cache invalidation messages");
+            }
+        }
+    }
     Some(key)
 }
 
