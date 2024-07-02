@@ -55,6 +55,9 @@ ENV PATH /root/.cargo/bin/:$PATH
 ARG RUST_TOOLCHAIN
 RUN rustup toolchain install ${RUST_TOOLCHAIN}
 
+# Install cargo-binstall with a specific version to adapt the current rust toolchain.
+# Note: if we use the latest version, we may encounter the following `use of unstable library feature 'io_error_downcast'` error.
+RUN cargo install cargo-binstall --version 1.6.6 --locked
+
 # Install nextest.
-RUN cargo install cargo-binstall --locked
 RUN cargo binstall cargo-nextest --no-confirm
