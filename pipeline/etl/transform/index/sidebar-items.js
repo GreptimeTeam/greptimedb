@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_FULLTEXT","INDEX_TAG","INDEX_TIMESTAMP"],"enum":["Index"]};

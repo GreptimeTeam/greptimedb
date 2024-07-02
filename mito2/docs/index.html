@@ -1,0 +1,237 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Mito developer document"><title>mito2::docs - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-46f98efaafac5295.ttf.woff2,FiraSans-Regular-018c141bf0843ffd.woff2,FiraSans-Medium-8f9a781e4970d388.woff2,SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2,SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../static.files/rustdoc-081576b923113409.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.79.0-nightly (f9b161492 2024-04-19)" data-channel="nightly" data-search-js="search-bf21c90c8c1d92b1.js" data-settings-js="settings-4313503d2e1961c2.js" ><script src="../../static.files/storage-e32f0c247825364d.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-20a3ad099b048cf2.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-09095024cf37855e.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../mito2/index.html">mito2</a><span class="version">0.8.2</span></h2></div><h2 class="location"><a href="#">Module docs</a></h2><div class="sidebar-elems"><h2><a href="../index.html">In crate mito2</a></h2></div></nav><div class="sidebar-resizer"></div><main><div class="width-limiter"><nav class="sub"><form class="search-form"><span></span><div id="sidebar-button" tabindex="-1"><a href="../../mito2/all.html" title="show sidebar"></a></div><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Type ‘S’ or ‘/’ to search, ‘?’ for more options…" type="search"><div id="help-button" tabindex="-1"><a href="../../help.html" title="help">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../settings.html" title="settings">Settings</a></div></form></nav><section id="main-content" class="content"><div class="main-heading"><h1>Module <a href="../index.html">mito2</a>::<wbr><a class="mod" href="#">docs</a><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><span class="out-of-band"><a class="src" href="../../src/mito2/lib.rs.html#174">source</a> · <button id="toggle-all-docs" title="collapse all docs">[<span>&#x2212;</span>]</button></span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="mito-developer-document"><a class="doc-anchor" href="#mito-developer-document">§</a>Mito developer document</h2><h3 id="engine"><a class="doc-anchor" href="#engine">§</a>Engine</h3>
+<p>Engine hierarchy:</p>
+<script type="module">
+    const mermaidModuleFile = "static.files.mermaid/mermaid.esm.min.mjs";
+    const fallbackRemoteUrl = "https://unpkg.com/mermaid@10/dist/mermaid.esm.min.mjs";
+    const rustdocVarsId= "rustdoc-vars";
+    const dataRootPathAttr = "data-root-path";
+
+
+    function initializeMermaid(mermaid) {
+     var amrn_mermaid_theme =
+         window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+         ? 'dark'
+         : 'default';
+
+      mermaid.initialize({
+        'startOnLoad':'true',
+        'theme': amrn_mermaid_theme,
+        'logLevel': 3 });
+      mermaid.run();
+    }
+
+	function failedToLoadWarnings() {
+		for(var elem of document.getElementsByClassName("mermaid")) {
+			 elem.innerHTML =
+			 `<div> <mark>
+			  &#9888; Cannot render diagram! Failed to import module from local
+			  file and remote location also!
+			  Either access the rustdocs via HTTP/S using a
+			  <a href="https://developer.mozilla.org/en-US/docs/Learn/Common_questions/Tools_and_setup/set_up_a_local_testing_server">
+			   local web server
+			  </a>, for example:
+			   python3 -m http.server --directory target/doc/, <br> or enable local file access in your
+			   Safari/Firefox/Chrome browser, for example
+			  starting Chrome with flag '--allow-file-access-from-files'.
+			  </mark></div> `;
+		}
+	}
+
+
+    // If rustdoc is read from file directly, the import of mermaid module
+    // from file will fail. In this case falling back to remote location.
+    // If neither succeeds, the mermaid markdown is replaced by notice to
+    // enable file acecss in browser.
+    try {
+       var rootPath = document
+         .getElementById(rustdocVarsId)
+         .attributes[dataRootPathAttr]
+         .value;
+       const {
+         default: mermaid,
+       } = await import(rootPath + mermaidModuleFile);
+	   initializeMermaid(mermaid);
+    } catch (e) {
+       try {
+         const {
+            default: mermaid,
+         } = await import(fallbackRemoteUrl);
+	     initializeMermaid(mermaid);
+       } catch (e) {
+		 failedToLoadWarnings();
+	   }
+    }
+</script>
+<div class="mermaid">
+ classDiagram
+ class MitoEngine {
+     -WorkerGroup workers
+ }
+ class MitoRegion {
+     +VersionControlRef version_control
+     -RegionId region_id
+     -String manifest_dir
+     -AtomicI64 last_flush_millis
+     +region_id() RegionId
+     +scan() ChunkReaderImpl
+ }
+ class RegionMap {
+     -HashMap&lt;RegionId, MitoRegionRef&gt; regions
+ }
+ class ChunkReaderImpl
+ class WorkerGroup {
+     -Vec~RegionWorker~ workers
+ }
+ class RegionWorker {
+     -RegionMap regions
+     -Sender sender
+     -JoinHandle handle
+ }
+ class RegionWorkerThread~LogStore~ {
+     -RegionMap regions
+     -Receiver receiver
+     -Wal~LogStore~ wal
+     -ObjectStore object_store
+     -MemtableBuilderRef memtable_builder
+     -FlushSchedulerRef~LogStore~ flush_scheduler
+     -FlushStrategy flush_strategy
+     -CompactionSchedulerRef~LogStore~ compaction_scheduler
+     -FilePurgerRef file_purger
+ }
+ class Wal~LogStore~ {
+     -LogStore log_store
+ }
+ class MitoConfig
+ MitoEngine o-- MitoConfig
+ MitoEngine o-- MitoRegion
+ MitoEngine o-- WorkerGroup
+ MitoRegion o-- VersionControl
+ MitoRegion -- ChunkReaderImpl
+ WorkerGroup o-- RegionWorker
+ RegionWorker o-- RegionMap
+ RegionWorker -- RegionWorkerThread~LogStore~
+ RegionWorkerThread~LogStore~ o-- RegionMap
+ RegionWorkerThread~LogStore~ o-- Wal~LogStore~
+</div>
+<h3 id="metadata"><a class="doc-anchor" href="#metadata">§</a>Metadata</h3>
+<p>Metadata hierarchy:</p>
+<script type="module">
+    const mermaidModuleFile = "static.files.mermaid/mermaid.esm.min.mjs";
+    const fallbackRemoteUrl = "https://unpkg.com/mermaid@10/dist/mermaid.esm.min.mjs";
+    const rustdocVarsId= "rustdoc-vars";
+    const dataRootPathAttr = "data-root-path";
+
+
+    function initializeMermaid(mermaid) {
+     var amrn_mermaid_theme =
+         window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+         ? 'dark'
+         : 'default';
+
+      mermaid.initialize({
+        'startOnLoad':'true',
+        'theme': amrn_mermaid_theme,
+        'logLevel': 3 });
+      mermaid.run();
+    }
+
+	function failedToLoadWarnings() {
+		for(var elem of document.getElementsByClassName("mermaid")) {
+			 elem.innerHTML =
+			 `<div> <mark>
+			  &#9888; Cannot render diagram! Failed to import module from local
+			  file and remote location also!
+			  Either access the rustdocs via HTTP/S using a
+			  <a href="https://developer.mozilla.org/en-US/docs/Learn/Common_questions/Tools_and_setup/set_up_a_local_testing_server">
+			   local web server
+			  </a>, for example:
+			   python3 -m http.server --directory target/doc/, <br> or enable local file access in your
+			   Safari/Firefox/Chrome browser, for example
+			  starting Chrome with flag '--allow-file-access-from-files'.
+			  </mark></div> `;
+		}
+	}
+
+
+    // If rustdoc is read from file directly, the import of mermaid module
+    // from file will fail. In this case falling back to remote location.
+    // If neither succeeds, the mermaid markdown is replaced by notice to
+    // enable file acecss in browser.
+    try {
+       var rootPath = document
+         .getElementById(rustdocVarsId)
+         .attributes[dataRootPathAttr]
+         .value;
+       const {
+         default: mermaid,
+       } = await import(rootPath + mermaidModuleFile);
+	   initializeMermaid(mermaid);
+    } catch (e) {
+       try {
+         const {
+            default: mermaid,
+         } = await import(fallbackRemoteUrl);
+	     initializeMermaid(mermaid);
+       } catch (e) {
+		 failedToLoadWarnings();
+	   }
+    }
+</script>
+<div class="mermaid">
+ classDiagram
+ class VersionControl {
+     -CowCell~Version~ version
+     -AtomicU64 committed_sequence
+ }
+ class Version {
+     -RegionMetadataRef metadata
+     -MemtableVersionRef memtables
+     -SstVersionRef ssts
+     -SequenceNumber flushed_sequence
+     -ManifestVersion manifest_version
+ }
+ class MemtableVersion {
+     -MemtableRef mutable
+     -Vec~MemtableRef~ immutables
+     +mutable_memtable() MemtableRef
+     +immutable_memtables() &[MemtableRef]
+     +freeze_mutable(MemtableRef new_mutable) MemtableVersion
+ }
+ class SstVersion {
+     -LevelMetaVec levels
+     -AccessLayerRef sst_layer
+     -FilePurgerRef file_purger
+     -Option~i64~ compaction_time_window
+ }
+ class LevelMeta {
+     -Level level
+     -HashMap&lt;FileId, FileHandle&gt; files
+ }
+ class FileHandle {
+     -FileMeta meta
+     -bool compacting
+     -AtomicBool deleted
+     -AccessLayerRef sst_layer
+     -FilePurgerRef file_purger
+ }
+ class FileMeta {
+     +RegionId region_id
+     +FileId file_id
+     +Option&lt;Timestamp, Timestamp&gt; time_range
+     +Level level
+     +u64 file_size
+ }
+ VersionControl o-- Version
+ Version o-- RegionMetadata
+ Version o-- MemtableVersion
+ Version o-- SstVersion
+ SstVersion o-- LevelMeta
+ LevelMeta o-- FileHandle
+ FileHandle o-- FileMeta
+ class RegionMetadata
+</div>
+<h3 id="region-workers"><a class="doc-anchor" href="#region-workers">§</a>Region workers</h3>
+<p>The engine handles DMLs and DDLs in dedicated <a href="../worker/struct.WorkerGroup.html" title="struct mito2::worker::WorkerGroup">workers</a>.</p>
+<h3 id="region-manifest"><a class="doc-anchor" href="#region-manifest">§</a>Region manifest</h3>
+<p>The <a href="../manifest/manager/struct.RegionManifestManager.html" title="struct mito2::manifest::manager::RegionManifestManager">RegionManifestManager</a> manages metadata of the engine.</p>
+</div></details></section></div></main></body></html>

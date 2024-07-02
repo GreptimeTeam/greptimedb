@@ -1,0 +1,1 @@
+searchState.loadedDescShard("common_version", 0, "Returns the argument unchanged.\nCalls <code>U::from(self)</code>.\nRustc Version\nShort version for reporting metrics.\nGreptimeDB Version\nGet the string for the output of cli “–version”.")

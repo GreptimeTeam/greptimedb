@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_table_cache"],"mod":["client","manager","table_cache"],"struct":["CachedMetaKvBackend","CachedMetaKvBackendBuilder","KvBackendCatalogManager","MetaKvBackend"],"type":["TableCache","TableCacheRef"]};

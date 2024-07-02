@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OPEN_REGION_MESSAGE_TIMEOUT"],"mod":["activate_region","deactivate_region","failover_end","failover_start","invalidate_cache","update_metadata"],"struct":["FailoverProcedureGuard","LockMeta","Node","RegionFailoverContext","RegionFailoverKey","RegionFailoverManager","RegionFailoverProcedure"],"trait":["State"]};

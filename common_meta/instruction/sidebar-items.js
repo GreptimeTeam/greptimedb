@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CacheIdent","Instruction","InstructionReply"],"struct":["CreateFlow","DowngradeRegion","DowngradeRegionReply","DropFlow","OpenRegion","RegionIdent","SimpleReply","UpgradeRegion","UpgradeRegionReply"]};

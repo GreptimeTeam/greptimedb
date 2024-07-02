@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["eval_f64","eval_i64","eval_u64","max","min","scalar_max","scalar_min"],"macro":["define_eval"],"struct":["ClipFunction"]};

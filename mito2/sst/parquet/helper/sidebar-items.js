@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_byte_ranges","fetch_ranges_concurrent","fetch_ranges_seq","maybe_spawn_blocking","new_task_join_error","parse_column_orders","parse_parquet_metadata"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SCRIPTS_TABLE_NAME"],"fn":["build_insert_column_schemas","build_scripts_schema","query_ctx"],"struct":["ScriptsTable"],"type":["ScriptsTableRef"]};

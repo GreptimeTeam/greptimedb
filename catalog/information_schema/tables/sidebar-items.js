@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ENGINE","INIT_CAPACITY","TABLE_CATALOG","TABLE_ID","TABLE_NAME","TABLE_SCHEMA","TABLE_TYPE"],"struct":["InformationSchemaTables","InformationSchemaTablesBuilder"]};

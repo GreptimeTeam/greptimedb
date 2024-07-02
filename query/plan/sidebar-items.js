@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LogicalPlan","TableType"],"fn":["extract_and_rewrite_full_table_names"],"struct":["TableNamesExtractAndRewriter"]};

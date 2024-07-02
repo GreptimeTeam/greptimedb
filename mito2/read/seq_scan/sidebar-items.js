@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["group_parts_by_range","maybe_merge_parts","maybe_split_parts"],"struct":["SeqDistributor","SeqScan"]};

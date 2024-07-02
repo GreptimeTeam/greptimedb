@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_into_maps","collect_plan_metrics","write_cost_header_map"],"mod":["constants"],"static":["CONTENT_ENCODING_SNAPPY","CONTENT_TYPE_PROTOBUF","GREPTIME_DB_HEADER_EXECUTION_TIME","GREPTIME_DB_HEADER_FORMAT","GREPTIME_DB_HEADER_METRICS","GREPTIME_DB_HEADER_NAME","GREPTIME_TIMEZONE_HEADER_NAME"],"struct":["GreptimeDbName"]};

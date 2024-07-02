@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROMETHEUS_API_VERSION"],"trait":["PrometheusHandler"],"type":["PrometheusHandlerRef"]};

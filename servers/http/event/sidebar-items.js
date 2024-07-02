@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_pipeline","ingest_logs_inner","log_ingester","transform_ndjson_array_factory"],"struct":["LogIngesterQueryParams","PipelineContent"]};

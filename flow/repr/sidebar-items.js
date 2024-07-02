@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BROADCAST_CAP"],"fn":["value_to_internal_ts"],"mod":["relation"],"struct":["Row"],"type":["Diff","DiffRow","Duration","KeyValDiffRow","Timestamp"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["DFInternalSnafu","DecodeDfPlanSnafu","DecodeRelSnafu","EncodeDfPlanSnafu","EncodeRelSnafu","InternalSnafu","UnknownPlanSnafu"],"type":["Result"]};

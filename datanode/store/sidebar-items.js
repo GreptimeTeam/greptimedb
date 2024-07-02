@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_http_client","clean_temp_dir","create_object_store_with_cache","new_object_store"],"mod":["azblob","fs","gcs","oss","s3"]};

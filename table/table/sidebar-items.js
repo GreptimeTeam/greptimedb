@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["adapter","metrics","numbers","scan"],"struct":["Table"],"type":["TableRef"]};

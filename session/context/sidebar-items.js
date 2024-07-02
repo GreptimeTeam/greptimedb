@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Channel","QueryContextBuilderError"],"struct":["ConfigurationVariables","ConnInfo","QueryContext","QueryContextBuilder"],"type":["ConnInfoRef","QueryContextRef"]};
