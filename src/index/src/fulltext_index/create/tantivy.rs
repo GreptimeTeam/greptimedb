@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tantivy::schema::{Schema, TEXT};
 use tantivy::store::{Compressor, ZstdCompressor};
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer, TokenizerManager};
@@ -23,7 +23,7 @@ use tantivy::{doc, Index, SingleSegmentIndexWriter};
 use tantivy_jieba::JiebaTokenizer;
 
 use crate::fulltext_index::create::FulltextIndexCreator;
-use crate::fulltext_index::error::{IOSnafu, Result, TantivySnafu};
+use crate::fulltext_index::error::{FinishedSnafu, IoSnafu, Result, TantivySnafu};
 use crate::fulltext_index::{Analyzer, Config};
 
 pub const TEXT_FIELD_NAME: &str = "greptime_fulltext_text";
@@ -47,7 +47,7 @@ impl TantivyFulltextIndexCreator {
     pub async fn new(path: impl AsRef<Path>, config: Config, memory_limit: usize) -> Result<Self> {
         tokio::fs::create_dir_all(path.as_ref())
             .await
-            .context(IOSnafu)?;
+            .context(IoSnafu)?;
 
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field(TEXT_FIELD_NAME, TEXT);
@@ -95,20 +95,14 @@ impl TantivyFulltextIndexCreator {
 #[async_trait]
 impl FulltextIndexCreator for TantivyFulltextIndexCreator {
     async fn push_text(&mut self, text: &str) -> Result<()> {
-        if let Some(writer) = &mut self.writer {
-            writer
-                .add_document(doc!(self.text_field => text))
-                .context(TantivySnafu)?;
-        }
-
-        Ok(())
+        let writer = self.writer.as_mut().context(FinishedSnafu)?;
+        let doc = doc!(self.text_field => text);
+        writer.add_document(doc).context(TantivySnafu)
     }
 
     async fn finish(&mut self) -> Result<()> {
-        if let Some(writer) = self.writer.take() {
-            writer.finalize().context(TantivySnafu)?;
-        }
-        Ok(())
+        let writer = self.writer.take().context(FinishedSnafu)?;
+        writer.finalize().map(|_| ()).context(TantivySnafu)
     }
 
     fn memory_usage(&self) -> usize {

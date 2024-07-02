@@ -25,7 +25,7 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("IO error"))]
-    IO {
+    Io {
         #[snafu(source)]
         error: IoError,
         #[snafu(implicit)]
@@ -36,6 +36,12 @@ pub enum Error {
     Tantivy {
         #[snafu(source)]
         error: tantivy::TantivyError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Operate on a finished creator"))]
+    Finished {
         #[snafu(implicit)]
         location: Location,
     },
@@ -54,7 +60,7 @@ impl ErrorExt for Error {
 
         match self {
             Tantivy { .. } => StatusCode::Internal,
-            IO { .. } => StatusCode::Unexpected,
+            Io { .. } | Finished { .. } => StatusCode::Unexpected,
 
             External { source, .. } => source.status_code(),
         }
