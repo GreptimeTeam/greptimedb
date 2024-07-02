@@ -15,6 +15,7 @@
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
 
+// TODO(yingwen): Stores ordering. Maybe also stores columns.
 /// Hint to fetch the top rows from the data source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TopHint {

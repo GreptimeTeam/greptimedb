@@ -14,11 +14,14 @@
 
 //! Optimize rule to push down first/last row function.
 
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion::datasource::DefaultTableSource;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::Result;
-use datafusion_expr::expr::{AggregateFunction, AggregateFunctionDefinition};
-use datafusion_expr::{aggregate_function, Expr, LogicalPlan};
+use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use store_api::storage::TopHint;
+
+use crate::dummy_catalog::DummyTableProvider;
 
 /// This rule pushes down `last_value`/`first_value` function as a hint to the
 /// leaf table scan node.
@@ -33,22 +36,53 @@ impl OptimizerRule for FirstLastPushDownRule {
         let mut visitor = TopValueVisitor::default();
         plan.visit(&mut visitor)?;
 
-        // if let Some(is_last) = visitor.is_last {
-        //     let new_plan = plan.clone();
-        //     let new_plan = new_plan.transform_down(&|plan| {
-        //         Self::set_top_value_hint(plan, &visitor.group_expr, is_last)
-        //     })?;
+        if let Some(is_last) = visitor.is_last {
+            let new_plan = plan.clone();
+            let new_plan = new_plan
+                .transform_down(&|plan| Self::set_top_hint(plan))?
+                .data;
 
-        //     Ok(Some(new_plan))
-        // } else {
-        //     Ok(Some(plan.clone()))
-        // }
+            common_telemetry::info!("Push down last");
 
-        Ok(Some(plan.clone()))
+            Ok(Some(new_plan))
+        } else {
+            Ok(Some(plan.clone()))
+        }
     }
 
     fn name(&self) -> &str {
         "FirstLastPushDownRule"
+    }
+}
+
+impl FirstLastPushDownRule {
+    fn set_top_hint(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        match &plan {
+            LogicalPlan::TableScan(table_scan) => {
+                let mut transformed = false;
+                if let Some(source) = table_scan
+                    .source
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
+                {
+                    // The provider in the region server is [DummyTableProvider].
+                    if let Some(adapter) = source
+                        .table_provider
+                        .as_any()
+                        .downcast_ref::<DummyTableProvider>()
+                    {
+                        adapter.with_top_hint(TopHint::LastRow);
+                        transformed = true;
+                    }
+                }
+                if transformed {
+                    Ok(Transformed::yes(plan))
+                } else {
+                    Ok(Transformed::no(plan))
+                }
+            }
+            _ => Ok(Transformed::no(plan)),
+        }
     }
 }
 
@@ -73,6 +107,12 @@ impl TreeNodeVisitor<'_> for TopValueVisitor {
                     break;
                 };
                 common_telemetry::info!("func is {:?}", func);
+                match func.func_def.name() {
+                    "last_value" => {
+                        self.is_last = Some(true);
+                    }
+                    _ => self.is_last = None,
+                }
                 // match func {
                 //     AggregateFunction {
                 //         func_def: AggregateFunctionDefinition::BuiltIn(aggregate_function::AggregateFunction::),
