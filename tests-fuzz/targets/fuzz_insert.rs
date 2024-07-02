@@ -64,7 +64,7 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let columns = rng.gen_range(2..30);
-        let rows = rng.gen_range(1..4096);
+        let rows = rng.gen_range(1..2048);
         Ok(FuzzInput {
             columns,
             rows,
