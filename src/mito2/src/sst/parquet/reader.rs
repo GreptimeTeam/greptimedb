@@ -31,16 +31,16 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection, RowSelector};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, TopHint};
 use table::predicate::Predicate;
 
-use crate::cache::CacheManagerRef;
+use crate::cache::{CacheManagerRef, TopRows};
 use crate::error;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
@@ -84,6 +84,8 @@ pub struct ParquetReaderBuilder {
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
     expected_metadata: Option<RegionMetadataRef>,
+    /// Top hint.
+    top_hint: Option<TopHint>,
 }
 
 impl ParquetReaderBuilder {
@@ -103,6 +105,7 @@ impl ParquetReaderBuilder {
             cache_manager: None,
             index_applier: None,
             expected_metadata: None,
+            top_hint: None,
         }
     }
 
@@ -147,6 +150,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
         self.expected_metadata = expected_metadata;
+        self
+    }
+
+    /// Attaches the top hint to the builder.
+    #[must_use]
+    pub fn top_hint(mut self, top_hint: Option<TopHint>) -> Self {
+        self.top_hint = top_hint;
         self
     }
 
@@ -213,6 +223,7 @@ impl ParquetReaderBuilder {
             projection: projection_mask,
             field_levels,
             cache_manager: self.cache_manager.clone(),
+            top_hint: self.top_hint.clone(),
         };
 
         metrics.build_cost = start.elapsed();
@@ -562,6 +573,8 @@ pub(crate) struct RowGroupReaderBuilder {
     field_levels: FieldLevels,
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
+    /// Top hint.
+    top_hint: Option<TopHint>,
 }
 
 impl RowGroupReaderBuilder {
@@ -573,6 +586,11 @@ impl RowGroupReaderBuilder {
     /// Handle of the file to read.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         &self.file_handle
+    }
+
+    /// Cache manager of the builder.
+    pub(crate) fn cache_manager(&self) -> Option<&CacheManagerRef> {
+        self.cache_manager.as_ref()
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -590,6 +608,7 @@ impl RowGroupReaderBuilder {
             &self.file_path,
             self.object_store.clone(),
         );
+
         // Fetches data into memory.
         row_group
             .fetch(&self.projection, row_selection.as_ref())
@@ -812,7 +831,11 @@ impl ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, row_selection)
                 .await?;
-            ReaderState::Readable(RowGroupReader::new(context.clone(), parquet_reader))
+            ReaderState::Readable(RowGroupReader::new(
+                row_group_idx,
+                context.clone(),
+                parquet_reader,
+            ))
         } else {
             ReaderState::Exhausted(ReaderMetrics::default())
         };
@@ -837,6 +860,8 @@ impl ParquetReader {
 
 /// Reader to read a row group of a parquet file.
 pub struct RowGroupReader {
+    /// Id of the row group.
+    row_group_idx: usize,
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet reader.
@@ -845,17 +870,34 @@ pub struct RowGroupReader {
     batches: VecDeque<Batch>,
     /// Local scan metrics.
     metrics: ReaderMetrics,
+    /// Optional top hint.
+    top_hint: Option<TopHint>,
+    /// Selections to keep top rows of each batch.
+    top_selectors: Vec<RowSelector>,
 }
 
 impl RowGroupReader {
     /// Creates a new reader.
-    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn new(
+        row_group_idx: usize,
+        context: FileRangeContextRef,
+        reader: ParquetRecordBatchReader,
+    ) -> Self {
         Self {
+            row_group_idx,
             context,
             reader,
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
+            top_hint: None,
+            top_selectors: Vec::default(),
         }
+    }
+
+    /// Attches top hint.
+    pub(crate) fn with_top_hint(mut self, top_hint: Option<TopHint>) -> Self {
+        self.top_hint = top_hint;
+        self
     }
 
     /// Gets the metrics.
@@ -870,6 +912,39 @@ impl RowGroupReader {
 
     /// Tries to fetch next [Batch] from the reader.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        // TODO(yingwen): Ensure filters is None. Ensure all rows are selected.
+        if self.top_hint.is_none() || self.context.cache_manager().is_none() {
+            return self.fetch_next_batch().await;
+        }
+
+        let Some(batch) = self.fetch_next_batch().await? else {
+            // Update last point cache.
+            let top_rows = TopRows {
+                last: true,
+                selection: RowSelection::from(std::mem::take(&mut self.top_selectors)),
+            };
+            self.context.cache_manager().unwrap().put_top_rows(
+                (self.context.file_id(), self.row_group_idx),
+                Arc::new(top_rows),
+            );
+
+            return Ok(None);
+        };
+
+        // TODO(yingwen): First or last.
+        // TODO(yingwen): Check the range of last timestamp.
+        assert!(!batch.is_empty());
+        let skip = batch.num_rows() - 1;
+        if skip > 0 {
+            self.top_selectors.push(RowSelector::skip(skip));
+        }
+        self.top_selectors.push(RowSelector::select(1));
+
+        Ok(Some(batch))
+    }
+
+    /// Tries to fetch next [Batch] from the reader without updating the top selection.
+    pub(crate) async fn fetch_next_batch(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();

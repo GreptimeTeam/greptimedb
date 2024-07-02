@@ -23,12 +23,14 @@ use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::ResultExt;
+use store_api::storage::TopHint;
 
+use crate::cache::CacheManagerRef;
 use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
@@ -59,14 +61,35 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
-    pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
+    pub(crate) async fn reader(&self, mut top_hint: Option<TopHint>) -> Result<RowGroupReader> {
+        let row_selection = if top_hint.is_some() && self.context.cache_manager().is_some() {
+            let top_selection = self
+                .context
+                .cache_manager()
+                .unwrap()
+                .get_top_rows(&(self.file_handle().file_id(), self.row_group_idx));
+            if let Some(top_select) = top_selection {
+                top_hint = None;
+                self.row_selection
+                    .as_ref()
+                    .map(|row_select| row_select.and_then(&top_select.selection))
+            } else {
+                self.row_selection.clone()
+            }
+        } else {
+            self.row_selection.clone()
+        };
+
         let parquet_reader = self
             .context
             .reader_builder
-            .build(self.row_group_idx, self.row_selection.clone())
+            .build(self.row_group_idx, row_selection)
             .await?;
 
-        Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
+        Ok(
+            RowGroupReader::new(self.row_group_idx, self.context.clone(), parquet_reader)
+                .with_top_hint(top_hint),
+        )
     }
 
     /// Returns the helper to compat batches.
@@ -114,6 +137,11 @@ impl FileRangeContext {
         self.reader_builder.file_path()
     }
 
+    /// Returns the file id of the file to read.
+    pub(crate) fn file_id(&self) -> FileId {
+        self.reader_builder.file_handle().file_id()
+    }
+
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.base.filters
@@ -143,6 +171,11 @@ impl FileRangeContext {
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     pub(crate) fn precise_filter(&self, input: Batch) -> Result<Option<Batch>> {
         self.base.precise_filter(input)
+    }
+
+    /// Returns the cache manager.
+    pub(crate) fn cache_manager(&self) -> Option<&CacheManagerRef> {
+        self.reader_builder.cache_manager()
     }
 }
 
