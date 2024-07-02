@@ -874,6 +874,8 @@ pub struct RowGroupReader {
     top_hint: Option<TopHint>,
     /// Selections to keep top rows of each batch.
     top_selectors: Vec<RowSelector>,
+    /// Last key.
+    last_key: Option<Vec<u8>>,
 }
 
 impl RowGroupReader {
@@ -891,6 +893,7 @@ impl RowGroupReader {
             metrics: ReaderMetrics::default(),
             top_hint: None,
             top_selectors: Vec::default(),
+            last_key: None,
         }
     }
 
@@ -930,6 +933,15 @@ impl RowGroupReader {
 
             return Ok(None);
         };
+
+        if let Some(last_key) = &self.last_key {
+            if batch.primary_key() == last_key {
+                if self.top_selectors.pop().is_some() {
+                    self.top_selectors.push(RowSelector::skip(1));
+                }
+            }
+        }
+        self.last_key = Some(batch.primary_key().to_vec());
 
         // TODO(yingwen): First or last.
         // TODO(yingwen): Check the range of last timestamp.
