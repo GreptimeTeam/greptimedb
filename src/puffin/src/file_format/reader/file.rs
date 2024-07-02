@@ -103,9 +103,7 @@ impl<'a, R: io::Read + io::Seek + 'a> SyncReader<'a> for PuffinFileReader<R> {
 }
 
 #[async_trait]
-impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> AsyncReader<'a>
-    for PuffinFileReader<R>
-{
+impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> AsyncReader<'a> for PuffinFileReader<R> {
     type Reader = PartialReader<&'a mut R>;
 
     async fn metadata(&'a mut self) -> Result<FileMetadata> {

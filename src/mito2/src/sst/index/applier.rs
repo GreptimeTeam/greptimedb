@@ -186,7 +186,7 @@ mod tests {
     use futures::io::Cursor;
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
-    use puffin::file_format::writer::{Blob, AsyncWriter, PuffinFileWriter};
+    use puffin::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
 
     use super::*;
     use crate::error::Error;

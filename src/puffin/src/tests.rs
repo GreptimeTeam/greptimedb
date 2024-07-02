@@ -21,7 +21,7 @@ use futures::AsyncReadExt;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::file_format::reader::{AsyncReader, PuffinFileReader, SyncReader};
-use crate::file_format::writer::{Blob, AsyncWriter, PuffinFileWriter, SyncWriter};
+use crate::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter, SyncWriter};
 
 #[test]
 fn test_read_empty_puffin_sync() {

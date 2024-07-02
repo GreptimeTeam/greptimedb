@@ -22,7 +22,7 @@ use snafu::ResultExt;
 use crate::blob_metadata::{BlobMetadata, BlobMetadataBuilder, CompressionCodec};
 use crate::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
 use crate::file_format::writer::footer::FooterWriter;
-use crate::file_format::writer::{Blob, AsyncWriter, SyncWriter};
+use crate::file_format::writer::{AsyncWriter, Blob, SyncWriter};
 use crate::file_format::MAGIC;
 
 /// Puffin file writer, implements both [`PuffinSyncWriter`] and [`PuffinAsyncWriter`]

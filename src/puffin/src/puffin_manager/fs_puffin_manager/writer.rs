@@ -28,7 +28,7 @@ use crate::error::{
     DuplicateBlobSnafu, MetadataSnafu, OpenSnafu, Result, SerializeJsonSnafu,
     UnsupportedCompressionSnafu, WalkDirSnafu,
 };
-use crate::file_format::writer::{Blob, AsyncWriter, PuffinFileWriter};
+use crate::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
 use crate::puffin_manager::fs_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
 use crate::puffin_manager::stager::StagerRef;
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinWriter, PutOptions};
