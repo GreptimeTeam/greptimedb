@@ -48,7 +48,7 @@ impl<'a> FstValuesMapper<'a> {
 
             let bm = self
                 .reader
-                .bitmap(self.metadata, relative_offset, size)
+                .bitmap(self.metadata.base_offset + relative_offset as u64, size)
                 .await?;
 
             // Ensure the longest BitVec is the left operand to prevent truncation during OR.
@@ -79,7 +79,7 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_bitmap()
-            .returning(|_, offset, size| match (offset, size) {
+            .returning(|offset, size| match (offset, size) {
                 (1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]),
                 (2, 1) => Ok(bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]),
                 _ => unreachable!(),
