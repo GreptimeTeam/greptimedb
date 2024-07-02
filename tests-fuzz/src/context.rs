@@ -57,6 +57,11 @@ impl From<&CreateTableExpr> for TableContext {
 }
 
 impl TableContext {
+    /// Returns the timestamp column
+    pub fn timestamp_column(&self) -> Option<Column> {
+        self.columns.iter().find(|c| c.is_time_index()).cloned()
+    }
+
     /// Applies the [AlterTableExpr].
     pub fn alter(mut self, expr: AlterTableExpr) -> Result<TableContext> {
         match expr.alter_options {

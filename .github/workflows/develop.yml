@@ -415,7 +415,7 @@ jobs:
     needs:  build-greptime-ci
     strategy:
       matrix:
-        target: ["fuzz_failover_mito_regions"]
+        target: ["fuzz_migrate_mito_regions", "fuzz_failover_mito_regions"]
         mode: 
           - name: "Remote WAL"
             minio: true
