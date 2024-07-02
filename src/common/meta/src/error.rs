@@ -624,7 +624,7 @@ pub enum Error {
     FromUtf8 {
         name: String,
         #[snafu(source)]
-        error: std::string::FromUtf8Error,
+        error: std::str::Utf8Error,
         #[snafu(implicit)]
         location: Location,
     },

@@ -31,6 +31,7 @@ use common_meta::cluster::{
 };
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::peer::Peer;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use common_meta::rpc::procedure::{
@@ -41,7 +42,7 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use common_meta::ClusterId;
+use common_meta::{ClusterId, FlownodeId};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use lock::Client as LockClient;
@@ -310,11 +311,31 @@ impl ClusterInfo for MetaClient {
             let req = RangeRequest::new().with_prefix(prefix);
             let res = cluster_client.range(req).await?;
             for kv in res.kvs {
-                nodes.push(NodeInfo::try_from(kv.value).context(ConvertMetaResponseSnafu)?);
+                nodes.push(
+                    NodeInfo::try_from(kv.value.as_slice()).context(ConvertMetaResponseSnafu)?,
+                );
             }
         }
 
         Ok(nodes)
+    }
+
+    async fn get_flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
+        let cluster_client = self.cluster_client()?;
+        let req = RangeRequest::new().with_prefix(NodeInfoKey {
+            cluster_id: self.id.0,
+            role: ClusterRole::Flownode,
+            node_id: id,
+        });
+        let res = cluster_client.range(req).await?;
+        res.kvs
+            .first()
+            .map(|kv| {
+                NodeInfo::try_from(kv.value.as_slice())
+                    .context(ConvertMetaResponseSnafu)
+                    .map(|node| node.peer)
+            })
+            .transpose()
     }
 }
 
