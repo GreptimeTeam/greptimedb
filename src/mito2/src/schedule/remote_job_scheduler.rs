@@ -66,7 +66,7 @@ pub trait RemoteJobScheduler: Send + Sync + 'static {
 #[snafu(display("Internal error occurred in remote job scheduler: {}", reason))]
 pub struct RemoteJobSchedulerError {
     #[snafu(implicit)]
-    location: Location,
+    pub location: Location,
     pub reason: String,
     // Keep the waiters in the error so that we can notify them when fallback to the local compaction.
     pub waiters: Vec<OutputTx>,
