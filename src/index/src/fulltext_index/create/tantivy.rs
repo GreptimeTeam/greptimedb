@@ -121,8 +121,6 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use common_test_util::temp_dir::create_temp_dir;
     use tantivy::collector::DocSetCollector;
     use tantivy::query::QueryParser;
@@ -142,18 +140,16 @@ mod tests {
                     .unwrap();
 
             let texts = vec!["hello", "world", "hello, world", "foo!", "Bar"];
-
             for text in texts {
                 creator.push_text(text).await.unwrap();
             }
-
             creator.finish().await.unwrap();
 
             let cases = [
-                ("hello", HashSet::from_iter([0u32, 2].into_iter())),
-                ("world", HashSet::from_iter([1, 2].into_iter())),
-                ("foo", HashSet::from_iter([3].into_iter())),
-                ("bar", HashSet::from_iter([4].into_iter())),
+                ("hello", vec![0u32, 2]),
+                ("world", vec![1, 2]),
+                ("foo", vec![3]),
+                ("bar", vec![4]),
             ];
 
             let index = Index::open_in_dir(temp_dir.path()).unwrap();
@@ -167,7 +163,8 @@ mod tests {
                 );
                 let query = query_parser.parse_query(query).unwrap();
                 let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let res = docs.into_iter().map(|d| d.doc_id).collect::<HashSet<_>>();
+                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
+                res.sort();
                 assert_eq!(res, expected);
             }
         }
@@ -190,18 +187,16 @@ mod tests {
                     .unwrap();
 
             let texts = vec!["hello", "world", "hello, world", "foo!", "Bar"];
-
             for text in texts {
                 creator.push_text(text).await.unwrap();
             }
-
             creator.finish().await.unwrap();
 
             let cases = [
-                ("hello", HashSet::from_iter([0u32, 2].into_iter())),
-                ("world", HashSet::from_iter([1, 2].into_iter())),
-                ("foo", HashSet::from_iter([3].into_iter())),
-                ("bar", HashSet::from_iter([].into_iter())),
+                ("hello", vec![0u32, 2]),
+                ("world", vec![1, 2]),
+                ("foo", vec![3]),
+                ("bar", vec![]),
             ];
 
             let index = Index::open_in_dir(temp_dir.path()).unwrap();
@@ -214,7 +209,8 @@ mod tests {
                 );
                 let query = query_parser.parse_query(query).unwrap();
                 let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let res = docs.into_iter().map(|d| d.doc_id).collect::<HashSet<_>>();
+                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
+                res.sort();
                 assert_eq!(res, expected);
             }
         }
@@ -237,18 +233,16 @@ mod tests {
                     .unwrap();
 
             let texts = vec!["你好", "世界", "你好，世界", "你好世界", "foo!", "Bar"];
-
             for text in texts {
                 creator.push_text(text).await.unwrap();
             }
-
             creator.finish().await.unwrap();
 
             let cases = [
-                ("你好", HashSet::from_iter([0u32, 2, 3].into_iter())),
-                ("世界", HashSet::from_iter([1, 2, 3].into_iter())),
-                ("foo", HashSet::from_iter([4].into_iter())),
-                ("bar", HashSet::from_iter([5].into_iter())),
+                ("你好", vec![0u32, 2, 3]),
+                ("世界", vec![1, 2, 3]),
+                ("foo", vec![4]),
+                ("bar", vec![5]),
             ];
 
             let index = Index::open_in_dir(temp_dir.path()).unwrap();
@@ -261,7 +255,8 @@ mod tests {
                 );
                 let query = query_parser.parse_query(query).unwrap();
                 let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let res = docs.into_iter().map(|d| d.doc_id).collect::<HashSet<_>>();
+                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
+                res.sort();
                 assert_eq!(res, expected);
             }
         }
@@ -284,18 +279,16 @@ mod tests {
                     .unwrap();
 
             let texts = vec!["你好", "世界", "你好，世界", "你好世界", "foo!", "Bar"];
-
             for text in texts {
                 creator.push_text(text).await.unwrap();
             }
-
             creator.finish().await.unwrap();
 
             let cases = [
-                ("你好", HashSet::from_iter([0u32, 2, 3].into_iter())),
-                ("世界", HashSet::from_iter([1, 2, 3].into_iter())),
-                ("foo", HashSet::from_iter([4].into_iter())),
-                ("bar", HashSet::from_iter([].into_iter())),
+                ("你好", vec![0u32, 2, 3]),
+                ("世界", vec![1, 2, 3]),
+                ("foo", vec![4]),
+                ("bar", vec![]),
             ];
 
             let index = Index::open_in_dir(temp_dir.path()).unwrap();
@@ -308,7 +301,8 @@ mod tests {
                 );
                 let query = query_parser.parse_query(query).unwrap();
                 let docs = searcher.search(&query, &DocSetCollector).unwrap();
-                let res = docs.into_iter().map(|d| d.doc_id).collect::<HashSet<_>>();
+                let mut res = docs.into_iter().map(|d| d.doc_id).collect::<Vec<_>>();
+                res.sort();
                 assert_eq!(res, expected);
             }
         }
