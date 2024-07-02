@@ -175,24 +175,6 @@ mod tests {
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 
         // Deserialized to DatanodeWalConfig.
-        let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
-        let expected = DatanodeKafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            compression: Compression::default(),
-            max_batch_size: ReadableSize::mb(1),
-            linger: Duration::from_millis(200),
-            consumer_wait_timeout: Duration::from_millis(100),
-            backoff: BackoffConfig {
-                init: Duration::from_millis(500),
-                max: Duration::from_secs(10),
-                base: 2,
-                deadline: Some(Duration::from_secs(60 * 5)),
-            },
-            ..Default::default()
-        };
-        assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
-
-        // Deserialized to DatanodeWalConfig.
         let standalone_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],

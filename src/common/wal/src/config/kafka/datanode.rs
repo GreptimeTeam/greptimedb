@@ -58,8 +58,7 @@ pub struct DatanodeKafkaConfig {
 
 impl Default for DatanodeKafkaConfig {
     fn default() -> Self {
-        let broker_endpoints = [BROKER_ENDPOINT.to_string()];
-        let replication_factor = broker_endpoints.len() as i16;
+        let replication_factor = 1;
         Self {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             compression: Compression::NoCompression,
