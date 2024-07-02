@@ -141,6 +141,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid view \"{view_name}\": {msg}"))]
+    InvalidView {
+        msg: String,
+        view_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
     ConvertColumnDefaultConstraint {
         column_name: String,
@@ -732,6 +740,7 @@ impl ErrorExt for Error {
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
+            | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
             | Error::InvalidViewStmt { .. }
             | Error::ConvertIdentifier { .. }

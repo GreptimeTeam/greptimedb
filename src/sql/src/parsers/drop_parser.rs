@@ -16,9 +16,9 @@ use snafu::{ensure, ResultExt};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, InvalidTableNameSnafu, Result};
+use crate::error::{self, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::{ParserContext, FLOW};
-use crate::statements::drop::{DropDatabase, DropFlow, DropTable};
+use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::statement::Statement;
 
 /// DROP statement parser implementation
@@ -28,6 +28,7 @@ impl<'a> ParserContext<'a> {
         match self.parser.peek_token().token {
             Token::Word(w) => match w.keyword {
                 Keyword::TABLE => self.parse_drop_table(),
+                Keyword::VIEW => self.parse_drop_view(),
                 Keyword::SCHEMA | Keyword::DATABASE => self.parse_drop_database(),
                 Keyword::NoKeyword => {
                     let uppercase = w.value.to_uppercase();
@@ -40,6 +41,31 @@ impl<'a> ParserContext<'a> {
             },
             unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    fn parse_drop_view(&mut self) -> Result<Statement> {
+        let _ = self.parser.next_token();
+
+        let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+        let raw_view_ident = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a view name",
+                actual: self.peek_token_as_string(),
+            })?;
+        let view_ident = Self::canonicalize_object_name(raw_view_ident);
+        ensure!(
+            !view_ident.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: view_ident.to_string()
+            }
+        );
+
+        Ok(Statement::DropView(DropView {
+            view_name: view_ident,
+            drop_if_exists: if_exists,
+        }))
     }
 
     fn parse_drop_flow(&mut self) -> Result<Statement> {
@@ -56,7 +82,7 @@ impl<'a> ParserContext<'a> {
         let flow_ident = Self::canonicalize_object_name(raw_flow_ident);
         ensure!(
             !flow_ident.0.is_empty(),
-            InvalidTableNameSnafu {
+            InvalidFlowNameSnafu {
                 name: flow_ident.to_string()
             }
         );
@@ -262,5 +288,54 @@ mod tests {
                 false
             ))
         )
+    }
+
+    #[test]
+    pub fn test_drop_view() {
+        let sql = "DROP VIEW foo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts: Vec<Statement> = result.unwrap();
+        let stmt = stmts.pop().unwrap();
+        assert_eq!(
+            stmt,
+            Statement::DropView(DropView {
+                view_name: ObjectName(vec![Ident::new("foo")]),
+                drop_if_exists: false,
+            })
+        );
+        assert_eq!(sql, stmt.to_string());
+
+        let sql = "DROP VIEW greptime.public.foo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts: Vec<Statement> = result.unwrap();
+        let stmt = stmts.pop().unwrap();
+        assert_eq!(
+            stmt,
+            Statement::DropView(DropView {
+                view_name: ObjectName(vec![
+                    Ident::new("greptime"),
+                    Ident::new("public"),
+                    Ident::new("foo")
+                ]),
+                drop_if_exists: false,
+            })
+        );
+        assert_eq!(sql, stmt.to_string());
+
+        let sql = "DROP VIEW IF EXISTS foo";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let mut stmts: Vec<Statement> = result.unwrap();
+        let stmt = stmts.pop().unwrap();
+        assert_eq!(
+            stmt,
+            Statement::DropView(DropView {
+                view_name: ObjectName(vec![Ident::new("foo")]),
+                drop_if_exists: true,
+            })
+        );
+        assert_eq!(sql, stmt.to_string());
     }
 }
