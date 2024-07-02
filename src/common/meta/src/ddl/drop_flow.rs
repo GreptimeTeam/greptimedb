@@ -25,18 +25,17 @@ use common_procedure::{
 use common_telemetry::info;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::AsRefStr;
 
 use super::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::flow_name::FlowName;
 use crate::instruction::{CacheIdent, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::lock_key::{CatalogLock, FlowLock};
-use crate::peer::Peer;
 use crate::rpc::ddl::DropFlowTask;
 use crate::{metrics, ClusterId};
 
@@ -103,10 +102,17 @@ impl DropFlowProcedure {
         let flownode_ids = &self.data.flow_info_value.as_ref().unwrap().flownode_ids;
         let flow_id = self.data.task.flow_id;
         let mut drop_flow_tasks = Vec::with_capacity(flownode_ids.len());
+        let cluster_id = self.data.cluster_id;
 
         for flownode in flownode_ids.values() {
-            // TODO(weny): use the real peer.
-            let peer = Peer::new(*flownode, "");
+            let peer = self
+                .context
+                .peer_lookup_service
+                .flownode(cluster_id, *flownode)
+                .await?
+                .with_context(|| UnexpectedSnafu {
+                    err_msg: "Attempted to drop flow on a node that could not be found. Consider verifying node availability.",
+                })?;
             let requester = self.context.node_manager.flownode(&peer).await;
             let request = FlowRequest {
                 body: Some(flow_request::Body::Drop(DropRequest {

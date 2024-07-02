@@ -22,87 +22,83 @@ use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::picker::{CompactionTask, Picker};
-use crate::compaction::task::CompactionTaskImpl;
-use crate::compaction::{get_expired_ssts, CompactionOutput, CompactionRequest};
-use crate::sst::file::{FileHandle, FileId};
+use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::run::{find_sorted_runs, reduce_runs};
+use crate::compaction::{get_expired_ssts, CompactionOutput};
+use crate::sst::file::{overlaps, FileHandle, FileId, Level};
 use crate::sst::version::LevelMeta;
+
+const LEVEL_COMPACTED: Level = 1;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 pub struct TwcsPicker {
-    max_active_window_files: usize,
-    max_inactive_window_files: usize,
+    max_active_window_runs: usize,
+    max_inactive_window_runs: usize,
     time_window_seconds: Option<i64>,
 }
 
 impl Debug for TwcsPicker {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsPicker")
-            .field("max_active_window_files", &self.max_active_window_files)
-            .field("max_inactive_window_files", &self.max_inactive_window_files)
+            .field("max_active_window_runs", &self.max_active_window_runs)
+            .field("max_inactive_window_runs", &self.max_inactive_window_runs)
             .finish()
     }
 }
 
 impl TwcsPicker {
     pub fn new(
-        max_active_window_files: usize,
-        max_inactive_window_files: usize,
+        max_active_window_runs: usize,
+        max_inactive_window_runs: usize,
         time_window_seconds: Option<i64>,
     ) -> Self {
         Self {
-            max_inactive_window_files,
-            max_active_window_files,
+            max_inactive_window_runs,
+            max_active_window_runs,
             time_window_seconds,
         }
     }
 
     /// Builds compaction output from files.
-    /// For active writing window, we allow for at most `max_active_window_files` files to alleviate
+    /// For active writing window, we allow for at most `max_active_window_runs` files to alleviate
     /// fragmentation. For other windows, we allow at most 1 file at each window.
     fn build_output(
         &self,
-        time_windows: &BTreeMap<i64, Window>,
+        time_windows: &mut BTreeMap<i64, Window>,
         active_window: Option<i64>,
     ) -> Vec<CompactionOutput> {
         let mut output = vec![];
         for (window, files) in time_windows {
-            let files_in_window = &files.files;
-            // we only remove deletion markers once no file in current window overlaps with any other window.
-            let filter_deleted = !files.overlapping;
+            let sorted_runs = find_sorted_runs(&mut files.files);
 
-            if let Some(active_window) = active_window
+            let max_runs = if let Some(active_window) = active_window
                 && *window == active_window
             {
-                if files_in_window.len() > self.max_active_window_files {
+                self.max_active_window_runs
+            } else {
+                self.max_inactive_window_runs
+            };
+
+            // we only remove deletion markers once no file in current window overlaps with any other window.
+            let found_runs = sorted_runs.len();
+            let filter_deleted = !files.overlapping && (found_runs == 1 || max_runs == 1);
+
+            if found_runs > max_runs {
+                let files_to_compact = reduce_runs(sorted_runs, max_runs);
+                info!("Building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, output size: {}", active_window, *window,max_runs, found_runs, files_to_compact.len());
+                for inputs in files_to_compact {
                     output.push(CompactionOutput {
                         output_file_id: FileId::random(),
-                        output_level: 1, // we only have two levels and always compact to l1
-                        inputs: files_in_window.clone(),
+                        output_level: LEVEL_COMPACTED, // always compact to l1
+                        inputs,
                         filter_deleted,
-                        output_time_range: None, // we do not enforce output time range in twcs compactions.
+                        output_time_range: None, // we do not enforce output time range in twcs compactions.});
                     });
-                } else {
-                    debug!("Active window not present or no enough files in active window {:?}, window: {}", active_window, *window);
                 }
             } else {
-                // not active writing window
-                if files_in_window.len() > self.max_inactive_window_files {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: 1,
-                        inputs: files_in_window.clone(),
-                        filter_deleted,
-                        output_time_range: None,
-                    });
-                } else {
-                    debug!(
-                        "No enough files, current: {}, max_inactive_window_files: {}",
-                        files_in_window.len(),
-                        self.max_inactive_window_files
-                    )
-                }
+                debug!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
             }
         }
         output
@@ -110,27 +106,10 @@ impl TwcsPicker {
 }
 
 impl Picker for TwcsPicker {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
-        let CompactionRequest {
-            engine_config,
-            current_version,
-            access_layer,
-            request_sender,
-            waiters,
-            file_purger,
-            start_time,
-            cache_manager,
-            manifest_ctx,
-            version_control,
-            listener,
-            ..
-        } = req;
-
-        let region_metadata = current_version.metadata.clone();
-        let region_id = region_metadata.region_id;
-
-        let levels = current_version.ssts.levels();
-        let ttl = current_version.options.ttl;
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
+        let region_id = compaction_region.region_id;
+        let levels = compaction_region.current_version.ssts.levels();
+        let ttl = compaction_region.current_version.options.ttl;
         let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
@@ -138,7 +117,8 @@ impl Picker for TwcsPicker {
             expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
 
-        let compaction_time_window = current_version
+        let compaction_time_window = compaction_region
+            .current_version
             .compaction_time_window
             .map(|window| window.as_secs() as i64);
         let time_window_size = compaction_time_window
@@ -155,37 +135,19 @@ impl Picker for TwcsPicker {
         // Find active window from files in level 0.
         let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
         // Assign files to windows
-        let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
-        let outputs = self.build_output(&windows, active_window);
+        let mut windows =
+            assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
+        let outputs = self.build_output(&mut windows, active_window);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
-            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
-            for waiter in waiters {
-                waiter.send(Ok(0));
-            }
             return None;
         }
-        let task = CompactionTaskImpl {
-            engine_config,
-            region_id,
-            metadata: region_metadata,
-            sst_layer: access_layer,
+
+        Some(PickerOutput {
             outputs,
             expired_ssts,
-            compaction_time_window: Some(time_window_size),
-            request_sender,
-            waiters,
-            file_purger,
-            start_time,
-            cache_manager,
-            storage: current_version.options.storage.clone(),
-            index_options: current_version.options.index_options.clone(),
-            append_mode: current_version.options.append_mode,
-            manifest_ctx,
-            version_control,
-            listener,
-        };
-        Some(Box::new(task))
+            time_window_size,
+        })
     }
 }
 
@@ -273,15 +235,6 @@ fn assign_to_windows<'a>(
     }
 
     windows.into_iter().map(|w| (w.time_window, w)).collect()
-}
-
-/// Checks if two inclusive timestamp ranges overlap with each other.
-fn overlaps(l: &(Timestamp, Timestamp), r: &(Timestamp, Timestamp)) -> bool {
-    let (l, r) = if l.0 <= r.0 { (l, r) } else { (r, l) };
-    let (_, l_end) = l;
-    let (r_start, _) = r;
-
-    r_start <= l_end
 }
 
 /// Finds the latest active writing window among all files.
@@ -526,10 +479,10 @@ mod tests {
 
     impl CompactionPickerTestCase {
         fn check(&self) {
-            let windows = assign_to_windows(self.input_files.iter(), self.window_size);
+            let mut windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::new(4, 1, None).build_output(&windows, active_window);
+            let output = TwcsPicker::new(4, 1, None).build_output(&mut windows, active_window);
 
             let output = output
                 .iter()

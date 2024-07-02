@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use self::insert_expr::{RowValue, RowValues};
 use crate::context::TableContextRef;
-use crate::generator::Random;
+use crate::generator::{Random, TsValueGenerator};
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
 
@@ -127,12 +127,10 @@ pub fn generate_random_value<R: Rng>(
 }
 
 /// Generate monotonically increasing timestamps for MySQL.
-pub fn generate_unique_timestamp_for_mysql<R: Rng>(
-    base: i64,
-) -> impl Fn(&mut R, TimestampType) -> Value {
+pub fn generate_unique_timestamp_for_mysql<R: Rng>(base: i64) -> TsValueGenerator<R> {
     let base = Arc::new(AtomicI64::new(base));
 
-    move |_rng, ts_type| -> Value {
+    Box::new(move |_rng, ts_type| -> Value {
         let value = base.fetch_add(1, Ordering::Relaxed);
         let v = match ts_type {
             TimestampType::Second(_) => Timestamp::new_second(1 + value),
@@ -141,7 +139,7 @@ pub fn generate_unique_timestamp_for_mysql<R: Rng>(
             TimestampType::Nanosecond(_) => Timestamp::new_nanosecond(1_000_000_000 + value),
         };
         Value::from(v)
-    }
+    })
 }
 
 /// Generate random timestamps.
@@ -252,6 +250,10 @@ impl Ident {
             value: value.into(),
             quote_style: Some(quote),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
     }
 }
 

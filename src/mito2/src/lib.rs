@@ -25,7 +25,7 @@ pub mod test_util;
 
 mod access_layer;
 mod cache;
-mod compaction;
+pub mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -38,7 +38,7 @@ pub mod region;
 mod region_write_ctx;
 pub mod request;
 pub mod row_converter;
-pub(crate) mod schedule;
+pub mod schedule;
 pub mod sst;
 mod time_provider;
 pub mod wal;

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -283,6 +283,7 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
+        // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
             .cache_max_capacity(cache_max_capacity)
             .cache_ttl(cache_ttl)
@@ -333,9 +334,10 @@ impl StartCommand {
             timeout: None,
             ..Default::default()
         };
-        let client = DatanodeClients::new(channel_config);
+        let client = NodeClients::new(channel_config);
 
         let mut instance = FrontendBuilder::new(
+            opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
@@ -349,12 +351,12 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
+        let servers = Services::new(opts, Arc::new(instance.clone()), plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
         instance
-            .build_servers(opts, servers)
+            .build_servers(servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance::new(instance, guard))
@@ -370,7 +372,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
-    use frontend::service_config::GrpcOptions;
+    use servers::grpc::GrpcOptions;
     use servers::http::HttpOptions;
 
     use super::*;

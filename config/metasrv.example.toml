@@ -32,7 +32,7 @@ read_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 write_rt_size = 8
 ## The number of threads to execute the runtime for global background operations.
-bg_rt_size = 8
+bg_rt_size = 4
 
 ## Procedure storage options.
 [procedure]
@@ -54,7 +54,7 @@ max_metadata_value_size = "1500KiB"
 [failure_detector]
 threshold = 8.0
 min_std_deviation = "100ms"
-acceptable_heartbeat_pause = "3000ms"
+acceptable_heartbeat_pause = "10000ms"
 first_heartbeat_estimate = "1000ms"
 
 ## Datanode options.

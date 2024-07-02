@@ -14,4 +14,5 @@
 
 #![feature(iter_partition_in_place)]
 
+pub mod fulltext_index;
 pub mod inverted_index;

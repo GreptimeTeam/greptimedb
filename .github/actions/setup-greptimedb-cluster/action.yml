@@ -22,6 +22,10 @@ inputs:
   etcd-endpoints:
     default: "etcd.etcd-cluster.svc.cluster.local:2379"
     description: "Etcd endpoints"
+  values-filename:
+    default: "with-minio.yaml"
+  enable-region-failover:
+    default: false
 
 runs:
   using: composite
@@ -44,6 +48,7 @@ runs:
       helm upgrade \
         --install my-greptimedb \
         --set meta.etcdEndpoints=${{ inputs.etcd-endpoints }} \
+        --set meta.enableRegionFailover=${{ inputs.enable-region-failover }} \
         --set image.registry=${{ inputs.image-registry }} \
         --set image.repository=${{ inputs.image-repository }}  \
         --set image.tag=${{ inputs.image-tag }} \
@@ -57,7 +62,7 @@ runs:
         greptime/greptimedb-cluster \
         --create-namespace \
         -n my-greptimedb \
-        --values ./.github/actions/setup-greptimedb-cluster/values.yaml \
+        --values ./.github/actions/setup-greptimedb-cluster/${{ inputs.values-filename }} \
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB

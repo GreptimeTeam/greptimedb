@@ -28,6 +28,7 @@ use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
+use servers::addrs;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
@@ -47,8 +48,7 @@ pub(crate) mod task_tracker;
 pub struct HeartbeatTask {
     node_id: u64,
     node_epoch: u64,
-    server_addr: String,
-    server_hostname: Option<String>,
+    peer_addr: String,
     running: Arc<AtomicBool>,
     meta_client: Arc<MetaClient>,
     region_server: RegionServer,
@@ -84,8 +84,7 @@ impl HeartbeatTask {
             node_id: opts.node_id.unwrap_or(0),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
-            server_addr: opts.rpc_addr.clone(),
-            server_hostname: opts.rpc_hostname.clone(),
+            peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
             running: Arc::new(AtomicBool::new(false)),
             meta_client: Arc::new(meta_client),
             region_server,
@@ -108,7 +107,7 @@ impl HeartbeatTask {
 
         let mut last_received_lease = Instant::now();
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_hb(async move {
             while let Some(res) = rx.message().await.unwrap_or_else(|e| {
                 error!(e; "Error while reading heartbeat response");
                 None
@@ -159,7 +158,7 @@ impl HeartbeatTask {
         ctx: HeartbeatResponseHandlerContext,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
-        trace!("heartbeat response: {:?}", ctx.response);
+        trace!("Heartbeat response: {:?}", ctx.response);
         handler_executor
             .handle(ctx)
             .await
@@ -183,7 +182,7 @@ impl HeartbeatTask {
         let interval = self.interval;
         let node_id = self.node_id;
         let node_epoch = self.node_epoch;
-        let addr = resolve_addr(&self.server_addr, &self.server_hostname);
+        let addr = &self.peer_addr;
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
 
         let meta_client = self.meta_client.clone();
@@ -215,7 +214,7 @@ impl HeartbeatTask {
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
 
-        common_runtime::spawn_bg(async move {
+        common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
             loop {
@@ -246,7 +245,7 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         let build_info = common_version::build_info();
-                        let region_stats = Self::load_region_stats(&region_server_clone).await;
+                        let region_stats = Self::load_region_stats(&region_server_clone);
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
@@ -314,31 +313,23 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let regions = region_server.reportable_regions();
-
-        let mut region_stats = Vec::new();
-        for stat in regions {
-            let approximate_bytes = region_server
-                .region_disk_usage(stat.region_id)
-                .await
-                .unwrap_or(0);
-            let region_stat = RegionStat {
+    fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
+        region_server
+            .reportable_regions()
+            .into_iter()
+            .map(|stat| RegionStat {
                 region_id: stat.region_id.as_u64(),
                 engine: stat.engine,
                 role: RegionRole::from(stat.role).into(),
-                approximate_bytes,
-                // TODO(ruihang): scratch more info
+                // TODO(jeremy): w/rcus
                 rcus: 0,
                 wcus: 0,
-                approximate_rows: 0,
-            };
-            region_stats.push(region_stat);
-        }
-        region_stats
+                approximate_bytes: region_server.region_disk_usage(stat.region_id).unwrap_or(0),
+            })
+            .collect()
     }
 
-    pub async fn close(&self) -> Result<()> {
+    pub fn close(&self) -> Result<()> {
         let running = self.running.clone();
         if running
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
@@ -348,25 +339,6 @@ impl HeartbeatTask {
         }
 
         Ok(())
-    }
-}
-
-/// Resolves hostname:port address for meta registration
-///
-fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
-    match hostname_addr {
-        Some(hostname_addr) => {
-            // it has port configured
-            if hostname_addr.contains(':') {
-                hostname_addr.clone()
-            } else {
-                // otherwise, resolve port from bind_addr
-                // should be safe to unwrap here because bind_addr is already validated
-                let port = bind_addr.split(':').nth(1).unwrap();
-                format!("{hostname_addr}:{port}")
-            }
-        }
-        None => bind_addr.to_owned(),
     }
 }
 
@@ -404,25 +376,4 @@ pub async fn new_metasrv_client(
         .await
         .context(MetaClientInitSnafu)?;
     Ok(meta_client)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_resolve_addr() {
-        assert_eq!(
-            "tomcat:3001",
-            super::resolve_addr("127.0.0.1:3001", &Some("tomcat".to_owned()))
-        );
-
-        assert_eq!(
-            "tomcat:3002",
-            super::resolve_addr("127.0.0.1:3001", &Some("tomcat:3002".to_owned()))
-        );
-
-        assert_eq!(
-            "127.0.0.1:3001",
-            super::resolve_addr("127.0.0.1:3001", &None)
-        );
-    }
 }

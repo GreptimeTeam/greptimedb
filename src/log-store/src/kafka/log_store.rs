@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use futures::future::try_join_all;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
@@ -30,26 +32,32 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::util::offset::Offset;
+use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    maybe_emit_entry, remaining_entries, Record, RecordProducer, ESTIMATED_META_SIZE,
+    convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
 };
 use crate::metrics;
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {
-    config: DatanodeKafkaConfig,
-    /// Manages kafka clients through which the log store contact the Kafka cluster.
+    /// The manager of topic clients.
     client_manager: ClientManagerRef,
+    /// The max size of a batch.
+    max_batch_bytes: usize,
+    /// The consumer wait timeout.
+    consumer_wait_timeout: Duration,
 }
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
     pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
+        let client_manager = Arc::new(ClientManager::try_new(config).await?);
+
         Ok(Self {
-            client_manager: Arc::new(ClientManager::try_new(config).await?),
-            config: config.clone(),
+            client_manager,
+            max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
+            consumer_wait_timeout: config.consumer_wait_timeout,
         })
     }
 }
@@ -109,8 +117,7 @@ impl LogStore for KafkaLogStore {
                 actual: provider.type_name(),
             })?;
 
-        let max_data_size =
-            self.client_manager.config.max_batch_size.as_bytes() as usize - ESTIMATED_META_SIZE;
+        let max_data_size = self.max_batch_bytes - ESTIMATED_META_SIZE;
         Ok(build_entry(
             data,
             entry_id,
@@ -120,7 +127,6 @@ impl LogStore for KafkaLogStore {
         ))
     }
 
-    // TODO(weny): refactor the writing.
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Entry>) -> Result<AppendBatchResponse> {
@@ -137,39 +143,55 @@ impl LogStore for KafkaLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        // Groups entries by region id and pushes them to an associated record producer.
-        let mut producers = HashMap::with_capacity(entries.len());
+        let region_ids = entries
+            .iter()
+            .map(|entry| entry.region_id())
+            .collect::<HashSet<_>>();
+        let mut region_grouped_records: HashMap<RegionId, (OrderedBatchProducerRef, Vec<_>)> =
+            HashMap::with_capacity(region_ids.len());
         for entry in entries {
-            let provider = entry
-                .provider()
-                .as_kafka_provider()
-                .context(error::InvalidProviderSnafu {
+            let provider = entry.provider().as_kafka_provider().with_context(|| {
+                error::InvalidProviderSnafu {
                     expected: KafkaProvider::type_name(),
                     actual: entry.provider().type_name(),
-                })?
-                .clone();
-            producers
-                .entry(entry.region_id())
-                .or_insert_with(|| RecordProducer::new(provider))
-                .push(entry);
+                }
+            })?;
+            let region_id = entry.region_id();
+            match region_grouped_records.entry(region_id) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    slot.get_mut().1.extend(convert_to_kafka_records(entry)?);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let producer = self
+                        .client_manager
+                        .get_or_insert(provider)
+                        .await?
+                        .producer()
+                        .clone();
+
+                    slot.insert((producer, convert_to_kafka_records(entry)?));
+                }
+            }
         }
 
-        // Produces entries for each region and gets the offset those entries written to.
-        // The returned offset is then converted into an entry id.
-        let last_entry_ids = futures::future::try_join_all(producers.into_iter().map(
-            |(region_id, producer)| async move {
-                let entry_id = producer
-                    .produce(&self.client_manager)
-                    .await
-                    .map(TryInto::try_into)??;
-                Ok((region_id, entry_id))
-            },
-        ))
-        .await?
-        .into_iter()
-        .collect::<HashMap<_, _>>();
+        let mut region_grouped_result_receivers = Vec::with_capacity(region_ids.len());
+        for (region_id, (producer, records)) in region_grouped_records {
+            // Safety: `KafkaLogStore::entry` will ensure that the
+            // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
+            region_grouped_result_receivers.push((region_id, producer.produce(records).await?))
+        }
 
-        Ok(AppendBatchResponse { last_entry_ids })
+        let region_grouped_max_offset =
+            try_join_all(region_grouped_result_receivers.into_iter().map(
+                |(region_id, receiver)| async move {
+                    receiver.wait().await.map(|offset| (region_id, offset))
+                },
+            ))
+            .await?;
+
+        Ok(AppendBatchResponse {
+            last_entry_ids: region_grouped_max_offset.into_iter().collect(),
+        })
     }
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids.
@@ -192,9 +214,9 @@ impl LogStore for KafkaLogStore {
         // Gets the client associated with the topic.
         let client = self
             .client_manager
-            .get_or_insert(&provider.topic)
+            .get_or_insert(provider)
             .await?
-            .raw_client
+            .client()
             .clone();
 
         // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
@@ -209,7 +231,7 @@ impl LogStore for KafkaLogStore {
             })?
             - 1;
         // Reads entries with offsets in the range [start_offset, end_offset].
-        let start_offset = Offset::try_from(entry_id)?.0;
+        let start_offset = entry_id as i64;
 
         debug!(
             "Start reading entries in range [{}, {}] for ns {}",
@@ -227,8 +249,8 @@ impl LogStore for KafkaLogStore {
         }
 
         let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
-            .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
-            .with_max_wait_ms(self.config.consumer_wait_timeout.as_millis() as i32)
+            .with_max_batch_size(self.max_batch_bytes as i32)
+            .with_max_wait_ms(self.consumer_wait_timeout.as_millis() as i32)
             .build();
 
         debug!(
@@ -440,7 +462,7 @@ mod tests {
             .collect::<Vec<_>>();
         let config = DatanodeKafkaConfig {
             broker_endpoints,
-            max_batch_size: ReadableSize::kb(32),
+            max_batch_bytes: ReadableSize::kb(32),
             ..Default::default()
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();
@@ -509,7 +531,7 @@ mod tests {
             .collect::<Vec<_>>();
         let config = DatanodeKafkaConfig {
             broker_endpoints,
-            max_batch_size: ReadableSize::kb(8),
+            max_batch_bytes: ReadableSize::kb(8),
             ..Default::default()
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();

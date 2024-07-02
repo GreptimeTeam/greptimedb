@@ -16,31 +16,35 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
-use store_api::region_engine::{RegionScannerRef, SinglePartitionScanner};
+use common_time::Timestamp;
+use datafusion::physical_plan::DisplayFormatType;
+use smallvec::SmallVec;
+use store_api::region_engine::RegionScannerRef;
 use store_api::storage::ScanRequest;
 use table::predicate::{build_time_range_predicate, Predicate};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
-use crate::memtable::MemtableRef;
+use crate::memtable::{MemtableRange, MemtableRef};
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::{CompatBatch, CompatReader};
+use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::unordered_scan::UnorderedScan;
-use crate::read::{compat, Batch, Source};
+use crate::read::{Batch, Source};
+use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
-use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::file::{overlaps, FileHandle, FileMeta};
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::file_range::FileRange;
@@ -57,7 +61,7 @@ impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build_stream().await.map_err(BoxedError::new),
+            Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
@@ -65,12 +69,8 @@ impl Scanner {
     /// Returns a [RegionScanner] to scan the region.
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         match self {
-            Scanner::Seq(seq_scan) => {
-                let stream = seq_scan.build_stream().await?;
-                let scanner = Arc::new(SinglePartitionScanner::new(stream));
-                Ok(scanner)
-            }
-            Scanner::Unordered(unordered_scan) => Ok(Arc::new(unordered_scan)),
+            Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
+            Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),
         }
     }
 }
@@ -221,9 +221,7 @@ impl ScanRegion {
     /// Scan sequentially.
     pub(crate) fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input(true)?;
-        let seq_scan = SeqScan::new(input);
-
-        Ok(seq_scan)
+        Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
@@ -235,8 +233,7 @@ impl ScanRegion {
     #[cfg(test)]
     pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
         let input = self.scan_input(false)?;
-        let scan = SeqScan::new(input);
-        Ok(scan)
+        Ok(SeqScan::new(input))
     }
 
     /// Creates a scan input.
@@ -263,9 +260,8 @@ impl ScanRegion {
                     return false;
                 }
                 let stats = mem.stats();
-                let Some((start, end)) = stats.time_range() else {
-                    return true;
-                };
+                // Safety: the memtable is not empty.
+                let (start, end) = stats.time_range().unwrap();
 
                 // The time range of the memtable is inclusive.
                 let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
@@ -300,7 +296,8 @@ impl ScanRegion {
             .with_parallelism(self.parallelism)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
-            .with_filter_deleted(filter_deleted);
+            .with_filter_deleted(filter_deleted)
+            .with_merge_mode(self.version.options.merge_mode());
         Ok(input)
     }
 
@@ -364,13 +361,6 @@ pub(crate) struct ScanParallism {
     pub(crate) channel_size: usize,
 }
 
-impl ScanParallism {
-    /// Returns true if we allow parallel scan.
-    pub(crate) fn allow_parallel_scan(&self) -> bool {
-        self.parallelism > 1
-    }
-}
-
 /// Returns true if the time range of a SST `file` matches the `predicate`.
 fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     if predicate == &TimestampRange::min_to_max() {
@@ -410,6 +400,8 @@ pub(crate) struct ScanInput {
     pub(crate) append_mode: bool,
     /// Whether to remove deletion markers.
     pub(crate) filter_deleted: bool,
+    /// Mode to merge duplicate rows.
+    pub(crate) merge_mode: MergeMode,
 }
 
 impl ScanInput {
@@ -430,6 +422,7 @@ impl ScanInput {
             query_start: None,
             append_mode: false,
             filter_deleted: true,
+            merge_mode: MergeMode::default(),
         }
     }
 
@@ -509,60 +502,22 @@ impl ScanInput {
         self
     }
 
-    /// Builds and returns sources to read.
-    pub(crate) async fn build_sources(&self) -> Result<Vec<Source>> {
-        let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
-        for mem in &self.memtables {
-            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone())?;
-            sources.push(Source::Iter(iter));
-        }
-        for file in &self.files {
-            let maybe_reader = self
-                .access_layer
-                .read_sst(file.clone())
-                .predicate(self.predicate.clone())
-                .time_range(self.time_range)
-                .projection(Some(self.mapper.column_ids().to_vec()))
-                .cache(self.cache_manager.clone())
-                .index_applier(self.index_applier.clone())
-                .expected_metadata(Some(self.mapper.metadata().clone()))
-                .build()
-                .await;
-            let reader = match maybe_reader {
-                Ok(reader) => reader,
-                Err(e) => {
-                    if e.is_object_not_found() && self.ignore_file_not_found {
-                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
-                sources.push(Source::Reader(Box::new(reader)));
-            } else {
-                // They have different schema. We need to adapt the batch first so the
-                // mapper can convert it.
-                let compat_reader =
-                    CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
-                sources.push(Source::Reader(Box::new(compat_reader)));
-            }
-        }
-
-        READ_SST_COUNT.observe(self.files.len() as f64);
-
-        Ok(sources)
+    /// Sets the merge mode.
+    #[must_use]
+    pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
+        self.merge_mode = merge_mode;
+        self
     }
 
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
-    pub(crate) async fn build_parallel_sources(&self) -> Result<Vec<Source>> {
-        assert!(self.parallelism.allow_parallel_scan());
-        // Scall all memtables and SSTs.
-        let sources = self.build_sources().await?;
-        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
+    pub(crate) fn create_parallel_sources(
+        &self,
+        sources: Vec<Source>,
+        semaphore: Arc<Semaphore>,
+    ) -> Result<Vec<Source>> {
+        debug_assert!(self.parallelism.parallelism > 1);
         // Spawn a task for each source.
         let sources = sources
             .into_iter()
@@ -576,7 +531,7 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Prunes file ranges to scan and adds them tothe `collector`.
+    /// Prunes file ranges to scan and adds them to the `collector`.
     pub(crate) async fn prune_file_ranges(
         &self,
         collector: &mut impl FileRangeCollector,
@@ -641,7 +596,7 @@ impl ScanInput {
         common_runtime::spawn_read(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
-                // the channel with the permit holded
+                // the channel with the permit held.
                 let maybe_batch = {
                     // Safety: We never close the semaphore.
                     let _permit = semaphore.acquire().await.unwrap();
@@ -680,25 +635,73 @@ impl ScanInput {
     }
 }
 
+/// Groups of file ranges. Each group in the list contains multiple file
+/// ranges to scan. File ranges in the same group may come from different files.
+pub(crate) type FileRangesGroup = SmallVec<[Vec<FileRange>; 4]>;
+
 /// A partition of a scanner to read.
 /// It contains memtables and file ranges to scan.
 #[derive(Default)]
 pub(crate) struct ScanPart {
-    /// Memtables to scan.
-    /// We scan the whole memtable now. We might scan a range of the memtable in the future.
-    pub(crate) memtables: Vec<MemtableRef>,
+    /// Memtable ranges to scan.
+    pub(crate) memtable_ranges: Vec<MemtableRange>,
     /// File ranges to scan.
-    pub(crate) file_ranges: Vec<FileRange>,
+    pub(crate) file_ranges: FileRangesGroup,
+    /// Optional time range of the part (inclusive).
+    pub(crate) time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl fmt::Debug for ScanPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ScanPart({} memtables, {} file ranges)",
-            self.memtables.len(),
-            self.file_ranges.len()
-        )
+            "ScanPart({} memtable ranges, {} file ranges",
+            self.memtable_ranges.len(),
+            self.file_ranges
+                .iter()
+                .map(|ranges| ranges.len())
+                .sum::<usize>(),
+        )?;
+        if let Some(time_range) = &self.time_range {
+            write!(f, ", time range: {:?})", time_range)
+        } else {
+            write!(f, ")")
+        }
+    }
+}
+
+impl ScanPart {
+    /// Returns true if the time range given `part` overlaps with this part.
+    pub(crate) fn overlaps(&self, part: &ScanPart) -> bool {
+        let (Some(current_range), Some(part_range)) = (self.time_range, part.time_range) else {
+            return true;
+        };
+
+        overlaps(&current_range, &part_range)
+    }
+
+    /// Merges given `part` to this part.
+    pub(crate) fn merge(&mut self, mut part: ScanPart) {
+        self.memtable_ranges.append(&mut part.memtable_ranges);
+        self.file_ranges.append(&mut part.file_ranges);
+        let Some(part_range) = part.time_range else {
+            return;
+        };
+        let Some(current_range) = self.time_range else {
+            self.time_range = part.time_range;
+            return;
+        };
+        let start = current_range.0.min(part_range.0);
+        let end = current_range.1.max(part_range.1);
+        self.time_range = Some((start, end));
+    }
+
+    /// Returns true if the we can split the part into multiple parts
+    /// and preserving order.
+    pub(crate) fn can_split_preserve_order(&self) -> bool {
+        self.memtable_ranges.is_empty()
+            && self.file_ranges.len() == 1
+            && self.file_ranges[0].len() > 1
     }
 }
 
@@ -710,4 +713,106 @@ pub(crate) trait FileRangeCollector {
         file_meta: &FileMeta,
         file_ranges: impl Iterator<Item = FileRange>,
     );
+}
+
+/// Optional list of [ScanPart]s.
+#[derive(Default)]
+pub(crate) struct ScanPartList(pub(crate) Option<Vec<ScanPart>>);
+
+impl fmt::Debug for ScanPartList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(parts) => write!(f, "{:?}", parts),
+            None => write!(f, "[]"),
+        }
+    }
+}
+
+impl ScanPartList {
+    /// Returns true if the list is None.
+    pub(crate) fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Sets parts to the list.
+    pub(crate) fn set_parts(&mut self, parts: Vec<ScanPart>) {
+        self.0 = Some(parts);
+    }
+
+    /// Gets the part by index, returns None if the index is out of bound.
+    /// # Panics
+    /// Panics if parts are not initialized.
+    pub(crate) fn get_part(&mut self, index: usize) -> Option<&ScanPart> {
+        let parts = self.0.as_ref().unwrap();
+        parts.get(index)
+    }
+
+    /// Returns the number of parts.
+    pub(crate) fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| parts.len())
+    }
+
+    /// Returns the number of memtable ranges.
+    pub(crate) fn num_mem_ranges(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.memtable_ranges.len()).sum()
+        })
+    }
+
+    /// Returns the number of file ranges.
+    pub(crate) fn num_file_ranges(&self) -> usize {
+        self.0.as_ref().map_or(0, |parts| {
+            parts.iter().map(|part| part.file_ranges.len()).sum()
+        })
+    }
+}
+
+/// Context shared by different streams from a scanner.
+/// It contains the input and distributes input to multiple parts
+/// to scan.
+pub(crate) struct StreamContext {
+    /// Input memtables and files.
+    pub(crate) input: ScanInput,
+    /// Parts to scan.
+    /// The scanner builds parts to scan from the input lazily.
+    /// The mutex is used to ensure the parts are only built once.
+    pub(crate) parts: Mutex<ScanPartList>,
+
+    // Metrics:
+    /// The start time of the query.
+    pub(crate) query_start: Instant,
+    /// Time elapsed before creating the scanner.
+    pub(crate) prepare_scan_cost: Duration,
+}
+
+impl StreamContext {
+    /// Creates a new [StreamContext].
+    pub(crate) fn new(input: ScanInput) -> Self {
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let prepare_scan_cost = query_start.elapsed();
+
+        Self {
+            input,
+            parts: Mutex::new(ScanPartList::default()),
+            query_start,
+            prepare_scan_cost,
+        }
+    }
+
+    /// Format parts for explain.
+    pub(crate) fn format_parts(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.parts.try_lock() {
+            Ok(inner) => match t {
+                DisplayFormatType::Default => write!(
+                    f,
+                    "partition_count={} ({} memtable ranges, {} file ranges)",
+                    inner.len(),
+                    inner.num_mem_ranges(),
+                    inner.num_file_ranges()
+                ),
+                DisplayFormatType::Verbose => write!(f, "{:?}", &*inner),
+            },
+            Err(_) => write!(f, "<locked>"),
+        }
+    }
 }

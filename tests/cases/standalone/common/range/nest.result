@@ -58,6 +58,7 @@ EXPLAIN SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 | logical_plan_| RangeSelect: range_exprs=[MIN(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host.host], time_index=ts |
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | RangeSelectExec: range_expr=[MIN(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts |
+|_|_CoalescePartitionsExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -72,9 +73,10 @@ EXPLAIN ANALYZE SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_RangeSelectExec: range_expr=[MIN(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SinglePartitionScanner: <SendableRecordBatchStream> REDACTED
+| 1_| 0_|_SeqScan: partition_count=1 (1 memtable ranges, 0 file ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 10_|
 +-+-+-+

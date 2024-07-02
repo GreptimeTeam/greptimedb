@@ -17,7 +17,7 @@ use std::io::SeekFrom;
 use async_trait::async_trait;
 use common_base::BitVec;
 use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
+use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
@@ -61,23 +61,22 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIn
         footer_reader.metadata().await
     }
 
-    async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap> {
-        let offset = SeekFrom::Start(meta.base_offset + meta.relative_fst_offset as u64);
-        self.source.seek(offset).await.context(SeekSnafu)?;
-        let mut buf = vec![0u8; meta.fst_size as usize];
+    async fn fst(&mut self, offset: u64, size: u32) -> Result<FstMap> {
+        self.source
+            .seek(SeekFrom::Start(offset))
+            .await
+            .context(SeekSnafu)?;
+        let mut buf = vec![0u8; size as usize];
         self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
 
         FstMap::new(buf).context(DecodeFstSnafu)
     }
 
-    async fn bitmap(
-        &mut self,
-        meta: &InvertedIndexMeta,
-        relative_offset: u32,
-        size: u32,
-    ) -> Result<BitVec> {
-        let offset = SeekFrom::Start(meta.base_offset + relative_offset as u64);
-        self.source.seek(offset).await.context(SeekSnafu)?;
+    async fn bitmap(&mut self, offset: u64, size: u32) -> Result<BitVec> {
+        self.source
+            .seek(SeekFrom::Start(offset))
+            .await
+            .context(SeekSnafu)?;
         let mut buf = vec![0u8; size as usize];
         self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
 
@@ -202,13 +201,25 @@ mod tests {
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
-        let fst_map = blob_reader.fst(meta).await.unwrap();
+        let fst_map = blob_reader
+            .fst(
+                meta.base_offset + meta.relative_fst_offset as u64,
+                meta.fst_size,
+            )
+            .await
+            .unwrap();
         assert_eq!(fst_map.len(), 2);
         assert_eq!(fst_map.get("key1".as_bytes()), Some(1));
         assert_eq!(fst_map.get("key2".as_bytes()), Some(2));
 
         let meta = metas.metas.get("tag1").unwrap();
-        let fst_map = blob_reader.fst(meta).await.unwrap();
+        let fst_map = blob_reader
+            .fst(
+                meta.base_offset + meta.relative_fst_offset as u64,
+                meta.fst_size,
+            )
+            .await
+            .unwrap();
         assert_eq!(fst_map.len(), 2);
         assert_eq!(fst_map.get("key1".as_bytes()), Some(1));
         assert_eq!(fst_map.get("key2".as_bytes()), Some(2));
@@ -222,17 +233,17 @@ mod tests {
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
-        let bitmap = blob_reader.bitmap(meta, 0, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
-        let bitmap = blob_reader.bitmap(meta, 2, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset + 2, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag1").unwrap();
 
-        let bitmap = blob_reader.bitmap(meta, 0, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
-        let bitmap = blob_reader.bitmap(meta, 2, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset + 2, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
     }
 }

@@ -33,6 +33,7 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionState;
+use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -151,16 +152,17 @@ pub enum Error {
         error: ArrowError,
     },
 
-    #[snafu(display("Failed to write to buffer"))]
-    WriteBuffer {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_datasource::error::Error,
-    },
-
     #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write parquet file"))]
+    WriteParquet {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
         #[snafu(implicit)]
@@ -696,6 +698,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Partition {} out of range, {} in total", given, all))]
+    PartitionOutOfRange {
+        given: usize,
+        all: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to iter data part"))]
     ReadDataPart {
         #[snafu(source)]
@@ -743,6 +753,35 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: Arc<Error>,
+    },
+
+    #[snafu(display("Failed to parse job id"))]
+    ParseJobId {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: uuid::Error,
+    },
+
+    #[snafu(display("Operation is not supported: {}", err_msg))]
+    UnsupportedOperation {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to remotely compact region {} by job {} due to {}",
+        region_id,
+        job_id,
+        reason
+    ))]
+    RemoteCompaction {
+        region_id: RegionId,
+        job_id: JobId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -795,7 +834,9 @@ impl ErrorExt for Error {
             | ColumnNotFound { .. }
             | InvalidMetadata { .. }
             | InvalidRegionOptions { .. }
-            | InvalidWalReadRequest { .. } => StatusCode::InvalidArguments,
+            | InvalidWalReadRequest { .. }
+            | PartitionOutOfRange { .. }
+            | ParseJobId { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 
@@ -808,7 +849,7 @@ impl ErrorExt for Error {
             | BuildEntry { .. } => StatusCode::Internal,
             OpenRegion { source, .. } => source.status_code(),
 
-            WriteBuffer { source, .. } => source.status_code(),
+            WriteParquet { .. } => StatusCode::Internal,
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
             SerializeField { .. } => StatusCode::Internal,
@@ -861,6 +902,8 @@ impl ErrorExt for Error {
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
+            UnsupportedOperation { .. } => StatusCode::Unsupported,
+            RemoteCompaction { .. } => StatusCode::Unexpected,
         }
     }
 

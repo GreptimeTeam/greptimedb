@@ -22,7 +22,7 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
-use crate::keys::StatKey;
+use crate::key::DatanodeStatKey;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
@@ -53,8 +53,6 @@ pub struct RegionStat {
     pub wcus: i64,
     /// Approximate bytes of this region
     pub approximate_bytes: i64,
-    /// Approximate number of rows in this region
-    pub approximate_rows: i64,
     /// The engine name.
     pub engine: String,
     /// The region role.
@@ -67,8 +65,8 @@ impl Stat {
         self.region_stats.is_empty()
     }
 
-    pub fn stat_key(&self) -> StatKey {
-        StatKey {
+    pub fn stat_key(&self) -> DatanodeStatKey {
+        DatanodeStatKey {
             cluster_id: self.cluster_id,
             node_id: self.id,
         }
@@ -142,7 +140,6 @@ impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
-            approximate_rows: value.approximate_rows,
             engine: value.engine.to_string(),
             role: RegionRole::from(value.role()),
         })

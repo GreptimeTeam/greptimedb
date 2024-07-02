@@ -1,4 +1,4 @@
-show databases;
+SHOW DATABASES;
 
 +--------------------+
 | Database           |
@@ -8,11 +8,21 @@ show databases;
 | public             |
 +--------------------+
 
-use information_schema;
+SHOW FULL DATABASES;
+
++--------------------+---------+
+| Database           | Options |
++--------------------+---------+
+| greptime_private   |         |
+| information_schema |         |
+| public             |         |
++--------------------+---------+
+
+USE information_schema;
 
 Affected Rows: 0
 
-show tables;
+SHOW TABLES;
 
 +---------------------------------------+
 | Tables                                |
@@ -48,7 +58,7 @@ show tables;
 | triggers                              |
 +---------------------------------------+
 
-use public;
+USE public;
 
 Affected Rows: 0
 

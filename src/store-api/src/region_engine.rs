@@ -21,14 +21,14 @@ use std::sync::{Arc, Mutex};
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
-use common_query::error::ExecuteRepeatedlySnafu;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
+use common_time::Timestamp;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
@@ -142,42 +142,71 @@ impl ScannerPartitioning {
     }
 }
 
+/// Represents one data range within a partition
+#[derive(Debug, Clone, Copy)]
+pub struct PartitionRange {
+    /// Start time of time index column. Inclusive.
+    pub start: Timestamp,
+    /// End time of time index column. Inclusive.
+    pub end: Timestamp,
+    /// Estimate size of this range. Is used to balance ranges between partitions.
+    /// No base unit, just a number.
+    pub estimated_size: usize,
+    /// Identifier to this range. Assigned by storage engine.
+    pub identifier: usize,
+}
+
 /// Properties of the [RegionScanner].
 #[derive(Debug)]
 pub struct ScannerProperties {
-    /// Partitions to scan.
-    partitioning: ScannerPartitioning,
+    /// A 2-dim partition ranges.
+    ///
+    /// The first dim vector's length represents the output partition number. The second
+    /// dim is ranges within one partition.
+    pub partitions: Vec<Vec<PartitionRange>>,
 }
 
 impl ScannerProperties {
-    /// Creates a new [ScannerProperties] with the given partitioning.
-    pub fn new(partitioning: ScannerPartitioning) -> Self {
-        Self { partitioning }
+    /// Creates a new [`ScannerProperties`] with the given partitioning.
+    pub fn new(partitions: Vec<Vec<PartitionRange>>) -> Self {
+        Self { partitions }
     }
 
-    /// Returns properties of partitions to scan.
-    pub fn partitioning(&self) -> &ScannerPartitioning {
-        &self.partitioning
+    /// Creates a new [`ScannerProperties`] with the given number of partitions.
+    pub fn new_with_partitions(partitions: usize) -> Self {
+        Self {
+            partitions: vec![vec![]; partitions],
+        }
+    }
+
+    pub fn num_partitions(&self) -> usize {
+        self.partitions.len()
     }
 }
 
 /// A scanner that provides a way to scan the region concurrently.
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
-/// You can use this trait to implement an [ExecutionPlan](datafusion_physical_plan::ExecutionPlan).
-pub trait RegionScanner: Debug + DisplayAs + Send + Sync {
+/// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
+pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;
 
     /// Returns the schema of the record batches.
     fn schema(&self) -> SchemaRef;
 
+    /// Prepares the scanner with the given partition ranges.
+    ///
+    /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
+    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError>;
+
     /// Scans the partition and returns a stream of record batches.
+    ///
     /// # Panics
     /// Panics if the `partition` is out of bound.
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
 }
 
-pub type RegionScannerRef = Arc<dyn RegionScanner>;
+pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
@@ -273,7 +302,7 @@ impl SinglePartitionScanner {
         Self {
             stream: Mutex::new(Some(stream)),
             schema,
-            properties: ScannerProperties::new(ScannerPartitioning::Unknown(1)),
+            properties: ScannerProperties::new_with_partitions(1),
         }
     }
 }
@@ -293,12 +322,19 @@ impl RegionScanner for SinglePartitionScanner {
         self.schema.clone()
     }
 
+    fn prepare(&mut self, ranges: Vec<Vec<PartitionRange>>) -> Result<(), BoxedError> {
+        self.properties = ScannerProperties::new(ranges);
+        Ok(())
+    }
+
     fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
-        stream
-            .take()
-            .context(ExecuteRepeatedlySnafu)
-            .map_err(BoxedError::new)
+        stream.take().ok_or_else(|| {
+            BoxedError::new(PlainError::new(
+                "Not expected to run ExecutionPlan more than once".to_string(),
+                StatusCode::Unexpected,
+            ))
+        })
     }
 }
 

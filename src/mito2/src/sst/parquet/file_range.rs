@@ -28,6 +28,7 @@ use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
@@ -72,20 +73,19 @@ impl FileRange {
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
         self.context.compat_batch()
     }
+
+    /// Returns the file handle of the file range.
+    pub(crate) fn file_handle(&self) -> &FileHandle {
+        self.context.reader_builder.file_handle()
+    }
 }
 
 /// Context shared by ranges of the same parquet SST.
 pub(crate) struct FileRangeContext {
-    // Row group reader builder for the file.
+    /// Row group reader builder for the file.
     reader_builder: RowGroupReaderBuilder,
-    /// Filters pushed down.
-    filters: Vec<SimpleFilterContext>,
-    /// Helper to read the SST.
-    read_format: ReadFormat,
-    /// Decoder for primary keys
-    codec: McmpRowCodec,
-    /// Optional helper to compat batches.
-    compat_batch: Option<CompatBatch>,
+    /// Base of the context.
+    base: RangeBase,
 }
 
 pub(crate) type FileRangeContextRef = Arc<FileRangeContext>;
@@ -100,10 +100,12 @@ impl FileRangeContext {
     ) -> Self {
         Self {
             reader_builder,
-            filters,
-            read_format,
-            codec,
-            compat_batch: None,
+            base: RangeBase {
+                filters,
+                read_format,
+                codec,
+                compat_batch: None,
+            },
         }
     }
 
@@ -114,12 +116,12 @@ impl FileRangeContext {
 
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
-        &self.filters
+        &self.base.filters
     }
 
     /// Returns the format helper.
     pub(crate) fn read_format(&self) -> &ReadFormat {
-        &self.read_format
+        &self.base.read_format
     }
 
     /// Returns the reader builder.
@@ -129,14 +131,34 @@ impl FileRangeContext {
 
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
-        self.compat_batch.as_ref()
+        self.base.compat_batch.as_ref()
     }
 
     /// Sets the `CompatBatch` to the context.
     pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
-        self.compat_batch = compat;
+        self.base.compat_batch = compat;
     }
 
+    /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
+    /// Return the filtered batch. If the entire batch is filtered out, return None.
+    pub(crate) fn precise_filter(&self, input: Batch) -> Result<Option<Batch>> {
+        self.base.precise_filter(input)
+    }
+}
+
+/// Common fields for a range to read and filter batches.
+pub(crate) struct RangeBase {
+    /// Filters pushed down.
+    pub(crate) filters: Vec<SimpleFilterContext>,
+    /// Helper to read the SST.
+    pub(crate) read_format: ReadFormat,
+    /// Decoder for primary keys
+    pub(crate) codec: McmpRowCodec,
+    /// Optional helper to compat batches.
+    pub(crate) compat_batch: Option<CompatBatch>,
+}
+
+impl RangeBase {
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     ///

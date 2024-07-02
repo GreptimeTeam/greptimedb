@@ -27,21 +27,24 @@ use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
-use operator::statement::StatementExecutor;
+use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
+use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use servers::server::ServerHandlers;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
+use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
-use crate::instance::{Instance, StatementExecutorRef};
+use crate::instance::Instance;
 use crate::script::ScriptExecutor;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
+    options: FrontendOptions,
     kv_backend: KvBackendRef,
     layered_cache_registry: LayeredCacheRegistryRef,
     local_cache_invalidator: Option<CacheInvalidatorRef>,
@@ -54,6 +57,7 @@ pub struct FrontendBuilder {
 
 impl FrontendBuilder {
     pub fn new(
+        options: FrontendOptions,
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
         catalog_manager: CatalogManagerRef,
@@ -61,6 +65,7 @@ impl FrontendBuilder {
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
+            options,
             kv_backend,
             layered_cache_registry,
             local_cache_invalidator: None,
@@ -172,11 +177,20 @@ impl FrontendBuilder {
             table_route_cache,
         ));
 
+        let pipeline_operator = Arc::new(PipelineOperator::new(
+            inserter.clone(),
+            statement_executor.clone(),
+            self.catalog_manager.clone(),
+            query_engine.clone(),
+        ));
+
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         Ok(Instance {
+            options: self.options,
             catalog_manager: self.catalog_manager,
             script_executor,
+            pipeline_operator,
             statement_executor,
             query_engine,
             plugins,

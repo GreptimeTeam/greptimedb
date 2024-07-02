@@ -330,6 +330,8 @@ async fn test_different_order_and_type() {
 
 #[tokio::test]
 async fn test_put_delete() {
+    common_telemetry::init_default_ut_logging();
+
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 

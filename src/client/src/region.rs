@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::region::{QueryRequest, RegionRequest};
+use api::v1::region::RegionRequest;
 use api::v1::ResponseHeader;
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
@@ -26,12 +26,15 @@ use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
+use common_query::request::QueryRequest;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
+use query::query_engine::DefaultSerializer;
 use snafu::{location, Location, OptionExt, ResultExt};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 
 use crate::error::{
@@ -63,6 +66,17 @@ impl Datanode for RegionRequester {
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&request.plan, DefaultSerializer)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .to_vec();
+        let request = api::v1::region::QueryRequest {
+            header: request.header,
+            region_id: request.region_id.as_u64(),
+            plan,
+        };
+
         let ticket = Ticket {
             ticket: request.encode_to_vec().into(),
         };

@@ -44,6 +44,7 @@ meta-client.workspace = true
 opentelemetry-proto.workspace = true
 operator.workspace = true
 partition.workspace = true
+pipeline.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
@@ -62,11 +63,13 @@ toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
-catalog.workspace = true
+catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 datanode.workspace = true
+datatypes.workspace = true
 futures = "0.3"
 meta-srv = { workspace = true, features = ["mock"] }
+serde_json.workspace = true
 strfmt = "0.2"
 tower.workspace = true
 uuid.workspace = true

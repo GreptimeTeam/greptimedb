@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::Plugins;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -126,6 +127,7 @@ impl WorkerGroup {
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
@@ -171,6 +173,7 @@ impl WorkerGroup {
                     time_provider: time_provider.clone(),
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
+                    plugins: plugins.clone(),
                 }
                 .start()
             })
@@ -293,6 +296,7 @@ impl WorkerGroup {
                     time_provider: time_provider.clone(),
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
+                    plugins: Plugins::new(),
                 }
                 .start()
             })
@@ -363,6 +367,7 @@ struct WorkerStarter<S> {
     flush_sender: watch::Sender<()>,
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
+    plugins: Plugins,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -398,6 +403,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.cache_manager.clone(),
                 self.config,
                 self.listener.clone(),
+                self.plugins.clone(),
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
@@ -657,6 +663,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
 
+            self.listener.on_recv_requests(buffer.len());
+
             self.handle_requests(&mut buffer).await;
 
             self.handle_periodical_tasks();
@@ -738,7 +746,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Compact(req) => {
-                    self.handle_compaction_request(ddl.region_id, req, ddl.sender);
+                    self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::Truncate(_) => {
@@ -783,6 +792,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
+            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req),
         }
     }
 
@@ -898,6 +909,15 @@ impl WorkerListener {
         }
         // Avoid compiler warning.
         let _ = region_id;
+    }
+
+    pub(crate) fn on_recv_requests(&self, request_num: usize) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_recv_requests(request_num);
+        }
+        // Avoid compiler warning.
+        let _ = request_num;
     }
 }
 

@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, frontend, metasrv, standalone, App};
+use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_version::version;
 
 #[derive(Parser)]
@@ -36,6 +36,10 @@ enum SubCommand {
     /// Start datanode service.
     #[clap(name = "datanode")]
     Datanode(datanode::Command),
+
+    /// Start flownode service.
+    #[clap(name = "flownode")]
+    Flownode(flownode::Command),
 
     /// Start frontend service.
     #[clap(name = "frontend")]
@@ -67,6 +71,12 @@ async fn main() -> Result<()> {
 async fn start(cli: Command) -> Result<()> {
     match cli.subcmd {
         SubCommand::Datanode(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Flownode(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)
                 .await?
                 .run()

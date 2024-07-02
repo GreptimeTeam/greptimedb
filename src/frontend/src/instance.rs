@@ -15,6 +15,7 @@
 pub mod builder;
 mod grpc;
 mod influxdb;
+mod log_handler;
 mod opentsdb;
 mod otlp;
 mod prom_store;
@@ -30,7 +31,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
-use common_config::{Configurable, KvBackendConfig};
+use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_frontend::handler::FrontendInvoker;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -48,6 +49,7 @@ use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
+use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -66,7 +68,7 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
+    InfluxdbLineProtocolHandler, LogHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
@@ -100,6 +102,7 @@ pub trait FrontendInstance:
     + OpenTelemetryProtocolHandler
     + ScriptHandler
     + PrometheusHandler
+    + LogHandler
     + Send
     + Sync
     + 'static
@@ -108,12 +111,13 @@ pub trait FrontendInstance:
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
-pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 #[derive(Clone)]
 pub struct Instance {
+    options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
     script_executor: Arc<ScriptExecutor>,
+    pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
@@ -186,14 +190,9 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub fn build_servers(
-        &mut self,
-        opts: impl Into<FrontendOptions> + Configurable,
-        servers: ServerHandlers,
-    ) -> Result<()> {
-        let opts: FrontendOptions = opts.into();
+    pub fn build_servers(&mut self, servers: ServerHandlers) -> Result<()> {
         self.export_metrics_task =
-            ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
+            ExportMetricsTask::try_new(&self.options.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         self.servers = servers;
@@ -513,6 +512,9 @@ pub fn check_permission(
         | Statement::DropFlow(_) => {}
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
+        }
+        Statement::ShowCreateFlow(stmt) => {
+            validate_param(&stmt.flow_name, query_ctx)?;
         }
         Statement::CreateExternalTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;

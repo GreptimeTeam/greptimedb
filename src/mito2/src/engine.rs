@@ -39,6 +39,8 @@ mod flush_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
+mod merge_mode_test;
+#[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod parallel_test;
@@ -58,6 +60,7 @@ use std::time::Instant;
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
+use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
@@ -105,11 +108,14 @@ impl MitoEngine {
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        plugins: Plugins,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
         Ok(MitoEngine {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager).await?),
+            inner: Arc::new(
+                EngineInner::new(config, log_store, object_store_manager, plugins).await?,
+            ),
         })
     }
 
@@ -135,6 +141,9 @@ impl MitoEngine {
     }
 
     /// Handle substrait query and return a stream of record batches
+    ///
+    /// Notice that the output stream's ordering is not guranateed. If order
+    /// matter, please use [`scanner`] to build a [`Scanner`] to consume.
     #[tracing::instrument(skip_all)]
     pub async fn scan_to_stream(
         &self,
@@ -268,11 +277,13 @@ impl EngineInner {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        plugins: Plugins,
     ) -> Result<EngineInner> {
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         Ok(EngineInner {
-            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager).await?,
+            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager, plugins)
+                .await?,
             config,
             wal_raw_entry_reader,
         })

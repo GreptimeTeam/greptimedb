@@ -20,12 +20,14 @@ use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
@@ -42,6 +44,7 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use super::manager::RegionMigrationProcedureTracker;
 use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use super::{Context, ContextFactory, DefaultContextFactory, State, VolatileContext};
@@ -94,6 +97,14 @@ pub struct TestingEnv {
     opening_region_keeper: MemoryRegionKeeperRef,
     server_addr: String,
     procedure_manager: ProcedureManagerRef,
+    tracker: RegionMigrationProcedureTracker,
+    kv_backend: KvBackendRef,
+}
+
+impl Default for TestingEnv {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestingEnv {
@@ -117,7 +128,19 @@ impl TestingEnv {
             mailbox_ctx,
             server_addr: "localhost".to_string(),
             procedure_manager,
+            tracker: Default::default(),
+            kv_backend,
         }
+    }
+
+    /// Returns the [KvBackendRef].
+    pub fn kv_backend(&self) -> KvBackendRef {
+        self.kv_backend.clone()
+    }
+
+    /// Returns the [RegionMigrationProcedureTracker].
+    pub(crate) fn tracker(&self) -> RegionMigrationProcedureTracker {
+        self.tracker.clone()
     }
 
     /// Returns a context of region migration procedure.
@@ -128,6 +151,7 @@ impl TestingEnv {
             volatile_ctx: Default::default(),
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.to_string(),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         }
     }
 
@@ -431,7 +455,7 @@ impl ProcedureMigrationTestSuite {
 
 /// The step of test.
 #[derive(Clone)]
-pub enum Step {
+pub(crate) enum Step {
     Setup((String, BeforeTest)),
     Next((String, Option<BeforeTest>, Assertion)),
 }

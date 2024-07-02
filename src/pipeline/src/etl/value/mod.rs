@@ -193,6 +193,34 @@ impl Value {
             v => v.to_string(),
         }
     }
+
+    pub fn to_str_type(&self) -> &str {
+        match self {
+            Value::Int8(_) => "int8",
+            Value::Int16(_) => "int16",
+            Value::Int32(_) => "int32",
+            Value::Int64(_) => "int64",
+
+            Value::Uint8(_) => "uint8",
+            Value::Uint16(_) => "uint16",
+            Value::Uint32(_) => "uint32",
+            Value::Uint64(_) => "uint64",
+
+            Value::Float32(_) => "float32",
+            Value::Float64(_) => "float64",
+
+            Value::Boolean(_) => "boolean",
+            Value::String(_) => "string",
+
+            Value::Time(_) => "time",
+            Value::Epoch(_) => "epoch",
+
+            Value::Array(_) => "array",
+            Value::Map(_) => "map",
+
+            Value::Null => "null",
+        }
+    }
 }
 
 impl std::fmt::Display for Value {

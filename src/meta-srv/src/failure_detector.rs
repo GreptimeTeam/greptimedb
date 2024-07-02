@@ -15,6 +15,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use common_meta::distributed_time_constants;
 use serde::{Deserialize, Serialize};
 
 /// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
@@ -37,7 +38,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// where F is the cumulative distribution function of a normal distribution with mean
 /// and standard deviation estimated from historical heartbeat inter-arrival times.
-#[cfg_attr(test, derive(Clone))]
+#[cfg_attr(test, derive(Debug, Clone, PartialEq))]
 pub(crate) struct PhiAccrualFailureDetector {
     /// A low threshold is prone to generate many wrong suspicions but ensures a quick detection
     /// in the event of a real crash. Conversely, a high threshold generates fewer mistakes but
@@ -63,7 +64,7 @@ pub(crate) struct PhiAccrualFailureDetector {
     last_heartbeat_millis: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhiAccrualFailureDetectorOptions {
     pub threshold: f32,
@@ -82,7 +83,9 @@ impl Default for PhiAccrualFailureDetectorOptions {
         Self {
             threshold: 8_f32,
             min_std_deviation: Duration::from_millis(100),
-            acceptable_heartbeat_pause: Duration::from_millis(3000),
+            acceptable_heartbeat_pause: Duration::from_secs(
+                distributed_time_constants::DATANODE_LEASE_SECS,
+            ),
             first_heartbeat_estimate: Duration::from_millis(1000),
         }
     }
@@ -195,7 +198,7 @@ fn phi(time_diff: i64, mean: f64, std_deviation: f64) -> f64 {
 /// It is capped by the number of samples specified in `max_sample_size`.
 ///
 /// The stats (mean, variance, std_deviation) are not defined for empty HeartbeatHistory.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct HeartbeatHistory {
     /// Number of samples to use for calculation of mean and standard deviation of inter-arrival
     /// times.

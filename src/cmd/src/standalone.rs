@@ -21,16 +21,18 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
+use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
-use common_meta::ddl::{DdlContext, ProcedureExecutorRef};
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::StandalonePeerLookupService;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
@@ -49,12 +51,13 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::server::Services;
 use frontend::service_config::{
-    GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
+    InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -63,9 +66,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
     BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
-    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result, ShutdownDatanodeSnafu,
-    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
-    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
+    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -203,7 +206,7 @@ impl StandaloneOptions {
             wal: cloned_opts.wal,
             storage: cloned_opts.storage,
             region_engine: cloned_opts.region_engine,
-            rpc_addr: cloned_opts.grpc.addr,
+            grpc: cloned_opts.grpc,
             ..Default::default()
         }
     }
@@ -350,7 +353,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
+            let datanode_grpc_addr = DatanodeOptions::default().grpc.addr;
             if addr.eq(&datanode_grpc_addr) {
                 return IllegalConfigSnafu {
                     msg: format!(
@@ -446,13 +449,18 @@ impl StartCommand {
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
         let flow_builder = FlownodeBuilder::new(
-            1,
             Default::default(),
             fe_plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
         );
-        let flownode = Arc::new(flow_builder.build().await);
+        let flownode = Arc::new(
+            flow_builder
+                .build()
+                .await
+                .map_err(BoxedError::new)
+                .context(OtherSnafu)?,
+        );
 
         let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
             .with_kv_backend(kv_backend.clone())
@@ -462,7 +470,7 @@ impl StartCommand {
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.clone(),
+            flow_server: flownode.flow_worker_manager(),
         });
 
         let table_id_sequence = Arc::new(
@@ -502,6 +510,7 @@ impl StartCommand {
         .await?;
 
         let mut frontend = FrontendBuilder::new(
+            fe_opts.clone(),
             kv_backend,
             layered_cache_registry,
             catalog_manager,
@@ -514,18 +523,19 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         // flow server need to be able to use frontend to write insert requests back
-        flownode
+        let flow_worker_manager = flownode.flow_worker_manager();
+        flow_worker_manager
             .set_frontend_invoker(Box::new(frontend.clone()))
             .await;
         // TODO(discord9): unify with adding `start` and `shutdown` method to flownode too.
-        let _handle = flownode.clone().run_background();
+        let _handle = flow_worker_manager.run_background();
 
-        let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+        let servers = Services::new(fe_opts, Arc::new(frontend.clone()), fe_plugins)
             .build()
             .await
             .context(StartFrontendSnafu)?;
         frontend
-            .build_servers(fe_opts, servers)
+            .build_servers(servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance {
@@ -556,6 +566,8 @@ impl StartCommand {
                     table_metadata_allocator,
                     flow_metadata_manager,
                     flow_metadata_allocator,
+                    peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager,
                 true,

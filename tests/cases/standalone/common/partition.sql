@@ -26,14 +26,17 @@ INSERT INTO my_table VALUES
     (2200, 'g', 7),
     (2400, 'h', 8);
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM my_table;
 
 DELETE FROM my_table WHERE a < 150;
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM my_table;
 
 DELETE FROM my_table WHERE a < 2200 AND a > 1500;
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM my_table;
 
 DELETE FROM my_table WHERE a < 2500;
@@ -66,6 +69,19 @@ INSERT INTO my_table VALUES
     (2200, 'g', 7),
     (2400, 'h', 8);
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM my_table;
 
 DROP TABLE my_table;
+
+-- incorrect partition rule
+CREATE TABLE invalid_rule (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 10,
+  a > 10 AND a < 20,
+  a >= 20
+);

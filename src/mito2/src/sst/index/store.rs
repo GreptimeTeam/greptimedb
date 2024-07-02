@@ -67,7 +67,9 @@ impl InstrumentedStore {
             .reader(path)
             .await
             .context(OpenDalSnafu)?
-            .into_futures_async_read(0..meta.content_length());
+            .into_futures_async_read(0..meta.content_length())
+            .await
+            .context(OpenDalSnafu)?;
         Ok(InstrumentedAsyncRead::new(
             reader,
             read_byte_count,

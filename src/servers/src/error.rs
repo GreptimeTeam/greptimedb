@@ -27,6 +27,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{debug, error};
 use datatypes::prelude::ConcreteDataType;
+use headers::ContentType;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
@@ -146,6 +147,19 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
+    },
+
+    #[snafu(display("Pipeline management api error"))]
+    Pipeline {
+        source: pipeline::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported delete pipeline."))]
+    UnsupportedDeletePipeline {
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to execute script by name: {}", name))]
@@ -533,6 +547,27 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse payload as json"))]
+    ParseJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert to structured log"))]
+    ToStructuredLog {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported content type: {:?}", content_type))]
+    UnsupportedContentType {
+        content_type: ContentType,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode url"))]
     UrlDecode {
         #[snafu(source)]
@@ -600,6 +635,7 @@ impl ErrorExt for Error {
             | FileWatch { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
+            UnsupportedDeletePipeline { .. } => StatusCode::Unsupported,
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
@@ -613,6 +649,8 @@ impl ErrorExt for Error {
             | ExecuteGrpcQuery { source, .. }
             | ExecuteGrpcRequest { source, .. }
             | CheckDatabaseValidity { source, .. } => source.status_code(),
+
+            Pipeline { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidParameter { .. }
@@ -637,6 +675,9 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | UnexpectedPhysicalTable { .. }
+            | ParseJson { .. }
+            | ToStructuredLog { .. }
+            | UnsupportedContentType { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
 
             RowWriter { source, .. }

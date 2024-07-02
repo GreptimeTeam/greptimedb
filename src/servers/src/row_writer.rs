@@ -333,6 +333,7 @@ fn write_ts_to(
             ValueData::TimestampNanosecondValue(ts),
         ),
     };
+
     let index = column_indexes.get(&name);
     if let Some(index) = index {
         check_schema(datatype, SemanticType::Timestamp, &schema[*index])?;

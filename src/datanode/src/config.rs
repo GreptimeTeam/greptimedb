@@ -17,9 +17,6 @@
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_config::Configurable;
-use common_grpc::channel_manager::{
-    DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-};
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
@@ -28,6 +25,7 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -264,13 +262,8 @@ pub struct DatanodeOptions {
     pub node_id: Option<u64>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
-    pub rpc_addr: String,
-    pub rpc_hostname: Option<String>,
-    pub rpc_runtime_size: usize,
-    // Max gRPC receiving(decoding) message size
-    pub rpc_max_recv_message_size: ReadableSize,
-    // Max gRPC sending(encoding) message size
-    pub rpc_max_send_message_size: ReadableSize,
+    pub init_regions_parallelism: usize,
+    pub grpc: GrpcOptions,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
@@ -282,20 +275,30 @@ pub struct DatanodeOptions {
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+
+    /// Deprecated options, please use the new options instead.
+    #[deprecated(note = "Please use `grpc.addr` instead.")]
+    pub rpc_addr: Option<String>,
+    #[deprecated(note = "Please use `grpc.hostname` instead.")]
+    pub rpc_hostname: Option<String>,
+    #[deprecated(note = "Please use `grpc.runtime_size` instead.")]
+    pub rpc_runtime_size: Option<usize>,
+    #[deprecated(note = "Please use `grpc.max_recv_message_size` instead.")]
+    pub rpc_max_recv_message_size: Option<ReadableSize>,
+    #[deprecated(note = "Please use `grpc.max_send_message_size` instead.")]
+    pub rpc_max_send_message_size: Option<ReadableSize>,
 }
 
 impl Default for DatanodeOptions {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             mode: Mode::Standalone,
             node_id: None,
             require_lease_before_startup: false,
             init_regions_in_background: false,
-            rpc_addr: "127.0.0.1:3001".to_string(),
-            rpc_hostname: None,
-            rpc_runtime_size: 8,
-            rpc_max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
-            rpc_max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            init_regions_parallelism: 16,
+            grpc: GrpcOptions::default().with_addr("127.0.0.1:3001"),
             http: HttpOptions::default(),
             meta_client: None,
             wal: DatanodeWalConfig::default(),
@@ -309,6 +312,13 @@ impl Default for DatanodeOptions {
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+
+            // Deprecated options
+            rpc_addr: None,
+            rpc_hostname: None,
+            rpc_runtime_size: None,
+            rpc_max_recv_message_size: None,
+            rpc_max_send_message_size: None,
         }
     }
 }

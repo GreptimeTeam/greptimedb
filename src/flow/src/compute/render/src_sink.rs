@@ -23,9 +23,9 @@ use snafu::OptionExt;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::adapter::error::{Error, PlanSnafu};
 use crate::compute::render::Context;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
+use crate::error::{Error, PlanSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{EvalError, GlobalId};
 use crate::repr::{DiffRow, Row, BROADCAST_CAP};
@@ -62,7 +62,6 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 let arr = arranged.get_updates_in_range(..=now);
                 err_collector.run(|| arranged.compact_to(now));
 
-                debug!("Call source");
                 let prev_avail = arr.into_iter().map(|((k, _), t, d)| (k, t, d));
                 let mut to_send = Vec::new();
                 let mut to_arrange = Vec::new();

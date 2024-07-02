@@ -43,7 +43,9 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
+    compact_table, flush_memtable, get_from_env_or_default_value,
+    init_greptime_connections_via_env, Connections, GT_FUZZ_INPUT_MAX_ROWS,
+    GT_FUZZ_INPUT_MAX_TABLES,
 };
 use tests_fuzz::validator;
 struct FuzzContext {
@@ -60,14 +62,18 @@ impl FuzzContext {
 struct FuzzInput {
     seed: u64,
     tables: usize,
+    rows: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let tables = rng.gen_range(1..256);
-        Ok(FuzzInput { tables, seed })
+        let max_tables = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_TABLES, 32);
+        let tables = rng.gen_range(1..max_tables);
+        let max_row = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+        let rows = rng.gen_range(1..max_row);
+        Ok(FuzzInput { tables, seed, rows })
     }
 }
 
@@ -204,11 +210,11 @@ async fn validate_values(
 }
 
 async fn insert_values<R: Rng + 'static>(
+    rows: usize,
     ctx: &FuzzContext,
     rng: &mut R,
     logical_table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
-    let rows = rng.gen_range(1..2048);
     let insert_expr = generate_insert_expr(rows, rng, logical_table_ctx.clone())?;
     let translator = InsertIntoExprTranslator;
     let sql = translator.translate(&insert_expr)?;
@@ -257,7 +263,8 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         info!("Create logical table: {sql}, result: {result:?}");
         let logical_table_ctx = Arc::new(TableContext::from(&create_logical_table_expr));
 
-        let insert_expr = insert_values(&ctx, &mut rng, logical_table_ctx.clone()).await?;
+        let insert_expr =
+            insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
         validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
         tables.insert(logical_table_ctx.name.clone(), logical_table_ctx.clone());
         if rng.gen_bool(0.1) {

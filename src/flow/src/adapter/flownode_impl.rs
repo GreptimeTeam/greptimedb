@@ -26,10 +26,11 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::adapter::FlownodeManager;
+use crate::adapter::FlowWorkerManager;
+use crate::error::InternalSnafu;
 use crate::repr::{self, DiffRow};
 
-fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
+fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
     // TODO(discord9): refactor this
     Err::<(), _>(BoxedError::new(err))
         .with_context(|_| ExternalSnafu)
@@ -37,7 +38,7 @@ fn to_meta_err(err: crate::adapter::error::Error) -> common_meta::error::Error {
 }
 
 #[async_trait::async_trait]
-impl Flownode for FlownodeManager {
+impl Flownode for FlowWorkerManager {
     async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
         let query_ctx = request
             .header
@@ -126,6 +127,16 @@ impl Flownode for FlownodeManager {
                     .context(UnexpectedSnafu {
                         err_msg: format!("Table not found: {}", table_id),
                     })?;
+                let table_col_names = table_col_names
+                    .iter().enumerate()
+                    .map(|(idx,name)| match name {
+                        Some(name) => Ok(name.clone()),
+                        None => InternalSnafu {
+                            reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
+                        }
+                        .fail().map_err(BoxedError::new).context(ExternalSnafu),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let name_to_col = HashMap::<_, _>::from_iter(
                     insert_schema
                         .iter()

@@ -122,7 +122,7 @@ impl MetricEngineInner {
     /// Includes:
     /// - Record physical region's column names
     /// - Record the mapping between logical region id and physical region id
-    async fn recover_states(&self, physical_region_id: RegionId) -> Result<()> {
+    pub(crate) async fn recover_states(&self, physical_region_id: RegionId) -> Result<()> {
         // load logical regions and physical column names
         let logical_regions = self
             .metadata_region

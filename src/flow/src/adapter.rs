@@ -21,39 +21,41 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
-use catalog::CatalogManagerRef;
-use common_base::Plugins;
+use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_frontend::handler::FrontendInvoker;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::Itertools;
-use query::{QueryEngine, QueryEngineFactory};
+use meta_client::MetaClientOptions;
+use query::QueryEngine;
 use serde::{Deserialize, Serialize};
+use servers::grpc::GrpcOptions;
+use servers::heartbeat_options::HeartbeatOptions;
+use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
-use tokio::sync::{oneshot, watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 
-use crate::adapter::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
+use crate::error::{ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::repr::{self, DiffRow, Row};
-use crate::transform::{register_function_to_query_engine, sql_to_flow_plan};
+use crate::transform::sql_to_flow_plan;
 
-pub(crate) mod error;
 mod flownode_impl;
 mod parse_expr;
-mod server;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -62,92 +64,56 @@ mod worker;
 pub(crate) mod node_context;
 mod table_source;
 
-use error::Error;
+use crate::error::Error;
 
-// TODO: replace this with `GREPTIME_TIMESTAMP` before v0.9
+// TODO(discord9): replace this with `GREPTIME_TIMESTAMP` before v0.9
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
 pub const UPDATE_AT_TS_COL: &str = "update_at";
 
-// TODO: refactor common types for flow to a separate module
+// TODO(discord9): refactor common types for flow to a separate module
 /// FlowId is a unique identifier for a flow task
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
 /// Options for flow node
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
-    /// rpc address
-    pub rpc_addr: String,
+    pub mode: Mode,
+    pub cluster_id: Option<u64>,
+    pub node_id: Option<u64>,
+    pub grpc: GrpcOptions,
+    pub meta_client: Option<MetaClientOptions>,
+    pub logging: LoggingOptions,
+    pub tracing: TracingOptions,
+    pub heartbeat: HeartbeatOptions,
 }
 
-/// Flownode Builder
-pub struct FlownodeBuilder {
-    flow_node_id: u32,
-    opts: FlownodeOptions,
-    plugins: Plugins,
-    table_meta: TableMetadataManagerRef,
-    catalog_manager: CatalogManagerRef,
-}
-
-impl FlownodeBuilder {
-    /// init flownode builder
-    pub fn new(
-        flow_node_id: u32,
-        opts: FlownodeOptions,
-        plugins: Plugins,
-        table_meta: TableMetadataManagerRef,
-        catalog_manager: CatalogManagerRef,
-    ) -> Self {
+impl Default for FlownodeOptions {
+    fn default() -> Self {
         Self {
-            flow_node_id,
-            opts,
-            plugins,
-            table_meta,
-            catalog_manager,
+            mode: servers::Mode::Standalone,
+            cluster_id: None,
+            node_id: None,
+            grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            meta_client: None,
+            logging: LoggingOptions::default(),
+            tracing: TracingOptions::default(),
+            heartbeat: HeartbeatOptions::default(),
         }
     }
-
-    /// TODO(discord9): error handling
-    pub async fn build(self) -> FlownodeManager {
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in flownode only translate plan with resolved table source.
-            self.catalog_manager.clone(),
-            None,
-            None,
-            None,
-            false,
-            self.plugins.clone(),
-        );
-        let query_engine = query_engine_factory.query_engine();
-
-        register_function_to_query_engine(&query_engine);
-
-        let (tx, rx) = oneshot::channel();
-
-        let node_id = Some(self.flow_node_id);
-
-        let _handle = std::thread::spawn(move || {
-            let (flow_node_manager, mut worker) =
-                FlownodeManager::new_with_worker(node_id, query_engine, self.table_meta.clone());
-            let _ = tx.send(flow_node_manager);
-            info!("Flow Worker started in new thread");
-            worker.run();
-        });
-        let man = rx.await.unwrap();
-        info!("Flow Node Manager started");
-        man
-    }
 }
 
+impl Configurable for FlownodeOptions {}
+
 /// Arc-ed FlowNodeManager, cheaper to clone
-pub type FlownodeManagerRef = Arc<FlownodeManager>;
+pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
-pub struct FlownodeManager {
+pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
@@ -165,7 +131,7 @@ pub struct FlownodeManager {
 }
 
 /// Building FlownodeManager
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// set frontend invoker
     pub async fn set_frontend_invoker(
         self: &Arc<Self>,
@@ -187,7 +153,7 @@ impl FlownodeManager {
         let node_context = FlownodeContext::default();
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
-        FlownodeManager {
+        FlowWorkerManager {
             worker_handles,
             query_engine,
             table_info_source: srv_map,
@@ -247,7 +213,7 @@ pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
 }
 
 /// This impl block contains methods to send writeback requests to frontend
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// TODO(discord9): merge all same type of diff row into one requests
     ///
     /// Return the number of requests it made
@@ -265,7 +231,7 @@ impl FlownodeManager {
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
             // TODO(discord9): instead of auto build table from request schema, actually build table
             // before `create flow` to be able to assign pk and ts etc.
-            let (primary_keys, schema, is_auto_create) = if let Some(table_id) = self
+            let (primary_keys, schema, is_ts_placeholder) = if let Some(table_id) = self
                 .table_info_source
                 .get_table_id_from_name(&table_name)
                 .await?
@@ -317,7 +283,12 @@ impl FlownodeManager {
                     .map(|v| {
                         v.column_indices
                             .iter()
-                            .map(|i| format!("Col_{i}"))
+                            .map(|i| {
+                                schema
+                                    .get_name(*i)
+                                    .clone()
+                                    .unwrap_or_else(|| format!("col_{i}"))
+                            })
                             .collect_vec()
                     })
                     .unwrap_or_default();
@@ -326,15 +297,8 @@ impl FlownodeManager {
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 );
-                // TODO(discord9): bugged so we can't infer time index from flow plan, so we have to manually set one
-                let ts_col = ColumnSchema::new(
-                    AUTO_CREATED_PLACEHOLDER_TS_COL,
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true);
 
-                let wout_ts = schema
+                let original_schema = schema
                     .typ()
                     .column_types
                     .clone()
@@ -345,16 +309,33 @@ impl FlownodeManager {
                             .names
                             .get(idx)
                             .cloned()
-                            .unwrap_or(format!("Col_{}", idx));
-                        ColumnSchema::new(name, typ.scalar_type, typ.nullable)
+                            .flatten()
+                            .unwrap_or(format!("col_{}", idx));
+                        let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
+                        if schema.typ().time_index == Some(idx) {
+                            ret.with_time_index(true)
+                        } else {
+                            ret
+                        }
                     })
                     .collect_vec();
 
-                let mut with_ts = wout_ts.clone();
-                with_ts.push(update_at);
-                with_ts.push(ts_col);
+                let mut with_auto_added_col = original_schema.clone();
+                with_auto_added_col.push(update_at);
 
-                (primary_keys, with_ts, true)
+                // if no time index, add one as placeholder
+                let no_time_index = schema.typ().time_index.is_none();
+                if no_time_index {
+                    let ts_col = ColumnSchema::new(
+                        AUTO_CREATED_PLACEHOLDER_TS_COL,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        true,
+                    )
+                    .with_time_index(true);
+                    with_auto_added_col.push(ts_col);
+                }
+
+                (primary_keys, with_auto_added_col, no_time_index)
             };
             let schema_len = schema.len();
             let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
@@ -377,7 +358,7 @@ impl FlownodeManager {
                                     now,
                                 ))]);
                                 // ts col, if auto create
-                                if is_auto_create {
+                                if is_ts_placeholder {
                                     ensure!(
                                         row.len() == schema_len - 1,
                                         InternalSnafu {
@@ -478,10 +459,11 @@ impl FlownodeManager {
 }
 
 /// Flow Runtime related methods
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// run in common_runtime background runtime
     pub fn run_background(self: Arc<Self>) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
+        // TODO(discord9): add heartbeat tasks here
         common_runtime::spawn_bg(async move {
             self.run().await;
         })
@@ -508,12 +490,13 @@ impl FlownodeManager {
         debug!("Starting to run");
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            debug!("call run_available in run every second");
-            self.run_available(true).await.unwrap();
-            debug!("call send_writeback_requests in run every second");
+            if let Err(err) = self.run_available(true).await {
+                common_telemetry::error!(err;"Run available errors");
+            }
             // TODO(discord9): error handling
-            self.send_writeback_requests().await.unwrap();
-            debug!("call log_all_errors in run every second");
+            if let Err(err) = self.send_writeback_requests().await {
+                common_telemetry::error!(err;"Send writeback request errors");
+            };
             self.log_all_errors().await;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -586,7 +569,7 @@ impl FlownodeManager {
 }
 
 /// Create&Remove flow
-impl FlownodeManager {
+impl FlowWorkerManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
@@ -596,6 +579,7 @@ impl FlownodeManager {
                 break;
             }
         }
+        self.node_context.write().await.remove_flow(flow_id);
         Ok(())
     }
 
@@ -642,8 +626,9 @@ impl FlownodeManager {
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
+
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-        node_ctx.assign_table_schema(&sink_table_name, flow_plan.typ.clone())?;
+        node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
 
         let _ = comment;
         let _ = flow_options;

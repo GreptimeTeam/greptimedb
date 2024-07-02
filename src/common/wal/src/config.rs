@@ -146,7 +146,7 @@ mod tests {
             topic_name_prefix = "greptimedb_wal_topic"
             replication_factor = 1
             create_topic_timeout = "30s"
-            max_batch_size = "1MB"
+            max_batch_bytes = "1MB"
             linger = "200ms"
             consumer_wait_timeout = "100ms"
             backoff_init = "500ms"
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 
         // Deserialized to DatanodeWalConfig.
-        let standalone_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
+        let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 32,
@@ -185,8 +185,7 @@ mod tests {
             replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
             compression: Compression::default(),
-            max_batch_size: ReadableSize::mb(1),
-            linger: Duration::from_millis(200),
+            max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: BackoffConfig {
                 init: Duration::from_millis(500),
@@ -195,6 +194,6 @@ mod tests {
                 deadline: Some(Duration::from_secs(60 * 5)),
             },
         };
-        assert_eq!(standalone_wal_config, DatanodeWalConfig::Kafka(expected));
+        assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
     }
 }

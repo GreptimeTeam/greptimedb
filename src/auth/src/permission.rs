@@ -30,6 +30,7 @@ pub enum PermissionReq<'a> {
     PromStoreWrite,
     PromStoreRead,
     Otlp,
+    LogWrite,
 }
 
 #[derive(Debug)]

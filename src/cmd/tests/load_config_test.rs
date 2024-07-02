@@ -16,7 +16,11 @@ use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
+use common_base::readable_size::ReadableSize;
 use common_config::Configurable;
+use common_grpc::channel_manager::{
+    DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+};
 use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::LoggingOptions;
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -29,7 +33,9 @@ use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
 use mito2::config::MitoConfig;
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 
+#[allow(deprecated)]
 #[test]
 fn test_load_datanode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/datanode.example.toml");
@@ -41,11 +47,10 @@ fn test_load_datanode_example_config() {
         runtime: RuntimeOptions {
             read_rt_size: 8,
             write_rt_size: 8,
-            bg_rt_size: 8,
+            bg_rt_size: 4,
         },
         component: DatanodeOptions {
             node_id: Some(42),
-            rpc_hostname: Some("127.0.0.1".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -70,6 +75,12 @@ fn test_load_datanode_example_config() {
                 num_workers: 8,
                 auto_flush_interval: Duration::from_secs(3600),
                 scan_parallelism: 0,
+                global_write_buffer_size: ReadableSize::gb(1),
+                global_write_buffer_reject_size: ReadableSize::gb(2),
+                sst_meta_cache_size: ReadableSize::mb(128),
+                vector_cache_size: ReadableSize::mb(512),
+                page_cache_size: ReadableSize::mb(512),
+                max_background_jobs: 4,
                 ..Default::default()
             })],
             logging: LoggingOptions {
@@ -83,6 +94,12 @@ fn test_load_datanode_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
+            grpc: GrpcOptions::default().with_addr("127.0.0.1:3001"),
+            rpc_addr: Some("127.0.0.1:3001".to_string()),
+            rpc_hostname: Some("127.0.0.1".to_string()),
+            rpc_runtime_size: Some(8),
+            rpc_max_recv_message_size: Some(DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE),
+            rpc_max_send_message_size: Some(DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE),
             ..Default::default()
         },
     };
@@ -100,7 +117,7 @@ fn test_load_frontend_example_config() {
         runtime: RuntimeOptions {
             read_rt_size: 8,
             write_rt_size: 8,
-            bg_rt_size: 8,
+            bg_rt_size: 4,
         },
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
@@ -148,7 +165,7 @@ fn test_load_metasrv_example_config() {
         runtime: RuntimeOptions {
             read_rt_size: 8,
             write_rt_size: 8,
-            bg_rt_size: 8,
+            bg_rt_size: 4,
         },
         component: MetasrvOptions {
             selector: SelectorType::LeaseBased,
@@ -181,7 +198,7 @@ fn test_load_standalone_example_config() {
         runtime: RuntimeOptions {
             read_rt_size: 8,
             write_rt_size: 8,
-            bg_rt_size: 8,
+            bg_rt_size: 4,
         },
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
@@ -194,6 +211,12 @@ fn test_load_standalone_example_config() {
                 num_workers: 8,
                 auto_flush_interval: Duration::from_secs(3600),
                 scan_parallelism: 0,
+                global_write_buffer_size: ReadableSize::gb(1),
+                global_write_buffer_reject_size: ReadableSize::gb(2),
+                sst_meta_cache_size: ReadableSize::mb(128),
+                vector_cache_size: ReadableSize::mb(512),
+                page_cache_size: ReadableSize::mb(512),
+                max_background_jobs: 4,
                 ..Default::default()
             })],
             storage: StorageConfig {

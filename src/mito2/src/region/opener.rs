@@ -119,9 +119,10 @@ impl RegionOpener {
     }
 
     /// Sets options for the region.
-    pub(crate) fn options(mut self, options: RegionOptions) -> Self {
+    pub(crate) fn options(mut self, options: RegionOptions) -> Result<Self> {
+        options.validate()?;
         self.options = Some(options);
-        self
+        Ok(self)
     }
 
     /// Sets the cache manager for the region.
@@ -192,9 +193,11 @@ impl RegionOpener {
         )
         .await?;
 
-        let memtable_builder = self
-            .memtable_builder_provider
-            .builder_for_options(options.memtable.as_ref(), !options.append_mode);
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(
+            options.memtable.as_ref(),
+            options.need_dedup(),
+            options.merge_mode(),
+        );
         // Initial memtable id is 0.
         let part_duration = options.compaction.time_window();
         let mutable = Arc::new(TimePartitions::new(
@@ -323,7 +326,8 @@ impl RegionOpener {
         ));
         let memtable_builder = self.memtable_builder_provider.builder_for_options(
             region_options.memtable.as_ref(),
-            !region_options.append_mode,
+            region_options.need_dedup(),
+            region_options.merge_mode(),
         );
         // Initial memtable id is 0.
         let part_duration = region_options.compaction.time_window();
@@ -530,6 +534,6 @@ where
 }
 
 /// Returns the directory to the manifest files.
-fn new_manifest_dir(region_dir: &str) -> String {
+pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
     join_dir(region_dir, "manifest")
 }

@@ -75,9 +75,9 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'SUM(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: User-defined coercion failed with Execution("Sum not supported for Timestamp(Millisecond, None)") and No function matches the given name and argument types 'SUM(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
-	SUM(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
+	SUM(UserDefined)
 
 SELECT AVG(t) FROM timestamp;
 

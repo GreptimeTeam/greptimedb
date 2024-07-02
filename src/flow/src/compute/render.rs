@@ -32,9 +32,9 @@ use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::state::Scheduler;
-use crate::adapter::error::{Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu};
 use crate::compute::state::DataflowState;
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
+use crate::error::{Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu};
 use crate::expr::error::{DataTypeSnafu, InternalSnafu};
 use crate::expr::{
     self, EvalError, GlobalId, LocalId, MapFilterProject, MfpPlan, SafeMfpPlan, ScalarExpr,
@@ -111,7 +111,7 @@ impl<'referred, 'df> Context<'referred, 'df> {
                 input,
                 key_val_plan,
                 reduce_plan,
-            } => self.render_reduce(input, key_val_plan, reduce_plan, plan.typ),
+            } => self.render_reduce(input, key_val_plan, reduce_plan, plan.schema.typ),
             Plan::Join { .. } => NotImplementedSnafu {
                 reason: "Join is still WIP",
             }

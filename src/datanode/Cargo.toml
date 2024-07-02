@@ -57,6 +57,7 @@ servers.workspace = true
 session.workspace = true
 snafu.workspace = true
 store-api.workspace = true
+substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
 toml.workspace = true

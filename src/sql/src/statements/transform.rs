@@ -20,13 +20,17 @@ use sqlparser::ast::{visit_expressions_mut, Expr};
 
 use crate::error::Result;
 use crate::statements::statement::Statement;
+mod expand_interval;
 mod type_alias;
+
+use expand_interval::ExpandIntervalTransformRule;
 pub use type_alias::get_data_type_by_alias_name;
 use type_alias::TypeAliasTransformRule;
 
 lazy_static! {
     /// [TransformRule] registry
     static ref RULES: Vec<Arc<dyn TransformRule>> = vec![
+        Arc::new(ExpandIntervalTransformRule{}),
         Arc::new(TypeAliasTransformRule{}),
     ];
 }

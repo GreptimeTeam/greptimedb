@@ -16,11 +16,11 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. |
-| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`. |
+| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
@@ -66,8 +66,7 @@
 | `wal.prefill_log_files` | Bool | `false` | Whether to pre-create log files on start up.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.sync_period` | String | `10s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.max_batch_size` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.linger` | String | `200ms` | The linger duration of a kafka batch producer.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.backoff_init` | String | `500ms` | The initial backoff delay.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.backoff_max` | String | `10s` | The maximum backoff delay.<br/>**It's only used when the provider is `kafka`**. |
@@ -161,16 +160,17 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `18s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. |
-| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>Support the following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`. |
+| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
@@ -251,7 +251,7 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
 | `procedure` | -- | -- | Procedure storage options. |
 | `procedure.max_retry_times` | Integer | `12` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
@@ -259,7 +259,7 @@
 | `failure_detector` | -- | -- | -- |
 | `failure_detector.threshold` | Float | `8.0` | -- |
 | `failure_detector.min_std_deviation` | String | `100ms` | -- |
-| `failure_detector.acceptable_heartbeat_pause` | String | `3000ms` | -- |
+| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | -- |
 | `failure_detector.first_heartbeat_estimate` | String | `1000ms` | -- |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
@@ -306,16 +306,28 @@
 | `node_id` | Integer | `None` | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
-| `rpc_addr` | String | `127.0.0.1:3001` | The gRPC address of the datanode. |
-| `rpc_hostname` | String | `None` | The hostname of the datanode. |
-| `rpc_runtime_size` | Integer | `8` | The number of gRPC server worker threads. |
-| `rpc_max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
-| `rpc_max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. |
+| `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `rpc_addr` | String | `None` | Deprecated, use `grpc.addr` instead. |
+| `rpc_hostname` | String | `None` | Deprecated, use `grpc.hostname` instead. |
+| `rpc_runtime_size` | Integer | `None` | Deprecated, use `grpc.runtime_size` instead. |
+| `rpc_max_recv_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_recv_message_size` instead. |
+| `rpc_max_send_message_size` | String | `None` | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
+| `grpc` | -- | -- | The gRPC server options. |
+| `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
+| `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
+| `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
+| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
+| `grpc.tls.mode` | String | `disable` | TLS mode. |
+| `grpc.tls.cert_path` | String | `None` | Certificate file path. |
+| `grpc.tls.key_path` | String | `None` | Private key file path. |
+| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.read_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.write_rt_size` | Integer | `8` | The number of threads to execute the runtime for global write operations. |
-| `runtime.bg_rt_size` | Integer | `8` | The number of threads to execute the runtime for global background operations. |
+| `runtime.bg_rt_size` | Integer | `4` | The number of threads to execute the runtime for global background operations. |
 | `heartbeat` | -- | -- | The heartbeat options. |
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
@@ -341,8 +353,7 @@
 | `wal.prefill_log_files` | Bool | `false` | Whether to pre-create log files on start up.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.sync_period` | String | `10s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.max_batch_size` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.linger` | String | `200ms` | The linger duration of a kafka batch producer.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.backoff_init` | String | `500ms` | The initial backoff delay.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.backoff_max` | String | `10s` | The maximum backoff delay.<br/>**It's only used when the provider is `kafka`**. |

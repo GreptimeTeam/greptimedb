@@ -114,9 +114,8 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
 #[cfg(test)]
 mod tests {
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Rows, SemanticType};
+    use api::v1::{ColumnDataType, RowInsertRequests, Rows, SemanticType};
 
-    use super::*;
     use crate::influxdb::InfluxdbRequest;
 
     #[test]

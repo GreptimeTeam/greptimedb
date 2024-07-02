@@ -28,7 +28,7 @@ use datatypes::arrow::datatypes::DataType;
 use crate::functions::{extract_array, linear_regression};
 use crate::range_array::RangeArray;
 
-#[range_fn(name = "Deriv", ret = "Float64Array", display_name = "prom_deriv")]
+#[range_fn(name = Deriv, ret = Float64Array, display_name = prom_deriv)]
 pub fn deriv(times: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.len() < 2 {
         None

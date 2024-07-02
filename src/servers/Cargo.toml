@@ -22,7 +22,7 @@ arrow-ipc.workspace = true
 arrow-schema.workspace = true
 async-trait = "0.1"
 auth.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 axum-macros = "0.3.8"
 base64.workspace = true
 bytes.workspace = true
@@ -69,6 +69,7 @@ opentelemetry-proto.workspace = true
 parking_lot = "0.12"
 pgwire = "0.20"
 pin-project = "1.0"
+pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [
     "flamegraph",
@@ -104,6 +105,7 @@ tonic-reflection = "0.11"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.4", features = ["full"] }
 urlencoding = "2.1"
+uuid.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
@@ -115,7 +117,7 @@ catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
-criterion = "0.4"
+criterion = "0.5"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
@@ -130,9 +132,16 @@ tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.11"
 tokio-test = "0.4"
 
+[target.'cfg(not(windows))'.dev-dependencies]
+pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+
 [build-dependencies]
 common-version.workspace = true
 
 [[bench]]
 name = "bench_prom"
+harness = false
+
+[[bench]]
+name = "to_http_output"
 harness = false

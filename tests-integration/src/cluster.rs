@@ -21,7 +21,7 @@ use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -168,7 +168,7 @@ impl GreptimeDbClusterBuilder {
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
-        let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
+        let datanode_clients = Arc::new(NodeClients::new(channel_config));
 
         let opt = MetasrvOptions {
             procedure: ProcedureConfig {
@@ -300,7 +300,7 @@ impl GreptimeDbClusterBuilder {
     ) {
         for _ in 0..10 {
             let alive_datanodes =
-                meta_srv::lease::filter_datanodes(1000, meta_peer_client, |_, _| true)
+                meta_srv::lease::alive_datanodes(1000, meta_peer_client, u64::MAX)
                     .await
                     .unwrap()
                     .len();
@@ -338,7 +338,7 @@ impl GreptimeDbClusterBuilder {
     async fn build_frontend(
         &self,
         metasrv: MockInfo,
-        datanode_clients: Arc<DatanodeClients>,
+        datanode_clients: Arc<NodeClients>,
     ) -> Arc<FeInstance> {
         let mut meta_client = MetaClientBuilder::frontend_default_options(1000)
             .channel_manager(metasrv.channel_manager)
@@ -376,14 +376,16 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
         ]);
 
+        let options = FrontendOptions::default();
         let heartbeat_task = HeartbeatTask::new(
-            &FrontendOptions::default(),
+            &options,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
         );
 
         let instance = FrontendBuilder::new(
+            options,
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
@@ -401,7 +403,7 @@ impl GreptimeDbClusterBuilder {
 }
 
 async fn build_datanode_clients(
-    clients: Arc<DatanodeClients>,
+    clients: Arc<NodeClients>,
     instances: &HashMap<DatanodeId, Datanode>,
     datanodes: usize,
 ) {

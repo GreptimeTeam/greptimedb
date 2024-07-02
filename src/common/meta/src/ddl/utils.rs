@@ -19,11 +19,14 @@ use snafu::{ensure, location, Location, OptionExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use table::metadata::TableId;
 
+use crate::ddl::DetectingRegion;
 use crate::error::{Error, Result, TableNotFoundSnafu, UnsupportedSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
+use crate::rpc::router::RegionRoute;
+use crate::ClusterId;
 
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
@@ -125,4 +128,20 @@ pub async fn get_physical_table_id(
         .table_route_manager()
         .get_physical_table_id(logical_table_id)
         .await
+}
+
+/// Converts a list of [`RegionRoute`] to a list of [`DetectingRegion`].
+pub fn convert_region_routes_to_detecting_regions(
+    cluster_id: ClusterId,
+    region_routes: &[RegionRoute],
+) -> Vec<DetectingRegion> {
+    region_routes
+        .iter()
+        .flat_map(|route| {
+            route
+                .leader_peer
+                .as_ref()
+                .map(|peer| (cluster_id, peer.id, route.region.id))
+        })
+        .collect::<Vec<_>>()
 }

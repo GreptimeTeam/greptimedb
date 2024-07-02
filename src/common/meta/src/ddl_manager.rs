@@ -805,12 +805,12 @@ mod tests {
     use crate::ddl::flow_meta::FlowMetadataAllocator;
     use crate::ddl::table_meta::TableMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
-    use crate::ddl::DdlContext;
+    use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
     use crate::key::flow::FlowMetadataManager;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
-    use crate::peer::Peer;
+    use crate::peer::{Peer, StandalonePeerLookupService};
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
@@ -855,6 +855,8 @@ mod tests {
                 flow_metadata_manager,
                 flow_metadata_allocator,
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+                region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             },
             procedure_manager.clone(),
             true,

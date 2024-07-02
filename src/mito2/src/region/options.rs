@@ -22,21 +22,34 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use serde_with::{serde_as, with_prefix, DisplayFromStr};
+use serde_with::{serde_as, with_prefix, DisplayFromStr, NoneAsEmptyString};
 use snafu::{ensure, ResultExt};
 use store_api::storage::ColumnId;
+use strum::EnumString;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
+/// Mode to handle duplicate rows while merging.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MergeMode {
+    /// Keeps the last row.
+    #[default]
+    LastRow,
+    /// Keeps the last non-null field for each row.
+    LastNonNull,
+}
+
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
@@ -54,6 +67,34 @@ pub struct RegionOptions {
     pub index_options: IndexOptions,
     /// Memtable options.
     pub memtable: Option<MemtableOptions>,
+    /// The mode to merge duplicate rows.
+    /// Only takes effect when `append_mode` is `false`.
+    pub merge_mode: Option<MergeMode>,
+}
+
+impl RegionOptions {
+    /// Validates options.
+    pub fn validate(&self) -> Result<()> {
+        if self.append_mode {
+            ensure!(
+                self.merge_mode.is_none(),
+                InvalidRegionOptionsSnafu {
+                    reason: "merge_mode is not allowed when append_mode is enabled",
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if deduplication is needed.
+    pub fn need_dedup(&self) -> bool {
+        !self.append_mode
+    }
+
+    /// Returns the `merge_mode` if it is set, otherwise returns the default `MergeMode`.
+    pub fn merge_mode(&self) -> MergeMode {
+        self.merge_mode.unwrap_or_default()
+    }
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -89,7 +130,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             None
         };
 
-        Ok(RegionOptions {
+        let opts = RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
@@ -97,12 +138,16 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             wal_options,
             index_options,
             memtable,
-        })
+            merge_mode: options.merge_mode,
+        };
+        opts.validate()?;
+
+        Ok(opts)
     }
 }
 
 /// Options for compactions
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "compaction.type")]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionOptions {
@@ -117,6 +162,12 @@ impl CompactionOptions {
             CompactionOptions::Twcs(opts) => opts.time_window,
         }
     }
+
+    pub(crate) fn remote_compaction(&self) -> bool {
+        match self {
+            CompactionOptions::Twcs(opts) => opts.remote_compaction,
+        }
+    }
 }
 
 impl Default for CompactionOptions {
@@ -127,18 +178,21 @@ impl Default for CompactionOptions {
 
 /// Time window compaction options.
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwcsOptions {
-    /// Max num of files that can be kept in active writing time window.
+    /// Max num of sorted runs that can be kept in active writing time window.
     #[serde_as(as = "DisplayFromStr")]
-    pub max_active_window_files: usize,
+    pub max_active_window_runs: usize,
     /// Max num of files that can be kept in inactive time window.
     #[serde_as(as = "DisplayFromStr")]
-    pub max_inactive_window_files: usize,
+    pub max_inactive_window_runs: usize,
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
+    /// Whether to use remote compaction.
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_compaction: bool,
 }
 
 with_prefix!(prefix_twcs "compaction.twcs.");
@@ -160,9 +214,10 @@ impl TwcsOptions {
 impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
-            max_active_window_files: 4,
-            max_inactive_window_files: 1,
+            max_active_window_runs: 1,
+            max_inactive_window_runs: 1,
             time_window: None,
+            remote_compaction: false,
         }
     }
 }
@@ -179,6 +234,8 @@ struct RegionOptionsWithoutEnum {
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
+    #[serde_as(as = "NoneAsEmptyString")]
+    merge_mode: Option<MergeMode>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -188,6 +245,7 @@ impl Default for RegionOptionsWithoutEnum {
             ttl: options.ttl,
             storage: options.storage,
             append_mode: options.append_mode,
+            merge_mode: options.merge_mode,
         }
     }
 }
@@ -195,7 +253,7 @@ impl Default for RegionOptionsWithoutEnum {
 with_prefix!(prefix_inverted_index "index.inverted_index.");
 
 /// Options for index.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IndexOptions {
     /// Options for the inverted index.
@@ -205,12 +263,13 @@ pub struct IndexOptions {
 
 /// Options for the inverted index.
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InvertedIndexOptions {
     /// The column ids that should be ignored when building the inverted index.
     /// The column ids are separated by commas. For example, "1,2,3".
     #[serde(deserialize_with = "deserialize_ignore_column_ids")]
+    #[serde(serialize_with = "serialize_ignore_column_ids")]
     pub ignore_column_ids: Vec<ColumnId>,
 
     /// The number of rows in a segment.
@@ -228,7 +287,7 @@ impl Default for InvertedIndexOptions {
 }
 
 /// Options for region level memtable.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "memtable.type", rename_all = "snake_case")]
 pub enum MemtableOptions {
     TimeSeries,
@@ -240,7 +299,7 @@ with_prefix!(prefix_partition_tree "memtable.partition_tree.");
 
 /// Partition tree memtable options.
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PartitionTreeOptions {
     /// Max keys in an index shard.
@@ -279,11 +338,26 @@ where
 {
     let s: String = Deserialize::deserialize(deserializer)?;
     let mut column_ids = Vec::new();
+    if s.is_empty() {
+        return Ok(column_ids);
+    }
     for item in s.split(',') {
         let column_id = item.parse().map_err(D::Error::custom)?;
         column_ids.push(column_id);
     }
     Ok(column_ids)
+}
+
+fn serialize_ignore_column_ids<S>(column_ids: &[ColumnId], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let s = column_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    serializer.serialize_str(&s)
 }
 
 /// Converts the `options` map to a json object.
@@ -381,7 +455,7 @@ mod tests {
     #[test]
     fn test_without_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.max_active_window_files", "8"),
+            ("compaction.twcs.max_active_window_runs", "8"),
             ("compaction.twcs.time_window", "2h"),
         ]);
         let err = RegionOptions::try_from(&map).unwrap_err();
@@ -391,14 +465,14 @@ mod tests {
     #[test]
     fn test_with_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.max_active_window_files", "8"),
+            ("compaction.twcs.max_active_window_runs", "8"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                max_active_window_files: 8,
+                max_active_window_runs: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
@@ -478,18 +552,34 @@ mod tests {
     }
 
     #[test]
+    fn test_with_merge_mode() {
+        let map = make_map(&[("merge_mode", "last_row")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(MergeMode::LastRow, options.merge_mode());
+
+        let map = make_map(&[("merge_mode", "last_non_null")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        assert_eq!(MergeMode::LastNonNull, options.merge_mode());
+
+        let map = make_map(&[("merge_mode", "unknown")]);
+        let err = RegionOptions::try_from(&map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
     fn test_with_all() {
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: "test_topic".to_string(),
         });
         let map = make_map(&[
             ("ttl", "7d"),
-            ("compaction.twcs.max_active_window_files", "8"),
-            ("compaction.twcs.max_inactive_window_files", "2"),
+            ("compaction.twcs.max_active_window_runs", "8"),
+            ("compaction.twcs.max_inactive_window_runs", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
+            ("compaction.twcs.remote_compaction", "false"),
             ("storage", "S3"),
-            ("append_mode", "true"),
+            ("append_mode", "false"),
             ("index.inverted_index.ignore_column_ids", "1,2,3"),
             ("index.inverted_index.segment_row_count", "512"),
             (
@@ -500,17 +590,19 @@ mod tests {
             ("memtable.partition_tree.index_max_keys_per_shard", "2048"),
             ("memtable.partition_tree.data_freeze_threshold", "2048"),
             ("memtable.partition_tree.fork_dictionary_bytes", "128M"),
+            ("merge_mode", "last_non_null"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7)),
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                max_active_window_files: 8,
-                max_inactive_window_files: 2,
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
             }),
             storage: Some("S3".to_string()),
-            append_mode: true,
+            append_mode: false,
             wal_options,
             index_options: IndexOptions {
                 inverted_index: InvertedIndexOptions {
@@ -523,7 +615,100 @@ mod tests {
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
             })),
+            merge_mode: Some(MergeMode::LastNonNull),
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_region_options_serde() {
+        let options = RegionOptions {
+            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            compaction: CompactionOptions::Twcs(TwcsOptions {
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
+                time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
+            }),
+            storage: Some("S3".to_string()),
+            append_mode: false,
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![1, 2, 3],
+                    segment_row_count: 512,
+                },
+            },
+            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
+                index_max_keys_per_shard: 2048,
+                data_freeze_threshold: 2048,
+                fork_dictionary_bytes: ReadableSize::mb(128),
+            })),
+            merge_mode: Some(MergeMode::LastNonNull),
+        };
+        let region_options_json_str = serde_json::to_string(&options).unwrap();
+        let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
+        assert_eq!(options, got);
+    }
+
+    #[test]
+    fn test_region_options_str_serde() {
+        // Notes: use empty string for `ignore_column_ids` to test the empty string case.
+        let region_options_json_str = r#"{
+  "ttl": "7days",
+  "compaction": {
+    "compaction.type": "twcs",
+    "compaction.twcs.max_active_window_runs": "8",
+    "compaction.twcs.max_inactive_window_runs": "2",
+    "compaction.twcs.time_window": "2h"
+  },
+  "storage": "S3",
+  "append_mode": false,
+  "wal_options": {
+    "wal.provider": "kafka",
+    "wal.kafka.topic": "test_topic"
+  },
+  "index_options": {
+    "index.inverted_index.ignore_column_ids": "",
+    "index.inverted_index.segment_row_count": "512"
+  },
+  "memtable": {
+    "memtable.type": "partition_tree",
+    "memtable.partition_tree.index_max_keys_per_shard": "2048",
+    "memtable.partition_tree.data_freeze_threshold": "2048",
+    "memtable.partition_tree.fork_dictionary_bytes": "128MiB"
+  },
+  "merge_mode": "last_non_null"
+}"#;
+        let got: RegionOptions = serde_json::from_str(region_options_json_str).unwrap();
+        let options = RegionOptions {
+            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            compaction: CompactionOptions::Twcs(TwcsOptions {
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
+                time_window: Some(Duration::from_secs(3600 * 2)),
+                remote_compaction: false,
+            }),
+            storage: Some("S3".to_string()),
+            append_mode: false,
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    ignore_column_ids: vec![],
+                    segment_row_count: 512,
+                },
+            },
+            memtable: Some(MemtableOptions::PartitionTree(PartitionTreeOptions {
+                index_max_keys_per_shard: 2048,
+                data_freeze_threshold: 2048,
+                fork_dictionary_bytes: ReadableSize::mb(128),
+            })),
+            merge_mode: Some(MergeMode::LastNonNull),
+        };
+        assert_eq!(options, got);
     }
 }

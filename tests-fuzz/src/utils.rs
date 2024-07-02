@@ -12,17 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cluster_info;
 pub mod config;
+pub mod crd;
 pub mod health;
+pub mod partition;
+pub mod pod_failure;
 #[cfg(feature = "unstable")]
 pub mod process;
+pub mod wait;
 
 use std::env;
 
 use common_telemetry::info;
+use common_telemetry::tracing::log::LevelFilter;
 use snafu::ResultExt;
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::{MySql, Pool};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use sqlx::{ConnectOptions, MySql, Pool};
 
 use crate::error::{self, Result};
 use crate::ir::Ident;
@@ -50,12 +56,9 @@ pub async fn init_greptime_connections_via_env() -> Connections {
 /// Connects to GreptimeDB.
 pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
     let mysql = if let Some(addr) = mysql {
-        Some(
-            MySqlPoolOptions::new()
-                .connect(&format!("mysql://{addr}/public"))
-                .await
-                .unwrap(),
-        )
+        let mut opts: MySqlConnectOptions = format!("mysql://{addr}/public").parse().unwrap();
+        opts.log_statements(LevelFilter::Off);
+        Some(MySqlPoolOptions::new().connect_with(opts).await.unwrap())
     } else {
         None
     };
@@ -88,6 +91,9 @@ pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
     }
 }
 
+pub const GT_FUZZ_CLUSTER_NAMESPACE: &str = "GT_FUZZ_CLUSTER_NAMESPACE";
+pub const GT_FUZZ_CLUSTER_NAME: &str = "GT_FUZZ_CLUSTER_NAME";
+
 /// Flushes memtable to SST file.
 pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
     let sql = format!("SELECT flush_table(\"{}\")", table_name);
@@ -110,4 +116,21 @@ pub async fn compact_table(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
     info!("Compact table: {}\n\nResult: {result:?}\n\n", table_name);
 
     Ok(())
+}
+
+pub const GT_FUZZ_INPUT_MAX_ROWS: &str = "GT_FUZZ_INPUT_MAX_ROWS";
+pub const GT_FUZZ_INPUT_MAX_TABLES: &str = "GT_FUZZ_INPUT_MAX_TABLES";
+pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
+pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
+pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
+
+/// Retrieves a value from the environment variables
+/// or returns a default value if the environment variable is not set.
+pub fn get_from_env_or_default_value(key: &str, default_value: usize) -> usize {
+    let _ = dotenv::dotenv();
+    if let Ok(value) = env::var(key) {
+        value.parse().unwrap()
+    } else {
+        default_value
+    }
 }

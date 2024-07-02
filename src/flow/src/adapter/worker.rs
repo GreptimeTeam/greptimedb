@@ -15,18 +15,18 @@
 //! For single-thread flow worker
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::info;
 use enum_as_inner::EnumAsInner;
 use hydroflow::scheduled::graph::Hydroflow;
-use snafu::{ensure, OptionExt};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use snafu::ensure;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
-use crate::adapter::error::{Error, FlowAlreadyExistSnafu, InternalSnafu, UnexpectedSnafu};
 use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};
+use crate::error::{Error, FlowAlreadyExistSnafu, InternalSnafu, UnexpectedSnafu};
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow};
@@ -39,7 +39,7 @@ type ReqId = usize;
 pub fn create_worker<'a>() -> (WorkerHandle, Worker<'a>) {
     let (itc_client, itc_server) = create_inter_thread_call();
     let worker_handle = WorkerHandle {
-        itc_client: Mutex::new(itc_client),
+        itc_client,
         shutdown: AtomicBool::new(false),
     };
     let worker = Worker {
@@ -106,7 +106,7 @@ impl<'subgraph> ActiveDataflowState<'subgraph> {
 
 #[derive(Debug)]
 pub struct WorkerHandle {
-    itc_client: Mutex<InterThreadCallClient>,
+    itc_client: InterThreadCallClient,
     shutdown: AtomicBool,
 }
 
@@ -122,12 +122,7 @@ impl WorkerHandle {
             }
         );
 
-        let ret = self
-            .itc_client
-            .lock()
-            .await
-            .call_with_resp(create_reqs)
-            .await?;
+        let ret = self.itc_client.call_with_resp(create_reqs).await?;
         ret.into_create().map_err(|ret| {
             InternalSnafu {
                 reason: format!(
@@ -141,7 +136,8 @@ impl WorkerHandle {
     /// remove task, return task id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<bool, Error> {
         let req = Request::Remove { flow_id };
-        let ret = self.itc_client.lock().await.call_with_resp(req).await?;
+
+        let ret = self.itc_client.call_with_resp(req).await?;
 
         ret.into_remove().map_err(|ret| {
             InternalSnafu {
@@ -157,15 +153,12 @@ impl WorkerHandle {
     ///
     /// the returned error is unrecoverable, and the worker should be shutdown/rebooted
     pub async fn run_available(&self, now: repr::Timestamp) -> Result<(), Error> {
-        self.itc_client
-            .lock()
-            .await
-            .call_no_resp(Request::RunAvail { now })
+        self.itc_client.call_no_resp(Request::RunAvail { now })
     }
 
     pub async fn contains_flow(&self, flow_id: FlowId) -> Result<bool, Error> {
         let req = Request::ContainTask { flow_id };
-        let ret = self.itc_client.lock().await.call_with_resp(req).await?;
+        let ret = self.itc_client.call_with_resp(req).await?;
 
         ret.into_contain_task().map_err(|ret| {
             InternalSnafu {
@@ -178,23 +171,9 @@ impl WorkerHandle {
     }
 
     /// shutdown the worker
-    pub async fn shutdown(&self) -> Result<(), Error> {
+    pub fn shutdown(&self) -> Result<(), Error> {
         if !self.shutdown.fetch_or(true, Ordering::SeqCst) {
-            self.itc_client.lock().await.call_no_resp(Request::Shutdown)
-        } else {
-            UnexpectedSnafu {
-                reason: "Worker already shutdown",
-            }
-            .fail()
-        }
-    }
-
-    /// shutdown the worker
-    pub fn shutdown_blocking(&self) -> Result<(), Error> {
-        if !self.shutdown.fetch_or(true, Ordering::SeqCst) {
-            self.itc_client
-                .blocking_lock()
-                .call_no_resp(Request::Shutdown)
+            self.itc_client.call_no_resp(Request::Shutdown)
         } else {
             UnexpectedSnafu {
                 reason: "Worker already shutdown",
@@ -206,10 +185,14 @@ impl WorkerHandle {
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
-        if let Err(err) = self.shutdown_blocking() {
-            common_telemetry::error!("Fail to shutdown worker: {:?}", err)
+        if let Err(ret) = self.shutdown() {
+            common_telemetry::error!(
+                ret;
+                "While dropping Worker Handle, failed to shutdown worker, worker might be in inconsistent state."
+            );
+        } else {
+            info!("Flow Worker shutdown due to Worker Handle dropped.")
         }
-        info!("Flow Worker shutdown due to Worker Handle dropped.")
     }
 }
 
@@ -271,7 +254,7 @@ impl<'s> Worker<'s> {
     /// Run the worker, blocking, until shutdown signal is received
     pub fn run(&mut self) {
         loop {
-            let (req_id, req) = if let Some(ret) = self.itc_server.blocking_lock().blocking_recv() {
+            let (req, ret_tx) = if let Some(ret) = self.itc_server.blocking_lock().blocking_recv() {
                 ret
             } else {
                 common_telemetry::error!(
@@ -280,19 +263,26 @@ impl<'s> Worker<'s> {
                 break;
             };
 
-            let ret = self.handle_req(req_id, req);
-            match ret {
-                Ok(Some((id, resp))) => {
-                    if let Err(err) = self.itc_server.blocking_lock().resp(id, resp) {
+            let ret = self.handle_req(req);
+            match (ret, ret_tx) {
+                (Ok(Some(resp)), Some(ret_tx)) => {
+                    if let Err(err) = ret_tx.send(resp) {
                         common_telemetry::error!(
                             err;
-                            "Worker's itc server has been closed unexpectedly, shutting down worker"
+                            "Result receiver is dropped, can't send result"
                         );
-                        break;
                     };
                 }
-                Ok(None) => continue,
-                Err(()) => {
+                (Ok(None), None) => continue,
+                (Ok(Some(resp)), None) => {
+                    common_telemetry::error!(
+                        "Expect no result for current request, but found {resp:?}"
+                    )
+                }
+                (Ok(None), Some(_)) => {
+                    common_telemetry::error!("Expect result for current request, but found nothing")
+                }
+                (Err(()), _) => {
                     break;
                 }
             }
@@ -310,7 +300,7 @@ impl<'s> Worker<'s> {
     /// handle request, return response if any, Err if receive shutdown signal
     ///
     /// return `Err(())` if receive shutdown request
-    fn handle_req(&mut self, req_id: ReqId, req: Request) -> Result<Option<(ReqId, Response)>, ()> {
+    fn handle_req(&mut self, req: Request) -> Result<Option<Response>, ()> {
         let ret = match req {
             Request::Create {
                 flow_id,
@@ -334,16 +324,13 @@ impl<'s> Worker<'s> {
                     create_if_not_exists,
                     err_collector,
                 );
-                Some((
-                    req_id,
-                    Response::Create {
-                        result: task_create_result,
-                    },
-                ))
+                Some(Response::Create {
+                    result: task_create_result,
+                })
             }
             Request::Remove { flow_id } => {
                 let ret = self.remove_flow(flow_id);
-                Some((req_id, Response::Remove { result: ret }))
+                Some(Response::Remove { result: ret })
             }
             Request::RunAvail { now } => {
                 self.run_tick(now);
@@ -351,7 +338,7 @@ impl<'s> Worker<'s> {
             }
             Request::ContainTask { flow_id } => {
                 let ret = self.task_states.contains_key(&flow_id);
-                Some((req_id, Response::ContainTask { result: ret }))
+                Some(Response::ContainTask { result: ret })
             }
             Request::Shutdown => return Err(()),
         };
@@ -401,82 +388,49 @@ enum Response {
 
 fn create_inter_thread_call() -> (InterThreadCallClient, InterThreadCallServer) {
     let (arg_send, arg_recv) = mpsc::unbounded_channel();
-    let (ret_send, ret_recv) = mpsc::unbounded_channel();
     let client = InterThreadCallClient {
-        call_id: AtomicUsize::new(0),
         arg_sender: arg_send,
-        ret_recv,
     };
-    let server = InterThreadCallServer {
-        arg_recv,
-        ret_sender: ret_send,
-    };
+    let server = InterThreadCallServer { arg_recv };
     (client, server)
 }
 
 #[derive(Debug)]
 struct InterThreadCallClient {
-    call_id: AtomicUsize,
-    arg_sender: mpsc::UnboundedSender<(ReqId, Request)>,
-    ret_recv: mpsc::UnboundedReceiver<(ReqId, Response)>,
+    arg_sender: mpsc::UnboundedSender<(Request, Option<oneshot::Sender<Response>>)>,
 }
 
 impl InterThreadCallClient {
-    /// call without expecting responses or blocking
     fn call_no_resp(&self, req: Request) -> Result<(), Error> {
-        // TODO(discord9): relax memory order later
-        let call_id = self.call_id.fetch_add(1, Ordering::SeqCst);
-        self.arg_sender
-            .send((call_id, req))
-            .map_err(from_send_error)
+        self.arg_sender.send((req, None)).map_err(from_send_error)
     }
 
-    /// call blocking, and return the result
-    async fn call_with_resp(&mut self, req: Request) -> Result<Response, Error> {
-        // TODO(discord9): relax memory order later
-        let call_id = self.call_id.fetch_add(1, Ordering::SeqCst);
+    async fn call_with_resp(&self, req: Request) -> Result<Response, Error> {
+        let (tx, rx) = oneshot::channel();
         self.arg_sender
-            .send((call_id, req))
+            .send((req, Some(tx)))
             .map_err(from_send_error)?;
-
-        // TODO(discord9): better inter thread call impl, i.e. support multiple client(also consider if it's necessary)
-        // since one node manger might manage multiple worker, but one worker should only belong to one node manager
-        let (ret_call_id, ret) = self
-            .ret_recv
-            .recv()
-            .await
-            .context(InternalSnafu { reason: "InterThreadCallClient call_blocking failed, ret_recv has been closed and there are no remaining messages in the channel's buffer" })?;
-
-        ensure!(
-            ret_call_id == call_id,
+        rx.await.map_err(|_| {
             InternalSnafu {
-                reason: "call id mismatch, worker/worker handler should be in sync",
+                reason: "Sender is dropped",
             }
-        );
-        Ok(ret)
+            .build()
+        })
     }
 }
 
 #[derive(Debug)]
 struct InterThreadCallServer {
-    pub arg_recv: mpsc::UnboundedReceiver<(ReqId, Request)>,
-    pub ret_sender: mpsc::UnboundedSender<(ReqId, Response)>,
+    pub arg_recv: mpsc::UnboundedReceiver<(Request, Option<oneshot::Sender<Response>>)>,
 }
 
 impl InterThreadCallServer {
-    pub async fn recv(&mut self) -> Option<(usize, Request)> {
+    pub async fn recv(&mut self) -> Option<(Request, Option<oneshot::Sender<Response>>)> {
         self.arg_recv.recv().await
     }
 
-    pub fn blocking_recv(&mut self) -> Option<(usize, Request)> {
+    pub fn blocking_recv(&mut self) -> Option<(Request, Option<oneshot::Sender<Response>>)> {
         self.arg_recv.blocking_recv()
-    }
-
-    /// Send response back to the client
-    pub fn resp(&self, call_id: ReqId, resp: Response) -> Result<(), Error> {
-        self.ret_sender
-            .send((call_id, resp))
-            .map_err(from_send_error)
     }
 }
 
@@ -496,6 +450,19 @@ mod test {
     use crate::plan::Plan;
     use crate::repr::{RelationType, Row};
 
+    #[test]
+    fn drop_handle() {
+        let (tx, rx) = oneshot::channel();
+        let worker_thread_handle = std::thread::spawn(move || {
+            let (handle, mut worker) = create_worker();
+            tx.send(handle).unwrap();
+            worker.run();
+        });
+        let handle = rx.blocking_recv().unwrap();
+        drop(handle);
+        worker_thread_handle.join().unwrap();
+    }
+
     #[tokio::test]
     pub async fn test_simple_get_with_worker_and_handle() {
         let (tx, rx) = oneshot::channel();
@@ -514,7 +481,7 @@ mod test {
                 plan: Plan::Get {
                     id: Id::Global(GlobalId::User(1)),
                 },
-                typ: RelationType::new(vec![]),
+                schema: RelationType::new(vec![]).into_unnamed(),
             },
         );
         let create_reqs = Request::Create {
@@ -528,11 +495,14 @@ mod test {
             create_if_not_exists: true,
             err_collector: ErrCollector::default(),
         };
-        handle.create_flow(create_reqs).await.unwrap();
+        assert_eq!(
+            handle.create_flow(create_reqs).await.unwrap(),
+            Some(flow_id)
+        );
         tx.send((Row::empty(), 0, 0)).unwrap();
         handle.run_available(0).await.unwrap();
         assert_eq!(sink_rx.recv().await.unwrap().0, Row::empty());
-        handle.shutdown().await.unwrap();
+        drop(handle);
         worker_thread_handle.join().unwrap();
     }
 }
