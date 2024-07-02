@@ -117,3 +117,20 @@ pub async fn compact_table(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
 
     Ok(())
 }
+
+pub const GT_FUZZ_INPUT_MAX_ROWS: &str = "GT_FUZZ_INPUT_MAX_ROWS";
+pub const GT_FUZZ_INPUT_MAX_TABLES: &str = "GT_FUZZ_INPUT_MAX_TABLES";
+pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
+pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
+pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
+
+/// Retrieves a value from the environment variables
+/// or returns a default value if the environment variable is not set.
+pub fn get_from_env_or_default_value(key: &str, default_value: usize) -> usize {
+    let _ = dotenv::dotenv();
+    if let Ok(value) = env::var(key) {
+        value.parse().unwrap()
+    } else {
+        default_value
+    }
+}

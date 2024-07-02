@@ -40,7 +40,10 @@ use tests_fuzz::ir::{droppable_columns, modifiable_columns, AlterTableExpr, Crea
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{
+    get_from_env_or_default_value, init_greptime_connections_via_env, Connections,
+    GT_FUZZ_INPUT_MAX_COLUMNS,
+};
 use tests_fuzz::validator;
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -67,7 +70,8 @@ enum AlterTableOption {
 }
 
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
-    let columns = rng.gen_range(2..30);
+    let max_columns = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_COLUMNS, 30);
+    let columns = rng.gen_range(2..max_columns);
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,

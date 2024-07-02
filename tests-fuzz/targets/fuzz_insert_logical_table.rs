@@ -43,7 +43,9 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
+    compact_table, flush_memtable, get_from_env_or_default_value,
+    init_greptime_connections_via_env, Connections, GT_FUZZ_INPUT_MAX_ROWS,
+    GT_FUZZ_INPUT_MAX_TABLES,
 };
 use tests_fuzz::validator;
 struct FuzzContext {
@@ -67,8 +69,10 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let tables = rng.gen_range(1..32);
-        let rows = rng.gen_range(1..2048);
+        let max_tables = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_TABLES, 32);
+        let tables = rng.gen_range(1..max_tables);
+        let max_row = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+        let rows = rng.gen_range(1..max_row);
         Ok(FuzzInput { tables, seed, rows })
     }
 }
