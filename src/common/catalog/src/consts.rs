@@ -108,3 +108,7 @@ pub const FILE_ENGINE: &str = "file";
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
 pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIMESTAMP";
+
+pub fn is_readonly_schema(schema: &str) -> bool {
+    matches!(schema, INFORMATION_SCHEMA_NAME)
+}

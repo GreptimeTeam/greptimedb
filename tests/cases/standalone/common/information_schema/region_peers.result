@@ -1,5 +1,5 @@
 --- test information_schema.region_peers ----
-USE INFORMATION_SCHEMA;
+USE public;
 
 Affected Rows: 0
 
@@ -35,6 +35,10 @@ CREATE TABLE region_peers_test (
 
 Affected Rows: 0
 
+use INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
 SELECT COUNT(distinct region_id) FROM region_peers;
 
 +----------------------------------------+
@@ -43,11 +47,11 @@ SELECT COUNT(distinct region_id) FROM region_peers;
 | 6                                      |
 +----------------------------------------+
 
-DROP TABLE region_peers_t1, region_peers_t2, region_peers_phy, region_peers_test;
+use public;
 
 Affected Rows: 0
 
-USE public;
+DROP TABLE region_peers_t1, region_peers_t2, region_peers_phy, region_peers_test;
 
 Affected Rows: 0
 
