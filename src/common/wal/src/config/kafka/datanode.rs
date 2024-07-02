@@ -57,7 +57,6 @@ pub struct DatanodeKafkaConfig {
 
 impl Default for DatanodeKafkaConfig {
     fn default() -> Self {
-        let replication_factor = 1;
         Self {
             broker_endpoints: vec![BROKER_ENDPOINT.to_string()],
             compression: Compression::NoCompression,
@@ -68,7 +67,7 @@ impl Default for DatanodeKafkaConfig {
             num_topics: 64,
             num_partitions: 1,
             selector_type: TopicSelectorType::RoundRobin,
-            replication_factor,
+            replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
             topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
         }
