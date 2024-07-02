@@ -22,6 +22,7 @@ use common_runtime::Builder as RuntimeBuilder;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
+use servers::http::event::LogValidatorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -89,7 +90,8 @@ where
             Some(self.instance.clone()),
         );
 
-        builder = builder.with_log_ingest_handler(self.instance.clone());
+        builder = builder
+            .with_log_ingest_handler(self.instance.clone(), self.plugins.get::<LogValidatorRef>());
 
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
             builder = builder.with_user_provider(user_provider);

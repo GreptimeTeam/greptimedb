@@ -19,7 +19,7 @@ use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
 use prost::Message;
-use serde_json::json;
+use serde_json::{json, Value};
 use servers::http::error_result::ErrorResponse;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
@@ -76,6 +76,8 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_prometheus_remote_write,
                 test_vm_proto_remote_write,
+
+                test_pipeline_api,
             );
         )*
     };
@@ -994,6 +996,105 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+
+    let body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    let content: Value = content.unwrap();
+    let pipeline_name = content.get("name");
+    assert!(pipeline_name.is_some());
+    assert_eq!(pipeline_name.unwrap(), "test");
+
+    let version = content.get("version");
+    assert!(version.is_some());
+    let version = version.unwrap().as_str();
+    assert!(version.is_some());
+    let version = version.unwrap();
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "I",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+    "#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let encoded: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
+
+    // 3. remove pipeline
+    let res = client
+        .delete(format!("/v1/events/pipelines/test?version={}", encoded).as_str())
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.text().await, "ok");
+
+    // 4. write data failed
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_ne!(res.status(), StatusCode::OK);
 
     guard.remove_all().await;
 }

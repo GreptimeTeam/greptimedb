@@ -101,6 +101,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid pipeline version format: {}", version))]
+    InvalidPipelineVersion {
+        version: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -113,9 +120,10 @@ impl ErrorExt for Error {
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
-            PipelineNotFound { .. } | CompilePipeline { .. } | PipelineTransform { .. } => {
-                StatusCode::InvalidArguments
-            }
+            PipelineNotFound { .. }
+            | CompilePipeline { .. }
+            | PipelineTransform { .. }
+            | InvalidPipelineVersion { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),

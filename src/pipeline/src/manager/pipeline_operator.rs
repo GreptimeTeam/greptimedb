@@ -27,10 +27,9 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
-use crate::table::{PipelineInfo, PipelineTable, PipelineTableRef, PipelineVersion};
+use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion, PIPELINE_TABLE_NAME};
+use crate::table::PipelineTable;
 use crate::{GreptimeTransformer, Pipeline};
-
-pub const PIPELINE_TABLE_NAME: &str = "pipelines";
 
 /// PipelineOperator is responsible for managing pipelines.
 /// It provides the ability to:
@@ -50,7 +49,7 @@ pub struct PipelineOperator {
 
 impl PipelineOperator {
     /// Create a table request for the pipeline table.
-    pub fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
+    fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
         let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
         let create_table_expr = CreateTableExpr {
@@ -146,19 +145,6 @@ impl PipelineOperator {
     pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef> {
         self.tables.read().unwrap().get(catalog).cloned()
     }
-
-    async fn insert_and_compile(
-        &self,
-        ctx: QueryContextRef,
-        name: &str,
-        content_type: &str,
-        pipeline: &str,
-    ) -> Result<PipelineInfo> {
-        self.get_pipeline_table_from_cache(ctx.current_catalog())
-            .context(PipelineTableNotFoundSnafu)?
-            .insert_and_compile(ctx.current_schema(), name, content_type, pipeline)
-            .await
-    }
 }
 
 impl PipelineOperator {
@@ -187,6 +173,7 @@ impl PipelineOperator {
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
+
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
             .get_pipeline(query_ctx.current_schema(), name, version)
@@ -204,7 +191,26 @@ impl PipelineOperator {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 
-        self.insert_and_compile(query_ctx, name, content_type, pipeline)
+        self.get_pipeline_table_from_cache(query_ctx.current_catalog())
+            .context(PipelineTableNotFoundSnafu)?
+            .insert_and_compile(query_ctx.current_schema(), name, content_type, pipeline)
+            .await
+    }
+
+    /// Delete a pipeline by name from pipeline table.
+    pub async fn delete_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        // trigger load pipeline table
+        self.create_pipeline_table_if_not_exists(query_ctx.clone())
+            .await?;
+
+        self.get_pipeline_table_from_cache(query_ctx.current_catalog())
+            .context(PipelineTableNotFoundSnafu)?
+            .delete_pipeline(query_ctx.current_schema(), name, version)
             .await
     }
 }

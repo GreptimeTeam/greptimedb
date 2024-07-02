@@ -156,12 +156,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unsupported delete pipeline."))]
-    UnsupportedDeletePipeline {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to execute script by name: {}", name))]
     ExecuteScript {
         name: String,
@@ -635,7 +629,6 @@ impl ErrorExt for Error {
             | FileWatch { .. } => StatusCode::Internal,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
-            UnsupportedDeletePipeline { .. } => StatusCode::Unsupported,
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
