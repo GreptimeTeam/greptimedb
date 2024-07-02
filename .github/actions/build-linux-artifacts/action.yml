@@ -31,8 +31,8 @@ runs:
       run: |
         cd ${{ inputs.working-dir }} && \
         make run-it-in-container BUILD_JOBS=4 \
-        IMAGE_NAMESPACE=i8k6a5e1/greptime \
-        IMAGE_REGISTRY=public.ecr.aws
+        IMAGE_NAMESPACE=${{ vars.IMAGE_NAMESPACE }} \
+        IMAGE_REGISTRY=${{ vars.aws-image-registry }}
 
     - name: Upload sqlness logs
       if: ${{ failure() && inputs.disable-run-tests == 'false' }} # Only upload logs when the integration tests failed.
@@ -51,8 +51,8 @@ runs:
         artifacts-dir: greptime-linux-${{ inputs.arch }}-pyo3-${{ inputs.version }}
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
-        image-registry: public.ecr.aws
-        image-namespace: i8k6a5e1/greptime        
+        image-registry: ${{ vars.aws-image-registry }}
+        image-namespace: ${{ vars.IMAGE_NAMESPACE }}
 
     - name: Build greptime without pyo3
       if: ${{ inputs.dev-mode == 'false' }}
@@ -64,8 +64,8 @@ runs:
         artifacts-dir: greptime-linux-${{ inputs.arch }}-${{ inputs.version }}
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
-        image-registry: public.ecr.aws
-        image-namespace: i8k6a5e1/greptime
+        image-registry: ${{ vars.aws-image-registry }}
+        image-namespace: ${{ vars.IMAGE_NAMESPACE }}
 
     - name: Clean up the target directory # Clean up the target directory for the centos7 base image, or it will still use the objects of last build.
       shell: bash
@@ -82,8 +82,8 @@ runs:
         artifacts-dir: greptime-linux-${{ inputs.arch }}-centos-${{ inputs.version }}
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
-        image-registry: public.ecr.aws
-        image-namespace: i8k6a5e1/greptime
+        image-registry: ${{ vars.aws-image-registry }}
+        image-namespace: ${{ vars.IMAGE_NAMESPACE }}
 
     - name: Build greptime on android base image
       uses: ./.github/actions/build-greptime-binary
@@ -94,5 +94,5 @@ runs:
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
         build-android-artifacts: true
-        image-registry: public.ecr.aws
-        image-namespace: i8k6a5e1/greptime
+        image-registry: ${{ vars.aws-image-registry }}
+        image-namespace: ${{ vars.IMAGE_NAMESPACE }}

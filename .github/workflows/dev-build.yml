@@ -240,12 +240,44 @@ jobs:
         run: |
           echo "build-result=success" >> $GITHUB_OUTPUT
 
+  release-images-to-ecr:
+    name: Build and push images to aws ecr
+    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+      build-linux-arm64-artifacts,
+    ]
+    runs-on: ubuntu-2004-16-cores
+    outputs:
+      build-result: ${{ steps.set-build-result.outputs.build-result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and push images to ecr
+        uses: ./.github/actions/build-images
+        with:
+          aws-image-registry: ${{ vars.aws-image-registry }}
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          aws-ecr-region: ${{ vars.AWS_ECR_REGION }}
+
+      - name: Set build result
+        id: set-build-result
+        run: |
+          echo "build-result=success" >> $GITHUB_OUTPUT
+
   release-cn-artifacts:
     name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
       release-images-to-dockerhub,
+      release-images-to-ecr,
     ]
     runs-on: ubuntu-20.04
     continue-on-error: true
@@ -327,7 +359,8 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
     needs: [
-      release-images-to-dockerhub
+      release-images-to-dockerhub,
+      release-images-to-ecr,
     ]
     runs-on: ubuntu-20.04
     env:
@@ -341,17 +374,17 @@ jobs:
         run: pnpm tsx bin/report-ci-failure.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' && needs.release-images-to-ecr.outputs.build-result == 'success' }}
       - name: Notify dev build successful result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' && needs.release-images-to-ecr.outputs.build-result == 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has completed successfully."}
 
       - name: Notify dev build failed result
         uses: slackapi/slack-github-action@v1.23.0
-        if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' }}
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' || needs.release-images-to-ecr.outputs.build-result != 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}

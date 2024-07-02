@@ -31,6 +31,21 @@ inputs:
     description: Build dev-builder-android image
     required: false
     default: "true"
+  aws-access-key-id:
+    description: AWS access key id
+    required: true
+  aws-secret-access-key:
+    description: AWS secret access key
+    required: true
+  aws-ecr-region:
+    description: AWS ecr region
+    required: true
+  aws-image-registry:
+    description: AWS ecr registry
+    required: true
+  image-namespace:
+    description: The namespace of the image registry to store the images
+    required: true
 runs:
   using: composite
   steps:
@@ -41,7 +56,19 @@ runs:
         username: ${{ inputs.dockerhub-image-registry-username }}
         password: ${{ inputs.dockerhub-image-registry-token }}
 
-    - name: Build and push dev-builder-ubuntu image
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-ecr-region }}
+
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+
+    - name: Build and push dev-builder-ubuntu image to dockerhub
       shell: bash
       if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
       run: |
@@ -52,7 +79,22 @@ runs:
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           IMAGE_TAG=${{ inputs.version }}
 
-    - name: Build and push dev-builder-centos image
+        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-ubuntu:${{ inputs.version }}
+
+    - name: Build and push dev-builder-ubuntu image to ecr
+      shell: bash
+      if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
+      run: |
+        make dev-builder \
+          BASE_IMAGE=ubuntu \
+          BUILDX_MULTI_PLATFORM_BUILD=all \
+          IMAGE_REGISTRY=${{ inputs.aws-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_TAG=${{ inputs.version }}
+
+        docker push ${{ inputs.aws-image-registry }}/${{ inputs.image-namespace }}/dev-builder-ubuntu:${{ inputs.version }}
+
+    - name: Build and push dev-builder-centos image to dockerhub
       shell: bash
       if: ${{ inputs.build-dev-builder-centos == 'true' }}
       run: |
@@ -63,7 +105,22 @@ runs:
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           IMAGE_TAG=${{ inputs.version }}
 
-    - name: Build and push dev-builder-android image # Only build image for amd64 platform.
+        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-centos:${{ inputs.version }}
+
+    - name: Build and push dev-builder-centos image to ecr
+      shell: bash
+      if: ${{ inputs.build-dev-builder-centos == 'true' }}
+      run: |
+        make dev-builder \
+          BASE_IMAGE=centos \
+          BUILDX_MULTI_PLATFORM_BUILD=amd64 \
+          IMAGE_REGISTRY=${{ inputs.aws-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_TAG=${{ inputs.version }}
+
+        docker push ${{ inputs.aws-image-registry }}/${{ inputs.image-namespace }}/dev-builder-centos:${{ inputs.version }}
+
+    - name: Build and push dev-builder-android image to dockerhub # Only build image for amd64 platform.
       shell: bash
       if: ${{ inputs.build-dev-builder-android == 'true' }}
       run: |
@@ -74,3 +131,15 @@ runs:
           IMAGE_TAG=${{ inputs.version }} && \
 
         docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }}
+
+    - name: Build and push dev-builder-android image to ecr
+      shell: bash
+      if: ${{ inputs.build-dev-builder-android == 'true' }}
+      run: |
+        make dev-builder \
+          BASE_IMAGE=android \
+          IMAGE_REGISTRY=${{ inputs.aws-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_TAG=${{ inputs.version }} && \
+
+        docker push ${{ inputs.aws-image-registry }}/${{ inputs.image-namespace }}/dev-builder-android:${{ inputs.version }}

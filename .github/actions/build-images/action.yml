@@ -28,6 +28,18 @@ inputs:
     description: Enable dev mode, only build standard greptime
     required: false
     default: 'false'
+  aws-access-key-id:
+    description: AWS access key id
+    required: true
+  aws-secret-access-key:
+    description: AWS secret access key
+    required: true
+  aws-ecr-region:
+    description: AWS ecr region
+    required: true
+  aws-image-registry:
+    description: AWS ecr registry
+    required: true
 runs:
   using: composite
   steps:
@@ -54,6 +66,38 @@ runs:
         image-namespace: ${{ inputs.image-namespace }}
         image-registry-username: ${{ inputs.image-registry-username }}
         image-registry-password: ${{ inputs.image-registry-password }}
+        image-name: ${{ inputs.image-name }}-centos
+        image-tag: ${{ inputs.version }}
+        docker-file: docker/ci/centos/Dockerfile
+        amd64-artifact-name: greptime-linux-amd64-centos-${{ inputs.version }}
+        platforms: linux/amd64
+        push-latest-tag: ${{ inputs.push-latest-tag }}
+
+    - name: Build and push standard images to ecr
+      uses: ./.github/actions/build-greptime-images
+      with: # The image will be used as '${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}'
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-ecr-region: ${{ inputs.aws-ecr-region }}
+        image-name: ${{ inputs.image-name }}
+        image-tag: ${{ inputs.version }}
+        docker-file: docker/ci/ubuntu/Dockerfile
+        amd64-artifact-name: greptime-linux-amd64-pyo3-${{ inputs.version }}
+        arm64-artifact-name: greptime-linux-arm64-pyo3-${{ inputs.version }}
+        platforms: linux/amd64,linux/arm64
+        push-latest-tag: ${{ inputs.push-latest-tag }}
+
+    - name: Build and push centos images to ecr
+      if: ${{ inputs.dev-mode == 'false' }}
+      uses: ./.github/actions/build-greptime-images
+      with:
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-ecr-region: ${{ inputs.aws-ecr-region }}
         image-name: ${{ inputs.image-name }}-centos
         image-tag: ${{ inputs.version }}
         docker-file: docker/ci/centos/Dockerfile
