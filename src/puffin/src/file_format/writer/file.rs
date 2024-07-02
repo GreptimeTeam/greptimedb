@@ -22,7 +22,7 @@ use snafu::ResultExt;
 use crate::blob_metadata::{BlobMetadata, BlobMetadataBuilder, CompressionCodec};
 use crate::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
 use crate::file_format::writer::footer::FooterWriter;
-use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinSyncWriter};
+use crate::file_format::writer::{Blob, AsyncWriter, SyncWriter};
 use crate::file_format::MAGIC;
 
 /// Puffin file writer, implements both [`PuffinSyncWriter`] and [`PuffinAsyncWriter`]
@@ -72,7 +72,7 @@ impl<W> PuffinFileWriter<W> {
     }
 }
 
-impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
+impl<W: io::Write> SyncWriter for PuffinFileWriter<W> {
     fn set_properties(&mut self, properties: HashMap<String, String>) {
         self.properties = properties;
     }
@@ -108,7 +108,7 @@ impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
 }
 
 #[async_trait]
-impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
+impl<W: AsyncWrite + Unpin + Send> AsyncWriter for PuffinFileWriter<W> {
     fn set_properties(&mut self, properties: HashMap<String, String>) {
         self.properties = properties;
     }

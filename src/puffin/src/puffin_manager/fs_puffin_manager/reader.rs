@@ -24,7 +24,7 @@ use crate::error::{
     BlobIndexOutOfBoundSnafu, BlobNotFoundSnafu, DeserializeJsonSnafu, FileKeyNotMatchSnafu,
     ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
-use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
+use crate::file_format::reader::{AsyncReader, PuffinFileReader};
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, StagerRef};

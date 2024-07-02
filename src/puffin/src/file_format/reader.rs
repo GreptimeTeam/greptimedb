@@ -22,8 +22,8 @@ use crate::error::Result;
 pub use crate::file_format::reader::file::PuffinFileReader;
 use crate::file_metadata::FileMetadata;
 
-/// `PuffinSyncReader` defines a synchronous reader for puffin data.
-pub trait PuffinSyncReader<'a> {
+/// `SyncReader` defines a synchronous reader for puffin data.
+pub trait SyncReader<'a> {
     type Reader: std::io::Read + std::io::Seek;
 
     /// Fetches the FileMetadata.
@@ -35,9 +35,9 @@ pub trait PuffinSyncReader<'a> {
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader>;
 }
 
-/// `PuffinAsyncReader` defines an asynchronous reader for puffin data.
+/// `AsyncReader` defines an asynchronous reader for puffin data.
 #[async_trait]
-pub trait PuffinAsyncReader<'a> {
+pub trait AsyncReader<'a> {
     type Reader: futures::AsyncRead + futures::AsyncSeek;
 
     /// Fetches the FileMetadata.

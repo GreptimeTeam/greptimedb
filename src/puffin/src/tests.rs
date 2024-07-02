@@ -20,8 +20,8 @@ use futures::io::Cursor as AsyncCursor;
 use futures::AsyncReadExt;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader, PuffinSyncReader};
-use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter, PuffinSyncWriter};
+use crate::file_format::reader::{AsyncReader, PuffinFileReader, SyncReader};
+use crate::file_format::writer::{Blob, AsyncWriter, PuffinFileWriter, SyncWriter};
 
 #[test]
 fn test_read_empty_puffin_sync() {
