@@ -17,7 +17,7 @@ mod footer;
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
+use greptime_proto::v1::index::InvertedIndexMetas;
 
 use crate::inverted_index::error::Result;
 pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
@@ -30,14 +30,9 @@ pub trait InvertedIndexReader: Send {
     /// Retrieve metadata of all inverted indices stored within the blob.
     async fn metadata(&mut self) -> Result<InvertedIndexMetas>;
 
-    /// Retrieve the finite state transducer (FST) map for a given inverted index metadata entry.
-    async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap>;
+    /// Retrieve the finite state transducer (FST) map from the given offset and size.
+    async fn fst(&mut self, offset: u64, size: u32) -> Result<FstMap>;
 
-    /// Retrieve the bitmap for a given inverted index metadata entry at the specified offset and size.
-    async fn bitmap(
-        &mut self,
-        meta: &InvertedIndexMeta,
-        relative_offset: u32,
-        size: u32,
-    ) -> Result<BitVec>;
+    /// Retrieve the bitmap from the given offset and size.
+    async fn bitmap(&mut self, offset: u64, size: u32) -> Result<BitVec>;
 }
