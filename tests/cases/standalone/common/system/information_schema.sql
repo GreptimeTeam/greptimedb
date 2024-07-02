@@ -2,6 +2,7 @@
 create database information_schema;
 
 -- scripts table has different table ids in different modes
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
 select *
 from information_schema.tables
 where table_name != 'scripts'

@@ -15,6 +15,7 @@
 //! Table and TableEngine requests
 
 use std::collections::HashMap;
+use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -125,6 +126,25 @@ impl TableOptions {
         );
 
         Ok(options)
+    }
+}
+
+impl fmt::Display for TableOptions {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut key_vals = vec![];
+        if let Some(size) = self.write_buffer_size {
+            key_vals.push(format!("{}={}", WRITE_BUFFER_SIZE_KEY, size));
+        }
+
+        if let Some(ttl) = self.ttl {
+            key_vals.push(format!("{}={}", TTL_KEY, humantime::Duration::from(ttl)));
+        }
+
+        for (k, v) in &self.extra_options {
+            key_vals.push(format!("{}={}", k, v));
+        }
+
+        write!(f, "{}", key_vals.join(" "))
     }
 }
 
@@ -344,5 +364,30 @@ mod tests {
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
         assert_eq!(options, serialized);
+    }
+
+    #[test]
+    fn test_table_options_to_string() {
+        let options = TableOptions {
+            write_buffer_size: Some(ReadableSize::mb(128)),
+            ttl: Some(Duration::from_secs(1000)),
+            extra_options: HashMap::new(),
+        };
+
+        assert_eq!(
+            "write_buffer_size=128.0MiB ttl=16m 40s",
+            options.to_string()
+        );
+
+        let options = TableOptions {
+            write_buffer_size: Some(ReadableSize::mb(128)),
+            ttl: Some(Duration::from_secs(1000)),
+            extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
+        };
+
+        assert_eq!(
+            "write_buffer_size=128.0MiB ttl=16m 40s a=A",
+            options.to_string()
+        );
     }
 }

@@ -25,6 +25,7 @@ mod tql;
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
+use client::RecordBatches;
 use common_error::ext::BoxedError;
 use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -42,7 +43,7 @@ use query::plan::LogicalPlan;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
@@ -56,7 +57,7 @@ use table::TableRef;
 use self::set::{set_bytea_output, set_datestyle, set_timezone, validate_client_encoding};
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, TableNotFoundSnafu,
+    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -307,7 +308,23 @@ impl StatementExecutor {
             }
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
+            Statement::Use(db) => self.use_database(db, query_ctx).await,
         }
+    }
+
+    pub async fn use_database(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
+        let catalog = query_ctx.current_catalog();
+        ensure!(
+            self.catalog_manager
+                .schema_exists(catalog, db.as_ref())
+                .await
+                .context(CatalogSnafu)?,
+            SchemaNotFoundSnafu { schema_info: &db }
+        );
+
+        query_ctx.set_current_schema(&db);
+
+        Ok(Output::new_with_record_batches(RecordBatches::empty()))
     }
 
     pub async fn plan(

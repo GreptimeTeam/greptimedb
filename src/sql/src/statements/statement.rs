@@ -98,6 +98,8 @@ pub enum Statement {
     SetVariables(SetVariables),
     // SHOW VARIABLES
     ShowVariables(ShowVariables),
+    // USE
+    Use(String),
 }
 
 impl Display for Statement {
@@ -136,6 +138,7 @@ impl Display for Statement {
                 write!(f, "SHOW COLLATION {kind}")
             }
             Statement::CreateView(s) => s.fmt(f),
+            Statement::Use(s) => s.fmt(f),
         }
     }
 }

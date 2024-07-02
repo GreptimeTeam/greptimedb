@@ -179,7 +179,7 @@ impl Deleter {
         for req in &mut requests.deletes {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
-            let table = self.get_table(catalog, schema, &req.table_name).await?;
+            let table = self.get_table(catalog, &schema, &req.table_name).await?;
             let key_column_names = self.key_column_names(&table)?;
 
             let rows = req.rows.as_mut().unwrap();

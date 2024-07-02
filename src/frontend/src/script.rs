@@ -230,7 +230,7 @@ mod python {
                 .script_manager
                 .insert_and_compile(
                     query_ctx.current_catalog(),
-                    query_ctx.current_schema(),
+                    &query_ctx.current_schema(),
                     name,
                     script,
                 )
@@ -266,7 +266,7 @@ mod python {
             self.script_manager
                 .execute(
                     query_ctx.current_catalog(),
-                    query_ctx.current_schema(),
+                    &query_ctx.current_schema(),
                     name,
                     params,
                 )

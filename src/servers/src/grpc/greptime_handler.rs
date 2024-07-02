@@ -148,7 +148,7 @@ pub(crate) async fn auth(
                 Identity::UserId(&username, None),
                 Password::PlainText(password.into()),
                 query_ctx.current_catalog(),
-                query_ctx.current_schema(),
+                &query_ctx.current_schema(),
             )
             .await
             .context(AuthSnafu),

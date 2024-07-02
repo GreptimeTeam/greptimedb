@@ -525,7 +525,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let catalog = if let Some(catalog) = &catalog_from_db {
             catalog.to_string()
         } else {
-            self.session.get_catalog()
+            self.session.catalog()
         };
 
         if !self

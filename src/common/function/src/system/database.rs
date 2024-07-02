@@ -44,7 +44,7 @@ impl Function for DatabaseFunction {
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let db = func_ctx.query_ctx.current_schema();
 
-        Ok(Arc::new(StringVector::from_slice(&[db])) as _)
+        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
     }
 }
 
