@@ -19,7 +19,7 @@ pub use tantivy::TantivyFulltextIndexCreator;
 
 use crate::fulltext_index::error::Result;
 
-/// `FulltextIndexCreator` is for creating a fulltext index.`
+/// `FulltextIndexCreator` is for creating a fulltext index.
 #[async_trait]
 pub trait FulltextIndexCreator: Send {
     /// Pushes a text to the index.
