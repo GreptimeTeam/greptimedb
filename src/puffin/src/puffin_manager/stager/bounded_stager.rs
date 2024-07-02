@@ -67,14 +67,14 @@ pub struct BoundedStager {
 }
 
 impl BoundedStager {
-    pub async fn new(base_dir: PathBuf, capicity: u64) -> Result<Self> {
+    pub async fn new(base_dir: PathBuf, capacity: u64) -> Result<Self> {
         let recycle_bin = Cache::builder()
             .time_to_live(Duration::from_secs(60))
             .build();
 
         let recycle_bin_cloned = recycle_bin.clone();
         let cache = Cache::builder()
-            .max_capacity(capicity)
+            .max_capacity(capacity)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .async_eviction_listener(move |k, v, _| {
                 let recycle_bin = recycle_bin_cloned.clone();

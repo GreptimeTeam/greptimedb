@@ -12,7 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(iter_partition_in_place)]
+mod tantivy;
 
-pub mod fulltext_index;
-pub mod inverted_index;
+use async_trait::async_trait;
+pub use tantivy::TantivyFulltextIndexCreator;
+
+use crate::fulltext_index::error::Result;
+
+/// `FulltextIndexCreator` is for creating a fulltext index.`
+#[async_trait]
+pub trait FulltextIndexCreator: Send {
+    /// Pushes a text to the index.
+    async fn push_text(&mut self, text: &str) -> Result<()>;
+
+    /// Finalizes the creation of the index.
+    async fn finish(&mut self) -> Result<()>;
+
+    /// Returns the memory usage in bytes during the creation of the index.
+    fn memory_usage(&self) -> usize;
+}
