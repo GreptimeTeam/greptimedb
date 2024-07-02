@@ -32,4 +32,3 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
-rand.workspace = true

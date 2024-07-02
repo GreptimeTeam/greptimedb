@@ -8479,7 +8479,6 @@ dependencies = [
  "lz4_flex 0.11.3",
  "moka",
  "pin-project",
- "rand",
  "serde",
  "serde_json",
  "sha2",

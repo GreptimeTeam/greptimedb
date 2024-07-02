@@ -119,15 +119,19 @@ where
                 .handle_compress(file_key.clone(), reader, options.compression)
                 .await?;
 
-            let relative_path = entry
-                .path()
+            let path = entry.path();
+            let relative_path = path
                 .strip_prefix(&dir_path)
-                .expect("entry path is under dir path")
-                .to_string_lossy()
-                .into_owned();
+                .expect("entry path is under dir path");
+
+            let unified_rel_path = if cfg!(windows) {
+                relative_path.to_string_lossy().replace('\\', "/")
+            } else {
+                relative_path.to_string_lossy().to_string()
+            };
 
             files.push(DirFileMetadata {
-                relative_path,
+                relative_path: unified_rel_path,
                 key: file_key.clone(),
                 blob_index: self.blob_keys.len(),
             });

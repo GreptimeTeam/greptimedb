@@ -485,7 +485,11 @@ struct MokaDirWriterProvider(PathBuf);
 #[async_trait]
 impl DirWriterProvider for MokaDirWriterProvider {
     async fn writer(&self, rel_path: &str) -> Result<BoxWriter> {
-        let full_path = self.0.join(rel_path);
+        let full_path = if cfg!(windows) {
+            self.0.join(rel_path.replace('/', "\\"))
+        } else {
+            self.0.join(rel_path)
+        };
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await.context(CreateSnafu)?;
         }
