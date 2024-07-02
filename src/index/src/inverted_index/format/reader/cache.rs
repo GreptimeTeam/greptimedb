@@ -16,27 +16,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use futures::{AsyncRead, AsyncSeek};
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
 use snafu::ResultExt;
 use uuid::Uuid;
 
 use crate::inverted_index::error::DecodeFstSnafu;
-use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::FstMap;
 
 pub struct CachedInvertedIndexBlobReader<R> {
     file_id: Uuid,
-    inner: InvertedIndexBlobReader<R>,
+    inner: R,
     cache: Arc<InvertedIndexCache>,
 }
 
 impl<R> CachedInvertedIndexBlobReader<R> {
-    pub fn new(
-        file_id: Uuid,
-        inner: InvertedIndexBlobReader<R>,
-        cache: Arc<InvertedIndexCache>,
-    ) -> Self {
+    pub fn new(file_id: Uuid, inner: R, cache: Arc<InvertedIndexCache>) -> Self {
         Self {
             file_id,
             inner,
@@ -47,7 +42,7 @@ impl<R> CachedInvertedIndexBlobReader<R> {
 
 impl<R> CachedInvertedIndexBlobReader<R>
 where
-    R: AsyncRead + AsyncSeek + Unpin + Send,
+    R: InvertedIndexReader,
 {
     async fn get_or_load(
         &mut self,
@@ -76,9 +71,15 @@ where
 }
 
 #[async_trait]
-impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader
-    for CachedInvertedIndexBlobReader<R>
-{
+impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobReader<R> {
+    async fn seek_read(
+        &mut self,
+        offset: u64,
+        size: u32,
+    ) -> crate::inverted_index::error::Result<Vec<u8>> {
+        self.inner.seek_read(offset, size).await
+    }
+
     async fn metadata(&mut self) -> crate::inverted_index::error::Result<InvertedIndexMetas> {
         self.inner.metadata().await
     }

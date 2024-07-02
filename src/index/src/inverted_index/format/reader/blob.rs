@@ -15,16 +15,13 @@
 use std::io::SeekFrom;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
 
-use crate::inverted_index::error::{
-    DecodeFstSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedBlobSizeSnafu,
-};
+use crate::inverted_index::error::{ReadSnafu, Result, SeekSnafu, UnexpectedBlobSizeSnafu};
 use crate::inverted_index::format::reader::footer::InvertedIndeFooterReader;
-use crate::inverted_index::format::reader::{FstMap, InvertedIndexReader};
+use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::MIN_BLOB_SIZE;
 
 /// Inverted index blob reader, implements [`InvertedIndexReader`]
@@ -50,11 +47,9 @@ impl<R> InvertedIndexBlobReader<R> {
     }
 }
 
-impl<R> InvertedIndexBlobReader<R>
-where
-    R: AsyncRead + AsyncSeek + Unpin + Send,
-{
-    pub(crate) async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
+#[async_trait]
+impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
+    async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
         self.source
             .seek(SeekFrom::Start(offset))
             .await
@@ -63,10 +58,7 @@ where
         self.source.read(&mut buf).await.context(ReadSnafu)?;
         Ok(buf)
     }
-}
 
-#[async_trait]
-impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
     async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
         let end = SeekFrom::End(0);
         let blob_size = self.source.seek(end).await.context(SeekSnafu)?;
@@ -74,15 +66,6 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIn
 
         let mut footer_reader = InvertedIndeFooterReader::new(&mut self.source, blob_size);
         footer_reader.metadata().await
-    }
-
-    async fn fst(&mut self, offset: u64, size: u32) -> Result<FstMap> {
-        let fst_data = self.seek_read(offset, size).await?;
-        FstMap::new(fst_data).context(DecodeFstSnafu)
-    }
-
-    async fn bitmap(&mut self, offset: u64, size: u32) -> Result<BitVec> {
-        self.seek_read(offset, size).await.map(BitVec::from_vec)
     }
 }
 

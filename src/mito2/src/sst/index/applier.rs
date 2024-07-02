@@ -18,6 +18,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::{AsyncRead, AsyncSeek};
+use index::inverted_index::format::reader::cache::{
+    CachedInvertedIndexBlobReader, InvertedIndexCache,
+};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -59,6 +62,8 @@ pub(crate) struct SstIndexApplier {
     /// Predefined index applier used to apply predicates to index files
     /// and return the relevant row group ids for further scan.
     index_applier: Box<dyn IndexApplier>,
+
+    index_cache: Option<Arc<InvertedIndexCache>>,
 }
 
 pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
@@ -70,6 +75,7 @@ impl SstIndexApplier {
         region_id: RegionId,
         object_store: ObjectStore,
         file_cache: Option<FileCacheRef>,
+        index_cache: Option<Arc<InvertedIndexCache>>,
         index_applier: Box<dyn IndexApplier>,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
@@ -80,6 +86,7 @@ impl SstIndexApplier {
             store: InstrumentedStore::new(object_store),
             file_cache,
             index_applier,
+            index_cache,
         }
     }
 
@@ -97,22 +104,48 @@ impl SstIndexApplier {
                 let start = Instant::now();
                 let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
                 common_telemetry::debug!("Build index blob reader cost: {:?}", start.elapsed());
-                let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
-                self.index_applier
-                    .apply(context, &mut index_reader)
-                    .await
-                    .context(ApplyIndexSnafu)
+
+                if let Some(index_cache) = &self.index_cache {
+                    let mut index_reader = CachedInvertedIndexBlobReader::new(
+                        file_id.into(),
+                        InvertedIndexBlobReader::new(blob_reader),
+                        index_cache.clone(),
+                    );
+                    self.index_applier
+                        .apply(context, &mut index_reader)
+                        .await
+                        .context(ApplyIndexSnafu)
+                } else {
+                    let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
+                    self.index_applier
+                        .apply(context, &mut index_reader)
+                        .await
+                        .context(ApplyIndexSnafu)
+                }
             }
             None => {
                 let start = Instant::now();
                 let mut puffin_reader = self.remote_puffin_reader(file_id).await?;
                 let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
                 common_telemetry::debug!("Build index blob reader cost: {:?}", start.elapsed());
-                let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
-                self.index_applier
-                    .apply(context, &mut index_reader)
-                    .await
-                    .context(ApplyIndexSnafu)
+
+                if let Some(index_cache) = &self.index_cache {
+                    let mut index_reader = CachedInvertedIndexBlobReader::new(
+                        file_id.into(),
+                        InvertedIndexBlobReader::new(blob_reader),
+                        index_cache.clone(),
+                    );
+                    self.index_applier
+                        .apply(context, &mut index_reader)
+                        .await
+                        .context(ApplyIndexSnafu)
+                } else {
+                    let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
+                    self.index_applier
+                        .apply(context, &mut index_reader)
+                        .await
+                        .context(ApplyIndexSnafu)
+                }
             }
         }
     }
@@ -236,6 +269,7 @@ mod tests {
             RegionId::new(0, 0),
             object_store,
             None,
+            None,
             Box::new(mock_index_applier),
         );
         let output = sst_index_applier.apply(file_id).await.unwrap();
@@ -255,7 +289,6 @@ mod tests {
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
         let path = location::index_file_path(&region_dir, file_id);
-
         let mut puffin_writer = PuffinFileWriter::new(
             object_store
                 .writer(&path)
@@ -282,6 +315,7 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
+            None,
             None,
             Box::new(mock_index_applier),
         );

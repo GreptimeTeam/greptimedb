@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use index::inverted_index::format::reader::cache::InvertedIndexCache;
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
@@ -59,6 +60,7 @@ pub struct CacheManager {
     page_cache: Option<PageCache>,
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
+    index_cache: Option<Arc<InvertedIndexCache>>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -167,6 +169,10 @@ impl CacheManager {
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
     }
+
+    pub(crate) fn index_cache(&self) -> Arc<InvertedIndexCache> {
+        self.index_cache.as_ref().unwrap().clone()
+    }
 }
 
 /// Builder to construct a [CacheManager].
@@ -240,11 +246,13 @@ impl CacheManagerBuilder {
                 .build()
         });
 
+        let inverted_index_cache = InvertedIndexCache::new(1024, 1024);
         CacheManager {
             sst_meta_cache,
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
+            index_cache: Some(Arc::new(inverted_index_cache)),
         }
     }
 }

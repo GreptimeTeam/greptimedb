@@ -19,6 +19,7 @@ mod in_list;
 mod regex_match;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_telemetry::warn;
@@ -26,6 +27,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
+use index::inverted_index::format::reader::cache::InvertedIndexCache;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
@@ -58,6 +60,8 @@ pub(crate) struct SstIndexApplierBuilder<'a> {
 
     /// Stores predicates during traversal on the Expr tree.
     output: HashMap<ColumnId, Vec<Predicate>>,
+
+    index_cache: Option<Arc<InvertedIndexCache>>,
 }
 
 impl<'a> SstIndexApplierBuilder<'a> {
@@ -66,6 +70,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         region_dir: String,
         object_store: ObjectStore,
         file_cache: Option<FileCacheRef>,
+        index_cache: Option<Arc<InvertedIndexCache>>,
         metadata: &'a RegionMetadata,
         ignore_column_ids: HashSet<ColumnId>,
     ) -> Self {
@@ -76,6 +81,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             metadata,
             ignore_column_ids,
             output: HashMap::default(),
+            index_cache,
         }
     }
 
@@ -96,11 +102,13 @@ impl<'a> SstIndexApplierBuilder<'a> {
             .map(|(column_id, predicates)| (column_id.to_string(), predicates))
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
+
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
             self.metadata.region_id,
             self.object_store,
             self.file_cache,
+            self.index_cache,
             Box::new(applier.context(BuildIndexApplierSnafu)?),
         )))
     }
@@ -310,6 +318,7 @@ mod tests {
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),

@@ -325,6 +325,7 @@ mod tests {
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt64Vector, UInt8Vector};
     use futures::future::BoxFuture;
+    use index::inverted_index::format::reader::cache::InvertedIndexCache;
     use object_store::services::Memory;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
@@ -433,10 +434,12 @@ mod tests {
         assert_eq!(row_count, tags.len() * segment_row_count);
 
         move |expr| {
+            let cache = Arc::new(InvertedIndexCache::new(10, 10));
             let applier = SstIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
                 None,
+                Some(cache),
                 &region_metadata,
                 Default::default(),
             )

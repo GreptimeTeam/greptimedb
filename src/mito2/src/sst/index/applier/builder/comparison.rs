@@ -229,6 +229,7 @@ mod tests {
             "test".to_string(),
             test_object_store(),
             None,
+            None,
             &metadata,
             HashSet::default(),
         );
@@ -254,6 +255,7 @@ mod tests {
             "test".to_string(),
             test_object_store(),
             None,
+            None,
             &metadata,
             HashSet::default(),
         );
@@ -269,6 +271,7 @@ mod tests {
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
@@ -286,6 +289,7 @@ mod tests {
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
+            None,
             None,
             &metadata,
             HashSet::default(),
