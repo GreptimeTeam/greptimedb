@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod moka_cache_manager;
+mod bounded_stager;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use bounded_stager::BoundedStager;
 use futures::future::BoxFuture;
 use futures::AsyncWrite;
 
@@ -40,19 +41,19 @@ pub type DirWriterProviderRef = Box<dyn DirWriterProvider + Send>;
 
 /// Function that initializes a blob.
 ///
-/// `CacheManager` will provide a `BoxWriter` that the caller of `get_blob`
-/// can use to write the blob into the cache.
+/// `Stager` will provide a `BoxWriter` that the caller of `get_blob`
+/// can use to write the blob into the staging area.
 pub trait InitBlobFn = Fn(BoxWriter) -> WriteResult;
 
 /// Function that initializes a directory.
 ///
-/// `CacheManager` will provide a `DirWriterProvider` that the caller of `get_dir`
-/// can use to write files inside the directory into the cache.
+/// `Stager` will provide a `DirWriterProvider` that the caller of `get_dir`
+/// can use to write files inside the directory into the staging area.
 pub trait InitDirFn = Fn(DirWriterProviderRef) -> WriteResult;
 
-/// `CacheManager` manages the cache for the puffin files.
+/// `Stager` manages the staging area for the puffin files.
 #[async_trait]
-pub trait CacheManager {
+pub trait Stager {
     type Blob: BlobGuard;
     type Dir: DirGuard;
 
@@ -78,7 +79,7 @@ pub trait CacheManager {
         init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
     ) -> Result<Self::Dir>;
 
-    /// Stores a directory in the cache.
+    /// Stores a directory in the staging area.
     async fn put_dir(
         &self,
         puffin_file_name: &str,
@@ -88,4 +89,4 @@ pub trait CacheManager {
     ) -> Result<()>;
 }
 
-pub type CacheManagerRef<B, D> = Arc<dyn CacheManager<Blob = B, Dir = D> + Send + Sync>;
+pub type StagerRef<B, D> = Arc<dyn Stager<Blob = B, Dir = D> + Send + Sync>;

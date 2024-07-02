@@ -28,18 +28,18 @@ use crate::error::{
     DuplicateBlobSnafu, MetadataSnafu, OpenSnafu, Result, SerializeJsonSnafu,
     UnsupportedCompressionSnafu, WalkDirSnafu,
 };
-use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
-use crate::puffin_manager::cache_manager::CacheManagerRef;
-use crate::puffin_manager::cached_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
+use crate::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
+use crate::puffin_manager::fs_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
+use crate::puffin_manager::stager::StagerRef;
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinWriter, PutOptions};
 
-/// `CachedPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
-pub struct CachedPuffinWriter<B, D, W> {
+/// `FsPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
+pub struct FsPuffinWriter<B, D, W> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
-    /// The cache manager.
-    cache_manager: CacheManagerRef<B, D>,
+    /// The stager.
+    stager: StagerRef<B, D>,
 
     /// The underlying `PuffinFileWriter`.
     puffin_file_writer: PuffinFileWriter<W>,
@@ -48,16 +48,11 @@ pub struct CachedPuffinWriter<B, D, W> {
     blob_keys: HashSet<String>,
 }
 
-impl<B, D, W> CachedPuffinWriter<B, D, W> {
-    #[allow(unused)]
-    pub(crate) fn new(
-        puffin_file_name: String,
-        cache_manager: CacheManagerRef<B, D>,
-        writer: W,
-    ) -> Self {
+impl<B, D, W> FsPuffinWriter<B, D, W> {
+    pub(crate) fn new(puffin_file_name: String, stager: StagerRef<B, D>, writer: W) -> Self {
         Self {
             puffin_file_name,
-            cache_manager,
+            stager,
             puffin_file_writer: PuffinFileWriter::new(writer),
             blob_keys: HashSet::new(),
         }
@@ -65,7 +60,7 @@ impl<B, D, W> CachedPuffinWriter<B, D, W> {
 }
 
 #[async_trait]
-impl<B, D, W> PuffinWriter for CachedPuffinWriter<B, D, W>
+impl<B, D, W> PuffinWriter for FsPuffinWriter<B, D, W>
 where
     B: BlobGuard,
     D: DirGuard,
@@ -79,32 +74,10 @@ where
             !self.blob_keys.contains(key),
             DuplicateBlobSnafu { blob: key }
         );
-        ensure!(
-            !matches!(options.compression, Some(CompressionCodec::Lz4)),
-            UnsupportedCompressionSnafu { codec: "lz4" }
-        );
 
-        let written_bytes = match options.compression {
-            Some(CompressionCodec::Lz4) => unreachable!("checked above"),
-            Some(CompressionCodec::Zstd) => {
-                let blob = Blob {
-                    blob_type: key.to_string(),
-                    compressed_data: ZstdEncoder::new(BufReader::new(raw_data)),
-                    compression_codec: options.compression,
-                    properties: Default::default(),
-                };
-                self.puffin_file_writer.add_blob(blob).await?
-            }
-            None => {
-                let blob = Blob {
-                    blob_type: key.to_string(),
-                    compressed_data: raw_data,
-                    compression_codec: options.compression,
-                    properties: Default::default(),
-                };
-                self.puffin_file_writer.add_blob(blob).await?
-            }
-        };
+        let written_bytes = self
+            .handle_compress(key.to_string(), raw_data, options.compression)
+            .await?;
 
         self.blob_keys.insert(key.to_string());
         Ok(written_bytes)
@@ -114,10 +87,6 @@ where
         ensure!(
             !self.blob_keys.contains(key),
             DuplicateBlobSnafu { blob: key }
-        );
-        ensure!(
-            !matches!(options.compression, Some(CompressionCodec::Lz4)),
-            UnsupportedCompressionSnafu { codec: "lz4" }
         );
 
         // Walk the directory and add all files to the puffin file.
@@ -142,37 +111,23 @@ where
                 .compat();
 
             let file_key = Uuid::new_v4().to_string();
-            match options.compression {
-                Some(CompressionCodec::Lz4) => unreachable!("checked above"),
-                Some(CompressionCodec::Zstd) => {
-                    let blob = Blob {
-                        blob_type: file_key.clone(),
-                        compressed_data: ZstdEncoder::new(BufReader::new(reader)),
-                        compression_codec: options.compression,
-                        properties: Default::default(),
-                    };
-                    written_bytes += self.puffin_file_writer.add_blob(blob).await?;
-                }
-                None => {
-                    let blob = Blob {
-                        blob_type: file_key.clone(),
-                        compressed_data: reader,
-                        compression_codec: options.compression,
-                        properties: Default::default(),
-                    };
-                    written_bytes += self.puffin_file_writer.add_blob(blob).await?;
-                }
-            }
+            written_bytes += self
+                .handle_compress(file_key.clone(), reader, options.compression)
+                .await?;
 
-            let relative_path = entry
-                .path()
+            let path = entry.path();
+            let relative_path = path
                 .strip_prefix(&dir_path)
-                .expect("entry path is under dir path")
-                .to_string_lossy()
-                .into_owned();
+                .expect("entry path is under dir path");
+
+            let unified_rel_path = if cfg!(windows) {
+                relative_path.to_string_lossy().replace('\\', "/")
+            } else {
+                relative_path.to_string_lossy().to_string()
+            };
 
             files.push(DirFileMetadata {
-                relative_path,
+                relative_path: unified_rel_path,
                 key: file_key.clone(),
                 blob_index: self.blob_keys.len(),
             });
@@ -191,8 +146,8 @@ where
         written_bytes += self.puffin_file_writer.add_blob(dir_meta_blob).await?;
         self.blob_keys.insert(key.to_string());
 
-        // Move the directory into the cache.
-        self.cache_manager
+        // Move the directory into the stager.
+        self.stager
             .put_dir(&self.puffin_file_name, key, dir_path, dir_size)
             .await?;
         Ok(written_bytes)
@@ -206,5 +161,42 @@ where
     async fn finish(mut self) -> Result<u64> {
         let size = self.puffin_file_writer.finish().await?;
         Ok(size)
+    }
+}
+
+impl<B, G, W> FsPuffinWriter<B, G, W>
+where
+    B: BlobGuard,
+    G: DirGuard,
+    W: AsyncWrite + Unpin + Send,
+{
+    /// Compresses the raw data and writes it to the puffin file.
+    async fn handle_compress(
+        &mut self,
+        key: String,
+        raw_data: impl AsyncRead + Send,
+        compression: Option<CompressionCodec>,
+    ) -> Result<u64> {
+        match compression {
+            Some(CompressionCodec::Lz4) => UnsupportedCompressionSnafu { codec: "lz4" }.fail(),
+            Some(CompressionCodec::Zstd) => {
+                let blob = Blob {
+                    blob_type: key,
+                    compressed_data: ZstdEncoder::new(BufReader::new(raw_data)),
+                    compression_codec: compression,
+                    properties: Default::default(),
+                };
+                self.puffin_file_writer.add_blob(blob).await
+            }
+            None => {
+                let blob = Blob {
+                    blob_type: key,
+                    compressed_data: raw_data,
+                    compression_codec: compression,
+                    properties: Default::default(),
+                };
+                self.puffin_file_writer.add_blob(blob).await
+            }
+        }
     }
 }

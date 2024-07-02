@@ -22,7 +22,7 @@ use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use object_store::ObjectStore;
-use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
+use puffin::file_format::reader::{AsyncReader, PuffinFileReader};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
@@ -194,7 +194,7 @@ mod tests {
     use futures::io::Cursor;
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
-    use puffin::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
+    use puffin::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
 
     use super::*;
     use crate::error::Error;

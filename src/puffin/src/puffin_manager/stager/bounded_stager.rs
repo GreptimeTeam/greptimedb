@@ -36,19 +36,16 @@ use crate::error::{
     CacheGetSnafu, CreateSnafu, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu, RenameSnafu,
     Result, WalkDirSnafu,
 };
-use crate::puffin_manager::cache_manager::{
-    BoxWriter, CacheManager, DirWriterProvider, InitBlobFn, InitDirFn,
-};
+use crate::puffin_manager::stager::{BoxWriter, DirWriterProvider, InitBlobFn, InitDirFn, Stager};
 use crate::puffin_manager::{BlobGuard, DirGuard};
 
 const DELETE_QUEUE_SIZE: usize = 10240;
-
 const TMP_EXTENSION: &str = "tmp";
 const DELETED_EXTENSION: &str = "deleted";
 
-/// `MokaCacheManager` is a `CacheManager` that uses `moka` to manage cache.
-pub struct MokaCacheManager {
-    /// The base directory of the cache.
+/// `BoundedStager` is a `Stager` that uses `moka` to manage staging area.
+pub struct BoundedStager {
+    /// The base directory of the staging area.
     base_dir: PathBuf,
 
     /// The cache maintaining the cache key to the size of the file or directory.
@@ -69,16 +66,15 @@ pub struct MokaCacheManager {
     delete_queue: Sender<DeleteTask>,
 }
 
-impl MokaCacheManager {
-    #[allow(unused)]
-    pub async fn new(base_dir: PathBuf, max_size: u64) -> Result<Self> {
+impl BoundedStager {
+    pub async fn new(base_dir: PathBuf, capicity: u64) -> Result<Self> {
         let recycle_bin = Cache::builder()
             .time_to_live(Duration::from_secs(60))
             .build();
 
         let recycle_bin_cloned = recycle_bin.clone();
         let cache = Cache::builder()
-            .max_capacity(max_size)
+            .max_capacity(capicity)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .async_eviction_listener(move |k, v, _| {
                 let recycle_bin = recycle_bin_cloned.clone();
@@ -92,21 +88,21 @@ impl MokaCacheManager {
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
         common_runtime::bg_runtime().spawn(Self::delete_routine(rx));
 
-        let manager = Self {
+        let stager = Self {
             cache,
             base_dir,
             delete_queue,
             recycle_bin,
         };
 
-        manager.recover().await?;
+        stager.recover().await?;
 
-        Ok(manager)
+        Ok(stager)
     }
 }
 
 #[async_trait]
-impl CacheManager for MokaCacheManager {
+impl Stager for BoundedStager {
     type Blob = Arc<FsBlobGuard>;
     type Dir = Arc<FsDirGuard>;
 
@@ -212,7 +208,7 @@ impl CacheManager for MokaCacheManager {
     }
 }
 
-impl MokaCacheManager {
+impl BoundedStager {
     fn encode_cache_key(puffin_file_name: &str, key: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(puffin_file_name);
@@ -262,7 +258,7 @@ impl MokaCacheManager {
         Ok(size)
     }
 
-    /// Recovers the cache by iterating through the cache directory.
+    /// Recovers the staging area by iterating through the staging directory.
     async fn recover(&self) -> Result<()> {
         let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
 
@@ -280,7 +276,7 @@ impl MokaCacheManager {
                     fs::remove_file(path).await.context(RemoveSnafu)?;
                 }
             } else {
-                // Insert the size of the file or directory to the cache
+                // Insert the guard of the file or directory to the cache
                 let meta = entry.metadata().await.context(MetadataSnafu)?;
                 let file_path = path.file_name().unwrap().to_string_lossy().into_owned();
 
@@ -289,7 +285,7 @@ impl MokaCacheManager {
                     Some(key) => key.to_string(),
                     None => {
                         warn!(
-                            "Invalid cache file name: {}, expected format: <key>.<uuid>",
+                            "Invalid staging file name: {}, expected format: <key>.<uuid>",
                             file_path
                         );
                         continue;
@@ -382,11 +378,11 @@ impl MokaCacheManager {
             }
         }
 
-        info!("The delete routine for moka cache manager is terminated.");
+        info!("The delete routine for the bounded stager is terminated.");
     }
 }
 
-impl Drop for MokaCacheManager {
+impl Drop for BoundedStager {
     fn drop(&mut self) {
         let _ = self.delete_queue.try_send(DeleteTask::Terminate);
     }
@@ -486,7 +482,11 @@ struct MokaDirWriterProvider(PathBuf);
 #[async_trait]
 impl DirWriterProvider for MokaDirWriterProvider {
     async fn writer(&self, rel_path: &str) -> Result<BoxWriter> {
-        let full_path = self.0.join(rel_path);
+        let full_path = if cfg!(windows) {
+            self.0.join(rel_path.replace('/', "\\"))
+        } else {
+            self.0.join(rel_path)
+        };
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await.context(CreateSnafu)?;
         }
@@ -500,7 +500,7 @@ impl DirWriterProvider for MokaDirWriterProvider {
 }
 
 #[cfg(test)]
-impl MokaCacheManager {
+impl BoundedStager {
     pub async fn must_get_file(&self, puffin_file_name: &str, key: &str) -> fs::File {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let value = self.cache.get(&cache_key).await.unwrap();
@@ -535,18 +535,18 @@ mod tests {
 
     use super::*;
     use crate::error::BlobNotFoundSnafu;
-    use crate::puffin_manager::cache_manager::CacheManager;
+    use crate::puffin_manager::stager::Stager;
 
     #[tokio::test]
     async fn test_get_blob() {
         let tempdir = create_temp_dir("test_get_blob_");
-        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
             .unwrap();
 
         let puffin_file_name = "test_get_blob";
         let key = "key";
-        let mut reader = manager
+        let mut reader = stager
             .get_blob(
                 puffin_file_name,
                 key,
@@ -567,7 +567,7 @@ mod tests {
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello world");
 
-        let mut file = manager.must_get_file(puffin_file_name, key).await;
+        let mut file = stager.must_get_file(puffin_file_name, key).await;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello world");
@@ -576,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_dir() {
         let tempdir = create_temp_dir("test_get_dir_");
-        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
             .unwrap();
 
@@ -590,7 +590,7 @@ mod tests {
 
         let puffin_file_name = "test_get_dir";
         let key = "key";
-        let dir_path = manager
+        let dir_path = stager
             .get_dir(
                 puffin_file_name,
                 key,
@@ -615,7 +615,7 @@ mod tests {
             assert_eq!(buf, *content);
         }
 
-        let dir_path = manager.must_get_dir(puffin_file_name, key).await;
+        let dir_path = stager.must_get_dir(puffin_file_name, key).await;
         for (rel_path, content) in &files_in_dir {
             let file_path = dir_path.join(rel_path);
             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
@@ -628,14 +628,14 @@ mod tests {
     #[tokio::test]
     async fn test_recover() {
         let tempdir = create_temp_dir("test_recover_");
-        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
             .unwrap();
 
-        // initialize cache
+        // initialize stager
         let puffin_file_name = "test_recover";
         let blob_key = "blob_key";
-        let guard = manager
+        let guard = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,
@@ -659,7 +659,7 @@ mod tests {
         ];
 
         let dir_key = "dir_key";
-        let guard = manager
+        let guard = stager
             .get_dir(
                 puffin_file_name,
                 dir_key,
@@ -677,13 +677,13 @@ mod tests {
             .unwrap();
         drop(guard);
 
-        // recover cache
-        drop(manager);
-        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+        // recover stager
+        drop(stager);
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
             .unwrap();
 
-        let mut reader = manager
+        let mut reader = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,
@@ -698,7 +698,7 @@ mod tests {
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello world");
 
-        let dir_path = manager
+        let dir_path = stager
             .get_dir(
                 puffin_file_name,
                 dir_key,
@@ -718,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn test_eviction() {
         let tempdir = create_temp_dir("test_eviction_");
-        let manager = MokaCacheManager::new(
+        let stager = BoundedStager::new(
             tempdir.path().to_path_buf(),
             1, /* extremely small size */
         )
@@ -729,7 +729,7 @@ mod tests {
         let blob_key = "blob_key";
 
         // First time to get the blob
-        let mut reader = manager
+        let mut reader = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,
@@ -747,15 +747,15 @@ mod tests {
             .unwrap();
 
         // The blob should be evicted
-        manager.cache.run_pending_tasks().await;
-        assert!(!manager.in_cache(puffin_file_name, blob_key));
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, blob_key));
 
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"Hello world");
 
         // Second time to get the blob, get from recycle bin
-        let mut reader = manager
+        let mut reader = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,
@@ -768,8 +768,8 @@ mod tests {
             .unwrap();
 
         // The blob should be evicted
-        manager.cache.run_pending_tasks().await;
-        assert!(!manager.in_cache(puffin_file_name, blob_key));
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, blob_key));
 
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
@@ -785,7 +785,7 @@ mod tests {
         ];
 
         // First time to get the directory
-        let guard_0 = manager
+        let guard_0 = stager
             .get_dir(
                 puffin_file_name,
                 dir_key,
@@ -813,11 +813,11 @@ mod tests {
         }
 
         // The directory should be evicted
-        manager.cache.run_pending_tasks().await;
-        assert!(!manager.in_cache(puffin_file_name, dir_key));
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, dir_key));
 
         // Second time to get the directory
-        let guard_1 = manager
+        let guard_1 = stager
             .get_dir(
                 puffin_file_name,
                 dir_key,
@@ -835,13 +835,13 @@ mod tests {
         }
 
         // Still hold the guard
-        manager.cache.run_pending_tasks().await;
-        assert!(!manager.in_cache(puffin_file_name, dir_key));
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, dir_key));
 
         // Third time to get the directory and all guards are dropped
         drop(guard_0);
         drop(guard_1);
-        let guard_2 = manager
+        let guard_2 = stager
             .get_dir(
                 puffin_file_name,
                 dir_key,
@@ -851,8 +851,8 @@ mod tests {
             .unwrap();
 
         // Still hold the guard, so the directory should not be removed even if it's evicted
-        manager.cache.run_pending_tasks().await;
-        assert!(!manager.in_cache(puffin_file_name, blob_key));
+        stager.cache.run_pending_tasks().await;
+        assert!(!stager.in_cache(puffin_file_name, blob_key));
 
         for (rel_path, content) in &files_in_dir {
             let file_path = guard_2.path().join(rel_path);
@@ -866,17 +866,17 @@ mod tests {
     #[tokio::test]
     async fn test_get_blob_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
-        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
             .unwrap();
 
         let puffin_file_name = "test_get_blob_concurrency_on_fail";
         let key = "key";
 
-        let manager = Arc::new(manager);
+        let stager = Arc::new(stager);
         let handles = (0..10)
             .map(|_| {
-                let manager = manager.clone();
+                let stager = stager.clone();
                 let task = async move {
                     let failed_init = Box::new(|_| {
                         async {
@@ -885,7 +885,7 @@ mod tests {
                         }
                         .boxed()
                     });
-                    manager.get_blob(puffin_file_name, key, failed_init).await
+                    stager.get_blob(puffin_file_name, key, failed_init).await
                 };
 
                 tokio::spawn(task)
@@ -897,23 +897,23 @@ mod tests {
             assert!(r.is_err());
         }
 
-        assert!(!manager.in_cache(puffin_file_name, key));
+        assert!(!stager.in_cache(puffin_file_name, key));
     }
 
     #[tokio::test]
     async fn test_get_dir_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
-        let manager = MokaCacheManager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
             .await
             .unwrap();
 
         let puffin_file_name = "test_get_dir_concurrency_on_fail";
         let key = "key";
 
-        let manager = Arc::new(manager);
+        let stager = Arc::new(stager);
         let handles = (0..10)
             .map(|_| {
-                let manager = manager.clone();
+                let stager = stager.clone();
                 let task = async move {
                     let failed_init = Box::new(|_| {
                         async {
@@ -922,7 +922,7 @@ mod tests {
                         }
                         .boxed()
                     });
-                    manager.get_dir(puffin_file_name, key, failed_init).await
+                    stager.get_dir(puffin_file_name, key, failed_init).await
                 };
 
                 tokio::spawn(task)
@@ -934,6 +934,6 @@ mod tests {
             assert!(r.is_err());
         }
 
-        assert!(!manager.in_cache(puffin_file_name, key));
+        assert!(!stager.in_cache(puffin_file_name, key));
     }
 }

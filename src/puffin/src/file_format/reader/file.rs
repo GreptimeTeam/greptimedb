@@ -24,7 +24,7 @@ use crate::error::{
     UnsupportedDecompressionSnafu,
 };
 use crate::file_format::reader::footer::FooterParser;
-use crate::file_format::reader::{PuffinAsyncReader, PuffinSyncReader};
+use crate::file_format::reader::{AsyncReader, SyncReader};
 use crate::file_format::{MAGIC, MAGIC_SIZE, MIN_FILE_SIZE};
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
@@ -63,7 +63,7 @@ impl<R> PuffinFileReader<R> {
     }
 }
 
-impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinFileReader<R> {
+impl<'a, R: io::Read + io::Seek + 'a> SyncReader<'a> for PuffinFileReader<R> {
     type Reader = PartialReader<&'a mut R>;
 
     fn metadata(&mut self) -> Result<FileMetadata> {
@@ -103,9 +103,7 @@ impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinFileReader<
 }
 
 #[async_trait]
-impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
-    for PuffinFileReader<R>
-{
+impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> AsyncReader<'a> for PuffinFileReader<R> {
     type Reader = PartialReader<&'a mut R>;
 
     async fn metadata(&'a mut self) -> Result<FileMetadata> {
@@ -132,15 +130,6 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
     }
 
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader> {
-        // TODO(zhongzc): support decompression
-        let compression = blob_metadata.compression_codec.as_ref();
-        ensure!(
-            compression.is_none(),
-            UnsupportedDecompressionSnafu {
-                decompression: compression.unwrap().to_string()
-            }
-        );
-
         Ok(PartialReader::new(
             &mut self.source,
             blob_metadata.offset as _,

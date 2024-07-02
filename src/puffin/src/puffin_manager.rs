@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod cache_manager;
-pub mod cached_puffin_manager;
 pub mod file_accessor;
+pub mod fs_puffin_manager;
+pub mod stager;
+
+#[cfg(test)]
+mod tests;
 
 use std::path::PathBuf;
 
@@ -89,7 +92,7 @@ pub trait PuffinReader {
 /// `BlobGuard` is provided by the `PuffinReader` to access the blob data.
 /// Users should hold the `BlobGuard` until they are done with the blob data.
 pub trait BlobGuard {
-    type Reader: AsyncRead + AsyncSeek;
+    type Reader: AsyncRead + AsyncSeek + Unpin;
     fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>>;
 }
 
