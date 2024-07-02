@@ -26,12 +26,12 @@ use crate::error::{
 };
 use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use crate::puffin_manager::cache_manager::{BoxWriter, CacheManagerRef, DirWriterProviderRef};
-use crate::puffin_manager::cached_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
+use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinReader};
 
-/// `CachedPuffinReader` is a `PuffinReader` that provides cached readers for puffin files.
-pub struct CachedPuffinReader<B, G, AR, AW> {
+/// `FsPuffinReader` is a `PuffinReader` that provides cached readers for puffin files.
+pub struct FsPuffinReader<B, G, AR, AW> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
@@ -42,7 +42,7 @@ pub struct CachedPuffinReader<B, G, AR, AW> {
     puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
 }
 
-impl<B, D, AR, AW> CachedPuffinReader<B, D, AR, AW> {
+impl<B, D, AR, AW> FsPuffinReader<B, D, AR, AW> {
     pub(crate) fn new(
         puffin_file_name: String,
         cache_manager: CacheManagerRef<B, D>,
@@ -57,7 +57,7 @@ impl<B, D, AR, AW> CachedPuffinReader<B, D, AR, AW> {
 }
 
 #[async_trait]
-impl<B, D, AR, AW> PuffinReader for CachedPuffinReader<B, D, AR, AW>
+impl<B, D, AR, AW> PuffinReader for FsPuffinReader<B, D, AR, AW>
 where
     B: BlobGuard,
     D: DirGuard,
@@ -98,7 +98,7 @@ where
     }
 }
 
-impl<B, G, AR, AW> CachedPuffinReader<B, G, AR, AW>
+impl<B, G, AR, AW> FsPuffinReader<B, G, AR, AW>
 where
     B: BlobGuard,
     G: DirGuard,

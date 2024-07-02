@@ -25,8 +25,8 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use crate::blob_metadata::CompressionCodec;
 use crate::error::Result;
 use crate::puffin_manager::cache_manager::MokaCacheManager;
-use crate::puffin_manager::cached_puffin_manager::CachedPuffinManager;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
+use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use crate::puffin_manager::{
     BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
 };
@@ -51,8 +51,7 @@ async fn test_put_get_file() {
                 new_moka_cache_manager("test_put_get_file_", cache_size).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_file_"));
 
-            let puffin_manager =
-                CachedPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -69,7 +68,7 @@ async fn test_put_get_file() {
             // renew cache manager
             let (_cache_dir, cache_manager) =
                 new_moka_cache_manager("test_put_get_file_", cache_size).await;
-            let puffin_manager = CachedPuffinManager::new(cache_manager.clone(), file_accessor);
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
@@ -89,8 +88,7 @@ async fn test_put_get_files() {
                 new_moka_cache_manager("test_put_get_files_", cache_size).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_files_"));
 
-            let puffin_manager =
-                CachedPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -117,7 +115,7 @@ async fn test_put_get_files() {
             // renew cache manager
             let (_cache_dir, cache_manager) =
                 new_moka_cache_manager("test_put_get_files_", cache_size).await;
-            let puffin_manager = CachedPuffinManager::new(cache_manager.clone(), file_accessor);
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
                 check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
@@ -138,8 +136,7 @@ async fn test_put_get_dir() {
                 new_moka_cache_manager("test_put_get_dir_", cache_size).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_dir_"));
 
-            let puffin_manager =
-                CachedPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -171,7 +168,7 @@ async fn test_put_get_dir() {
             // renew cache manager
             let (_cache_dir, cache_manager) =
                 new_moka_cache_manager("test_put_get_dir_", cache_size).await;
-            let puffin_manager = CachedPuffinManager::new(cache_manager.clone(), file_accessor);
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             check_dir(
@@ -197,8 +194,7 @@ async fn test_put_get_mix_file_dir() {
                 new_moka_cache_manager("test_put_get_mix_file_dir_", cache_size).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_mix_file_dir_"));
 
-            let puffin_manager =
-                CachedPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -243,7 +239,7 @@ async fn test_put_get_mix_file_dir() {
             // renew cache manager
             let (_cache_dir, cache_manager) =
                 new_moka_cache_manager("test_put_get_mix_file_dir_", cache_size).await;
-            let puffin_manager = CachedPuffinManager::new(cache_manager.clone(), file_accessor);
+            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {

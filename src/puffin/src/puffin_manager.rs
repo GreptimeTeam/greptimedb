@@ -13,8 +13,8 @@
 // limitations under the License.
 
 pub mod cache_manager;
-pub mod cached_puffin_manager;
 pub mod file_accessor;
+pub mod fs_puffin_manager;
 
 #[cfg(test)]
 mod tests;

@@ -30,11 +30,11 @@ use crate::error::{
 };
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
 use crate::puffin_manager::cache_manager::CacheManagerRef;
-use crate::puffin_manager::cached_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
+use crate::puffin_manager::fs_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinWriter, PutOptions};
 
-/// `CachedPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
-pub struct CachedPuffinWriter<B, D, W> {
+/// `FsPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
+pub struct FsPuffinWriter<B, D, W> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
@@ -48,7 +48,7 @@ pub struct CachedPuffinWriter<B, D, W> {
     blob_keys: HashSet<String>,
 }
 
-impl<B, D, W> CachedPuffinWriter<B, D, W> {
+impl<B, D, W> FsPuffinWriter<B, D, W> {
     pub(crate) fn new(
         puffin_file_name: String,
         cache_manager: CacheManagerRef<B, D>,
@@ -64,7 +64,7 @@ impl<B, D, W> CachedPuffinWriter<B, D, W> {
 }
 
 #[async_trait]
-impl<B, D, W> PuffinWriter for CachedPuffinWriter<B, D, W>
+impl<B, D, W> PuffinWriter for FsPuffinWriter<B, D, W>
 where
     B: BlobGuard,
     D: DirGuard,
@@ -168,7 +168,7 @@ where
     }
 }
 
-impl<B, G, W> CachedPuffinWriter<B, G, W>
+impl<B, G, W> FsPuffinWriter<B, G, W>
 where
     B: BlobGuard,
     G: DirGuard,

@@ -18,16 +18,16 @@ mod writer;
 
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
-pub use reader::CachedPuffinReader;
-pub use writer::CachedPuffinWriter;
+pub use reader::FsPuffinReader;
+pub use writer::FsPuffinWriter;
 
 use crate::error::Result;
 use crate::puffin_manager::cache_manager::CacheManagerRef;
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinManager};
 
-/// `CachedPuffinManager` is a `PuffinManager` that provides cached readers and writers for puffin files.
-pub struct CachedPuffinManager<B, D, AR, AW> {
+/// `FsPuffinManager` is a `PuffinManager` that provides readers and writers for puffin data in filesystem.
+pub struct FsPuffinManager<B, D, AR, AW> {
     /// The cache manager.
     cache_manager: CacheManagerRef<B, D>,
 
@@ -35,8 +35,8 @@ pub struct CachedPuffinManager<B, D, AR, AW> {
     puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
 }
 
-impl<B, D, AR, AW> CachedPuffinManager<B, D, AR, AW> {
-    /// Creates a new `CachedPuffinManager` with the specified `cache_manager` and `puffin_file_accessor`.
+impl<B, D, AR, AW> FsPuffinManager<B, D, AR, AW> {
+    /// Creates a new `FsPuffinManager` with the specified `cache_manager` and `puffin_file_accessor`.
     pub fn new(
         cache_manager: CacheManagerRef<B, D>,
         puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
@@ -49,18 +49,18 @@ impl<B, D, AR, AW> CachedPuffinManager<B, D, AR, AW> {
 }
 
 #[async_trait]
-impl<B, D, AR, AW> PuffinManager for CachedPuffinManager<B, D, AR, AW>
+impl<B, D, AR, AW> PuffinManager for FsPuffinManager<B, D, AR, AW>
 where
     B: BlobGuard,
     D: DirGuard,
     AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
     AW: AsyncWrite + Send + Unpin + 'static,
 {
-    type Reader = CachedPuffinReader<B, D, AR, AW>;
-    type Writer = CachedPuffinWriter<B, D, AW>;
+    type Reader = FsPuffinReader<B, D, AR, AW>;
+    type Writer = FsPuffinWriter<B, D, AW>;
 
     async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
-        Ok(CachedPuffinReader::new(
+        Ok(FsPuffinReader::new(
             puffin_file_name.to_string(),
             self.cache_manager.clone(),
             self.puffin_file_accessor.clone(),
@@ -69,7 +69,7 @@ where
 
     async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
         let writer = self.puffin_file_accessor.writer(puffin_file_name).await?;
-        Ok(CachedPuffinWriter::new(
+        Ok(FsPuffinWriter::new(
             puffin_file_name.to_string(),
             self.cache_manager.clone(),
             writer,
