@@ -82,8 +82,13 @@ impl IndexApplier for PredicatesIndexApplier {
             };
 
             let get_fst_start = Instant::now();
-            let fst = reader.fst(meta).await?;
+
+            let fst_offset = meta.base_offset + meta.relative_fst_offset as u64;
+            let fst_size = meta.fst_size;
+            let fst = reader.fst(fst_offset, fst_size).await?;
+
             get_fst_cost += get_fst_start.elapsed();
+
             let apply_fst_start = Instant::now();
             let values = fst_applier.apply(&fst);
             apply_fst_cost += apply_fst_start.elapsed();
@@ -172,15 +177,16 @@ mod tests {
         s.to_owned()
     }
 
-    fn mock_metas(tags: impl IntoIterator<Item = &'static str>) -> InvertedIndexMetas {
+    fn mock_metas(tags: impl IntoIterator<Item = (&'static str, u32)>) -> InvertedIndexMetas {
         let mut metas = InvertedIndexMetas {
             total_row_count: 8,
             segment_row_count: 1,
             ..Default::default()
         };
-        for tag in tags.into_iter() {
+        for (tag, idx) in tags.into_iter() {
             let meta = InvertedIndexMeta {
                 name: s(tag),
+                relative_fst_offset: idx,
                 ..Default::default()
             };
             metas.metas.insert(s(tag), meta);
@@ -211,19 +217,16 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag-0"])));
+            .returning(|| Ok(mock_metas([("tag-0", 0)])));
+        mock_reader.expect_fst().returning(|_offset, _size| {
+            Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap())
+        });
         mock_reader
-            .expect_fst()
-            .returning(|meta| match meta.name.as_str() {
-                "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap()),
+            .expect_bitmap()
+            .returning(|offset, size| match (offset, size) {
+                (2, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
                 _ => unreachable!(),
             });
-        mock_reader.expect_bitmap().returning(|meta, offset, size| {
-            match (meta.name.as_str(), offset, size) {
-                ("tag-0", 2, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
-                _ => unreachable!(),
-            }
-        });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
@@ -237,13 +240,10 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag-0"])));
-        mock_reader
-            .expect_fst()
-            .returning(|meta| match meta.name.as_str() {
-                "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap()),
-                _ => unreachable!(),
-            });
+            .returning(|| Ok(mock_metas([("tag-0", 0)])));
+        mock_reader.expect_fst().returning(|_offset, _size| {
+            Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap())
+        });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
@@ -265,21 +265,21 @@ mod tests {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag-0", "tag-1"])));
+            .returning(|| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
         mock_reader
             .expect_fst()
-            .returning(|meta| match meta.name.as_str() {
-                "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(1, 1))]).unwrap()),
-                "tag-1" => Ok(FstMap::from_iter([(b"tag-1_value-a", fst_value(2, 1))]).unwrap()),
+            .returning(|offset, _size| match offset {
+                0 => Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(1, 1))]).unwrap()),
+                1 => Ok(FstMap::from_iter([(b"tag-1_value-a", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
-        mock_reader.expect_bitmap().returning(|meta, offset, size| {
-            match (meta.name.as_str(), offset, size) {
-                ("tag-0", 1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
-                ("tag-1", 2, 1) => Ok(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
+        mock_reader
+            .expect_bitmap()
+            .returning(|offset, size| match (offset, size) {
+                (1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
+                (2, 1) => Ok(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
                 _ => unreachable!(),
-            }
-        });
+            });
 
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
@@ -300,7 +300,7 @@ mod tests {
         let mut mock_reader: MockInvertedIndexReader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag-0"])));
+            .returning(|| Ok(mock_metas([("tag-0", 0)])));
 
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
