@@ -24,34 +24,33 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use crate::blob_metadata::CompressionCodec;
 use crate::error::Result;
-use crate::puffin_manager::cache_manager::MokaCacheManager;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
+use crate::puffin_manager::stager::BoundedStager;
 use crate::puffin_manager::{
     BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
 };
 
-async fn new_moka_cache_manager(prefix: &str, cache_size: u64) -> (TempDir, Arc<MokaCacheManager>) {
-    let cache_dir = create_temp_dir(prefix);
-    let path = cache_dir.path().to_path_buf();
+async fn new_bounded_stager(prefix: &str, capicity: u64) -> (TempDir, Arc<BoundedStager>) {
+    let staging_dir = create_temp_dir(prefix);
+    let path = staging_dir.path().to_path_buf();
     (
-        cache_dir,
-        Arc::new(MokaCacheManager::new(path, cache_size).await.unwrap()),
+        staging_dir,
+        Arc::new(BoundedStager::new(path, capicity).await.unwrap()),
     )
 }
 
 #[tokio::test]
 async fn test_put_get_file() {
-    let cache_sizes = [1, 16, u64::MAX];
+    let capicities = [1, 16, u64::MAX];
     let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
-    for cache_size in cache_sizes {
+    for capicity in capicities {
         for compression_codec in compression_codecs {
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_file_", cache_size).await;
+            let (_staging_dir, stager) = new_bounded_stager("test_put_get_file_", capicity).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_file_"));
 
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -63,32 +62,30 @@ async fn test_put_get_file() {
             writer.finish().await.unwrap();
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
+            check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
 
             // renew cache manager
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_file_", cache_size).await;
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
+            let (_staging_dir, stager) = new_bounded_stager("test_put_get_file_", capicity).await;
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
+            check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
         }
     }
 }
 
 #[tokio::test]
 async fn test_put_get_files() {
-    let cache_sizes = [1, 16, u64::MAX];
+    let capicities = [1, 16, u64::MAX];
 
-    for cache_size in cache_sizes {
+    for capicity in capicities {
         let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
         for compression_codec in compression_codecs {
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_files_", cache_size).await;
+            let (_staging_dir, stager) = new_bounded_stager("test_put_get_files_", capicity).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_files_"));
 
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -109,16 +106,15 @@ async fn test_put_get_files() {
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
+                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
             }
 
             // renew cache manager
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_files_", cache_size).await;
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
+            let (_staging_dir, stager) = new_bounded_stager("test_put_get_files_", capicity).await;
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
+                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
             }
         }
     }
@@ -126,17 +122,16 @@ async fn test_put_get_files() {
 
 #[tokio::test]
 async fn test_put_get_dir() {
-    let cache_sizes = [1, 64, u64::MAX];
+    let capicities = [1, 64, u64::MAX];
 
     let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
-    for cache_size in cache_sizes {
+    for capicity in capicities {
         for compression_codec in compression_codecs {
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_dir_", cache_size).await;
+            let (_staging_dir, stager) = new_bounded_stager("test_put_get_dir_", capicity).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_dir_"));
 
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -156,45 +151,30 @@ async fn test_put_get_dir() {
             writer.finish().await.unwrap();
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_dir(
-                puffin_file_name,
-                key,
-                &files_in_dir,
-                &cache_manager,
-                &reader,
-            )
-            .await;
+            check_dir(puffin_file_name, key, &files_in_dir, &stager, &reader).await;
 
             // renew cache manager
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_dir_", cache_size).await;
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
+            let (_staging_dir, stager) = new_bounded_stager("test_put_get_dir_", capicity).await;
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_dir(
-                puffin_file_name,
-                key,
-                &files_in_dir,
-                &cache_manager,
-                &reader,
-            )
-            .await;
+            check_dir(puffin_file_name, key, &files_in_dir, &stager, &reader).await;
         }
     }
 }
 
 #[tokio::test]
 async fn test_put_get_mix_file_dir() {
-    let cache_sizes = [1, 64, u64::MAX];
+    let capicities = [1, 64, u64::MAX];
     let compression_codecs = [None, Some(CompressionCodec::Zstd)];
 
-    for cache_size in cache_sizes {
+    for capicity in capicities {
         for compression_codec in compression_codecs {
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_mix_file_dir_", cache_size).await;
+            let (_staging_dir, stager) =
+                new_bounded_stager("test_put_get_mix_file_dir_", capicity).await;
             let file_accessor = Arc::new(MockFileAccessor::new("test_put_get_mix_file_dir_"));
 
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor.clone());
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
             let puffin_file_name = "puffin_file";
             let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
@@ -225,34 +205,20 @@ async fn test_put_get_mix_file_dir() {
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
+                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
             }
-            check_dir(
-                puffin_file_name,
-                dir_key,
-                &files_in_dir,
-                &cache_manager,
-                &reader,
-            )
-            .await;
+            check_dir(puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
 
             // renew cache manager
-            let (_cache_dir, cache_manager) =
-                new_moka_cache_manager("test_put_get_mix_file_dir_", cache_size).await;
-            let puffin_manager = FsPuffinManager::new(cache_manager.clone(), file_accessor);
+            let (_staging_dir, stager) =
+                new_bounded_stager("test_put_get_mix_file_dir_", capicity).await;
+            let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
             let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
-                check_blob(puffin_file_name, key, raw_data, &cache_manager, &reader).await;
+                check_blob(puffin_file_name, key, raw_data, &stager, &reader).await;
             }
-            check_dir(
-                puffin_file_name,
-                dir_key,
-                &files_in_dir,
-                &cache_manager,
-                &reader,
-            )
-            .await;
+            check_dir(puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
         }
     }
 }
@@ -279,7 +245,7 @@ async fn check_blob<R>(
     puffin_file_name: &str,
     key: &str,
     raw_data: &[u8],
-    cache_manager: &MokaCacheManager,
+    stager: &BoundedStager,
     puffin_reader: &R,
 ) where
     R: PuffinReader,
@@ -290,7 +256,7 @@ async fn check_blob<R>(
     reader.read_to_end(&mut buf).await.unwrap();
     assert_eq!(buf, raw_data);
 
-    let mut cached_file = cache_manager.must_get_file(puffin_file_name, key).await;
+    let mut cached_file = stager.must_get_file(puffin_file_name, key).await;
     let mut buf = Vec::new();
     cached_file.read_to_end(&mut buf).await.unwrap();
     assert_eq!(buf, raw_data);
@@ -329,7 +295,7 @@ async fn check_dir<R>(
     puffin_file_name: &str,
     key: &str,
     files_in_dir: &[(&str, &[u8])],
-    cache_manager: &MokaCacheManager,
+    stager: &BoundedStager,
     puffin_reader: &R,
 ) where
     R: PuffinReader,
@@ -345,7 +311,7 @@ async fn check_dir<R>(
         assert_eq!(buf, *raw_data);
     }
 
-    let cached_dir = cache_manager.must_get_dir(puffin_file_name, key).await;
+    let cached_dir = stager.must_get_dir(puffin_file_name, key).await;
     for (file_name, raw_data) in files_in_dir {
         let file_path = if cfg!(windows) {
             cached_dir.as_path().join(file_name.replace('/', "\\"))

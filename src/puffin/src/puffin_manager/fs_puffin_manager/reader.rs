@@ -25,18 +25,18 @@ use crate::error::{
     ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
 use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
-use crate::puffin_manager::cache_manager::{BoxWriter, CacheManagerRef, DirWriterProviderRef};
 use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
+use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, StagerRef};
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinReader};
 
-/// `FsPuffinReader` is a `PuffinReader` that provides cached readers for puffin files.
+/// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
 pub struct FsPuffinReader<B, G, AR, AW> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
-    /// The cache manager.
-    cache_manager: CacheManagerRef<B, G>,
+    /// The stager.
+    stager: StagerRef<B, G>,
 
     /// The puffin file accessor.
     puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
@@ -45,12 +45,12 @@ pub struct FsPuffinReader<B, G, AR, AW> {
 impl<B, D, AR, AW> FsPuffinReader<B, D, AR, AW> {
     pub(crate) fn new(
         puffin_file_name: String,
-        cache_manager: CacheManagerRef<B, D>,
+        stager: StagerRef<B, D>,
         puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
     ) -> Self {
         Self {
             puffin_file_name,
-            cache_manager,
+            stager,
             puffin_file_accessor,
         }
     }
@@ -68,7 +68,7 @@ where
     type Dir = D;
 
     async fn blob(&self, key: &str) -> Result<Self::Blob> {
-        self.cache_manager
+        self.stager
             .get_blob(
                 self.puffin_file_name.as_str(),
                 key,
@@ -83,7 +83,7 @@ where
     }
 
     async fn dir(&self, key: &str) -> Result<Self::Dir> {
-        self.cache_manager
+        self.stager
             .get_dir(
                 self.puffin_file_name.as_str(),
                 key,

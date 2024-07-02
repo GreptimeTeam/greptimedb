@@ -29,8 +29,8 @@ use crate::error::{
     UnsupportedCompressionSnafu, WalkDirSnafu,
 };
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
-use crate::puffin_manager::cache_manager::CacheManagerRef;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
+use crate::puffin_manager::stager::StagerRef;
 use crate::puffin_manager::{BlobGuard, DirGuard, PuffinWriter, PutOptions};
 
 /// `FsPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
@@ -38,8 +38,8 @@ pub struct FsPuffinWriter<B, D, W> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
-    /// The cache manager.
-    cache_manager: CacheManagerRef<B, D>,
+    /// The stager.
+    stager: StagerRef<B, D>,
 
     /// The underlying `PuffinFileWriter`.
     puffin_file_writer: PuffinFileWriter<W>,
@@ -49,14 +49,10 @@ pub struct FsPuffinWriter<B, D, W> {
 }
 
 impl<B, D, W> FsPuffinWriter<B, D, W> {
-    pub(crate) fn new(
-        puffin_file_name: String,
-        cache_manager: CacheManagerRef<B, D>,
-        writer: W,
-    ) -> Self {
+    pub(crate) fn new(puffin_file_name: String, stager: StagerRef<B, D>, writer: W) -> Self {
         Self {
             puffin_file_name,
-            cache_manager,
+            stager,
             puffin_file_writer: PuffinFileWriter::new(writer),
             blob_keys: HashSet::new(),
         }
@@ -150,8 +146,8 @@ where
         written_bytes += self.puffin_file_writer.add_blob(dir_meta_blob).await?;
         self.blob_keys.insert(key.to_string());
 
-        // Move the directory into the cache.
-        self.cache_manager
+        // Move the directory into the stager.
+        self.stager
             .put_dir(&self.puffin_file_name, key, dir_path, dir_size)
             .await?;
         Ok(written_bytes)
