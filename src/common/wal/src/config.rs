@@ -76,6 +76,7 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use rskafka::client::partition::Compression;
+    use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
     use crate::config::kafka::common::BackoffConfig;
@@ -149,17 +150,19 @@ mod tests {
         let metasrv_wal_config: MetasrvWalConfig = toml::from_str(toml_str).unwrap();
         let expected = MetasrvKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            num_topics: 32,
-            selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_topic".to_string(),
-            num_partitions: 1,
-            replication_factor: 1,
-            create_topic_timeout: Duration::from_secs(30),
             backoff: BackoffConfig {
                 init: Duration::from_millis(500),
                 max: Duration::from_secs(10),
                 base: 2,
                 deadline: Some(Duration::from_secs(60 * 5)),
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 32,
+                selector_type: TopicSelectorType::RoundRobin,
+                topic_name_prefix: "greptimedb_wal_topic".to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                create_topic_timeout: Duration::from_secs(30),
             },
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
@@ -168,12 +171,6 @@ mod tests {
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = DatanodeKafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
-            num_topics: 32,
-            selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_topic".to_string(),
-            num_partitions: 1,
-            replication_factor: 1,
-            create_topic_timeout: Duration::from_secs(30),
             compression: Compression::default(),
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
@@ -182,6 +179,14 @@ mod tests {
                 max: Duration::from_secs(10),
                 base: 2,
                 deadline: Some(Duration::from_secs(60 * 5)),
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 32,
+                selector_type: TopicSelectorType::RoundRobin,
+                topic_name_prefix: "greptimedb_wal_topic".to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                create_topic_timeout: Duration::from_secs(30),
             },
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
