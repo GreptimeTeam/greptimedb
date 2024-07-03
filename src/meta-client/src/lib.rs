@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -67,11 +68,13 @@ pub enum MetaClientType {
     Frontend,
 }
 
+pub type MetaClientRef = Arc<client::MetaClient>;
+
 pub async fn create_meta_client(
     cluster_id: u64,
     client_type: MetaClientType,
     meta_client_options: &MetaClientOptions,
-) -> error::Result<client::MetaClient> {
+) -> error::Result<MetaClientRef> {
     info!(
         "Creating {:?} instance from cluster {} with Metasrv addrs {:?}",
         client_type, cluster_id, meta_client_options.metasrv_addrs
@@ -110,7 +113,7 @@ pub async fn create_meta_client(
 
     meta_client.ask_leader().await?;
 
-    Ok(meta_client)
+    Ok(Arc::new(meta_client))
 }
 
 #[cfg(test)]

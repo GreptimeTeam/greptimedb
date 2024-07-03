@@ -26,7 +26,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
-use meta_client::{MetaClientOptions, MetaClientType};
+use meta_client::MetaClientRef;
 use servers::addrs;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, Notify};
@@ -49,7 +49,7 @@ pub struct HeartbeatTask {
     node_epoch: u64,
     peer_addr: String,
     running: Arc<AtomicBool>,
-    meta_client: Arc<MetaClient>,
+    meta_client: MetaClientRef,
     region_server: RegionServer,
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
@@ -67,7 +67,7 @@ impl HeartbeatTask {
     pub async fn try_new(
         opts: &DatanodeOptions,
         region_server: RegionServer,
-        meta_client: MetaClient,
+        meta_client: MetaClientRef,
     ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
@@ -85,7 +85,7 @@ impl HeartbeatTask {
             node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
             running: Arc::new(AtomicBool::new(false)),
-            meta_client: Arc::new(meta_client),
+            meta_client,
             region_server,
             interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
@@ -339,20 +339,4 @@ impl HeartbeatTask {
 
         Ok(())
     }
-}
-
-/// Create metasrv client instance and spawn heartbeat loop.
-pub async fn new_meta_client(
-    member_id: u64,
-    meta_config: &MetaClientOptions,
-) -> Result<MetaClient> {
-    let cluster_id = 0; // TODO(hl): read from config
-
-    meta_client::create_meta_client(
-        cluster_id,
-        MetaClientType::Datanode { member_id },
-        meta_config,
-    )
-    .await
-    .context(MetaClientInitSnafu)
 }

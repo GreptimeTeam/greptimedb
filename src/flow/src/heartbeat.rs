@@ -233,18 +233,3 @@ impl HeartbeatTask {
         }
     }
 }
-
-/// Create metasrv client instance and spawn heartbeat loop.
-pub async fn new_meta_client(
-    cluster_id: u64,
-    member_id: u64,
-    meta_config: &MetaClientOptions,
-) -> Result<MetaClient, Error> {
-    meta_client::create_meta_client(
-        cluster_id,
-        MetaClientType::Flownode { member_id },
-        meta_config,
-    )
-    .await
-    .context(MetaClientInitSnafu)
-}

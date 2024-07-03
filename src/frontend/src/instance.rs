@@ -43,8 +43,6 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
-use meta_client::client::MetaClient;
-use meta_client::{MetaClientOptions, MetaClientType};
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
@@ -129,16 +127,6 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn create_meta_client(
-        meta_client_options: &MetaClientOptions,
-    ) -> Result<Arc<MetaClient>> {
-        let cluster_id = 0; // (TODO: jeremy): It is currently a reserved field and has not been enabled.
-        meta_client::create_meta_client(cluster_id, MetaClientType::Frontend, meta_client_options)
-            .await
-            .map(Arc::new)
-            .context(error::StartMetaClientSnafu)
-    }
-
     pub async fn try_build_standalone_components(
         dir: String,
         kv_backend_config: KvBackendConfig,
