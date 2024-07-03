@@ -306,14 +306,11 @@ impl PatternAst {
                 optional_list.clear();
             }
 
-            let children_this_level = optional_list
-                .into_iter()
-                .chain(compound_list.into_iter())
-                .collect();
+            let children_this_level = optional_list.into_iter().chain(compound_list).collect();
             let new_node = if !must_list.is_empty() || !must_not_list.is_empty() {
                 let new_children = must_list
                     .into_iter()
-                    .chain(must_not_list.into_iter())
+                    .chain(must_not_list)
                     .chain(Some(PatternAst::Binary {
                         op: BinaryOp::Or,
                         children: children_this_level,
