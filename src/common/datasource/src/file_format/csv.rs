@@ -169,11 +169,14 @@ impl FileFormat for CsvFormat {
             .stat(path)
             .await
             .context(error::ReadObjectSnafu { path })?;
+
         let reader = store
             .reader(path)
             .await
             .context(error::ReadObjectSnafu { path })?
             .into_futures_async_read(0..meta.content_length())
+            .await
+            .context(error::ReadObjectSnafu { path })?
             .compat();
 
         let decoded = self.compression_type.convert_async_read(reader);

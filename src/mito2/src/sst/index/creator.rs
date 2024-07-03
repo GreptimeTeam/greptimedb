@@ -26,7 +26,7 @@ use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
 use object_store::ObjectStore;
-use puffin::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
+use puffin::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use tokio::io::duplex;

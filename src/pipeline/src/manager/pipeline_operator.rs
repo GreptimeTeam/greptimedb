@@ -171,12 +171,13 @@ impl PipelineOperator {
         name: &str,
         version: PipelineVersion,
     ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+        let schema = query_ctx.current_schema();
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .get_pipeline(query_ctx.current_schema(), name, version)
+            .get_pipeline(&schema, name, version)
             .await
     }
 
@@ -193,7 +194,7 @@ impl PipelineOperator {
 
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .insert_and_compile(query_ctx.current_schema(), name, content_type, pipeline)
+            .insert_and_compile(&query_ctx.current_schema(), name, content_type, pipeline)
             .await
     }
 
@@ -210,7 +211,7 @@ impl PipelineOperator {
 
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .delete_pipeline(query_ctx.current_schema(), name, version)
+            .delete_pipeline(&query_ctx.current_schema(), name, version)
             .await
     }
 }

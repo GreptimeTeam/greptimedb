@@ -33,6 +33,7 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionState;
+use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -754,9 +755,31 @@ pub enum Error {
         source: Arc<Error>,
     },
 
+    #[snafu(display("Failed to parse job id"))]
+    ParseJobId {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: uuid::Error,
+    },
+
     #[snafu(display("Operation is not supported: {}", err_msg))]
     UnsupportedOperation {
         err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to remotely compact region {} by job {} due to {}",
+        region_id,
+        job_id,
+        reason
+    ))]
+    RemoteCompaction {
+        region_id: RegionId,
+        job_id: JobId,
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -812,7 +835,8 @@ impl ErrorExt for Error {
             | InvalidMetadata { .. }
             | InvalidRegionOptions { .. }
             | InvalidWalReadRequest { .. }
-            | PartitionOutOfRange { .. } => StatusCode::InvalidArguments,
+            | PartitionOutOfRange { .. }
+            | ParseJobId { .. } => StatusCode::InvalidArguments,
 
             InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 
@@ -879,6 +903,7 @@ impl ErrorExt for Error {
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
+            RemoteCompaction { .. } => StatusCode::Unexpected,
         }
     }
 

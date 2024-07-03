@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod cache_manager;
-pub mod cached_puffin_manager;
 pub mod file_accessor;
+pub mod fs_puffin_manager;
+pub mod stager;
+
+#[cfg(test)]
+mod tests;
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use futures::{AsyncRead, AsyncSeek};
 
 use crate::blob_metadata::CompressionCodec;
@@ -69,12 +73,31 @@ pub struct PutOptions {
 /// The `PuffinReader` trait provides methods for reading blobs and directories from a Puffin file.
 #[async_trait]
 pub trait PuffinReader {
-    type Reader: AsyncRead + AsyncSeek;
+    type Blob: BlobGuard;
+    type Dir: DirGuard;
 
     /// Reads a blob from the Puffin file.
-    async fn blob(&self, key: &str) -> Result<Self::Reader>;
+    ///
+    /// The returned `BlobGuard` is used to access the blob data.
+    /// Users should hold the `BlobGuard` until they are done with the blob data.
+    async fn blob(&self, key: &str) -> Result<Self::Blob>;
 
     /// Reads a directory from the Puffin file.
-    /// The returned `PathBuf` is used to access the directory in the filesystem.
-    async fn dir(&self, key: &str) -> Result<PathBuf>;
+    ///
+    /// The returned `DirGuard` is used to access the directory in the filesystem.
+    /// The caller is responsible for holding the `DirGuard` until they are done with the directory.
+    async fn dir(&self, key: &str) -> Result<Self::Dir>;
+}
+
+/// `BlobGuard` is provided by the `PuffinReader` to access the blob data.
+/// Users should hold the `BlobGuard` until they are done with the blob data.
+pub trait BlobGuard {
+    type Reader: AsyncRead + AsyncSeek + Unpin;
+    fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>>;
+}
+
+/// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.
+/// Users should hold the `DirGuard` until they are done with the directory.
+pub trait DirGuard {
+    fn path(&self) -> &PathBuf;
 }

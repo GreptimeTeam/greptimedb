@@ -45,7 +45,7 @@ use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{self, plan_rel, Expression, Plan as SubPlan, Rel};
 
-use crate::adapter::error::{
+use crate::error::{
     DatatypesSnafu, Error, EvalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu,
     TableNotFoundSnafu,
 };
@@ -58,7 +58,7 @@ use crate::repr::{self, ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
-    fn from_substrait_agg_grouping(
+    async fn from_substrait_agg_grouping(
         ctx: &mut FlownodeContext,
         groupings: &[Grouping],
         typ: &RelationDesc,
@@ -69,7 +69,7 @@ impl TypedExpr {
         match groupings.len() {
             1 => {
                 for e in &groupings[0].grouping_expressions {
-                    let x = TypedExpr::from_substrait_rex(e, typ, extensions)?;
+                    let x = TypedExpr::from_substrait_rex(e, typ, extensions).await?;
                     group_expr.push(x);
                 }
             }
@@ -87,7 +87,7 @@ impl AggregateExpr {
     /// Convert list of `Measure` into Flow's AggregateExpr
     ///
     /// Return both the AggregateExpr and a MapFilterProject that is the final output of the aggregate function
-    fn from_substrait_agg_measures(
+    async fn from_substrait_agg_measures(
         ctx: &mut FlownodeContext,
         measures: &[Measure],
         typ: &RelationDesc,
@@ -98,11 +98,15 @@ impl AggregateExpr {
         let mut post_maps = vec![];
 
         for m in measures {
-            let filter = &m
+            let filter = match m
                 .filter
                 .as_ref()
                 .map(|fil| TypedExpr::from_substrait_rex(fil, typ, extensions))
-                .transpose()?;
+            {
+                Some(fut) => Some(fut.await),
+                None => None,
+            }
+            .transpose()?;
 
             let (aggr_expr, post_mfp) = match &m.measure {
                 Some(f) => {
@@ -112,9 +116,10 @@ impl AggregateExpr {
                         _ => false,
                     };
                     AggregateExpr::from_substrait_agg_func(
-                        f, typ, extensions, filter, // TODO(discord9): impl order_by
+                        f, typ, extensions, &filter, // TODO(discord9): impl order_by
                         &None, distinct,
                     )
+                    .await
                 }
                 None => not_impl_err!("Aggregate without aggregate function is not supported"),
             }?;
@@ -142,7 +147,7 @@ impl AggregateExpr {
     ///
     /// the returned value is a tuple of AggregateExpr and a optional ScalarExpr that if exist is the final output of the aggregate function
     /// since aggr functions like `avg` need to be transform to `sum(x)/cast(count(x) as x_type)`
-    pub fn from_substrait_agg_func(
+    pub async fn from_substrait_agg_func(
         f: &proto::AggregateFunction,
         input_schema: &RelationDesc,
         extensions: &FunctionExtensions,
@@ -157,7 +162,7 @@ impl AggregateExpr {
         for arg in &f.arguments {
             let arg_expr = match &arg.arg_type {
                 Some(ArgType::Value(e)) => {
-                    TypedExpr::from_substrait_rex(e, input_schema, extensions)
+                    TypedExpr::from_substrait_rex(e, input_schema, extensions).await
                 }
                 _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
             }?;
@@ -306,13 +311,14 @@ impl TypedPlan {
     /// The output of aggr plan is:
     ///
     /// <group_exprs>..<aggr_exprs>
-    pub fn from_substrait_agg_rel(
+    #[async_recursion::async_recursion]
+    pub async fn from_substrait_agg_rel(
         ctx: &mut FlownodeContext,
         agg: &proto::AggregateRel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
         let input = if let Some(input) = agg.input.as_ref() {
-            TypedPlan::from_substrait_rel(ctx, input, extensions)?
+            TypedPlan::from_substrait_rel(ctx, input, extensions).await?
         } else {
             return not_impl_err!("Aggregate without an input is not supported");
         };
@@ -323,7 +329,8 @@ impl TypedPlan {
                 &agg.groupings,
                 &input.schema,
                 extensions,
-            )?;
+            )
+            .await?;
 
             TypedExpr::expand_multi_value(&input.schema.typ, &group_exprs)?
         };
@@ -335,7 +342,8 @@ impl TypedPlan {
             &agg.measures,
             &input.schema,
             extensions,
-        )?;
+        )
+        .await?;
 
         let key_val_plan = KeyValPlan::from_substrait_gen_key_val_plan(
             &mut aggr_exprs,
@@ -479,7 +487,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        assert!(TypedPlan::from_substrait_plan(&mut ctx, &plan).is_err());
+        assert!(TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -489,7 +499,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -578,6 +590,7 @@ mod test {
                                             },
                                         },
                                     )
+                                    .await
                                     .unwrap(),
                                     exprs: vec![ScalarExpr::Column(0)],
                                 }])
@@ -630,7 +643,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -743,6 +758,7 @@ mod test {
                                     ]),
                                 },
                             })
+                            .await
                             .unwrap(),
                             exprs: vec![ScalarExpr::Column(3)],
                         },
@@ -766,7 +782,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -913,7 +931,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1029,7 +1049,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1145,7 +1167,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -1250,7 +1272,9 @@ mod test {
 
         let mut ctx = create_test_ctx();
 
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_exprs = vec![
             AggregateExpr {
@@ -1341,7 +1365,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
         let typ = RelationType::new(vec![ColumnType::new(
             ConcreteDataType::uint64_datatype(),
             true,
@@ -1404,7 +1428,9 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).unwrap();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,
@@ -1482,7 +1508,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let aggr_expr = AggregateExpr {
             func: AggregateFunc::SumUInt32,

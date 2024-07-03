@@ -44,7 +44,7 @@ pub struct CreateTableExprGenerator<R: Rng + 'static> {
     partition: usize,
     if_not_exists: bool,
     #[builder(setter(into))]
-    name: String,
+    name: Ident,
     #[builder(setter(into))]
     with_clause: HashMap<String, String>,
     name_generator: Box<dyn Random<Ident, R>>,
@@ -65,7 +65,7 @@ impl<R: Rng + 'static> Default for CreateTableExprGenerator<R> {
             engine: DEFAULT_ENGINE.to_string(),
             if_not_exists: false,
             partition: 0,
-            name: String::new(),
+            name: Ident::new(""),
             with_clause: HashMap::default(),
             name_generator: Box::new(MappedGenerator::new(WordGenerator, random_capitalize_map)),
             ts_column_type_generator: Box::new(TsColumnTypeGenerator),
@@ -190,7 +190,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         if self.name.is_empty() {
             builder.table_name(self.name_generator.gen(rng));
         } else {
-            builder.table_name(self.name.to_string());
+            builder.table_name(self.name.clone());
         }
         if !self.with_clause.is_empty() {
             let mut options = HashMap::new();

@@ -63,7 +63,7 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
     );
 }
 
-/// Please refer to [prometheus](https://docs.rs/prometheus) for every operations.
+/// Please refer to [prometheus](https://docs.rs/prometheus) for every operation.
 ///
 /// # Prometheus Metrics
 ///
@@ -441,8 +441,8 @@ impl<R> PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
-    async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
-        self.inner.read_at(offset, limit).await.map_err(|err| {
+    async fn read(&mut self) -> Result<Buffer> {
+        self.inner.read().await.map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
         })
@@ -450,8 +450,8 @@ impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
-    fn read_at(&self, offset: u64, limit: usize) -> opendal::Result<Buffer> {
-        self.inner.read_at(offset, limit).map_err(|err| {
+    fn read(&mut self) -> opendal::Result<Buffer> {
+        self.inner.read().map_err(|err| {
             increment_errors_total(self.op, err.kind());
             err
         })

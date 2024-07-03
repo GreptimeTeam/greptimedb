@@ -32,6 +32,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
+use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
@@ -256,16 +257,24 @@ impl TestEnv {
         let data_home = self.data_home().display().to_string();
 
         match log_store {
-            LogStoreImpl::RaftEngine(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -274,16 +283,24 @@ impl TestEnv {
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
         let data_home = self.data_home().display().to_string();
         match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                MitoEngine::new(&data_home, config, log_store, object_store_manager)
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                object_store_manager,
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -434,6 +451,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -442,6 +460,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -456,6 +475,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -464,6 +484,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                Plugins::new(),
             )
             .await
             .unwrap(),
@@ -484,16 +505,22 @@ impl TestEnv {
         config.sanitize(&data_home).unwrap();
 
         match log_store {
-            LogStoreImpl::RaftEngine(log_store) => {
-                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
-                    .await
-                    .unwrap()
-            }
-            LogStoreImpl::Kafka(log_store) => {
-                WorkerGroup::start(Arc::new(config), log_store, Arc::new(object_store_manager))
-                    .await
-                    .unwrap()
-            }
+            LogStoreImpl::RaftEngine(log_store) => WorkerGroup::start(
+                Arc::new(config),
+                log_store,
+                Arc::new(object_store_manager),
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
+            LogStoreImpl::Kafka(log_store) => WorkerGroup::start(
+                Arc::new(config),
+                log_store,
+                Arc::new(object_store_manager),
+                Plugins::new(),
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -914,6 +941,38 @@ pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
                 },
                 api::v1::Value {
                     value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
+                },
+            ],
+        })
+        .collect()
+}
+
+/// Build rows with schema (string, f64, f64, ts_millis).
+/// - `key`: A string key that is common across all rows.
+/// - `timestamps`: Array of timestamp values.
+/// - `fields`: Array of tuples where each tuple contains two optional i64 values, representing two optional float fields.
+/// Returns a vector of `Row` each containing the key, two optional float fields, and a timestamp.
+pub fn build_rows_with_fields(
+    key: &str,
+    timestamps: &[i64],
+    fields: &[(Option<i64>, Option<i64>)],
+) -> Vec<Row> {
+    timestamps
+        .iter()
+        .zip(fields.iter())
+        .map(|(ts, (field1, field2))| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(key.to_string())),
+                },
+                api::v1::Value {
+                    value_data: field1.map(|v| ValueData::F64Value(v as f64)),
+                },
+                api::v1::Value {
+                    value_data: field2.map(|v| ValueData::F64Value(v as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(*ts * 1000)),
                 },
             ],
         })

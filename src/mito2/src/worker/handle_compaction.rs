@@ -24,7 +24,7 @@ use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles compaction request submitted to region worker.
-    pub(crate) fn handle_compaction_request(
+    pub(crate) async fn handle_compaction_request(
         &mut self,
         region_id: RegionId,
         req: RegionCompactRequest,
@@ -34,14 +34,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         COMPACTION_REQUEST_COUNT.inc();
-        if let Err(e) = self.compaction_scheduler.schedule_compaction(
-            region.region_id,
-            req.options,
-            &region.version_control,
-            &region.access_layer,
-            sender,
-            &region.manifest_ctx,
-        ) {
+        if let Err(e) = self
+            .compaction_scheduler
+            .schedule_compaction(
+                region.region_id,
+                req.options,
+                &region.version_control,
+                &region.access_layer,
+                sender,
+                &region.manifest_ctx,
+            )
+            .await
+        {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
             info!(
@@ -74,7 +78,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Schedule next compaction if necessary.
         self.compaction_scheduler
-            .on_compaction_finished(region_id, &region.manifest_ctx);
+            .on_compaction_finished(region_id, &region.manifest_ctx)
+            .await;
     }
 
     /// When compaction fails, we simply log the error.

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use api::v1::region::compact_request;
 use common_telemetry::info;
-use object_store::manager::ObjectStoreManager;
+use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
@@ -26,8 +26,8 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
-use crate::compaction::build_sst_reader;
 use crate::compaction::picker::{new_picker, PickerOutput};
+use crate::compaction::CompactionSstReaderBuilder;
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -77,7 +77,7 @@ pub struct OpenCompactionRegionRequest {
 pub async fn open_compaction_region(
     req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
-    object_store_manager: ObjectStoreManager,
+    object_store_manager: ObjectStoreManagerRef,
 ) -> Result<CompactionRegion> {
     let object_store = {
         let name = &req.region_options.storage;
@@ -137,7 +137,8 @@ pub async fn open_compaction_region(
         let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
             .builder_for_options(
                 req.region_options.memtable.as_ref(),
-                !req.region_options.append_mode,
+                req.region_options.need_dedup(),
+                req.region_options.merge_mode(),
             );
 
         // Initial memtable id is 0.
@@ -282,16 +283,19 @@ impl Compactor for DefaultCompactor {
                 .index_options
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
+            let merge_mode = compaction_region.current_version.options.merge_mode();
             futs.push(async move {
-                let reader = build_sst_reader(
-                    region_metadata.clone(),
-                    sst_layer.clone(),
-                    Some(cache_manager.clone()),
-                    &output.inputs,
+                let reader = CompactionSstReaderBuilder {
+                    metadata: region_metadata.clone(),
+                    sst_layer: sst_layer.clone(),
+                    cache: Some(cache_manager.clone()),
+                    inputs: &output.inputs,
                     append_mode,
-                    output.filter_deleted,
-                    output.output_time_range,
-                )
+                    filter_deleted: output.filter_deleted,
+                    time_range: output.output_time_range,
+                    merge_mode,
+                }
+                .build_sst_reader()
                 .await?;
                 let file_meta_opt = sst_layer
                     .write_sst(

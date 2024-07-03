@@ -260,6 +260,7 @@ mod tests {
                 wal_options: Default::default(),
                 index_options: Default::default(),
                 memtable: None,
+                merge_mode: None,
             },
         })
     }

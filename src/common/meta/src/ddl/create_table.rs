@@ -33,7 +33,10 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, region_storage_path};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, convert_region_routes_to_detecting_regions, handle_retry_error,
+    region_storage_path,
+};
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
@@ -265,16 +268,25 @@ impl CreateTableProcedure {
     /// - Failed to create table metadata.
     async fn on_create_metadata(&mut self) -> Result<Status> {
         let table_id = self.table_id();
+        let cluster_id = self.creator.data.cluster_id;
         let manager = &self.context.table_metadata_manager;
 
         let raw_table_info = self.table_info().clone();
         // Safety: the region_wal_options must be allocated.
         let region_wal_options = self.region_wal_options()?.clone();
         // Safety: the table_route must be allocated.
-        let table_route = TableRouteValue::Physical(self.table_route()?.clone());
+        let physical_table_route = self.table_route()?.clone();
+        let detecting_regions = convert_region_routes_to_detecting_regions(
+            cluster_id,
+            &physical_table_route.region_routes,
+        );
+        let table_route = TableRouteValue::Physical(physical_table_route);
         manager
             .create_table_metadata(raw_table_info, table_route, region_wal_options)
             .await?;
+        self.context
+            .register_failure_detectors(detecting_regions)
+            .await;
         info!("Created table metadata for table {table_id}");
 
         self.creator.opening_regions.clear();

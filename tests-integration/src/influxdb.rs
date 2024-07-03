@@ -18,52 +18,19 @@ mod test {
 
     use client::OutputData;
     use common_recordbatch::RecordBatches;
-    use frontend::instance::Instance;
+    use rstest::rstest;
+    use rstest_reuse::apply;
     use servers::influxdb::InfluxdbRequest;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::InfluxdbLineProtocolHandler;
     use session::context::QueryContext;
 
-    use crate::standalone::GreptimeDbStandaloneBuilder;
-    use crate::tests;
+    use crate::tests::test_util::{both_instances_cases, distributed, standalone, MockInstance};
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_put_influxdb_lines() {
-        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_put_influxdb_lines")
-            .build()
-            .await;
-        let instance = &standalone.instance;
+    #[apply(both_instances_cases)]
+    async fn test_put_influxdb_lines_without_time_column(instance: Arc<dyn MockInstance>) {
+        let instance = instance.frontend();
 
-        test_put_influxdb_lines(instance).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_put_influxdb_lines() {
-        let instance =
-            tests::create_distributed_instance("test_distributed_put_influxdb_lines").await;
-        test_put_influxdb_lines(&instance.frontend()).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_standalone_put_influxdb_lines_without_time_column() {
-        let standalone = GreptimeDbStandaloneBuilder::new(
-            "test_standalone_put_influxdb_lines_without_time_column",
-        )
-        .build()
-        .await;
-        test_put_influxdb_lines_without_time_column(&standalone.instance).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_distributed_put_influxdb_lines_without_time_column() {
-        let instance = tests::create_distributed_instance(
-            "test_distributed_put_influxdb_lines_without_time_column",
-        )
-        .await;
-        test_put_influxdb_lines_without_time_column(&instance.frontend()).await;
-    }
-
-    async fn test_put_influxdb_lines_without_time_column(instance: &Arc<Instance>) {
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024
 monitor1,host=host2 memory=1027";
@@ -92,7 +59,10 @@ monitor1,host=host2 memory=1027";
         assert_eq!(total, 2);
     }
 
-    async fn test_put_influxdb_lines(instance: &Arc<Instance>) {
+    #[apply(both_instances_cases)]
+    async fn test_put_influxdb_lines(instance: Arc<dyn MockInstance>) {
+        let instance = instance.frontend();
+
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
 monitor1,host=host2 memory=1027 1663840496400340001";

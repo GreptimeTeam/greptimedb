@@ -22,7 +22,7 @@ use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
 use substrait_proto::proto::{plan_rel, Plan as SubPlan, ProjectRel, Rel};
 
-use crate::adapter::error::{
+use crate::error::{
     Error, InternalSnafu, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
 };
 use crate::expr::{MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc};
@@ -32,7 +32,7 @@ use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedPlan {
     /// Convert Substrait Plan into Flow's TypedPlan
-    pub fn from_substrait_plan(
+    pub async fn from_substrait_plan(
         ctx: &mut FlownodeContext,
         plan: &SubPlan,
     ) -> Result<TypedPlan, Error> {
@@ -45,13 +45,13 @@ impl TypedPlan {
             match plan.relations[0].rel_type.as_ref() {
                 Some(rt) => match rt {
                     plan_rel::RelType::Rel(rel) => {
-                        Ok(TypedPlan::from_substrait_rel(ctx, rel, &function_extension)?)
+                        Ok(TypedPlan::from_substrait_rel(ctx, rel, &function_extension).await?)
                     },
                     plan_rel::RelType::Root(root) => {
                         let input = root.input.as_ref().with_context(|| InvalidQuerySnafu {
                             reason: "Root relation without input",
                         })?;
-                        Ok(TypedPlan::from_substrait_rel(ctx, input, &function_extension)?)
+                        Ok(TypedPlan::from_substrait_rel(ctx, input, &function_extension).await?)
                     }
                 },
                 None => plan_err!("Cannot parse plan relation: None")
@@ -64,13 +64,14 @@ impl TypedPlan {
     }
     }
 
-    pub fn from_substrait_project(
+    #[async_recursion::async_recursion]
+    pub async fn from_substrait_project(
         ctx: &mut FlownodeContext,
         p: &ProjectRel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
         let input = if let Some(input) = p.input.as_ref() {
-            TypedPlan::from_substrait_rel(ctx, input, extensions)?
+            TypedPlan::from_substrait_rel(ctx, input, extensions).await?
         } else {
             return not_impl_err!("Projection without an input is not supported");
         };
@@ -93,7 +94,7 @@ impl TypedPlan {
 
         let mut exprs: Vec<TypedExpr> = Vec::with_capacity(p.expressions.len());
         for e in &p.expressions {
-            let expr = TypedExpr::from_substrait_rex(e, &schema_before_expand, extensions)?;
+            let expr = TypedExpr::from_substrait_rex(e, &schema_before_expand, extensions).await?;
             exprs.push(expr);
         }
         let is_literal = exprs.iter().all(|expr| expr.expr.is_literal());
@@ -131,26 +132,27 @@ impl TypedPlan {
         }
     }
 
-    pub fn from_substrait_filter(
+    #[async_recursion::async_recursion]
+    pub async fn from_substrait_filter(
         ctx: &mut FlownodeContext,
         filter: &FilterRel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
         let input = if let Some(input) = filter.input.as_ref() {
-            TypedPlan::from_substrait_rel(ctx, input, extensions)?
+            TypedPlan::from_substrait_rel(ctx, input, extensions).await?
         } else {
             return not_impl_err!("Filter without an input is not supported");
         };
 
         let expr = if let Some(condition) = filter.condition.as_ref() {
-            TypedExpr::from_substrait_rex(condition, &input.schema, extensions)?
+            TypedExpr::from_substrait_rex(condition, &input.schema, extensions).await?
         } else {
             return not_impl_err!("Filter without an condition is not valid");
         };
         input.filter(expr)
     }
 
-    pub fn from_substrait_read(
+    pub async fn from_substrait_read(
         ctx: &mut FlownodeContext,
         read: &ReadRel,
         _extensions: &FunctionExtensions,
@@ -212,16 +214,22 @@ impl TypedPlan {
 
     /// Convert Substrait Rel into Flow's TypedPlan
     /// TODO(discord9): SELECT DISTINCT(does it get compile with something else?)
-    pub fn from_substrait_rel(
+    pub async fn from_substrait_rel(
         ctx: &mut FlownodeContext,
         rel: &Rel,
         extensions: &FunctionExtensions,
     ) -> Result<TypedPlan, Error> {
         match &rel.rel_type {
-            Some(RelType::Project(p)) => Self::from_substrait_project(ctx, p.as_ref(), extensions),
-            Some(RelType::Filter(filter)) => Self::from_substrait_filter(ctx, filter, extensions),
-            Some(RelType::Read(read)) => Self::from_substrait_read(ctx, read, extensions),
-            Some(RelType::Aggregate(agg)) => Self::from_substrait_agg_rel(ctx, agg, extensions),
+            Some(RelType::Project(p)) => {
+                Self::from_substrait_project(ctx, p.as_ref(), extensions).await
+            }
+            Some(RelType::Filter(filter)) => {
+                Self::from_substrait_filter(ctx, filter, extensions).await
+            }
+            Some(RelType::Read(read)) => Self::from_substrait_read(ctx, read, extensions).await,
+            Some(RelType::Aggregate(agg)) => {
+                Self::from_substrait_agg_rel(ctx, agg, extensions).await
+            }
             _ => not_impl_err!("Unsupported relation type: {:?}", rel.rel_type),
         }
     }
@@ -353,7 +361,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])

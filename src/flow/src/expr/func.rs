@@ -32,7 +32,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 use substrait::df_logical_plan::consumer::name_to_op;
 
-use crate::adapter::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
+use crate::error::{Error, ExternalSnafu, InvalidQuerySnafu, PlanSnafu};
 use crate::expr::error::{
     CastValueSnafu, DivisionByZeroSnafu, EvalError, InternalSnafu, OverflowSnafu,
     TryFromValueSnafu, TypeMismatchSnafu,
@@ -43,7 +43,7 @@ use crate::repr::{self, value_to_internal_ts, Row};
 
 /// UnmaterializableFunc is a function that can't be eval independently,
 /// and require special handling
-#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Ord, PartialOrd, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum UnmaterializableFunc {
     Now,
     CurrentSchema,

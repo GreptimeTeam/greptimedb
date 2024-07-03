@@ -26,7 +26,7 @@ use substrait_proto::proto::expression::literal::LiteralType;
 use substrait_proto::proto::expression::Literal;
 use substrait_proto::proto::r#type::Kind;
 
-use crate::adapter::error::{Error, NotImplementedSnafu, PlanSnafu};
+use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::transform::substrait_proto;
 
 /// Convert a Substrait literal into a Value and its ConcreteDataType (So that we can know type even if the value is null)
@@ -172,7 +172,7 @@ mod test {
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
-        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan);
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)])

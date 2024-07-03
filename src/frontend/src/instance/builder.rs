@@ -36,6 +36,7 @@ use servers::server::ServerHandlers;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
+use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
@@ -43,6 +44,7 @@ use crate::script::ScriptExecutor;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
+    options: FrontendOptions,
     kv_backend: KvBackendRef,
     layered_cache_registry: LayeredCacheRegistryRef,
     local_cache_invalidator: Option<CacheInvalidatorRef>,
@@ -55,6 +57,7 @@ pub struct FrontendBuilder {
 
 impl FrontendBuilder {
     pub fn new(
+        options: FrontendOptions,
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
         catalog_manager: CatalogManagerRef,
@@ -62,6 +65,7 @@ impl FrontendBuilder {
         procedure_executor: ProcedureExecutorRef,
     ) -> Self {
         Self {
+            options,
             kv_backend,
             layered_cache_registry,
             local_cache_invalidator: None,
@@ -183,6 +187,7 @@ impl FrontendBuilder {
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         Ok(Instance {
+            options: self.options,
             catalog_manager: self.catalog_manager,
             script_executor,
             pipeline_operator,

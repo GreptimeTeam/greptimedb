@@ -16,6 +16,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
@@ -86,6 +87,7 @@ impl SchedulerEnv {
             Arc::new(CacheManager::default()),
             Arc::new(MitoConfig::default()),
             WorkerListener::default(),
+            Plugins::new(),
         )
     }
 

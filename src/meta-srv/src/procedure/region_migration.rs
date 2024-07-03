@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
+use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
@@ -154,15 +155,17 @@ pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
+    region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
 }
 
 impl DefaultContextFactory {
-    /// Returns an [ContextFactoryImpl].
+    /// Returns an [`DefaultContextFactory`].
     pub fn new(
         table_metadata_manager: TableMetadataManagerRef,
         opening_region_keeper: MemoryRegionKeeperRef,
+        region_failure_detector_controller: RegionFailureDetectorControllerRef,
         mailbox: MailboxRef,
         server_addr: String,
     ) -> Self {
@@ -170,6 +173,7 @@ impl DefaultContextFactory {
             volatile_ctx: VolatileContext::default(),
             table_metadata_manager,
             opening_region_keeper,
+            region_failure_detector_controller,
             mailbox,
             server_addr,
         }
@@ -183,6 +187,7 @@ impl ContextFactory for DefaultContextFactory {
             volatile_ctx: self.volatile_ctx,
             table_metadata_manager: self.table_metadata_manager,
             opening_region_keeper: self.opening_region_keeper,
+            region_failure_detector_controller: self.region_failure_detector_controller,
             mailbox: self.mailbox,
             server_addr: self.server_addr,
         }
@@ -195,6 +200,7 @@ pub struct Context {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
+    region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
 }
@@ -234,6 +240,20 @@ impl Context {
         }
 
         Ok(table_route_value.as_ref().unwrap())
+    }
+
+    /// Notifies the RegionSupervisor to register failure detectors of failed region.
+    ///
+    /// The original failure detector was removed once the procedure was triggered.
+    /// Now, we need to register the failure detector for the failed region.
+    pub async fn register_failure_detectors(&self) {
+        let cluster_id = self.persistent_ctx.cluster_id;
+        let datanode_id = self.persistent_ctx.from_peer.id;
+        let region_id = self.persistent_ctx.region_id;
+
+        self.region_failure_detector_controller
+            .register_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
+            .await;
     }
 
     /// Removes the `table_route` of [VolatileContext], returns true if any.

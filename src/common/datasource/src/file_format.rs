@@ -149,7 +149,9 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
             .reader(&path)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?
-            .into_bytes_stream(..);
+            .into_bytes_stream(..)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         let mut upstream = compression_type.convert_stream(reader).fuse();
 

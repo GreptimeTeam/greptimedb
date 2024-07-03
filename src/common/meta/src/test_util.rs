@@ -24,7 +24,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use crate::cache_invalidator::DummyCacheInvalidator;
 use crate::ddl::flow_meta::FlowMetadataAllocator;
 use crate::ddl::table_meta::TableMetadataAllocator;
-use crate::ddl::DdlContext;
+use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use crate::error::Result;
 use crate::key::flow::FlowMetadataManager;
 use crate::key::TableMetadataManager;
@@ -182,6 +182,7 @@ pub fn new_ddl_context_with_kv_backend(
         flow_metadata_allocator,
         flow_metadata_manager,
         peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
+        region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
     }
 }
 

@@ -31,7 +31,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
-use common_config::{Configurable, KvBackendConfig};
+use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_frontend::handler::FrontendInvoker;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -114,6 +114,7 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 #[derive(Clone)]
 pub struct Instance {
+    options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
     script_executor: Arc<ScriptExecutor>,
     pipeline_operator: Arc<PipelineOperator>,
@@ -189,14 +190,9 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub fn build_servers(
-        &mut self,
-        opts: impl Into<FrontendOptions> + Configurable,
-        servers: ServerHandlers,
-    ) -> Result<()> {
-        let opts: FrontendOptions = opts.into();
+    pub fn build_servers(&mut self, servers: ServerHandlers) -> Result<()> {
         self.export_metrics_task =
-            ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
+            ExportMetricsTask::try_new(&self.options.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         self.servers = servers;
@@ -513,7 +509,8 @@ pub fn check_permission(
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
         | Statement::DropDatabase(_)
-        | Statement::DropFlow(_) => {}
+        | Statement::DropFlow(_)
+        | Statement::Use(_) => {}
         Statement::ShowCreateTable(stmt) => {
             validate_param(&stmt.table_name, query_ctx)?;
         }

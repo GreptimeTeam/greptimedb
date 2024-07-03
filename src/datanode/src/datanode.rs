@@ -52,7 +52,7 @@ use store_api::storage::RegionId;
 use tokio::fs;
 use tokio::sync::Notify;
 
-use crate::config::{DatanodeOptions, RegionEngineConfig};
+use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
     MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
@@ -136,7 +136,6 @@ impl Datanode {
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
                 .close()
-                .await
                 .map_err(BoxedError::new)
                 .context(ShutdownInstanceSnafu)?;
         }
@@ -270,6 +269,20 @@ impl DatanodeBuilder {
         })
     }
 
+    /// Builds [ObjectStoreManager] from [StorageConfig].
+    pub async fn build_object_store_manager(cfg: &StorageConfig) -> Result<ObjectStoreManagerRef> {
+        let object_store = store::new_object_store(cfg.store.clone(), &cfg.data_home).await?;
+        let default_name = cfg.store.name();
+        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
+        for store in &cfg.providers {
+            object_store_manager.add(
+                store.name(),
+                store::new_object_store(store.clone(), &cfg.data_home).await?,
+            );
+        }
+        Ok(Arc::new(object_store_manager))
+    }
+
     #[cfg(test)]
     /// Open all regions belong to this datanode.
     async fn initialize_region_server(
@@ -329,8 +342,9 @@ impl DatanodeBuilder {
             table_provider_factory,
         );
 
-        let object_store_manager = Self::build_object_store_manager(opts).await?;
-        let engines = Self::build_store_engines(opts, object_store_manager).await?;
+        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
+        let engines =
+            Self::build_store_engines(opts, object_store_manager, self.plugins.clone()).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -344,14 +358,19 @@ impl DatanodeBuilder {
     async fn build_store_engines(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
+        plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let mito_engine =
-                        Self::build_mito_engine(opts, object_store_manager.clone(), config.clone())
-                            .await?;
+                    let mito_engine = Self::build_mito_engine(
+                        opts,
+                        object_store_manager.clone(),
+                        config.clone(),
+                        plugins.clone(),
+                    )
+                    .await?;
 
                     let metric_engine = MetricEngine::new(mito_engine.clone());
                     engines.push(Arc::new(mito_engine) as _);
@@ -374,6 +393,7 @@ impl DatanodeBuilder {
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
         config: MitoConfig,
+        plugins: Plugins,
     ) -> Result<MitoEngine> {
         let mito_engine = match &opts.wal {
             DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
@@ -382,6 +402,7 @@ impl DatanodeBuilder {
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                     .await?,
                 object_store_manager,
+                plugins,
             )
             .await
             .context(BuildMitoEngineSnafu)?,
@@ -390,6 +411,7 @@ impl DatanodeBuilder {
                 config,
                 Self::build_kafka_log_store(kafka_config).await?,
                 object_store_manager,
+                plugins,
             )
             .await
             .context(BuildMitoEngineSnafu)?,
@@ -431,21 +453,6 @@ impl DatanodeBuilder {
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
             .map(Arc::new)
-    }
-
-    /// Builds [ObjectStoreManager]
-    async fn build_object_store_manager(opts: &DatanodeOptions) -> Result<ObjectStoreManagerRef> {
-        let object_store =
-            store::new_object_store(opts.storage.store.clone(), &opts.storage.data_home).await?;
-        let default_name = opts.storage.store.name();
-        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
-        for store in &opts.storage.providers {
-            object_store_manager.add(
-                store.name(),
-                store::new_object_store(store.clone(), &opts.storage.data_home).await?,
-            );
-        }
-        Ok(Arc::new(object_store_manager))
     }
 }
 

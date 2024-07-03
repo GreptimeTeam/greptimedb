@@ -332,7 +332,7 @@ async fn validate_schema(
     query_ctx: QueryContextRef,
 ) -> Option<(StatusCode, String)> {
     match sql_handler
-        .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
+        .is_valid_schema(query_ctx.current_catalog(), &query_ctx.current_schema())
         .await
     {
         Ok(true) => None,

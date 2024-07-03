@@ -43,8 +43,10 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::config::{get_conf_path, write_config_file};
 use tests_fuzz::utils::health::HttpHealthChecker;
-use tests_fuzz::utils::load_unstable_test_env_variables;
 use tests_fuzz::utils::process::{ProcessManager, ProcessState, UnstableProcessController};
+use tests_fuzz::utils::{
+    get_from_env_or_default_value, load_unstable_test_env_variables, GT_FUZZ_INPUT_MAX_TABLES,
+};
 use tests_fuzz::{error, validator};
 use tokio::sync::watch;
 
@@ -61,15 +63,16 @@ impl FuzzContext {
 #[derive(Clone, Debug)]
 struct FuzzInput {
     seed: u64,
-    num: usize,
+    tables: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let num = rng.gen_range(1..500);
-        Ok(FuzzInput { seed, num })
+        let max_tables = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_TABLES, 256);
+        let tables = rng.gen_range(1..max_tables);
+        Ok(FuzzInput { seed, tables })
     }
 }
 
@@ -134,7 +137,7 @@ async fn execute_unstable_create_table(
     let ctx = FuzzContext { greptime: mysql };
     let mut table_states = HashMap::new();
 
-    for _ in 0..input.num {
+    for _ in 0..input.tables {
         let expr = generate_create_table_expr(&mut rng);
         let table_ctx = Arc::new(TableContext::from(&expr));
         let table_name = expr.table_name.to_string();

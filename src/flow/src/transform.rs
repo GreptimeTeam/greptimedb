@@ -37,11 +37,11 @@ use substrait::{
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 
-use crate::adapter::error::{
+use crate::adapter::FlownodeContext;
+use crate::error::{
     Error, ExternalSnafu, InvalidQueryProstSnafu, NotImplementedSnafu, TableNotFoundSnafu,
     UnexpectedSnafu,
 };
-use crate::adapter::FlownodeContext;
 use crate::expr::GlobalId;
 use crate::plan::TypedPlan;
 use crate::repr::RelationType;
@@ -140,7 +140,7 @@ pub async fn sql_to_flow_plan(
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan)?;
+    let flow_plan = TypedPlan::from_substrait_plan(ctx, &sub_plan).await?;
 
     Ok(flow_plan)
 }
