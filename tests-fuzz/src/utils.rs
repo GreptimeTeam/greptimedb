@@ -16,8 +16,10 @@ pub mod cluster_info;
 pub mod config;
 pub mod crd;
 pub mod health;
+pub mod migration;
 pub mod partition;
 pub mod pod_failure;
+pub mod procedure;
 #[cfg(feature = "unstable")]
 pub mod process;
 pub mod wait;

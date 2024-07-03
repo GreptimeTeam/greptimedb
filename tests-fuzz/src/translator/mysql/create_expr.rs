@@ -75,17 +75,12 @@ impl CreateTableExprTranslator {
     fn format_partition(input: &CreateTableExpr) -> Option<String> {
         input.partition.as_ref().map(|partition| {
             format!(
-                "PARTITION BY RANGE COLUMNS({}) (\n{}\n)",
+                "PARTITION ON COLUMNS({}) (\n{}\n)",
                 partition.partition_columns().join(", "),
                 partition
                     .partition_bounds()
                     .iter()
-                    .enumerate()
-                    .map(|(i, bound)| format!(
-                        "PARTITION r{} VALUES LESS THAN ({})",
-                        i,
-                        Self::format_partition_bound(bound)
-                    ))
+                    .map(Self::format_partition_bound)
                     .collect::<Vec<_>>()
                     .join(",\n")
             )
@@ -138,11 +133,11 @@ impl CreateTableExprTranslator {
 
     fn format_table_options(input: &CreateTableExpr) -> String {
         let mut output = vec![];
-        if !input.engine.is_empty() {
-            output.push(format!("ENGINE={}", input.engine));
-        }
         if let Some(partition) = Self::format_partition(input) {
             output.push(partition);
+        }
+        if !input.engine.is_empty() {
+            output.push(format!("ENGINE={}", input.engine));
         }
 
         output.join("\n")
@@ -187,7 +182,7 @@ impl CreateDatabaseExprTranslator {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::value::Value;
+    use partition::expr::{Operand, PartitionExpr, RestrictedOp};
     use partition::partition::{PartitionBound, PartitionDef};
 
     use super::CreateTableExprTranslator;
@@ -206,9 +201,29 @@ mod tests {
             .partition(PartitionDef::new(
                 vec!["idc".to_string()],
                 vec![
-                    PartitionBound::Value(Value::String("a".into())),
-                    PartitionBound::Value(Value::String("f".into())),
-                    PartitionBound::MaxValue,
+                    PartitionBound::Expr(PartitionExpr::new(
+                        Operand::Column("idc".to_string()),
+                        RestrictedOp::Lt,
+                        Operand::Value(datatypes::value::Value::Int32(10)),
+                    )),
+                    PartitionBound::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("idc".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(datatypes::value::Value::Int32(10)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("idc".to_string()),
+                            RestrictedOp::Lt,
+                            Operand::Value(datatypes::value::Value::Int32(50)),
+                        )),
+                    )),
+                    PartitionBound::Expr(PartitionExpr::new(
+                        Operand::Column("idc".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(datatypes::value::Value::Int32(50)),
+                    )),
                 ],
             ))
             .build()
@@ -217,7 +232,6 @@ mod tests {
         let output = CreateTableExprTranslator
             .translate(&create_table_expr)
             .unwrap();
-
         assert_eq!(
             "CREATE TABLE system_metrics(
 host STRING,
@@ -228,12 +242,12 @@ disk_util DOUBLE,
 ts TIMESTAMP(3) TIME INDEX,
 PRIMARY KEY(host, idc)
 )
-ENGINE=mito
-PARTITION BY RANGE COLUMNS(idc) (
-PARTITION r0 VALUES LESS THAN ('a'),
-PARTITION r1 VALUES LESS THAN ('f'),
-PARTITION r2 VALUES LESS THAN (MAXVALUE)
-);",
+PARTITION ON COLUMNS(idc) (
+idc < 10,
+idc >= 10 AND idc < 50,
+idc >= 50
+)
+ENGINE=mito;",
             output
         );
     }
