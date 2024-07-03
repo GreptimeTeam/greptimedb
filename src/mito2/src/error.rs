@@ -790,14 +790,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to create staging directory"))]
-    CreateStagingDir {
-        #[snafu(source)]
-        error: std::io::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -903,7 +895,6 @@ impl ErrorExt for Error {
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
             | PuffinBuildReader { source, .. } => source.status_code(),
-            CreateStagingDir { .. } => StatusCode::Unexpected,
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,

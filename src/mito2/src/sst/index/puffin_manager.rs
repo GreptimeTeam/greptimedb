@@ -25,7 +25,7 @@ use puffin::puffin_manager::stager::{BoundedStager, FsBlobGuard, FsDirGuard};
 use puffin::puffin_manager::BlobGuard;
 use snafu::ResultExt;
 
-use crate::error::{CreateStagingDirSnafu, PuffinInitStagerSnafu, Result};
+use crate::error::{PuffinInitStagerSnafu, Result};
 use crate::metrics::{
     INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL, INDEX_PUFFIN_READ_OP_TOTAL,
     INDEX_PUFFIN_SEEK_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
@@ -60,10 +60,6 @@ impl PuffinManagerFactory {
         staging_capacity: u64,
         write_buffer_size: Option<usize>,
     ) -> Result<Self> {
-        tokio::fs::create_dir_all(&staging_path)
-            .await
-            .context(CreateStagingDirSnafu)?;
-
         let stager = BoundedStager::new(staging_path.as_ref().to_path_buf(), staging_capacity)
             .await
             .context(PuffinInitStagerSnafu)?;

@@ -68,6 +68,10 @@ pub struct BoundedStager {
 
 impl BoundedStager {
     pub async fn new(base_dir: PathBuf, capacity: u64) -> Result<Self> {
+        tokio::fs::create_dir_all(&base_dir)
+            .await
+            .context(CreateSnafu)?;
+
         let recycle_bin = Cache::builder()
             .time_to_live(Duration::from_secs(60))
             .build();
