@@ -38,9 +38,7 @@ impl OptimizerRule for FirstLastPushDownRule {
 
         if let Some(_is_last) = visitor.is_last {
             let new_plan = plan.clone();
-            let new_plan = new_plan
-                .transform_down(&|plan| Self::set_top_hint(plan))?
-                .data;
+            let new_plan = new_plan.transform_down(Self::set_top_hint)?.data;
 
             common_telemetry::debug!("Push down last");
 
@@ -133,7 +131,7 @@ impl TreeNodeVisitor<'_> for TopValueVisitor {
                 // }
             }
             if self.is_last.is_some() {
-                self.group_expr = aggregate.group_expr.clone();
+                self.group_expr.clone_from(&aggregate.group_expr);
             }
         }
 
