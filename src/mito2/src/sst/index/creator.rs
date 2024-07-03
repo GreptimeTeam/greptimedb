@@ -332,6 +332,7 @@ mod tests {
     use super::*;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
     use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
 
     fn mock_object_store() -> ObjectStore {
@@ -403,8 +404,10 @@ mod tests {
     }
 
     async fn build_applier_factory(
+        prefix: &str,
         tags: BTreeSet<(&'static str, i32)>,
     ) -> impl Fn(DfExpr) -> BoxFuture<'static, Vec<usize>> {
+        let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let region_dir = "region0".to_string();
         let sst_file_id = FileId::random();
         let file_path = location::index_file_path(&region_dir, sst_file_id);
@@ -433,12 +436,14 @@ mod tests {
         assert_eq!(row_count, tags.len() * segment_row_count);
 
         move |expr| {
+            let _d = &d;
             let applier = SstIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
                 None,
                 &region_metadata,
                 Default::default(),
+                factory.clone(),
             )
             .build(&[expr])
             .unwrap()
@@ -469,7 +474,7 @@ mod tests {
             ("abc", 3),
         ]);
 
-        let applier_factory = build_applier_factory(tags).await;
+        let applier_factory = build_applier_factory("test_create_and_query_get_key_", tags).await;
 
         let expr = col("tag_str").eq(lit("aaa"));
         let res = applier_factory(expr).await;
@@ -508,7 +513,7 @@ mod tests {
             ("abc", 3),
         ]);
 
-        let applier_factory = build_applier_factory(tags).await;
+        let applier_factory = build_applier_factory("test_create_and_query_range_", tags).await;
 
         let expr = col("tag_str").between(lit("aaa"), lit("aab"));
         let res = applier_factory(expr).await;
@@ -541,7 +546,8 @@ mod tests {
             ("abc", 3),
         ]);
 
-        let applier_factory = build_applier_factory(tags).await;
+        let applier_factory =
+            build_applier_factory("test_create_and_query_comparison_", tags).await;
 
         let expr = col("tag_str").lt(lit("aab"));
         let res = applier_factory(expr).await;
@@ -600,7 +606,7 @@ mod tests {
             ("abc", 3),
         ]);
 
-        let applier_factory = build_applier_factory(tags).await;
+        let applier_factory = build_applier_factory("test_create_and_query_regex_", tags).await;
 
         let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit(".*"));
         let res = applier_factory(expr).await;

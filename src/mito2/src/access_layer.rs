@@ -27,6 +27,7 @@ use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilder;
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -40,6 +41,8 @@ pub struct AccessLayer {
     region_dir: String,
     /// Target object store.
     object_store: ObjectStore,
+    /// Puffin manager factory for index.
+    puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
 }
@@ -57,11 +60,13 @@ impl AccessLayer {
     pub fn new(
         region_dir: impl Into<String>,
         object_store: ObjectStore,
+        puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> AccessLayer {
         AccessLayer {
             region_dir: region_dir.into(),
             object_store,
+            puffin_manager_factory,
             intermediate_manager,
         }
     }
@@ -76,6 +81,11 @@ impl AccessLayer {
         &self.object_store
     }
 
+    /// Returns the puffin manager factory.
+    pub fn puffin_manager_factory(&self) -> &PuffinManagerFactory {
+        &self.puffin_manager_factory
+    }
+
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
         let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
@@ -86,14 +96,13 @@ impl AccessLayer {
                 file_id: file_meta.file_id,
             })?;
 
-        if file_meta.inverted_index_available() {
-            let path = location::index_file_path(&self.region_dir, file_meta.file_id);
-            self.object_store
-                .delete(&path)
-                .await
-                .context(DeleteIndexSnafu {
+        let path = location::index_file_path(&self.region_dir, file_meta.file_id);
+        if let Err(err) = self.object_store.delete(&path).await {
+            if err.kind() != object_store::ErrorKind::NotFound {
+                return Err(err).context(DeleteIndexSnafu {
                     file_id: file_meta.file_id,
-                })?;
+                });
+            }
         }
 
         Ok(())

@@ -36,6 +36,7 @@ use crate::region::{ManifestContext, ManifestContextRef, RegionState};
 use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::worker::WorkerListener;
 
 /// Scheduler mocker.
@@ -55,11 +56,21 @@ impl SchedulerEnv {
         let mut builder = Fs::default();
         builder.root(&path_str);
 
-        let intm_mgr = IntermediateManager::init_fs(join_dir(&path_str, "intm"))
+        let intm_path = path.path().join("intm");
+        let staging_path = path.path().join("staging");
+        let puffin_mgr = PuffinManagerFactory::new(staging_path, 4096, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(intm_path.to_str().unwrap())
             .await
             .unwrap();
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let access_layer = Arc::new(AccessLayer::new("", object_store.clone(), intm_mgr));
+        let access_layer = Arc::new(AccessLayer::new(
+            "",
+            object_store.clone(),
+            puffin_mgr,
+            intm_mgr,
+        ));
 
         SchedulerEnv {
             path,

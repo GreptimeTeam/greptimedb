@@ -597,13 +597,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
-    PuffinBlobTypeNotFound {
-        blob_type: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to write puffin completely"))]
     PuffinFinish {
         source: puffin::error::Error,
@@ -783,6 +776,28 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to initialize puffin stager"))]
+    PuffinInitStager {
+        source: puffin::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build puffin reader"))]
+    PuffinBuildReader {
+        source: puffin::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create staging directory"))]
+    CreateStagingDir {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -821,7 +836,6 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
-            | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. }
             | IndexEncodeNull { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
@@ -886,7 +900,10 @@ impl ErrorExt for Error {
             PuffinReadMetadata { source, .. }
             | PuffinReadBlob { source, .. }
             | PuffinFinish { source, .. }
-            | PuffinAddBlob { source, .. } => source.status_code(),
+            | PuffinAddBlob { source, .. }
+            | PuffinInitStager { source, .. }
+            | PuffinBuildReader { source, .. } => source.status_code(),
+            CreateStagingDir { .. } => StatusCode::Unexpected,
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,

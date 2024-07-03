@@ -58,6 +58,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 
@@ -132,10 +133,15 @@ impl WorkerGroup {
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
         ));
-        let intermediate_manager =
-            IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
-                .await?
-                .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
+        let puffin_manager_factory = PuffinManagerFactory::new(
+            &config.index.staging_path,
+            config.index.staging_size.as_bytes(),
+            Some(config.index.write_buffer_size.as_bytes() as _),
+        )
+        .await?;
+        let intermediate_manager = IntermediateManager::init_fs(&config.index.intermediate_path)
+            .await?
+            .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         // We use another scheduler to avoid purge jobs blocking other jobs.
         // A purge job is cheaper than other background jobs so they share the same job limit.
@@ -169,6 +175,7 @@ impl WorkerGroup {
                     purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
+                    puffin_manager_factory: puffin_manager_factory.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
                     flush_sender: flush_sender.clone(),
@@ -261,10 +268,15 @@ impl WorkerGroup {
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let intermediate_manager =
-            IntermediateManager::init_fs(&config.inverted_index.intermediate_path)
-                .await?
-                .with_buffer_size(Some(config.inverted_index.write_buffer_size.as_bytes() as _));
+        let puffin_manager_factory = PuffinManagerFactory::new(
+            &config.index.staging_path,
+            config.index.staging_size.as_bytes(),
+            Some(config.index.write_buffer_size.as_bytes() as _),
+        )
+        .await?;
+        let intermediate_manager = IntermediateManager::init_fs(&config.index.intermediate_path)
+            .await?
+            .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let write_cache = write_cache_from_config(
             &config,
             object_store_manager.clone(),
@@ -292,6 +304,7 @@ impl WorkerGroup {
                     purge_scheduler: purge_scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
+                    puffin_manager_factory: puffin_manager_factory.clone(),
                     intermediate_manager: intermediate_manager.clone(),
                     time_provider: time_provider.clone(),
                     flush_sender: flush_sender.clone(),
@@ -361,6 +374,7 @@ struct WorkerStarter<S> {
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
+    puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
     time_provider: TimeProviderRef,
     /// Watch channel sender to notify workers to handle stalled requests.
@@ -408,6 +422,7 @@ impl<S: LogStore> WorkerStarter<S> {
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
+            puffin_manager_factory: self.puffin_manager_factory,
             intermediate_manager: self.intermediate_manager,
             time_provider: self.time_provider,
             last_periodical_check_millis: now,
@@ -586,6 +601,8 @@ struct RegionWorkerLoop<S> {
     listener: WorkerListener,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// Puffin manager factory for index.
+    puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
     /// Provider to get current time.

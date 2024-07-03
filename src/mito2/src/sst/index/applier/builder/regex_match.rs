@@ -53,9 +53,11 @@ mod tests {
         field_column, int64_lit, nonexistent_column, string_lit, tag_column, test_object_store,
         test_region_metadata,
     };
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[test]
     fn test_regex_match_basic() {
+        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_regex_match_basic_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -63,6 +65,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         builder
@@ -81,6 +84,8 @@ mod tests {
 
     #[test]
     fn test_regex_match_field_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_regex_match_field_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -88,6 +93,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         builder
@@ -99,6 +105,8 @@ mod tests {
 
     #[test]
     fn test_regex_match_type_mismatch() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_regex_match_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -106,6 +114,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         builder
@@ -117,6 +126,8 @@ mod tests {
 
     #[test]
     fn test_regex_match_type_nonexist_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_regex_match_type_nonexist_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -124,6 +135,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let res = builder.collect_regex_match(&nonexistent_column(), &string_lit("abc"));
