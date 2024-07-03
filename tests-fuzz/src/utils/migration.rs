@@ -31,12 +31,12 @@ use crate::utils::wait::wait_condition_fn;
 pub async fn migrate_region(
     e: &Pool<MySql>,
     region_id: u64,
-    from_peer: u64,
-    to_peer: u64,
+    from_peer_id: u64,
+    to_peer_id: u64,
     timeout_secs: u64,
 ) -> String {
     let sql = format!(
-        "select migrate_region({region_id}, {from_peer}, {to_peer}, {timeout_secs}) as output;"
+        "select migrate_region({region_id}, {from_peer_id}, {to_peer_id}, {timeout_secs}) as output;"
     );
     let result = sqlx::query(&sql)
         .fetch_one(e)
