@@ -321,7 +321,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(60)).await;
 
     // Validates value rows
-    info!("Validates num of values");
+    info!("Validates num of rows");
     for (table_ctx, expected_rows) in table_ctxs.iter().zip(affected_rows) {
         let sql = format!("select count(1) as count from {}", table_ctx.name);
         let values = count_values(&ctx.greptime, &sql).await?;
