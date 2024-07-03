@@ -49,13 +49,8 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
             DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
             DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
-                num_topics: config.num_topics,
-                selector_type: config.selector_type,
-                topic_name_prefix: config.topic_name_prefix,
-                num_partitions: config.num_partitions,
-                replication_factor: config.replication_factor,
-                create_topic_timeout: config.create_topic_timeout,
                 backoff: config.backoff,
+                kafka_topic: config.kafka_topic,
             }),
         }
     }
@@ -67,13 +62,8 @@ impl From<MetasrvWalConfig> for DatanodeWalConfig {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
             MetasrvWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 broker_endpoints: config.broker_endpoints,
-                num_topics: config.num_topics,
-                selector_type: config.selector_type,
-                topic_name_prefix: config.topic_name_prefix,
-                num_partitions: config.num_partitions,
-                replication_factor: config.replication_factor,
-                create_topic_timeout: config.create_topic_timeout,
                 backoff: config.backoff,
+                kafka_topic: config.kafka_topic,
                 ..Default::default()
             }),
         }
