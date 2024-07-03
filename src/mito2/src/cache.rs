@@ -36,6 +36,7 @@ use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::read::Batch;
 use crate::sst::file::FileId;
 
 // Metrics type key for sst meta.
@@ -61,6 +62,8 @@ pub struct CacheManager {
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
     index_cache: Option<Arc<InvertedIndexCache>>,
+    /// Cache for first/last rows.
+    top_cache: Option<TopCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -173,6 +176,18 @@ impl CacheManager {
     pub(crate) fn index_cache(&self) -> Arc<InvertedIndexCache> {
         self.index_cache.as_ref().unwrap().clone()
     }
+
+    /// Puts top rows into the cache.
+    pub(crate) fn put_top_rows(&self, key: TopKey, value: Arc<TopRows>) {
+        if let Some(cache) = &self.top_cache {
+            cache.insert(key, value);
+        }
+    }
+
+    /// Gets top rows from the cache.
+    pub(crate) fn get_top_rows(&self, key: &TopKey) -> Option<Arc<TopRows>> {
+        self.top_cache.as_ref().and_then(|cache| cache.get(key))
+    }
 }
 
 /// Builder to construct a [CacheManager].
@@ -245,6 +260,7 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
+        let top_cache = Some(Cache::builder().max_capacity(10000).build());
 
         // todo(hl): make it configurable.
         let inverted_index_cache = InvertedIndexCache::new(1024 * 16, 1024 * 16);
@@ -254,6 +270,7 @@ impl CacheManagerBuilder {
             page_cache,
             write_cache: self.write_cache,
             index_cache: Some(Arc::new(inverted_index_cache)),
+            top_cache,
         }
     }
 }
@@ -332,6 +349,17 @@ impl PageValue {
     }
 }
 
+type TopKey = (FileId, usize);
+
+/// Cached top rows for a row group.
+#[allow(dead_code)]
+pub struct TopRows {
+    /// Is last.
+    pub last: bool,
+    /// Batches with last rows.
+    pub batches: Vec<Batch>,
+}
+
 /// Maps (region id, file id) to [ParquetMetaData].
 type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 /// Maps [Value] to a vector that holds this value repeatedly.
@@ -340,6 +368,8 @@ type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (region, file, row group, column) to [PageValue].
 type PageCache = Cache<PageKey, Arc<PageValue>>;
+/// Maps (file id, row group id) to row selectors.
+type TopCache = Cache<TopKey, Arc<TopRows>>;
 
 #[cfg(test)]
 mod tests {

@@ -30,7 +30,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TopHint};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
@@ -195,6 +195,11 @@ impl DummyTableProvider {
     /// Sets the ordering hint of the query to the provider.
     pub fn with_ordering_hint(&self, order_opts: &[OrderOption]) {
         self.scan_request.lock().unwrap().output_ordering = Some(order_opts.to_vec());
+    }
+
+    /// Sets the top hint of the query to the provider.
+    pub fn with_top_hint(&self, top: TopHint) {
+        self.scan_request.lock().unwrap().top_hint = Some(top);
     }
 
     /// Gets the scan request of the provider.

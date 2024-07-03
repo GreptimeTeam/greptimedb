@@ -15,6 +15,14 @@
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
 
+// TODO(yingwen): Stores ordering. Maybe also stores columns.
+/// Hint to fetch the top rows from the data source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TopHint {
+    /// Fetch the last row from each time series.
+    LastRow,
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
     /// Indices of columns to read, `None` to read all columns. This indices is
@@ -29,4 +37,6 @@ pub struct ScanRequest {
     /// If set, it contains the amount of rows needed by the caller,
     /// The data source should return *at least* this number of rows if available.
     pub limit: Option<usize>,
+    /// Optional hint to fetch the top rows from the data source.
+    pub top_hint: Option<TopHint>,
 }

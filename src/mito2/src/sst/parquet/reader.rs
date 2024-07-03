@@ -29,6 +29,8 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Operator};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
+use datatypes::vectors::BooleanVector;
 use itertools::Itertools;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
@@ -37,10 +39,10 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, TopHint};
 use table::predicate::Predicate;
 
-use crate::cache::CacheManagerRef;
+use crate::cache::{CacheManagerRef, TopRows};
 use crate::error;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
@@ -575,6 +577,11 @@ impl RowGroupReaderBuilder {
         &self.file_handle
     }
 
+    /// Cache manager of the builder.
+    pub(crate) fn cache_manager(&self) -> Option<&CacheManagerRef> {
+        self.cache_manager.as_ref()
+    }
+
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
     pub(crate) async fn build(
         &self,
@@ -590,6 +597,7 @@ impl RowGroupReaderBuilder {
             &self.file_path,
             self.object_store.clone(),
         );
+
         // Fetches data into memory.
         row_group
             .fetch(&self.projection, row_selection.as_ref())
@@ -812,7 +820,11 @@ impl ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, row_selection)
                 .await?;
-            ReaderState::Readable(RowGroupReader::new(context.clone(), parquet_reader))
+            ReaderState::Readable(RowGroupReader::new(
+                row_group_idx,
+                context.clone(),
+                parquet_reader,
+            ))
         } else {
             ReaderState::Exhausted(ReaderMetrics::default())
         };
@@ -837,6 +849,8 @@ impl ParquetReader {
 
 /// Reader to read a row group of a parquet file.
 pub struct RowGroupReader {
+    /// Id of the row group.
+    row_group_idx: usize,
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet reader.
@@ -845,17 +859,52 @@ pub struct RowGroupReader {
     batches: VecDeque<Batch>,
     /// Local scan metrics.
     metrics: ReaderMetrics,
+    /// Optional top hint.
+    top_hint: Option<TopHint>,
+    /// Last rows.
+    top_rows: Vec<Batch>,
+    /// Last key.
+    last_key: Option<Vec<u8>>,
+    /// Only returns cached batches.
+    cache_only: bool,
 }
 
 impl RowGroupReader {
     /// Creates a new reader.
-    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn new(
+        row_group_idx: usize,
+        context: FileRangeContextRef,
+        reader: ParquetRecordBatchReader,
+    ) -> Self {
         Self {
+            row_group_idx,
             context,
             reader,
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
+            top_hint: None,
+            top_rows: Vec::default(),
+            last_key: None,
+            cache_only: false,
         }
+    }
+
+    /// Attaches top hint.
+    pub(crate) fn with_top_hint(mut self, top_hint: Option<TopHint>) -> Self {
+        self.top_hint = top_hint;
+        self
+    }
+
+    /// Attaches cache only.
+    pub(crate) fn with_cache_only(mut self, cache_only: bool) -> Self {
+        self.cache_only = cache_only;
+        self
+    }
+
+    /// Attaches batches.
+    pub(crate) fn with_batches(mut self, batches: VecDeque<Batch>) -> Self {
+        self.batches = batches;
+        self
     }
 
     /// Gets the metrics.
@@ -870,6 +919,51 @@ impl RowGroupReader {
 
     /// Tries to fetch next [Batch] from the reader.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        if self.cache_only {
+            return Ok(self.batches.pop_front());
+        }
+
+        // TODO(yingwen): Ensure filters is None. Ensure all rows are selected.
+        if self.top_hint.is_none() || self.context.cache_manager().is_none() {
+            return self.fetch_next_batch().await;
+        }
+
+        let Some(mut batch) = self.fetch_next_batch().await? else {
+            // Update last point cache.
+            let top_rows = TopRows {
+                last: true,
+                batches: std::mem::take(&mut self.top_rows),
+            };
+            self.context.cache_manager().unwrap().put_top_rows(
+                (self.context.file_id(), self.row_group_idx),
+                Arc::new(top_rows),
+            );
+
+            return Ok(None);
+        };
+
+        if let Some(last_key) = &self.last_key {
+            if batch.primary_key() == last_key {
+                self.top_rows.pop();
+            }
+        }
+        self.last_key = Some(batch.primary_key().to_vec());
+
+        // TODO(yingwen): First or last.
+        // TODO(yingwen): Check the range of last timestamp.
+        assert!(!batch.is_empty());
+        let filter = BooleanVector::from_iterator(
+            (0..batch.num_rows()).map(|idx| idx == batch.num_rows() - 1),
+        );
+        // TODO(yingwen): error handling.
+        batch.filter(&filter).unwrap();
+        self.top_rows.push(batch.clone());
+
+        Ok(Some(batch))
+    }
+
+    /// Tries to fetch next [Batch] from the reader without updating the top selection.
+    pub(crate) async fn fetch_next_batch(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();

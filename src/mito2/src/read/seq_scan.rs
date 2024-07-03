@@ -29,13 +29,14 @@ use datatypes::schema::SchemaRef;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, TopHint};
 use table::predicate::Predicate;
 use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::memtable::MemtableRef;
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
+use crate::read::first_last::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::{
     FileRangeCollector, ScanInput, ScanPart, ScanPartList, StreamContext,
@@ -102,7 +103,11 @@ impl SeqScan {
     }
 
     /// Builds sources from a [ScanPart].
-    fn build_part_sources(part: &ScanPart, sources: &mut Vec<Source>) -> Result<()> {
+    fn build_part_sources(
+        part: &ScanPart,
+        top_hint: &Option<TopHint>,
+        sources: &mut Vec<Source>,
+    ) -> Result<()> {
         sources.reserve(part.memtable_ranges.len() + part.file_ranges.len());
         // Read memtables.
         for mem in &part.memtable_ranges {
@@ -117,6 +122,7 @@ impl SeqScan {
 
             // Creates a stream to read the file.
             let ranges = file.clone();
+            let top = top_hint.clone();
             let stream = try_stream! {
                 let mut reader_metrics = ReaderMetrics::default();
                 // Safety: We checked whether it is empty before.
@@ -124,7 +130,7 @@ impl SeqScan {
                 let region_id = ranges[0].file_handle().region_id();
                 let range_num = ranges.len();
                 for range in ranges {
-                    let mut reader = range.reader().await?;
+                    let mut reader = range.reader(top.clone()).await?;
                     let compat_batch = range.compat_batch();
                     while let Some(mut batch) = reader.next_batch().await? {
                         if let Some(compat) = compat_batch {
@@ -165,7 +171,7 @@ impl SeqScan {
                 return Ok(None);
             };
 
-            Self::build_part_sources(part, &mut sources)?;
+            Self::build_part_sources(part, &stream_ctx.input.top_hint, &mut sources)?;
         }
 
         Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
@@ -188,7 +194,7 @@ impl SeqScan {
             return Ok(None);
         };
 
-        Self::build_part_sources(part, &mut sources)?;
+        Self::build_part_sources(part, &stream_ctx.input.top_hint, &mut sources)?;
 
         Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
     }
@@ -210,8 +216,8 @@ impl SeqScan {
         let reader = builder.build().await?;
 
         let dedup = !stream_ctx.input.append_mode;
-        if dedup {
-            let reader = match stream_ctx.input.merge_mode {
+        let reader = if dedup {
+            match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::new(DedupReader::new(
                     reader,
                     LastRow::new(stream_ctx.input.filter_deleted),
@@ -220,12 +226,19 @@ impl SeqScan {
                     reader,
                     LastNonNull::new(stream_ctx.input.filter_deleted),
                 )) as _,
-            };
-            Ok(Some(reader))
+            }
         } else {
-            let reader = Box::new(reader);
-            Ok(Some(reader))
-        }
+            Box::new(reader) as _
+        };
+
+        let Some(top) = &stream_ctx.input.top_hint else {
+            return Ok(Some(reader));
+        };
+        let reader = match top {
+            TopHint::LastRow => Box::new(LastRowReader::new(reader)) as _,
+        };
+
+        Ok(Some(reader))
     }
 
     /// Scans the given partition when the part list is set properly.

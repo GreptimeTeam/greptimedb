@@ -15,6 +15,7 @@
 //! Structs and functions for reading ranges from a parquet file. A file range
 //! is usually a row group in a parquet file.
 
+use std::collections::VecDeque;
 use std::ops::BitAnd;
 use std::sync::Arc;
 
@@ -23,12 +24,14 @@ use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::ResultExt;
+use store_api::storage::TopHint;
 
+use crate::cache::CacheManagerRef;
 use crate::error::{FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result};
 use crate::read::compat::CompatBatch;
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
 
@@ -59,14 +62,40 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
-    pub(crate) async fn reader(&self) -> Result<RowGroupReader> {
+    pub(crate) async fn reader(&self, mut top_hint: Option<TopHint>) -> Result<RowGroupReader> {
+        let mut cache_only = false;
+        let mut batches = VecDeque::new();
+        if top_hint.is_some() && self.context.cache_manager().is_some() {
+            let top_rows = self
+                .context
+                .cache_manager()
+                .unwrap()
+                .get_top_rows(&(self.file_handle().file_id(), self.row_group_idx));
+            if let Some(rows) = top_rows {
+                top_hint = None;
+                cache_only = true;
+                batches = VecDeque::from_iter(rows.batches.iter().cloned());
+                // common_telemetry::info!(
+                //     "file {}, row group {}, top cache hit, top_select: {:?}",
+                //     self.file_handle().file_id(),
+                //     self.row_group_idx,
+                //     top_select.selection
+                // );
+            }
+        }
+
         let parquet_reader = self
             .context
             .reader_builder
             .build(self.row_group_idx, self.row_selection.clone())
             .await?;
 
-        Ok(RowGroupReader::new(self.context.clone(), parquet_reader))
+        Ok(
+            RowGroupReader::new(self.row_group_idx, self.context.clone(), parquet_reader)
+                .with_top_hint(top_hint)
+                .with_cache_only(cache_only)
+                .with_batches(batches),
+        )
     }
 
     /// Returns the helper to compat batches.
@@ -114,6 +143,11 @@ impl FileRangeContext {
         self.reader_builder.file_path()
     }
 
+    /// Returns the file id of the file to read.
+    pub(crate) fn file_id(&self) -> FileId {
+        self.reader_builder.file_handle().file_id()
+    }
+
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.base.filters
@@ -143,6 +177,11 @@ impl FileRangeContext {
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     pub(crate) fn precise_filter(&self, input: Batch) -> Result<Option<Batch>> {
         self.base.precise_filter(input)
+    }
+
+    /// Returns the cache manager.
+    pub(crate) fn cache_manager(&self) -> Option<&CacheManagerRef> {
+        self.reader_builder.cache_manager()
     }
 }
 
