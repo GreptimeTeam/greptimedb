@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(row_count, tags.len() * segment_row_count);
 
         move |expr| {
-            let cache = Arc::new(InvertedIndexCache::new(10, 10));
+            let cache = Arc::new(InvertedIndexCache::new(10, 10, 10));
             let applier = SstIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),

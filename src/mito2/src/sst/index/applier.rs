@@ -22,6 +22,7 @@ use index::inverted_index::format::reader::cache::{
     CachedInvertedIndexBlobReader, InvertedIndexCache,
 };
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
+use index::inverted_index::metrics::INDEX_CACHE_STATS;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
@@ -102,7 +103,8 @@ impl SstIndexApplier {
         match self.cached_puffin_reader(file_id).await? {
             Some(mut puffin_reader) => {
                 let start = Instant::now();
-                let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+                let blob_reader =
+                    Self::index_blob_reader(&mut puffin_reader, file_id, &self.index_cache).await?;
                 common_telemetry::debug!("Build index blob reader cost: {:?}", start.elapsed());
 
                 if let Some(index_cache) = &self.index_cache {
@@ -126,7 +128,8 @@ impl SstIndexApplier {
             None => {
                 let start = Instant::now();
                 let mut puffin_reader = self.remote_puffin_reader(file_id).await?;
-                let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+                let blob_reader =
+                    Self::index_blob_reader(&mut puffin_reader, file_id, &self.index_cache).await?;
                 common_telemetry::debug!("Build index blob reader cost: {:?}", start.elapsed());
 
                 if let Some(index_cache) = &self.index_cache {
@@ -192,13 +195,39 @@ impl SstIndexApplier {
     }
 
     /// Helper function to create a [`PuffinBlobReader`] for the index blob of the provided index file reader.
-    async fn index_blob_reader(
-        puffin_reader: &mut PuffinFileReader<impl AsyncRead + AsyncSeek + Unpin + Send>,
-    ) -> Result<impl AsyncRead + AsyncSeek + '_> {
-        let file_meta = puffin_reader
-            .metadata()
-            .await
-            .context(PuffinReadMetadataSnafu)?;
+    async fn index_blob_reader<'a>(
+        puffin_reader: &'a mut PuffinFileReader<impl AsyncRead + AsyncSeek + Unpin + Send>,
+        file_id: FileId,
+        cache: &Option<Arc<InvertedIndexCache>>,
+    ) -> Result<impl AsyncRead + AsyncSeek + 'a> {
+        let file_meta = if let Some(cache) = cache.as_ref() {
+            if let Some(cached_metadata) = cache.get_file_metadata(file_id.into()) {
+                INDEX_CACHE_STATS
+                    .with_label_values(&["puffin_metadata", "hit"])
+                    .inc();
+                cached_metadata
+            } else {
+                INDEX_CACHE_STATS
+                    .with_label_values(&["puffin_metadata", "hit"])
+                    .inc();
+                let file_meta = Arc::new(
+                    puffin_reader
+                        .metadata()
+                        .await
+                        .context(PuffinReadMetadataSnafu)?,
+                );
+                cache.put_file_metadata(file_id.into(), file_meta.clone());
+                file_meta
+            }
+        } else {
+            Arc::new(
+                puffin_reader
+                    .metadata()
+                    .await
+                    .context(PuffinReadMetadataSnafu)?,
+            )
+        };
+
         let blob_meta = file_meta
             .blobs
             .iter()

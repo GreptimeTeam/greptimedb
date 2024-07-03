@@ -24,6 +24,7 @@ moka = { workspace = true, features = ["sync", "future"] }
 pin-project.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+puffin.workspace = true
 regex.workspace = true
 regex-automata.workspace = true
 snafu.workspace = true

@@ -5155,6 +5155,7 @@ dependencies = [
  "pin-project",
  "prometheus",
  "prost 0.12.6",
+ "puffin",
  "rand",
  "regex",
  "regex-automata 0.4.7",

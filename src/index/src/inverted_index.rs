@@ -15,7 +15,7 @@
 pub mod create;
 pub mod error;
 pub mod format;
-mod metrics;
+pub mod metrics;
 pub mod search;
 
 pub type FstMap = fst::Map<Vec<u8>>;
