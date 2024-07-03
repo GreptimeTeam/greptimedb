@@ -123,6 +123,24 @@ pub fn normalize_path(path: &str) -> String {
     p
 }
 
+// This logical tries to extract parent path from the object storage operation
+// the function also relies on assumption that the region path is built from
+// pattern `<data|index>/catalog/schema/table_id/....`
+//
+// this implementation is also safe when the path is not constructed in a
+// way that we assumed.
+pub fn extract_parent_path(path: &str) -> String {
+    // split the path into `catalog`, `schema` and others
+    let parts: Vec<&str> = path.splitn(4, '/').collect();
+    if parts.len() == 4 {
+        // retain the first 3 part
+        parts[0..3].join("/").to_string()
+    } else {
+        // unexpected path, return empty string for safety
+        String::new()
+    }
+}
+
 /// Attaches instrument layers to the object store.
 pub fn with_instrument_layers(object_store: ObjectStore) -> ObjectStore {
     object_store
@@ -178,5 +196,15 @@ mod tests {
         assert_eq!("abc/def", join_path(" abc", "/def "));
         assert_eq!("/abc", join_path("//", "/abc"));
         assert_eq!("abc/def", join_path("abc/", "//def"));
+    }
+
+    #[test]
+    fn test_path_extraction() {
+        assert_eq!(
+            "data/greptime/public",
+            extract_parent_path("data/greptime/public/1024/1024_0000000000/")
+        );
+
+        assert_eq!("", extract_parent_path("tmp/greptime"));
     }
 }
