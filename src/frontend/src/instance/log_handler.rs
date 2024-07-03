@@ -73,7 +73,7 @@ impl LogHandler for Instance {
         name: &str,
         version: PipelineVersion,
         ctx: QueryContextRef,
-    ) -> ServerResult<()> {
+    ) -> ServerResult<Option<()>> {
         self.pipeline_operator
             .delete_pipeline(name, version, ctx)
             .await

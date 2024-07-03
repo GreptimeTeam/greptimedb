@@ -248,9 +248,8 @@ impl PipelineTable {
             .context(InsertPipelineSnafu)?;
 
         info!(
-            "Inserted pipeline: {} into {} table: {}, output: {:?}.",
+            "Insert pipeline success, name: {:?}, table: {:?}, output: {:?}",
             name,
-            PIPELINE_TABLE_NAME,
             table_info.full_table_name(),
             output
         );
@@ -320,7 +319,7 @@ impl PipelineTable {
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<()> {
+    ) -> Result<Option<()>> {
         // 0. version is ensured at the http api level not None
         ensure!(
             version.is_some(),
@@ -330,7 +329,7 @@ impl PipelineTable {
         // 1. check pipeline exist in catalog
         let pipeline = self.find_pipeline(schema, name, version).await?;
         if pipeline.is_none() {
-            return Ok(());
+            return Ok(None);
         }
 
         // 2. do delete
@@ -378,8 +377,11 @@ impl PipelineTable {
             .context(ExecuteInternalStatementSnafu)?;
 
         info!(
-            "delete pipeline: {:?}, version: {:?}, output: {:?}",
-            name, version, output
+            "Delete pipeline success, name: {:?}, version: {:?}, table: {:?}, output: {:?}",
+            name,
+            version,
+            table_info.full_table_name(),
+            output
         );
 
         // remove cache with version and latest
@@ -388,7 +390,7 @@ impl PipelineTable {
         self.pipelines
             .remove(&generate_pipeline_cache_key(schema, name, None));
 
-        Ok(())
+        Ok(Some(()))
     }
 
     async fn find_pipeline(

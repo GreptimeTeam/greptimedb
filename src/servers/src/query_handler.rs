@@ -149,5 +149,5 @@ pub trait LogHandler {
         name: &str,
         version: PipelineVersion,
         query_ctx: QueryContextRef,
-    ) -> Result<()>;
+    ) -> Result<Option<()>>;
 }

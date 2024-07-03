@@ -222,7 +222,7 @@ impl PipelineOperator {
         name: &str,
         version: PipelineVersion,
         query_ctx: QueryContextRef,
-    ) -> Result<()> {
+    ) -> Result<Option<()>> {
         // trigger load pipeline table
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;

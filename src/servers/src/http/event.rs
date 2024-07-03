@@ -126,18 +126,7 @@ pub async fn add_pipeline(
         .await;
 
     result
-        .map(|pipeline| {
-            let json_header =
-                HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
-            let mut headers = HeaderMap::new();
-            headers.append(CONTENT_TYPE, json_header);
-
-            let version = pipeline.0.to_timezone_aware_string(None);
-            (
-                headers,
-                json!({"version": version, "name": pipeline_name}).to_string(),
-            )
-        })
+        .map(|pipeline| to_json_result(pipeline_name, pipeline.0.to_timezone_aware_string(None)))
         .map_err(|e| {
             error!(e; "failed to insert pipeline");
             e
@@ -150,7 +139,7 @@ pub async fn delete_pipeline(
     Extension(query_ctx): Extension<QueryContextRef>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Path(pipeline_name): Path<String>,
-) -> Result<String> {
+) -> Result<Response> {
     let handler = state.log_handler;
     ensure!(
         !pipeline_name.is_empty(),
@@ -159,16 +148,22 @@ pub async fn delete_pipeline(
         }
     );
 
-    let version = query_params.version.context(InvalidParameterSnafu {
+    let version_str = query_params.version.context(InvalidParameterSnafu {
         reason: "version is required",
     })?;
 
-    let version = to_pipeline_version(Some(version)).context(PipelineSnafu)?;
+    let version = to_pipeline_version(Some(version_str.clone())).context(PipelineSnafu)?;
 
     handler
         .delete_pipeline(&pipeline_name, version, query_ctx)
         .await
-        .map(|_| "ok".to_string())
+        .map(|v| {
+            if v.is_some() {
+                to_json_result(pipeline_name, version_str).into_response()
+            } else {
+                (HeaderMap::new(), json!({}).to_string()).into_response()
+            }
+        })
         .map_err(|e| {
             error!(e; "failed to delete pipeline");
             e
@@ -297,6 +292,17 @@ async fn ingest_logs_inner(
         .await
         .with_execution_time(start.elapsed().as_millis() as u64);
     Ok(response)
+}
+
+fn to_json_result(pipeline_name: String, version: String) -> impl IntoResponse {
+    let json_header = HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_TYPE, json_header);
+
+    (
+        headers,
+        json!({"version": version, "name": pipeline_name}).to_string(),
+    )
 }
 
 pub trait LogValidator {
