@@ -301,6 +301,7 @@ async fn ingest_logs_inner(
 
 pub trait LogValidator {
     /// validate payload by source before processing
+    /// Return a `Some` result to indicate validation failure.
     fn validate(&self, source: Option<String>, payload: &str) -> Option<Result<HttpResponse>>;
 }
 

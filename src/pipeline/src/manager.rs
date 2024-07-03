@@ -25,8 +25,6 @@ pub mod pipeline_operator;
 pub mod table;
 pub mod util;
 
-const PIPELINE_TABLE_NAME: &str = "pipelines";
-
 /// Pipeline version. An optional timestamp with nanosecond precision.
 /// If the version is None, it means the latest version of the pipeline.
 /// User can specify the version by providing a timestamp string formatted as iso8601.

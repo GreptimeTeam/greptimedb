@@ -49,9 +49,10 @@ use crate::error::{
 };
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
-use crate::manager::{PipelineInfo, PipelineVersion, PIPELINE_TABLE_NAME};
+use crate::manager::{PipelineInfo, PipelineVersion};
 use crate::util::{build_plan_filter, generate_pipeline_cache_key};
 
+pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
 pub(crate) const PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME: &str = "name";
 pub(crate) const PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME: &str = "schema";
 const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type";

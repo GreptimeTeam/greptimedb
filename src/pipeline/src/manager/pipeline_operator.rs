@@ -29,12 +29,12 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
-use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion, PIPELINE_TABLE_NAME};
+use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion};
 use crate::metrics::{
     METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
 };
-use crate::table::PipelineTable;
+use crate::table::{PipelineTable, PIPELINE_TABLE_NAME};
 use crate::{GreptimeTransformer, Pipeline};
 
 /// PipelineOperator is responsible for managing pipelines.
