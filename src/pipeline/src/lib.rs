@@ -14,6 +14,7 @@
 
 mod etl;
 mod manager;
+mod metrics;
 
 pub use etl::transform::GreptimeTransformer;
 pub use etl::value::Value;
