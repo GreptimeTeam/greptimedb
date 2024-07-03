@@ -5153,6 +5153,7 @@ dependencies = [
  "mockall",
  "moka",
  "pin-project",
+ "prometheus",
  "prost 0.12.6",
  "rand",
  "regex",

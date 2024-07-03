@@ -246,7 +246,8 @@ impl CacheManagerBuilder {
                 .build()
         });
 
-        let inverted_index_cache = InvertedIndexCache::new(1024, 1024);
+        // todo(hl): make it configurable.
+        let inverted_index_cache = InvertedIndexCache::new(1024 * 16, 1024 * 16);
         CacheManager {
             sst_meta_cache,
             vector_cache,
