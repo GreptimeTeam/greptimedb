@@ -184,6 +184,7 @@ mod tests {
                     comment: "comment".to_string(),
                     options: Default::default(),
                 },
+                vec![],
             )
             .await
             .unwrap();

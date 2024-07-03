@@ -38,7 +38,7 @@
 //!
 //! 6. Flow info key: `__flow/info/{flow_id}`
 //!     - Stores metadata of the flow.
-//! 
+//!
 //! 7. Flow info key: `__flow/route/{flow_id}/{partition_id}`
 //!     - Stores route of the flow.
 //!

@@ -14,8 +14,6 @@
 
 pub mod flow_info;
 pub(crate) mod flow_name;
-/// TODO(weny): remove it later.
-#[allow(dead_code)]
 pub(crate) mod flow_route;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
@@ -24,12 +22,14 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use common_telemetry::info;
+use flow_route::{FlowRouteKey, FlowRouteManager, FlowRouteValue};
 use snafu::{ensure, OptionExt};
 
 use self::flow_info::{FlowInfoKey, FlowInfoValue};
 use self::flow_name::FlowNameKey;
 use self::flownode_flow::FlownodeFlowKey;
 use self::table_flow::TableFlowKey;
+use super::FlowPartitionId;
 use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowInfoManager;
@@ -97,6 +97,7 @@ pub type FlowMetadataManagerRef = Arc<FlowMetadataManager>;
 /// - Delete metadata of the flow.
 pub struct FlowMetadataManager {
     flow_info_manager: FlowInfoManager,
+    flow_route_manager: FlowRouteManager,
     flownode_flow_manager: FlownodeFlowManager,
     table_flow_manager: TableFlowManager,
     flow_name_manager: FlowNameManager,
@@ -104,10 +105,11 @@ pub struct FlowMetadataManager {
 }
 
 impl FlowMetadataManager {
-    /// Returns a new [FlowMetadataManager].
+    /// Returns a new [`FlowMetadataManager`].
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             flow_info_manager: FlowInfoManager::new(kv_backend.clone()),
+            flow_route_manager: FlowRouteManager::new(kv_backend.clone()),
             flow_name_manager: FlowNameManager::new(kv_backend.clone()),
             flownode_flow_manager: FlownodeFlowManager::new(kv_backend.clone()),
             table_flow_manager: TableFlowManager::new(kv_backend.clone()),
@@ -115,22 +117,27 @@ impl FlowMetadataManager {
         }
     }
 
-    /// Returns the [FlowNameManager].
+    /// Returns the [`FlowNameManager`].
     pub fn flow_name_manager(&self) -> &FlowNameManager {
         &self.flow_name_manager
     }
 
-    /// Returns the [FlowManager].
+    /// Returns the [`FlowInfoManager`].
     pub fn flow_info_manager(&self) -> &FlowInfoManager {
         &self.flow_info_manager
     }
 
-    /// Returns the [FlownodeFlowManager].
+    /// Returns the [`FlowRouteManager`].
+    pub fn flow_route_manager(&self) -> &FlowRouteManager {
+        &self.flow_route_manager
+    }
+
+    /// Returns the [`FlownodeFlowManager`].
     pub fn flownode_flow_manager(&self) -> &FlownodeFlowManager {
         &self.flownode_flow_manager
     }
 
-    /// Returns the [TableFlowManager].
+    /// Returns the [`TableFlowManager`].
     pub fn table_flow_manager(&self) -> &TableFlowManager {
         &self.table_flow_manager
     }
@@ -139,36 +146,42 @@ impl FlowMetadataManager {
     pub async fn create_flow_metadata(
         &self,
         flow_id: FlowId,
-        flow_value: FlowInfoValue,
+        flow_info: FlowInfoValue,
+        flow_routes: Vec<(FlowPartitionId, FlowRouteValue)>,
     ) -> Result<()> {
         let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) = self
             .flow_name_manager
-            .build_create_txn(&flow_value.catalog_name, &flow_value.flow_name, flow_id)?;
+            .build_create_txn(&flow_info.catalog_name, &flow_info.flow_name, flow_id)?;
 
         let (create_flow_txn, on_create_flow_failure) = self
             .flow_info_manager
-            .build_create_txn(flow_id, &flow_value)?;
+            .build_create_txn(flow_id, &flow_info)?;
+
+        let create_flow_routes_txn = self
+            .flow_route_manager
+            .build_create_txn(flow_id, flow_routes)?;
 
         let create_flownode_flow_txn = self
             .flownode_flow_manager
-            .build_create_txn(flow_id, flow_value.flownode_ids().clone());
+            .build_create_txn(flow_id, flow_info.flownode_ids().clone());
 
         let create_table_flow_txn = self.table_flow_manager.build_create_txn(
             flow_id,
-            flow_value.flownode_ids().clone(),
-            flow_value.source_table_ids(),
+            flow_info.flownode_ids().clone(),
+            flow_info.source_table_ids(),
         );
 
         let txn = Txn::merge_all(vec![
             create_flow_flow_name_txn,
             create_flow_txn,
+            create_flow_routes_txn,
             create_flownode_flow_txn,
             create_table_flow_txn,
         ]);
         info!(
             "Creating flow {}.{}({}), with {} txn operations",
-            flow_value.catalog_name,
-            flow_value.flow_name,
+            flow_info.catalog_name,
+            flow_info.flow_name,
             flow_id,
             txn.max_operations()
         );
@@ -188,14 +201,14 @@ impl FlowMetadataManager {
             if remote_flow_flow_name.flow_id() != flow_id {
                 info!(
                     "Trying to create flow {}.{}({}), but flow({}) already exists",
-                    flow_value.catalog_name,
-                    flow_value.flow_name,
+                    flow_info.catalog_name,
+                    flow_info.flow_name,
                     flow_id,
                     remote_flow_flow_name.flow_id()
                 );
 
                 return error::FlowAlreadyExistsSnafu {
-                    flow_name: format!("{}.{}", flow_value.catalog_name, flow_value.flow_name),
+                    flow_name: format!("{}.{}", flow_info.catalog_name, flow_info.flow_name),
                 }
                 .fail();
             }
@@ -207,7 +220,7 @@ impl FlowMetadataManager {
                     ),
                 })?;
             let op_name = "creating flow";
-            ensure_values!(*remote_flow, flow_value, op_name);
+            ensure_values!(*remote_flow, flow_info, op_name);
         }
 
         Ok(())
@@ -216,7 +229,7 @@ impl FlowMetadataManager {
     fn flow_metadata_keys(&self, flow_id: FlowId, flow_value: &FlowInfoValue) -> Vec<Vec<u8>> {
         let source_table_ids = flow_value.source_table_ids();
         let mut keys =
-            Vec::with_capacity(2 + flow_value.flownode_ids.len() * (source_table_ids.len() + 1));
+            Vec::with_capacity(2 + flow_value.flownode_ids.len() * (source_table_ids.len() + 2));
         // Builds flow name key
         let flow_name = FlowNameKey::new(&flow_value.catalog_name, &flow_value.flow_name);
         keys.push(flow_name.to_bytes());
@@ -231,14 +244,13 @@ impl FlowMetadataManager {
             .iter()
             .for_each(|(&partition_id, &flownode_id)| {
                 keys.push(FlownodeFlowKey::new(flownode_id, flow_id, partition_id).to_bytes());
-
+                keys.push(FlowRouteKey::new(flow_id, partition_id).to_bytes());
                 source_table_ids.iter().for_each(|&table_id| {
                     keys.push(
                         TableFlowKey::new(table_id, flownode_id, flow_id, partition_id).to_bytes(),
                     );
                 })
             });
-
         keys
     }
 
@@ -271,6 +283,7 @@ mod tests {
     use crate::key::flow::table_flow::TableFlowKey;
     use crate::key::FlowPartitionId;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::peer::Peer;
     use crate::FlownodeId;
 
     #[derive(Debug)]
@@ -342,13 +355,27 @@ mod tests {
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let flow_id = 10;
         let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_routes = vec![
+            (
+                1u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                2,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
         flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_value.clone())
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
             .await
             .unwrap();
         // Creates again.
         flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_value.clone())
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
             .await
             .unwrap();
         let got = flow_metadata_manager
@@ -357,6 +384,29 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let routes = flow_metadata_manager
+            .flow_route_manager()
+            .routes(flow_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            routes,
+            vec![
+                (
+                    FlowRouteKey::new(flow_id, 1),
+                    FlowRouteValue {
+                        peer: Peer::empty(1),
+                    },
+                ),
+                (
+                    FlowRouteKey::new(flow_id, 2),
+                    FlowRouteValue {
+                        peer: Peer::empty(2),
+                    },
+                ),
+            ]
+        );
         assert_eq!(got, flow_value);
         let flows = flow_metadata_manager
             .flownode_flow_manager()
@@ -382,13 +432,27 @@ mod tests {
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv);
         let flow_id = 10;
         let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_routes = vec![
+            (
+                1u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                2,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
         flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_value.clone())
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
             .await
             .unwrap();
         // Creates again
         let err = flow_metadata_manager
-            .create_flow_metadata(flow_id + 1, flow_value)
+            .create_flow_metadata(flow_id + 1, flow_value, flow_routes.clone())
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::FlowAlreadyExists { .. });
@@ -401,8 +465,22 @@ mod tests {
         let flow_id = 10;
         let catalog_name = "greptime";
         let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_routes = vec![
+            (
+                1u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                2,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
         flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_value.clone())
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
             .await
             .unwrap();
         // Creates again.
@@ -423,7 +501,7 @@ mod tests {
             options: Default::default(),
         };
         let err = flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_value)
+            .create_flow_metadata(flow_id, flow_value, flow_routes.clone())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Reads the different value"));
@@ -435,8 +513,14 @@ mod tests {
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let flow_id = 10;
         let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_routes = vec![(
+            0u32,
+            FlowRouteValue {
+                peer: Peer::empty(1),
+            },
+        )];
         flow_metadata_manager
-            .create_flow_metadata(flow_id, flow_value.clone())
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
             .await
             .unwrap();
 
