@@ -269,11 +269,11 @@
 | `wal` | -- | -- | -- |
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster. |
-| `wal.kafka_topic_num_topics` | Integer | `64` | Number of topics to be created upon start. |
-| `wal.kafka_topic_selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default) |
-| `wal.kafka_topic_name_prefix` | String | `greptimedb_wal_topic` | A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`. |
-| `wal.kafka_topic_replication_factor` | Integer | `1` | Expected number of replicas of each partition. |
-| `wal.kafka_topic_create_topic_timeout` | String | `30s` | Above which a topic creation operation will be cancelled. |
+| `wal.num_topics` | Integer | `64` | Number of topics to be created upon start. |
+| `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default) |
+| `wal.topic_name_prefix` | String | `greptimedb_wal_topic` | A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`. |
+| `wal.replication_factor` | Integer | `1` | Expected number of replicas of each partition. |
+| `wal.create_topic_timeout` | String | `30s` | Above which a topic creation operation will be cancelled. |
 | `wal.backoff_init` | String | `500ms` | The initial backoff for kafka clients. |
 | `wal.backoff_max` | String | `10s` | The maximum backoff for kafka clients. |
 | `wal.backoff_base` | Integer | `2` | Exponential backoff rate, i.e. next backoff = base * current backoff. |
