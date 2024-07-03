@@ -3368,6 +3368,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion-common 38.0.0",
+ "datafusion-expr 38.0.0",
  "enum_dispatch",
  "num",
  "num-traits",

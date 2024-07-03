@@ -146,6 +146,10 @@ impl TableProvider for DummyTableProvider {
         self.metadata.schema.arrow_schema().clone()
     }
 
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.metadata.schema.get_column_default(column)
+    }
+
     fn table_type(&self) -> TableType {
         TableType::Base
     }

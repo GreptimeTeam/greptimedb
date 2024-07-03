@@ -25,6 +25,7 @@ use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
+use datatypes::schema::SchemaRef;
 use store_api::region_engine::SinglePartitionScanner;
 use store_api::storage::ScanRequest;
 
@@ -35,11 +36,13 @@ use crate::table::{TableRef, TableType};
 pub struct DfTableProviderAdapter {
     table: TableRef,
     scan_req: Arc<Mutex<ScanRequest>>,
+    schema: SchemaRef,
 }
 
 impl DfTableProviderAdapter {
     pub fn new(table: TableRef) -> Self {
         Self {
+            schema: table.schema(),
             table,
             scan_req: Arc::default(),
         }
@@ -66,7 +69,7 @@ impl TableProvider for DfTableProviderAdapter {
     }
 
     fn schema(&self) -> DfSchemaRef {
-        self.table.schema().arrow_schema().clone()
+        self.schema.arrow_schema().clone()
     }
 
     fn table_type(&self) -> DfTableType {
@@ -75,6 +78,10 @@ impl TableProvider for DfTableProviderAdapter {
             TableType::View => DfTableType::View,
             TableType::Temporary => DfTableType::Temporary,
         }
+    }
+
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.schema.get_column_default(column)
     }
 
     async fn scan(
