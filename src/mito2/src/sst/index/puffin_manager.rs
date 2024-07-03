@@ -20,8 +20,9 @@ use common_error::ext::BoxedError;
 use object_store::{FuturesAsyncReader, FuturesAsyncWriter, ObjectStore};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
-use puffin::puffin_manager::fs_puffin_manager::{FsPuffinManager, FsPuffinReader};
+use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use puffin::puffin_manager::stager::{BoundedStager, FsBlobGuard, FsDirGuard};
+use puffin::puffin_manager::BlobGuard;
 use snafu::ResultExt;
 
 use crate::error::{CreateStagingDirSnafu, PuffinInitStagerSnafu, Result};
@@ -34,13 +35,8 @@ use crate::sst::index::store::{self, InstrumentedStore};
 type InstrumentedAsyncRead = store::InstrumentedAsyncRead<'static, FuturesAsyncReader>;
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
-pub type SstPuffinReader = FsPuffinReader<
-    Arc<FsBlobGuard>,
-    Arc<FsDirGuard>,
-    InstrumentedAsyncRead,
-    InstrumentedAsyncWrite,
->;
-pub type SstPuffinManager = FsPuffinManager<
+pub(crate) type BlobReader = <Arc<FsBlobGuard> as BlobGuard>::Reader;
+pub(crate) type SstPuffinManager = FsPuffinManager<
     Arc<FsBlobGuard>,
     Arc<FsDirGuard>,
     InstrumentedAsyncRead,
@@ -181,7 +177,7 @@ mod tests {
             .put_blob(blob_key, Cursor::new(raw_data), PutOptions::default())
             .await
             .unwrap();
-        let dir_data = create_temp_dir("test_puffin_manager_factory_dir_data");
+        let dir_data = create_temp_dir("test_puffin_manager_factory_dir_data_");
         tokio::fs::write(dir_data.path().join("hello"), raw_data)
             .await
             .unwrap();

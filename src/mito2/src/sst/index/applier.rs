@@ -30,7 +30,7 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
-use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinReader};
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
@@ -90,25 +90,16 @@ impl SstIndexApplier {
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
 
-        let puffin_reader = match self.cached_puffin_reader(file_id).await {
+        let blob = match self.cached_blob_reader(file_id).await {
             Ok(Some(puffin_reader)) => puffin_reader,
             other => {
                 if let Err(err) = other {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
-                self.remote_puffin_reader(file_id).await?
+                self.remote_blob_reader(file_id).await?
             }
         };
-
-        let blob = puffin_reader
-            .blob(INDEX_BLOB_TYPE)
-            .await
-            .context(PuffinReadBlobSnafu)?
-            .reader()
-            .await
-            .context(PuffinBuildReaderSnafu)?;
         let mut blob_reader = InvertedIndexBlobReader::new(blob);
-
         let output = self
             .index_applier
             .apply(context, &mut blob_reader)
@@ -117,8 +108,8 @@ impl SstIndexApplier {
         Ok(output)
     }
 
-    /// Creates a [`SstPuffinReader`] from the cached index file.
-    async fn cached_puffin_reader(&self, file_id: FileId) -> Result<Option<SstPuffinReader>> {
+    /// Creates a blob reader from the cached index file.
+    async fn cached_blob_reader(&self, file_id: FileId) -> Result<Option<BlobReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
@@ -134,17 +125,28 @@ impl SstIndexApplier {
         let reader = puffin_manager
             .reader(&puffin_file_name)
             .await
+            .context(PuffinBuildReaderSnafu)?
+            .blob(INDEX_BLOB_TYPE)
+            .await
+            .context(PuffinReadBlobSnafu)?
+            .reader()
+            .await
             .context(PuffinBuildReaderSnafu)?;
-
         Ok(Some(reader))
     }
 
-    /// Creates a [`SstPuffinReader`] from the remote index file.
-    async fn remote_puffin_reader(&self, file_id: FileId) -> Result<SstPuffinReader> {
+    /// Creates a blob reader from the remote index file.
+    async fn remote_blob_reader(&self, file_id: FileId) -> Result<BlobReader> {
         let puffin_manager = self.puffin_manager_factory.build(self.store.clone());
         let file_path = location::index_file_path(&self.region_dir, file_id);
         puffin_manager
             .reader(&file_path)
+            .await
+            .context(PuffinBuildReaderSnafu)?
+            .blob(INDEX_BLOB_TYPE)
+            .await
+            .context(PuffinReadBlobSnafu)?
+            .reader()
             .await
             .context(PuffinBuildReaderSnafu)
     }
