@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-async-compression = "0.4.11"
+async-compression = { version = "0.4.11", features = ["futures-io", "zstd"] }
 async-trait.workspace = true
 async-walkdir = "2.0.0"
 bitflags.workspace = true

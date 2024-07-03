@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod create;
-pub mod error;
-pub mod format;
-mod metrics;
-pub mod search;
+use mockall::lazy_static;
+use prometheus::{register_int_counter_vec, IntCounterVec};
 
-pub type FstMap = fst::Map<Vec<u8>>;
-pub type Bytes = Vec<u8>;
-pub type BytesRef<'a> = &'a [u8];
+lazy_static! {
+    pub static ref INDEX_CACHE_STATS: IntCounterVec = register_int_counter_vec!(
+        "greptime_index_cache",
+        "greptime index cache stats",
+        &["cache_type", "op_type"]
+    )
+    .unwrap();
+}
