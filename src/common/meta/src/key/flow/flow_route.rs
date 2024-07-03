@@ -39,7 +39,7 @@ lazy_static! {
 
 /// The key stores the route info of the flow.
 ///
-/// The layout: `__flow/info/{flow_id}/{partition_id}`.
+/// The layout: `__flow/route/{flow_id}/{partition_id}`.
 #[derive(Debug, PartialEq)]
 pub struct FlowRouteKey(FlowScoped<FlowRouteKeyInner>);
 
