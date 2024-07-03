@@ -71,3 +71,69 @@ fn invalidator<'a>(
 fn filter(ident: &CacheIdent) -> bool {
     matches!(ident, CacheIdent::FlownodeId(_))
 }
+
+#[cfg(test)]
+mod tests {
+
+    use std::sync::Arc;
+
+    use common_error::ext::BoxedError;
+    use moka::future::CacheBuilder;
+
+    use crate::cache::new_flownode_peer_cache;
+    use crate::cluster::{ClusterInfo, NodeInfo, Role};
+    use crate::instruction::CacheIdent;
+    use crate::peer::Peer;
+    use crate::{error, FlownodeId};
+
+    struct MockClusterInfo {
+        error: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ClusterInfo for MockClusterInfo {
+        async fn list_nodes(
+            &self,
+            _role: Option<Role>,
+        ) -> std::result::Result<Vec<NodeInfo>, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn get_flownode(
+            &self,
+            id: FlownodeId,
+        ) -> std::result::Result<Option<Peer>, BoxedError> {
+            if self.error {
+                return Err(BoxedError::new(
+                    error::UnexpectedSnafu {
+                        err_msg: "mock error".to_string(),
+                    }
+                    .build(),
+                ));
+            }
+            Ok(Some(Peer {
+                id,
+                addr: format!("{}.flownode", id),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get() {
+        let mock_cluster_info = Arc::new(MockClusterInfo { error: false });
+        let cache = CacheBuilder::new(128).build();
+        let cache = new_flownode_peer_cache("test".to_string(), cache, mock_cluster_info);
+        let peer_1 = cache.get(1).await.unwrap().unwrap();
+        assert_eq!(peer_1.id, 1);
+        let peer_2 = cache.get(2).await.unwrap().unwrap();
+        assert_eq!(peer_2.id, 2);
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        cache
+            .invalidate(&[CacheIdent::FlownodeId(1)])
+            .await
+            .unwrap();
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+    }
+}
