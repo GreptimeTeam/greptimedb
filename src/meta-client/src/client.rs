@@ -213,7 +213,7 @@ impl MetaClientBuilder {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct MetaClient {
     id: Id,
     channel_manager: ChannelManager,

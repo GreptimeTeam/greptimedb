@@ -28,14 +28,14 @@ use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{FlownodeBuilder, FlownodeInstance};
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
-use meta_client::MetaClientOptions;
+use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result,
-    ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
+    MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -217,7 +217,7 @@ impl StartCommand {
             msg: "'cluster_id'",
         })?;
 
-        let node_id = opts
+        let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
 
@@ -225,11 +225,13 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = Arc::new(
-            flow::heartbeat::new_metasrv_client(cluster_id, node_id, meta_config)
-                .await
-                .context(StartFlownodeSnafu)?,
-        );
+        let meta_client = meta_client::create_meta_client(
+            cluster_id,
+            MetaClientType::Flownode { member_id },
+            meta_config,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
         let cache_max_capacity = meta_config.metadata_cache_max_capacity;
         let cache_ttl = meta_config.metadata_cache_ttl;

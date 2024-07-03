@@ -57,10 +57,7 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output> {
         let requests: RowInsertRequests = request.try_into()?;
         for expr in requests.inserts {
-            let _ = self
-                .tx
-                .send((ctx.current_schema().to_owned(), expr.table_name))
-                .await;
+            let _ = self.tx.send((ctx.current_schema(), expr.table_name)).await;
         }
 
         Ok(Output::new_with_affected_rows(0))

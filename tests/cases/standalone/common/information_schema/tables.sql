@@ -17,3 +17,21 @@ use public;
 drop schema abc;
 
 drop schema abcde;
+
+drop schema information_schema;
+
+use information_schema;
+
+create table t (ts timestamp time index);
+
+drop table build_info;
+
+alter table build_info add q string;
+
+truncate table build_info;
+
+insert into build_info values ("", "", "", "", "");
+
+delete from build_info;
+
+use public;
