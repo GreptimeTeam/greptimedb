@@ -36,8 +36,7 @@ impl InsertIntoExpr {
         self.columns
             .iter()
             .enumerate()
-            .find(|(_, c)| c.is_time_index())
-            .map(|(idx, _)| idx)
+            .find_map(|(idx, c)| if c.is_time_index() { Some(idx) } else { None })
     }
 
     /// Returns a vector of columns that are primary keys or time indices.
@@ -54,8 +53,13 @@ impl InsertIntoExpr {
         self.columns
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.is_primary_key() || c.is_time_index())
-            .map(|(i, _)| i)
+            .filter_map(|(i, c)| {
+                if c.is_primary_key() || c.is_time_index() {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>()
     }
 }
