@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -26,8 +25,8 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
-use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOptions;
+use meta_client::client::{HeartbeatSender, MetaClient};
+use meta_client::{MetaClientOptions, MetaClientType};
 use servers::addrs;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, Notify};
@@ -343,37 +342,17 @@ impl HeartbeatTask {
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
-pub async fn new_metasrv_client(
-    node_id: u64,
+pub async fn new_meta_client(
+    member_id: u64,
     meta_config: &MetaClientOptions,
 ) -> Result<MetaClient> {
     let cluster_id = 0; // TODO(hl): read from config
-    let member_id = node_id;
 
-    let config = ChannelConfig::new()
-        .timeout(meta_config.timeout)
-        .connect_timeout(meta_config.connect_timeout)
-        .tcp_nodelay(meta_config.tcp_nodelay);
-    let channel_manager = ChannelManager::with_config(config.clone());
-    let heartbeat_channel_manager = ChannelManager::with_config(
-        config
-            .timeout(meta_config.timeout)
-            .connect_timeout(meta_config.connect_timeout),
-    );
-
-    let mut meta_client = MetaClientBuilder::datanode_default_options(cluster_id, member_id)
-        .channel_manager(channel_manager)
-        .heartbeat_channel_manager(heartbeat_channel_manager)
-        .build();
-    meta_client
-        .start(&meta_config.metasrv_addrs)
-        .await
-        .context(MetaClientInitSnafu)?;
-
-    // required only when the heartbeat_client is enabled
-    meta_client
-        .ask_leader()
-        .await
-        .context(MetaClientInitSnafu)?;
-    Ok(meta_client)
+    meta_client::create_meta_client(
+        cluster_id,
+        MetaClientType::Datanode { member_id },
+        meta_config,
+    )
+    .await
+    .context(MetaClientInitSnafu)
 }

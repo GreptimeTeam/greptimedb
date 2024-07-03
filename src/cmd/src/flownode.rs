@@ -226,7 +226,7 @@ impl StartCommand {
         })?;
 
         let meta_client = Arc::new(
-            flow::heartbeat::new_metasrv_client(cluster_id, node_id, meta_config)
+            flow::heartbeat::new_meta_client(cluster_id, node_id, meta_config)
                 .await
                 .context(StartFlownodeSnafu)?,
         );

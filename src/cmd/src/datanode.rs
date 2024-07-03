@@ -283,7 +283,7 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
+        let meta_client = datanode::heartbeat::new_meta_client(node_id, meta_config)
             .await
             .context(StartDatanodeSnafu)?;
 

@@ -14,7 +14,11 @@
 
 use std::time::Duration;
 
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
+
+use crate::client::MetaClientBuilder;
 
 pub mod client;
 pub mod error;
@@ -54,6 +58,59 @@ impl Default for MetaClientOptions {
             metadata_cache_tti: Duration::from_secs(300u64),
         }
     }
+}
+
+#[derive(Debug)]
+pub enum MetaClientType {
+    Datanode { member_id: u64 },
+    Flownode { member_id: u64 },
+    Frontend,
+}
+
+pub async fn create_meta_client(
+    cluster_id: u64,
+    client_type: MetaClientType,
+    meta_client_options: &MetaClientOptions,
+) -> error::Result<client::MetaClient> {
+    info!(
+        "Creating {:?} instance from cluster {} with Metasrv addrs {:?}",
+        client_type, cluster_id, meta_client_options.metasrv_addrs
+    );
+
+    let mut builder = match client_type {
+        MetaClientType::Datanode { member_id } => {
+            MetaClientBuilder::datanode_default_options(cluster_id, member_id)
+        }
+        MetaClientType::Flownode { member_id } => {
+            MetaClientBuilder::flownode_default_options(cluster_id, member_id)
+        }
+        MetaClientType::Frontend => MetaClientBuilder::frontend_default_options(cluster_id),
+    };
+
+    let base_config = ChannelConfig::new()
+        .timeout(meta_client_options.timeout)
+        .connect_timeout(meta_client_options.connect_timeout)
+        .tcp_nodelay(meta_client_options.tcp_nodelay);
+    let heartbeat_config = base_config.clone();
+
+    if let MetaClientType::Frontend = client_type {
+        let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
+        builder = builder.ddl_channel_manager(ChannelManager::with_config(ddl_config));
+    }
+
+    builder = builder
+        .channel_manager(ChannelManager::with_config(base_config))
+        .heartbeat_channel_manager(ChannelManager::with_config(heartbeat_config));
+
+    let mut meta_client = builder.build();
+
+    meta_client
+        .start(&meta_client_options.metasrv_addrs)
+        .await?;
+
+    meta_client.ask_leader().await?;
+
+    Ok(meta_client)
 }
 
 #[cfg(test)]
