@@ -352,6 +352,7 @@ impl PageValue {
 type TopKey = (FileId, usize);
 
 /// Cached top rows for a row group.
+#[allow(dead_code)]
 pub struct TopRows {
     /// Is last.
     pub last: bool,

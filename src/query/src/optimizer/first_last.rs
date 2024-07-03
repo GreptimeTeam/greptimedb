@@ -31,12 +31,12 @@ impl OptimizerRule for FirstLastPushDownRule {
     fn try_optimize(
         &self,
         plan: &LogicalPlan,
-        config: &dyn OptimizerConfig,
+        _config: &dyn OptimizerConfig,
     ) -> Result<Option<LogicalPlan>> {
         let mut visitor = TopValueVisitor::default();
         plan.visit(&mut visitor)?;
 
-        if let Some(is_last) = visitor.is_last {
+        if let Some(_is_last) = visitor.is_last {
             let new_plan = plan.clone();
             let new_plan = new_plan
                 .transform_down(&|plan| Self::set_top_hint(plan))?
