@@ -33,6 +33,7 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionState;
+use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -768,6 +769,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to remotely compact region {} by job {} due to {}",
+        region_id,
+        job_id,
+        reason
+    ))]
+    RemoteCompaction {
+        region_id: RegionId,
+        job_id: JobId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -888,6 +903,7 @@ impl ErrorExt for Error {
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
+            RemoteCompaction { .. } => StatusCode::Unexpected,
         }
     }
 

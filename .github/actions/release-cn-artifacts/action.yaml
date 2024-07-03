@@ -123,10 +123,10 @@ runs:
         DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
       run: |
         ./.github/scripts/copy-image.sh \
-         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:latest \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:${{ inputs.version }} \
          ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
 
-    - name: Push greptimedb-centos image from DockerHub to ACR
+    - name: Push latest greptimedb-centos image from DockerHub to ACR
       shell: bash
       if: ${{ inputs.dev-mode == 'false' && inputs.push-latest-tag == 'true' }}
       env:

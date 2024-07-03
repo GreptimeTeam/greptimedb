@@ -33,13 +33,16 @@ use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_timestamp_for_mysql, generate_random_value, replace_default, CreateTableExpr,
-    InsertIntoExpr, MySQLTsColumnTypeGenerator,
+    generate_random_timestamp_for_mysql, generate_random_value, replace_default,
+    sort_by_primary_keys, CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{flush_memtable, init_greptime_connections_via_env, Connections};
+use tests_fuzz::utils::{
+    flush_memtable, get_from_env_or_default_value, init_greptime_connections_via_env, Connections,
+    GT_FUZZ_INPUT_MAX_COLUMNS, GT_FUZZ_INPUT_MAX_ROWS,
+};
 use tests_fuzz::validator;
 
 struct FuzzContext {
@@ -63,8 +66,10 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let columns = rng.gen_range(2..30);
-        let rows = rng.gen_range(1..4096);
+        let max_columns = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_COLUMNS, 30);
+        let columns = rng.gen_range(2..max_columns);
+        let max_row = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+        let rows = rng.gen_range(1..max_row);
         Ok(FuzzInput {
             columns,
             rows,
@@ -184,23 +189,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     );
     let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
     let mut expected_rows = replace_default(&insert_expr.values_list, &table_ctx, &insert_expr);
-    expected_rows.sort_by(|a, b| {
-        let a_keys: Vec<_> = primary_keys_idxs_in_insert_expr
-            .iter()
-            .map(|&i| &a[i])
-            .collect();
-        let b_keys: Vec<_> = primary_keys_idxs_in_insert_expr
-            .iter()
-            .map(|&i| &b[i])
-            .collect();
-        for (a_key, b_key) in a_keys.iter().zip(b_keys.iter()) {
-            match a_key.cmp(b_key) {
-                Some(std::cmp::Ordering::Equal) => continue,
-                non_eq => return non_eq.unwrap(),
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
+    sort_by_primary_keys(&mut expected_rows, primary_keys_idxs_in_insert_expr);
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
 
     // Cleans up

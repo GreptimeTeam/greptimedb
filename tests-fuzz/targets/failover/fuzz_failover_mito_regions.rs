@@ -51,8 +51,10 @@ use tests_fuzz::utils::partition::{
 };
 use tests_fuzz::utils::pod_failure::{inject_datanode_pod_failure, recover_pod_failure};
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
-    GT_FUZZ_CLUSTER_NAME, GT_FUZZ_CLUSTER_NAMESPACE,
+    compact_table, flush_memtable, get_from_env_or_default_value,
+    init_greptime_connections_via_env, Connections, GT_FUZZ_CLUSTER_NAME,
+    GT_FUZZ_CLUSTER_NAMESPACE, GT_FUZZ_INPUT_MAX_COLUMNS, GT_FUZZ_INPUT_MAX_INSERT_ACTIONS,
+    GT_FUZZ_INPUT_MAX_ROWS, GT_FUZZ_INPUT_MAX_TABLES,
 };
 use tests_fuzz::validator::row::count_values;
 use tokio::sync::Semaphore;
@@ -83,10 +85,14 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let columns = rng.gen_range(2..64);
-        let rows = rng.gen_range(2..2048);
-        let tables = rng.gen_range(1..64);
-        let inserts = rng.gen_range(2..8);
+        let max_columns = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_COLUMNS, 64);
+        let columns = rng.gen_range(2..max_columns);
+        let max_rows = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+        let rows = rng.gen_range(2..max_rows);
+        let max_tables = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_TABLES, 64);
+        let tables = rng.gen_range(1..max_tables);
+        let max_inserts = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 8);
+        let inserts = rng.gen_range(2..max_inserts);
         Ok(FuzzInput {
             columns,
             rows,

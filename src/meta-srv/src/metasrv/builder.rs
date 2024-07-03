@@ -352,7 +352,6 @@ impl MetasrvBuilder {
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator: flow_metadata_allocator.clone(),
-                    peer_lookup_service,
                     region_failure_detector_controller,
                 },
                 procedure_manager.clone(),
