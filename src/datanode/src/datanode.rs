@@ -34,7 +34,7 @@ use file_engine::engine::FileRegionEngine;
 use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use meta_client::client::MetaClient;
+use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
@@ -155,7 +155,7 @@ impl Datanode {
 pub struct DatanodeBuilder {
     opts: DatanodeOptions,
     plugins: Plugins,
-    meta_client: Option<MetaClient>,
+    meta_client: Option<MetaClientRef>,
     kv_backend: Option<KvBackendRef>,
 }
 
@@ -171,7 +171,7 @@ impl DatanodeBuilder {
         }
     }
 
-    pub fn with_meta_client(self, meta_client: MetaClient) -> Self {
+    pub fn with_meta_client(self, meta_client: MetaClientRef) -> Self {
         Self {
             meta_client: Some(meta_client),
             ..self

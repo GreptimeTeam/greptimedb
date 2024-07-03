@@ -34,7 +34,6 @@ use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_frontend::handler::FrontendInvoker;
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -42,10 +41,8 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::{debug, error, info, tracing};
+use common_telemetry::{debug, error, tracing};
 use log_store::raft_engine::RaftEngineBackend;
-use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
@@ -130,36 +127,6 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn create_meta_client(
-        meta_client_options: &MetaClientOptions,
-    ) -> Result<Arc<MetaClient>> {
-        info!(
-            "Creating Frontend instance in distributed mode with Meta server addr {:?}",
-            meta_client_options.metasrv_addrs
-        );
-
-        let channel_config = ChannelConfig::new()
-            .timeout(meta_client_options.timeout)
-            .connect_timeout(meta_client_options.connect_timeout)
-            .tcp_nodelay(meta_client_options.tcp_nodelay);
-        let ddl_channel_config = channel_config
-            .clone()
-            .timeout(meta_client_options.ddl_timeout);
-        let channel_manager = ChannelManager::with_config(channel_config);
-        let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
-
-        let cluster_id = 0; // It is currently a reserved field and has not been enabled.
-        let mut meta_client = MetaClientBuilder::frontend_default_options(cluster_id)
-            .channel_manager(channel_manager)
-            .ddl_channel_manager(ddl_channel_manager)
-            .build();
-        meta_client
-            .start(&meta_client_options.metasrv_addrs)
-            .await
-            .context(error::StartMetaClientSnafu)?;
-        Ok(Arc::new(meta_client))
-    }
-
     pub async fn try_build_standalone_components(
         dir: String,
         kv_backend_config: KvBackendConfig,
