@@ -14,6 +14,9 @@
 
 pub mod flow_info;
 pub(crate) mod flow_name;
+/// TODO(weny): remove it later.
+#[allow(dead_code)]
+pub(crate) mod flow_route;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
 
