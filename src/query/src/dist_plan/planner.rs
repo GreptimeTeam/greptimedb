@@ -27,7 +27,6 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::TableReference;
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion_optimizer::analyzer::Analyzer;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -72,8 +71,9 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         let input_plan = merge_scan.input();
         let fallback = |logical_plan| async move {
+            let optimized_plan = self.optimize_input_logical_plan(session_state, logical_plan)?;
             planner
-                .create_physical_plan(logical_plan, session_state)
+                .create_physical_plan(&optimized_plan, session_state)
                 .await
                 .map(Some)
         };
@@ -83,7 +83,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(input_plan).await;
         }
 
-        let optimized_plan = self.optimize_input_logical_plan(session_state, input_plan)?;
+        let optimized_plan = input_plan;
         let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
             // no relation found in input plan, going to execute them locally
             return fallback(&optimized_plan).await;
@@ -137,16 +137,14 @@ impl DistExtensionPlanner {
         Ok(table.table_info().region_ids())
     }
 
-    // TODO(ruihang): find a more elegant way to optimize input logical plan
+    /// Input logical plan is analyzed. Thus only call logical optimizer to optimize it.
     fn optimize_input_logical_plan(
         &self,
         session_state: &SessionState,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
         let state = session_state.clone();
-        let analyzer = Analyzer::default();
-        let state = state.with_analyzer_rules(analyzer.rules);
-        state.optimize(plan)
+        state.optimizer().optimize(plan.clone(), &state, |_, _| {})
     }
 }
 

@@ -47,6 +47,7 @@ use table::TableRef;
 use crate::analyze::DistAnalyzeExec;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
+use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, DataFusionSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -356,9 +357,34 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
+                // todo: handle explain node
+
                 let state = ctx.state();
+
+                // analyze first
+                let analyzed_plan = state
+                    .analyzer()
+                    .execute_and_check(df_plan.clone(), state.config_options(), |_, _| {})
+                    .context(error::DatafusionSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
+                // skip optimize for MergeScan
+                let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
+                    && ext.node.name() == MergeScanLogicalPlan::name()
+                {
+                    analyzed_plan.clone()
+                } else {
+                    state
+                        .optimizer()
+                        .optimize(analyzed_plan, state, |_, _| {})
+                        .context(error::DatafusionSnafu)
+                        .map_err(BoxedError::new)
+                        .context(QueryExecutionSnafu)?
+                };
+
                 let physical_plan = state
-                    .create_physical_plan(df_plan)
+                    .query_planner()
+                    .create_physical_plan(&optimized_plan, state)
                     .await
                     .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)

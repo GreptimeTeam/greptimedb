@@ -104,15 +104,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
-datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "729b356ef543ffcda6813c7b5373507a04ae0109" }
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "d7bda5c9b762426e81f144296deadc87e5f4a0b8" }
 derive_builder = "0.12"
 dotenv = "0.15"
 # TODO(LFC): Wait for https://github.com/etcdv3/etcd-client/pull/76
