@@ -39,16 +39,19 @@
 //! 6. Flow info key: `__flow/info/{flow_id}`
 //!     - Stores metadata of the flow.
 //!
-//! 7. Flow name key: `__flow/name/{catalog}/{flow_name}`
+//! 7. Flow route key: `__flow/route/{flow_id}/{partition_id}`
+//!     - Stores route of the flow.
+//!
+//! 8. Flow name key: `__flow/name/{catalog}/{flow_name}`
 //!     - Mapping {catalog}/{flow_name} to {flow_id}
 //!
-//! 8. Flownode flow key: `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
+//! 9. Flownode flow key: `__flow/flownode/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping {flownode_id} to {flow_id}
 //!
-//! 9. Table flow key: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
+//! 10. Table flow key: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping source table's {table_id} to {flownode_id}
 //!     - Used in `Flownode` booting.
-//! 10. View info key: `__view_info/{view_id}`
+//! 11. View info key: `__view_info/{view_id}`
 //!     - The value is a [ViewInfoValue] struct; it contains the encoded logical plan.
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
@@ -65,6 +68,9 @@
 //! __flow/
 //!   info/
 //!     {flow_id}
+//!   route/
+//!     {flow_id}/
+//!      {partition_id}
 //!
 //!    name/
 //!      {catalog_name}
@@ -105,6 +111,7 @@ use common_catalog::consts::{
 };
 use common_telemetry::warn;
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
+use flow::flow_route::FlowRouteValue;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::DeserializeOwned;
@@ -1185,7 +1192,8 @@ impl_table_meta_value! {
     ViewInfoValue,
     DatanodeTableValue,
     FlowInfoValue,
-    FlowNameValue
+    FlowNameValue,
+    FlowRouteValue
 }
 
 impl_optional_meta_value! {
