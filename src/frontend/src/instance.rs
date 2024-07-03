@@ -152,6 +152,7 @@ impl Instance {
         let mut meta_client = MetaClientBuilder::frontend_default_options(cluster_id)
             .channel_manager(channel_manager)
             .ddl_channel_manager(ddl_channel_manager)
+            .enable_access_cluster_info()
             .build();
         meta_client
             .start(&meta_client_options.metasrv_addrs)

@@ -16,7 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use cache::{
+    build_flownode_peer_cache, build_fundamental_cache_registry_with,
+    with_default_composite_cache_registry,
+};
 use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -297,8 +300,11 @@ impl StartCommand {
                 .add_cache(cached_meta_backend.clone())
                 .build(),
         );
-        let fundamental_cache_registry =
-            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let cluster_info = meta_client.clone();
+        let fundamental_cache_registry = build_fundamental_cache_registry_with(
+            Arc::new(MetaKvBackend::new(meta_client.clone())),
+            move |builder| builder.add_cache(build_flownode_peer_cache(cluster_info)),
+        );
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
                 layered_cache_builder.add_cache_registry(fundamental_cache_registry),

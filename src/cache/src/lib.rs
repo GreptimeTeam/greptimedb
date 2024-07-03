@@ -19,10 +19,11 @@ use std::time::Duration;
 
 use catalog::kvbackend::new_table_cache;
 use common_meta::cache::{
-    new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
-    new_table_route_cache, new_view_info_cache, CacheRegistry, CacheRegistryBuilder,
-    LayeredCacheRegistryBuilder,
+    new_flownode_peer_cache, new_table_flownode_set_cache, new_table_info_cache,
+    new_table_name_cache, new_table_route_cache, new_view_info_cache, CacheRegistry,
+    CacheRegistryBuilder, FlownodePeerCacheRef, LayeredCacheRegistryBuilder,
 };
+use common_meta::cluster::ClusterInfoRef;
 use common_meta::kv_backend::KvBackendRef;
 use moka::future::CacheBuilder;
 use snafu::OptionExt;
@@ -39,8 +40,9 @@ pub const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
 pub const TABLE_CACHE_NAME: &str = "table_cache";
 pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
+pub const FLOWNODE_PEER_CACHE_NAME: &str = "flownode_peer_cache";
 
-pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
+fn default_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistryBuilder {
     // Builds table info cache
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
         .time_to_live(DEFAULT_CACHE_TTL)
@@ -101,7 +103,33 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         .add_cache(table_route_cache)
         .add_cache(view_info_cache)
         .add_cache(table_flownode_set_cache)
-        .build()
+}
+
+pub fn build_flownode_peer_cache(cluster_info: ClusterInfoRef) -> FlownodePeerCacheRef {
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build();
+    Arc::new(new_flownode_peer_cache(
+        FLOWNODE_PEER_CACHE_NAME.to_string(),
+        cache,
+        cluster_info,
+    ))
+}
+
+pub fn build_fundamental_cache_registry_with<F>(
+    kv_backend: KvBackendRef,
+    applier: F,
+) -> CacheRegistry
+where
+    F: FnOnce(CacheRegistryBuilder) -> CacheRegistryBuilder,
+{
+    let builder = default_fundamental_cache_registry(kv_backend);
+    applier(builder).build()
+}
+
+pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
+    default_fundamental_cache_registry(kv_backend).build()
 }
 
 // TODO(weny): Make the cache configurable.
