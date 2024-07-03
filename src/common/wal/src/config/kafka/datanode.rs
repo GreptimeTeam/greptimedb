@@ -18,7 +18,9 @@ use common_base::readable_size::ReadableSize;
 use rskafka::client::partition::Compression;
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
+use crate::config::kafka::common::{
+    backoff_prefix, kafka_topic_prefix, BackoffConfig, KafkaTopicConfig,
+};
 use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for datanode.
@@ -41,7 +43,7 @@ pub struct DatanodeKafkaConfig {
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
     /// The kafka topic config.
-    #[serde(flatten)]
+    #[serde(flatten, with = "kafka_topic_prefix")]
     pub kafka_topic: KafkaTopicConfig,
 }
 

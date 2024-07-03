@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
+use crate::config::kafka::common::{
+    backoff_prefix, kafka_topic_prefix, BackoffConfig, KafkaTopicConfig,
+};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
 
 /// Kafka wal configurations for metasrv.
@@ -28,6 +30,7 @@ pub struct MetasrvKafkaConfig {
     /// The backoff config.
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
+    #[serde(flatten, with = "kafka_topic_prefix")]
     pub kafka_topic: KafkaTopicConfig,
 }
 
@@ -38,7 +41,7 @@ impl Default for MetasrvKafkaConfig {
         let kafka_topic = KafkaTopicConfig {
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
+            name_prefix: TOPIC_NAME_PREFIX.to_string(),
             num_partitions: 1,
             replication_factor,
             create_topic_timeout: Duration::from_secs(30),

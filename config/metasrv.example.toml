@@ -77,21 +77,21 @@ provider = "raft_engine"
 broker_endpoints = ["127.0.0.1:9092"]
 
 ## Number of topics to be created upon start.
-num_topics = 64
+kafka_topic_num_topics = 64
 
 ## Topic selector type.
 ## Available selector types:
 ## - `round_robin` (default)
-selector_type = "round_robin"
+kafka_topic_selector_type = "round_robin"
 
-## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
-topic_name_prefix = "greptimedb_wal_topic"
+## A Kafka topic is constructed by concatenating `name_prefix` and `topic_id`.
+kafka_topic_name_prefix = "greptimedb_wal_topic"
 
 ## Expected number of replicas of each partition.
-replication_factor = 1
+kafka_topic_replication_factor = 1
 
 ## Above which a topic creation operation will be cancelled.
-create_topic_timeout = "30s"
+kafka_topic_create_topic_timeout = "30s"
 ## The initial backoff for kafka clients.
 backoff_init = "500ms"
 
