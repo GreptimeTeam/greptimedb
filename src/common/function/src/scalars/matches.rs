@@ -272,12 +272,12 @@ impl ParserContext {
                 }
                 Token::OpenParen => operator_stack.push(token),
                 Token::And | Token::Or => {
-                    while let Some(op) = operator_stack.pop() {
-                        if op == Token::OpenParen {
-                            operator_stack.push(op);
-                            break;
-                        }
-                        result.push(op);
+                    // Or has lower priority than And
+                    while let Some(stack_top) = operator_stack.last()
+                        && *stack_top == Token::And
+                        && token == Token::Or
+                    {
+                        result.push(operator_stack.pop().unwrap());
                     }
                     operator_stack.push(token);
                 }
@@ -757,6 +757,7 @@ mod test {
         ];
         let input_vector = Arc::new(StringVector::from(input_data));
         let cases = [
+            // basic cases
             ("quick", vec![true, false, true, true, true, true, true]),
             (
                 "\"quick brown\"",
@@ -790,6 +791,32 @@ mod test {
                 "-over AND -lazy",
                 vec![false, false, false, false, false, false, false],
             ),
+            // test priority between AND & OR
+            (
+                "fox AND jumps OR over",
+                vec![true, true, true, true, true, true, true],
+            ),
+            (
+                "fox OR brown AND quick",
+                vec![true, true, true, true, true, true, true],
+            ),
+            (
+                "(fox OR brown) AND quick",
+                vec![true, false, true, true, true, true, true],
+            ),
+            (
+                "brown AND quick OR fox",
+                vec![true, true, true, true, true, true, true],
+            ),
+            (
+                "brown AND (quick OR fox)",
+                vec![true, false, true, true, true, true, true],
+            ),
+            (
+                "brown AND quick AND fox  OR  jumps AND over AND lazy",
+                vec![true, true, true, true, true, true, true],
+            ),
+            // optional & must conversion
         ];
 
         let f = MatchesFunction;
