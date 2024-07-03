@@ -60,6 +60,7 @@ pub struct CacheManager {
     page_cache: Option<PageCache>,
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
+    /// Cache for inverted index.
     index_cache: Option<InvertedIndexCacheRef>,
 }
 
@@ -246,7 +247,8 @@ impl CacheManagerBuilder {
                 .build()
         });
 
-        let inverted_index_cache = InvertedIndexCache::new(1024, 1024);
+        // todo(hl): make it configurable.
+        let inverted_index_cache = InvertedIndexCache::new(1024 * 16, 1024 * 16);
         CacheManager {
             sst_meta_cache,
             vector_cache,
