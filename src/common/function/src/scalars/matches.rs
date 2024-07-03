@@ -19,7 +19,8 @@ use std::sync::Arc;
 use common_query::error::{
     GeneralDataFusionSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result,
 };
-use datafusion::common::DFSchema;
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeIterator, TreeNodeRecursion};
+use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::{self, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
@@ -94,8 +95,10 @@ impl MatchesFunction {
     fn eval(&self, data: VectorRef, pattern: String) -> Result<VectorRef> {
         let col_name = "data";
         let parser_context = ParserContext::default();
-        let ast = parser_context.parse_pattern(&pattern)?;
-        let like_expr = ast.to_like_expr(col_name);
+        let raw_ast = parser_context.parse_pattern(&pattern)?;
+        let ast = raw_ast.transform_ast()?;
+
+        let like_expr = ast.into_like_expr(col_name);
 
         let input_schema = Self::input_schema();
         let session_state =
@@ -140,42 +143,46 @@ enum PatternAst {
         pattern: String,
     },
     Binary {
-        lhs: Box<PatternAst>,
         op: BinaryOp,
-        rhs: Box<PatternAst>,
+        children: Vec<PatternAst>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum UnaryOp {
     Must,
     Optional,
     Negative,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum BinaryOp {
     And,
     Or,
 }
 
 impl PatternAst {
-    fn to_like_expr(&self, column: &str) -> Expr {
+    fn into_like_expr(self, column: &str) -> Expr {
         match self {
             PatternAst::Literal { op, pattern } => {
-                let expr = Self::convert_literal(column, pattern);
+                let expr = Self::convert_literal(column, &pattern);
                 match op {
                     UnaryOp::Must => expr,
                     UnaryOp::Optional => expr,
                     UnaryOp::Negative => logical_expr::not(expr),
                 }
             }
-            PatternAst::Binary { lhs, op, rhs } => {
-                let lhs_expr = lhs.to_like_expr(column);
-                let rhs_expr = rhs.to_like_expr(column);
+            PatternAst::Binary { op, children } => {
+                if children.is_empty() {
+                    return logical_expr::lit(true);
+                }
+                let exprs = children
+                    .into_iter()
+                    .map(|child| child.into_like_expr(column));
+                // safety: children is not empty
                 match op {
-                    BinaryOp::And => lhs_expr.and(rhs_expr),
-                    BinaryOp::Or => lhs_expr.or(rhs_expr),
+                    BinaryOp::And => exprs.reduce(Expr::and).unwrap(),
+                    BinaryOp::Or => exprs.reduce(Expr::or).unwrap(),
                 }
             }
         }
@@ -197,28 +204,202 @@ impl PatternAst {
             })
             .collect::<String>()
     }
-}
 
-struct PatternAstBuilder {
-    ast: Option<PatternAst>,
-}
-
-impl PatternAstBuilder {
-    fn from_existing(ast: PatternAst) -> Self {
-        Self { ast: Some(ast) }
+    /// Transform this AST with preset rules to make it correct.
+    fn transform_ast(self) -> Result<Self> {
+        self.transform_up(Self::collapse_binary_branch_fn)
+            .context(GeneralDataFusionSnafu)
+            .map(|data| data.data)?
+            .transform_up(Self::eliminate_optional_fn)
+            .context(GeneralDataFusionSnafu)
+            .map(|data| data.data)?
+            .transform_down(Self::eliminate_single_child_fn)
+            .context(GeneralDataFusionSnafu)
+            .map(|data| data.data)
     }
 
-    fn build(self) -> PatternAst {
-        self.ast.unwrap()
+    /// Collapse binary branch with the same operator. I.e., this transformer
+    /// changes the binary-tree AST into a multiple branching AST.
+    ///
+    /// This function is expected to be called in a bottom-up manner as
+    /// it won't recursion.
+    fn collapse_binary_branch_fn(self) -> DfResult<Transformed<Self>> {
+        let PatternAst::Binary {
+            op: parent_op,
+            children,
+        } = self
+        else {
+            return Ok(Transformed::no(self));
+        };
+
+        let mut collapsed = vec![];
+        let mut remains = vec![];
+
+        for child in children {
+            match child {
+                PatternAst::Literal { .. } => {
+                    collapsed.push(child);
+                }
+                PatternAst::Binary { op, children } => {
+                    // no need to recursion because this function is expected to be called
+                    // in a bottom-up manner
+                    if op == parent_op {
+                        collapsed.extend(children);
+                    } else {
+                        remains.push(PatternAst::Binary { op, children });
+                    }
+                }
+            }
+        }
+
+        if collapsed.is_empty() {
+            Ok(Transformed::no(PatternAst::Binary {
+                op: parent_op,
+                children: remains,
+            }))
+        } else {
+            collapsed.extend(remains);
+            Ok(Transformed::yes(PatternAst::Binary {
+                op: parent_op,
+                children: collapsed,
+            }))
+        }
     }
 
-    fn or(&mut self, rhs: PatternAst) {
-        let lhs = self.ast.take().unwrap();
-        self.ast = Some(PatternAst::Binary {
-            lhs: Box::new(lhs),
-            op: BinaryOp::Or,
-            rhs: Box::new(rhs),
+    /// Eliminate optional pattern. An optional pattern can always be
+    /// omitted or transformed into a must pattern follows the following rules:
+    /// - If there is only one pattern and it's optional, change it to must
+    /// - If there is any must pattern, remove all other optional patterns
+    fn eliminate_optional_fn(self) -> DfResult<Transformed<Self>> {
+        let PatternAst::Binary {
+            op: parent_op,
+            children,
+        } = self
+        else {
+            return Ok(Transformed::no(self));
+        };
+
+        if parent_op == BinaryOp::Or {
+            let mut must_list = vec![];
+            let mut must_not_list = vec![];
+            let mut optional_list = vec![];
+            let mut compound_list = vec![];
+
+            for child in children {
+                match child {
+                    PatternAst::Literal {
+                        op,
+                        pattern: ref _pattern,
+                    } => match op {
+                        UnaryOp::Must => must_list.push(child),
+                        UnaryOp::Optional => optional_list.push(child),
+                        UnaryOp::Negative => must_not_list.push(child),
+                    },
+                    PatternAst::Binary { .. } => {
+                        compound_list.push(child);
+                    }
+                }
+            }
+
+            // Eliminate optional list if there is MUST.
+            if !must_list.is_empty() {
+                optional_list.clear();
+            }
+
+            let children_this_level = optional_list
+                .into_iter()
+                .chain(compound_list.into_iter())
+                .collect();
+            let new_node = if !must_list.is_empty() || !must_not_list.is_empty() {
+                let new_children = must_list
+                    .into_iter()
+                    .chain(must_not_list.into_iter())
+                    .chain(Some(PatternAst::Binary {
+                        op: BinaryOp::Or,
+                        children: children_this_level,
+                    }))
+                    .collect();
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: new_children,
+                }
+            } else {
+                PatternAst::Binary {
+                    op: BinaryOp::Or,
+                    children: children_this_level,
+                }
+            };
+
+            return Ok(Transformed::yes(new_node));
+        }
+
+        Ok(Transformed::no(PatternAst::Binary {
+            op: parent_op,
+            children,
+        }))
+    }
+
+    /// Eliminate single child node. If a binary node has only one child, it can be
+    /// replaced by its only child.
+    ///
+    /// This function prefers to be applied in a top-down manner. But it's not required.
+    fn eliminate_single_child_fn(self) -> DfResult<Transformed<Self>> {
+        let PatternAst::Binary { op, mut children } = self else {
+            return Ok(Transformed::no(self));
+        };
+
+        // remove empty grand children
+        children.retain(|child| match child {
+            PatternAst::Binary {
+                children: grand_children,
+                ..
+            } => !grand_children.is_empty(),
+            PatternAst::Literal { .. } => true,
         });
+
+        if children.len() == 1 {
+            Ok(Transformed::yes(children.into_iter().next().unwrap()))
+        } else {
+            Ok(Transformed::no(PatternAst::Binary { op, children }))
+        }
+    }
+}
+
+impl TreeNode for PatternAst {
+    fn apply_children<'n, F: FnMut(&'n Self) -> DfResult<TreeNodeRecursion>>(
+        &'n self,
+        mut f: F,
+    ) -> DfResult<TreeNodeRecursion> {
+        match self {
+            PatternAst::Literal { .. } => Ok(TreeNodeRecursion::Continue),
+            PatternAst::Binary { op: _, children } => {
+                for child in children {
+                    if TreeNodeRecursion::Stop == f(child)? {
+                        return Ok(TreeNodeRecursion::Stop);
+                    }
+                }
+
+                Ok(TreeNodeRecursion::Continue)
+            }
+        }
+    }
+
+    fn map_children<F: FnMut(Self) -> DfResult<Transformed<Self>>>(
+        self,
+        mut f: F,
+    ) -> DfResult<Transformed<Self>> {
+        match self {
+            PatternAst::Literal { .. } => Ok(Transformed::no(self)),
+            PatternAst::Binary { op, children } => children
+                .into_iter()
+                .map_until_stop_and_collect(&mut f)?
+                .map_data(|new_children| {
+                    Ok(PatternAst::Binary {
+                        op,
+                        children: new_children,
+                    })
+                }),
+        }
     }
 }
 
@@ -245,12 +426,14 @@ impl ParserContext {
         );
 
         // conjoin them together
-        let mut builder = PatternAstBuilder::from_existing(self.stack.pop().unwrap());
-        while let Some(ast) = self.stack.pop() {
-            builder.or(ast);
+        if self.stack.len() == 1 {
+            Ok(self.stack.pop().unwrap())
+        } else {
+            Ok(PatternAst::Binary {
+                op: BinaryOp::Or,
+                children: self.stack,
+            })
         }
-
-        Ok(builder.build())
     }
 
     /// Convert infix token stream to RPN
@@ -350,9 +533,8 @@ impl ParserContext {
                         err_msg: "Invalid pattern, \"AND\" operator should have two operands",
                     })?;
                     self.stack.push(PatternAst::Binary {
-                        lhs: Box::new(lhs),
                         op: BinaryOp::And,
-                        rhs: Box::new(rhs),
+                        children: vec![lhs, rhs],
                     });
                     return Ok(());
                 }
@@ -370,9 +552,8 @@ impl ParserContext {
                         err_msg: "Invalid pattern, \"OR\" operator should have two operands",
                     })?;
                     self.stack.push(PatternAst::Binary {
-                        lhs: Box::new(lhs),
                         op: BinaryOp::Or,
-                        rhs: Box::new(rhs),
+                        children: vec![lhs, rhs],
                     });
                     return Ok(());
                 }
@@ -627,112 +808,235 @@ mod test {
     }
 
     #[test]
+    fn valid_ast_transformer() {
+        let cases = [
+            (
+                "a AND b OR c",
+                PatternAst::Binary {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "c".to_string(),
+                        },
+                        PatternAst::Binary {
+                            op: BinaryOp::And,
+                            children: vec![
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "a".to_string(),
+                                },
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "b".to_string(),
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ),
+            (
+                "a -b",
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Negative,
+                            pattern: "b".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "a".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                "a +b",
+                PatternAst::Literal {
+                    op: UnaryOp::Must,
+                    pattern: "b".to_string(),
+                },
+            ),
+            (
+                "a b c d",
+                PatternAst::Binary {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "d".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "c".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "b".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "a".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                "a b c AND d",
+                PatternAst::Binary {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "b".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "a".to_string(),
+                        },
+                        PatternAst::Binary {
+                            op: BinaryOp::And,
+                            children: vec![
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "c".to_string(),
+                                },
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "d".to_string(),
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ),
+        ];
+
+        for (query, expected) in cases {
+            let parser = ParserContext { stack: vec![] };
+            let ast = parser.parse_pattern(query).unwrap();
+            let ast = ast.transform_ast().unwrap();
+            assert_eq!(expected, ast, "{query}");
+        }
+    }
+
+    #[test]
     fn valid_matches_parser() {
         let cases = [
             (
                 "a AND b OR c",
                 PatternAst::Binary {
-                    lhs: Box::new(PatternAst::Binary {
-                        lhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "a".to_string(),
-                        }),
-                        op: BinaryOp::And,
-                        rhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "b".to_string(),
-                        }),
-                    }),
                     op: BinaryOp::Or,
-                    rhs: Box::new(PatternAst::Literal {
-                        op: UnaryOp::Optional,
-                        pattern: "c".to_string(),
-                    }),
+                    children: vec![
+                        PatternAst::Binary {
+                            op: BinaryOp::And,
+                            children: vec![
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "a".to_string(),
+                                },
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "b".to_string(),
+                                },
+                            ],
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "c".to_string(),
+                        },
+                    ],
                 },
             ),
             (
                 "(a AND b) OR c",
                 PatternAst::Binary {
-                    lhs: Box::new(PatternAst::Binary {
-                        lhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "a".to_string(),
-                        }),
-                        op: BinaryOp::And,
-                        rhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "b".to_string(),
-                        }),
-                    }),
                     op: BinaryOp::Or,
-                    rhs: Box::new(PatternAst::Literal {
-                        op: UnaryOp::Optional,
-                        pattern: "c".to_string(),
-                    }),
+                    children: vec![
+                        PatternAst::Binary {
+                            op: BinaryOp::And,
+                            children: vec![
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "a".to_string(),
+                                },
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "b".to_string(),
+                                },
+                            ],
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "c".to_string(),
+                        },
+                    ],
                 },
             ),
             (
                 "a AND (b OR c)",
                 PatternAst::Binary {
-                    lhs: Box::new(PatternAst::Literal {
-                        op: UnaryOp::Optional,
-                        pattern: "a".to_string(),
-                    }),
-
                     op: BinaryOp::And,
-                    rhs: Box::new(PatternAst::Binary {
-                        lhs: Box::new(PatternAst::Literal {
+                    children: vec![
+                        PatternAst::Literal {
                             op: UnaryOp::Optional,
-                            pattern: "b".to_string(),
-                        }),
-                        op: BinaryOp::Or,
-                        rhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "c".to_string(),
-                        }),
-                    }),
+                            pattern: "a".to_string(),
+                        },
+                        PatternAst::Binary {
+                            op: BinaryOp::Or,
+                            children: vec![
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "b".to_string(),
+                                },
+                                PatternAst::Literal {
+                                    op: UnaryOp::Optional,
+                                    pattern: "c".to_string(),
+                                },
+                            ],
+                        },
+                    ],
                 },
             ),
             (
                 "a +b -c",
                 PatternAst::Binary {
-                    lhs: Box::new(PatternAst::Binary {
-                        lhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Optional,
-                            pattern: "a".to_string(),
-                        }),
-                        op: BinaryOp::Or,
-                        rhs: Box::new(PatternAst::Literal {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Negative,
+                            pattern: "c".to_string(),
+                        },
+                        PatternAst::Literal {
                             op: UnaryOp::Must,
                             pattern: "b".to_string(),
-                        }),
-                    }),
-                    op: BinaryOp::Or,
-                    rhs: Box::new(PatternAst::Literal {
-                        op: UnaryOp::Negative,
-                        pattern: "c".to_string(),
-                    }),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "a".to_string(),
+                        },
+                    ],
                 },
             ),
             (
                 "(+a +b) c",
                 PatternAst::Binary {
-                    lhs: Box::new(PatternAst::Binary {
-                        lhs: Box::new(PatternAst::Literal {
-                            op: UnaryOp::Must,
-                            pattern: "a".to_string(),
-                        }),
-                        op: BinaryOp::Or,
-                        rhs: Box::new(PatternAst::Literal {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "c".to_string(),
+                        },
+                        PatternAst::Literal {
                             op: UnaryOp::Must,
                             pattern: "b".to_string(),
-                        }),
-                    }),
-                    op: BinaryOp::Or,
-                    rhs: Box::new(PatternAst::Literal {
-                        op: UnaryOp::Optional,
-                        pattern: "c".to_string(),
-                    }),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Must,
+                            pattern: "a".to_string(),
+                        },
+                    ],
                 },
             ),
         ];
@@ -768,14 +1072,6 @@ mod test {
                 vec![true, true, false, false, true, true, true],
             ),
             (
-                "fox +jumps -over",
-                vec![true, true, true, true, true, true, true],
-            ),
-            (
-                "fox AND +jumps AND -over",
-                vec![false, false, false, false, true, false, false],
-            ),
-            (
                 "fox OR lazy",
                 vec![true, true, true, true, true, true, true],
             ),
@@ -785,7 +1081,7 @@ mod test {
             ),
             (
                 "-over -lazy",
-                vec![false, false, false, false, true, true, true],
+                vec![false, false, false, false, false, false, false],
             ),
             (
                 "-over AND -lazy",
@@ -817,6 +1113,23 @@ mod test {
                 vec![true, true, true, true, true, true, true],
             ),
             // optional & must conversion
+            (
+                "quick brown fox +jumps",
+                vec![true, true, true, false, true, true, true],
+            ),
+            (
+                "fox +jumps -over",
+                vec![false, false, false, false, true, false, false],
+            ),
+            (
+                "fox AND +jumps AND -over",
+                vec![false, false, false, false, true, false, false],
+            ),
+            // TODO: still parentheses are not supported
+            // (
+            //     "(+fox +jumps) over",
+            //     vec![true, true, true, true, true, true, true],
+            // ),
         ];
 
         let f = MatchesFunction;
