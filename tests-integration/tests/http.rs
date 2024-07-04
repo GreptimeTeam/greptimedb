@@ -1053,7 +1053,7 @@ transform:
     assert!(version.is_some());
     let version = version.unwrap().as_str();
     assert!(version.is_some());
-    let version = version.unwrap();
+    let version_str = version.unwrap();
 
     // 2. write data
     let data_body = r#"
@@ -1076,7 +1076,7 @@ transform:
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let encoded: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
+    let encoded: String = url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
 
     // 3. remove pipeline
     let res = client
@@ -1085,7 +1085,14 @@ transform:
         .await;
 
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(res.text().await, "ok");
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    let content: Value = content.unwrap();
+
+    assert_eq!(content, json!({"name": "test", "version": version_str}));
 
     // 4. write data failed
     let res = client

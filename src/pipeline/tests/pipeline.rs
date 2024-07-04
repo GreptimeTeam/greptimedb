@@ -81,7 +81,7 @@ fn test_complex_data() {
 
     let pipeline_yaml = r#"
 ---
-description: Pipeline for Akamai DataStream2 Log
+description: Pipeline for Demo Log
 
 processors:
   - urlencoding:
