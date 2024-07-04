@@ -55,6 +55,25 @@ where
         .remove(0))
 }
 
+/// Returns the [Partition] of the specific `region_id`
+pub async fn fetch_partition<'a, DB, E>(e: E, region_id: u64) -> Result<Partition>
+where
+    DB: Database,
+    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
+    for<'c> E: 'a + Executor<'c, Database = DB>,
+    for<'c> u64: Decode<'c, DB> + Type<DB>,
+    for<'c> String: Decode<'c, DB> + Type<DB>,
+    for<'c> u64: Encode<'c, DB> + Type<DB>,
+    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
+{
+    let sql = "select region_id, peer_id as datanode_id from information_schema.region_peers where region_id = ?;";
+    sqlx::query_as::<_, Partition>(sql)
+        .bind(region_id)
+        .fetch_one(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })
+}
+
 /// Returns all [Partition] of the specific `table`
 pub async fn fetch_partitions<'a, DB, E>(e: E, table_name: Ident) -> Result<Vec<Partition>>
 where
