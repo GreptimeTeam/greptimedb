@@ -431,7 +431,7 @@ apply_on_query = "auto"
 ## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
 mem_threshold_on_create = "64M"
 
-## Deprecated, use `region_engine.mito.index.intermediate_path` instead.
+## Deprecated, use `region_engine.mito.index.auxiliary_path` instead.
 intermediate_path = ""
 
 [region_engine.mito.memtable]
