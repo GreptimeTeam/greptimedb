@@ -17,6 +17,7 @@ use datatypes::value::{Value, ValueRef};
 use memcomparable::Serializer;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
+use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -57,8 +58,6 @@ impl IndexValueCodec {
     }
 }
 
-pub(crate) type ColumnId = String;
-
 /// Decodes primary key values into their corresponding column ids, data types and values.
 pub struct IndexValuesCodec {
     /// The tag column ids.
@@ -75,7 +74,7 @@ impl IndexValuesCodec {
         let (column_ids, fields): (Vec<_>, Vec<_>) = tag_columns
             .map(|column| {
                 (
-                    column.column_id.to_string(),
+                    column.column_id,
                     SortField::new(column.column_schema.data_type.clone()),
                 )
             })
@@ -176,12 +175,12 @@ mod tests {
         let mut iter = codec.decode(&primary_key).unwrap();
 
         let (column_id, field, value) = iter.next().unwrap();
-        assert_eq!(column_id, "1");
+        assert_eq!(*column_id, 1);
         assert_eq!(field, &SortField::new(ConcreteDataType::string_datatype()));
         assert_eq!(value, None);
 
         let (column_id, field, value) = iter.next().unwrap();
-        assert_eq!(column_id, "2");
+        assert_eq!(*column_id, 2);
         assert_eq!(field, &SortField::new(ConcreteDataType::int64_datatype()));
         assert_eq!(value, Some(Value::Int64(10)));
 

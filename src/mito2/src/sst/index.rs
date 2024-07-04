@@ -191,14 +191,7 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count,
             self.inverted_index_config.compress,
         )
-        .with_ignore_column_ids(
-            self.index_options
-                .inverted_index
-                .ignore_column_ids
-                .iter()
-                .map(|i| i.to_string())
-                .collect(),
-        );
+        .with_ignore_column_ids(&self.index_options.inverted_index.ignore_column_ids);
 
         Some(indexer)
     }

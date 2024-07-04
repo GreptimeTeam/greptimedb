@@ -28,6 +28,7 @@ use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -38,7 +39,7 @@ use crate::error::{
 use crate::read::Batch;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
-use crate::sst::index::inverted_index::codec::{ColumnId, IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::inverted_index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::inverted_index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
@@ -67,9 +68,6 @@ pub struct SstIndexCreator {
     /// Whether the index creation is aborted.
     aborted: bool,
 
-    /// Ignore column IDs for index creation.
-    ignore_column_ids: HashSet<ColumnId>,
-
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
@@ -77,7 +75,7 @@ pub struct SstIndexCreator {
     compress: bool,
 
     /// Ids of indexed columns.
-    column_ids: Vec<store_api::storage::ColumnId>,
+    column_ids: HashSet<ColumnId>,
 }
 
 impl SstIndexCreator {
@@ -118,7 +116,6 @@ impl SstIndexCreator {
             value_buf: vec![],
             stats: Statistics::default(),
             aborted: false,
-            ignore_column_ids: HashSet::default(),
             memory_usage,
             compress,
             column_ids,
@@ -126,8 +123,10 @@ impl SstIndexCreator {
     }
 
     /// Sets the ignore column IDs for index creation.
-    pub fn with_ignore_column_ids(mut self, ignore_column_ids: HashSet<ColumnId>) -> Self {
-        self.ignore_column_ids = ignore_column_ids;
+    pub fn with_ignore_column_ids(mut self, ignore_column_ids: &[ColumnId]) -> Self {
+        for id in ignore_column_ids {
+            self.column_ids.remove(id);
+        }
         self
     }
 
@@ -198,7 +197,7 @@ impl SstIndexCreator {
         guard.inc_row_count(n);
 
         for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
-            if self.ignore_column_ids.contains(column_id) {
+            if !self.column_ids.contains(column_id) {
                 continue;
             }
 
@@ -214,7 +213,7 @@ impl SstIndexCreator {
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
-                .push_with_name_n(column_id, value, n)
+                .push_with_name_n(&column_id.to_string(), value, n)
                 .await
                 .context(PushIndexValueSnafu)?;
         }
