@@ -318,9 +318,10 @@ impl GreptimeDbClusterBuilder {
                 .channel_manager(metasrv.channel_manager)
                 .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
+        let meta_client = Arc::new(meta_client);
 
         let meta_backend = Arc::new(MetaKvBackend {
-            client: Arc::new(meta_client.clone()),
+            client: meta_client.clone(),
         });
 
         let mut datanode = DatanodeBuilder::new(opts, Plugins::default())

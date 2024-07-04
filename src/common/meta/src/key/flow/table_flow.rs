@@ -17,14 +17,16 @@ use std::sync::Arc;
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey};
+use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetaKey, TableMetaValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::peer::Peer;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
@@ -166,9 +168,16 @@ impl<'a> MetaKey<'a, TableFlowKeyInner> for TableFlowKeyInner {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TableFlowValue {
+    pub(crate) peer: Peer,
+}
+
 /// Decodes `KeyValue` to [TableFlowKey].
-pub fn table_flow_decoder(kv: KeyValue) -> Result<TableFlowKey> {
-    TableFlowKey::from_bytes(&kv.key)
+pub fn table_flow_decoder(kv: KeyValue) -> Result<(TableFlowKey, TableFlowValue)> {
+    let key = TableFlowKey::from_bytes(&kv.key)?;
+    let value = TableFlowValue::try_from_raw_value(&kv.value)?;
+    Ok((key, value))
 }
 
 pub type TableFlowManagerRef = Arc<TableFlowManager>;
@@ -187,7 +196,10 @@ impl TableFlowManager {
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
     ///
     /// TODO(discord9): add cache for it since range request does not support cache.
-    pub fn flows(&self, table_id: TableId) -> BoxStream<'static, Result<TableFlowKey>> {
+    pub fn flows(
+        &self,
+        table_id: TableId,
+    ) -> BoxStream<'static, Result<(TableFlowKey, TableFlowValue)>> {
         let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
@@ -203,25 +215,27 @@ impl TableFlowManager {
     /// Builds a create table flow transaction.
     ///
     /// Puts `__flow/source_table/{table_id}/{node_id}/{partition_id}` keys.
-    pub fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
+    pub fn build_create_txn(
         &self,
         flow_id: FlowId,
-        flownode_ids: I,
+        table_flow_values: Vec<(FlowPartitionId, TableFlowValue)>,
         source_table_ids: &[TableId],
-    ) -> Txn {
-        let txns = flownode_ids
-            .into_iter()
-            .flat_map(|(partition_id, flownode_id)| {
-                source_table_ids.iter().map(move |table_id| {
-                    TxnOp::Put(
-                        TableFlowKey::new(*table_id, flownode_id, flow_id, partition_id).to_bytes(),
-                        vec![],
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
+    ) -> Result<Txn> {
+        let mut txns = Vec::with_capacity(source_table_ids.len() * table_flow_values.len());
 
-        Txn::new().and_then(txns)
+        for (partition_id, table_flow_value) in table_flow_values {
+            let flownode_id = table_flow_value.peer.id;
+            let value = table_flow_value.try_as_raw_value()?;
+            for source_table_id in source_table_ids {
+                txns.push(TxnOp::Put(
+                    TableFlowKey::new(*source_table_id, flownode_id, flow_id, partition_id)
+                        .to_bytes(),
+                    value.clone(),
+                ));
+            }
+        }
+
+        Ok(Txn::new().and_then(txns))
     }
 }
 

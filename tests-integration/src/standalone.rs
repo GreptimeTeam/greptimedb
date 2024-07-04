@@ -28,7 +28,6 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::peer::StandalonePeerLookupService;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::WalOptionsAllocator;
@@ -197,7 +196,6 @@ impl GreptimeDbStandaloneBuilder {
                     table_metadata_allocator,
                     flow_metadata_manager,
                     flow_metadata_allocator,
-                    peer_lookup_service: Arc::new(StandalonePeerLookupService::new()),
                     region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager.clone(),

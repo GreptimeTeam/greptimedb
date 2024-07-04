@@ -1,5 +1,5 @@
 --- test information_schema.region_peers ----
-USE INFORMATION_SCHEMA;
+USE public;
 
 CREATE TABLE region_peers_phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
 
@@ -25,10 +25,10 @@ CREATE TABLE region_peers_test (
     a >= 20,
 );
 
+use INFORMATION_SCHEMA;
+
 SELECT COUNT(distinct region_id) FROM region_peers;
 
+use public;
+
 DROP TABLE region_peers_t1, region_peers_t2, region_peers_phy, region_peers_test;
-
-USE public;
-
-

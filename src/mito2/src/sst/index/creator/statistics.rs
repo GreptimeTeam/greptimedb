@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ELAPSED, INDEX_CREATE_ROWS_TOTAL};
 
+pub(crate) type ByteCount = u64;
+pub(crate) type RowCount = usize;
+
 /// Stage of the index creation process.
 enum Stage {
     Update,
@@ -33,9 +36,9 @@ pub(crate) struct Statistics {
     /// Accumulated elapsed time for the cleanup stage.
     cleanup_eplased: Duration,
     /// Number of rows in the index.
-    row_count: usize,
+    row_count: RowCount,
     /// Number of bytes in the index.
-    byte_count: u64,
+    byte_count: ByteCount,
 }
 
 impl Statistics {
@@ -58,12 +61,12 @@ impl Statistics {
     }
 
     /// Returns row count.
-    pub fn row_count(&self) -> usize {
+    pub fn row_count(&self) -> RowCount {
         self.row_count
     }
 
     /// Returns byte count.
-    pub fn byte_count(&self) -> u64 {
+    pub fn byte_count(&self) -> ByteCount {
         self.byte_count
     }
 }

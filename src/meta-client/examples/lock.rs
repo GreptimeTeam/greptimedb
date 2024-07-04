@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::rpc::lock::{LockRequest, UnlockRequest};
-use meta_client::client::{MetaClient, MetaClientBuilder};
+use meta_client::client::MetaClientBuilder;
+use meta_client::MetaClientRef;
 use tracing::{info, subscriber};
 use tracing_subscriber::FmtSubscriber;
 
@@ -39,6 +41,7 @@ async fn run() {
         .channel_manager(channel_manager)
         .build();
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();
+    let meta_client = Arc::new(meta_client);
 
     run_normal(meta_client.clone()).await;
 
@@ -47,7 +50,7 @@ async fn run() {
     run_multi_thread_with_one_timeout(meta_client).await;
 }
 
-async fn run_normal(meta_client: MetaClient) {
+async fn run_normal(meta_client: MetaClientRef) {
     let name = "lock_name".as_bytes().to_vec();
     let expire_secs = 60;
 
@@ -70,7 +73,7 @@ async fn run_normal(meta_client: MetaClient) {
     info!("unlock success!");
 }
 
-async fn run_multi_thread(meta_client: MetaClient) {
+async fn run_multi_thread(meta_client: MetaClientRef) {
     let meta_client_clone = meta_client.clone();
     let join1 = tokio::spawn(async move {
         run_normal(meta_client_clone.clone()).await;
@@ -86,7 +89,7 @@ async fn run_multi_thread(meta_client: MetaClient) {
     join2.await.unwrap();
 }
 
-async fn run_multi_thread_with_one_timeout(meta_client: MetaClient) {
+async fn run_multi_thread_with_one_timeout(meta_client: MetaClientRef) {
     let meta_client_clone = meta_client.clone();
     let join1 = tokio::spawn(async move {
         run_with_timeout(meta_client_clone.clone()).await;
@@ -102,7 +105,7 @@ async fn run_multi_thread_with_one_timeout(meta_client: MetaClient) {
     join2.await.unwrap();
 }
 
-async fn run_with_timeout(meta_client: MetaClient) {
+async fn run_with_timeout(meta_client: MetaClientRef) {
     let name = "lock_name".as_bytes().to_vec();
     let expire_secs = 5;
 

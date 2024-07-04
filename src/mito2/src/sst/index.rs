@@ -16,6 +16,7 @@ pub(crate) mod applier;
 mod codec;
 pub(crate) mod creator;
 pub(crate) mod intermediate;
+pub(crate) mod puffin_manager;
 mod store;
 
 use std::num::NonZeroUsize;

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use common_catalog::format_full_flow_name;
-use snafu::OptionExt;
+use futures::TryStreamExt;
+use snafu::{ensure, OptionExt};
 
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::error::{self, Result};
@@ -32,7 +33,23 @@ impl DropFlowProcedure {
             .with_context(|| error::FlowNotFoundSnafu {
                 flow_name: format_full_flow_name(catalog_name, flow_name),
             })?;
+
+        let flow_route_values = self
+            .context
+            .flow_metadata_manager
+            .flow_route_manager()
+            .routes(self.data.task.flow_id)
+            .map_ok(|(_, value)| value)
+            .try_collect::<Vec<_>>()
+            .await?;
+        ensure!(
+            !flow_route_values.is_empty(),
+            error::FlowRouteNotFoundSnafu {
+                flow_name: format_full_flow_name(catalog_name, flow_name),
+            }
+        );
         self.data.flow_info_value = Some(flow_info_value);
+        self.data.flow_route_values = flow_route_values;
 
         Ok(())
     }

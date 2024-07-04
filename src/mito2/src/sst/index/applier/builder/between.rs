@@ -66,9 +66,11 @@ mod tests {
         encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
         test_object_store, test_region_metadata,
     };
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[test]
     fn test_collect_between_basic() {
+        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_between_basic_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -76,6 +78,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let between = Between {
@@ -108,6 +111,8 @@ mod tests {
 
     #[test]
     fn test_collect_between_negated() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_between_negated_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -115,6 +120,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let between = Between {
@@ -130,6 +136,8 @@ mod tests {
 
     #[test]
     fn test_collect_between_field_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_between_field_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -137,6 +145,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let between = Between {
@@ -152,6 +161,8 @@ mod tests {
 
     #[test]
     fn test_collect_between_type_mismatch() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_between_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -159,6 +170,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let between = Between {
@@ -175,6 +187,8 @@ mod tests {
 
     #[test]
     fn test_collect_between_nonexistent_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_between_nonexistent_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -182,6 +196,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let between = Between {

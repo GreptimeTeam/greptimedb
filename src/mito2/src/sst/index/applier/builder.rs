@@ -38,6 +38,7 @@ use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnaf
 use crate::row_converter::SortField;
 use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 /// Constructs an [`SstIndexApplier`] which applies predicates to SST files during scan.
 pub(crate) struct SstIndexApplierBuilder<'a> {
@@ -58,6 +59,9 @@ pub(crate) struct SstIndexApplierBuilder<'a> {
 
     /// Stores predicates during traversal on the Expr tree.
     output: HashMap<ColumnId, Vec<Predicate>>,
+
+    /// The puffin manager factory.
+    puffin_manager_factory: PuffinManagerFactory,
 }
 
 impl<'a> SstIndexApplierBuilder<'a> {
@@ -68,6 +72,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         file_cache: Option<FileCacheRef>,
         metadata: &'a RegionMetadata,
         ignore_column_ids: HashSet<ColumnId>,
+        puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         Self {
             region_dir,
@@ -76,6 +81,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             metadata,
             ignore_column_ids,
             output: HashMap::default(),
+            puffin_manager_factory,
         }
     }
 
@@ -102,6 +108,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             self.object_store,
             self.file_cache,
             Box::new(applier.context(BuildIndexApplierSnafu)?),
+            self.puffin_manager_factory,
         )))
     }
 
@@ -306,6 +313,8 @@ mod tests {
 
     #[test]
     fn test_collect_and_basic() {
+        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_and_basic_");
+
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -313,6 +322,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let expr = Expr::BinaryExpr(BinaryExpr {

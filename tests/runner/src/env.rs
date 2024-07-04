@@ -227,7 +227,7 @@ impl Env {
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
-                    "--metasrv-addr=127.0.0.1:3002".to_string(),
+                    "--metasrv-addrs=127.0.0.1:3002".to_string(),
                     "--http-addr=127.0.0.1:5003".to_string(),
                 ];
                 (args, SERVER_ADDR.to_string())
@@ -303,7 +303,7 @@ impl Env {
         args.push(format!("--node-id={id}"));
         args.push("-c".to_string());
         args.push(self.generate_config_file(subcommand, db_ctx));
-        args.push("--metasrv-addr=127.0.0.1:3002".to_string());
+        args.push("--metasrv-addrs=127.0.0.1:3002".to_string());
         (args, format!("127.0.0.1:410{id}"))
     }
 

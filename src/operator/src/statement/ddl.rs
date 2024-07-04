@@ -20,7 +20,7 @@ use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
@@ -72,8 +72,8 @@ use crate::error::{
     ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionColumnsSnafu,
     InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
     InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu,
-    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_factory;
 use crate::statement::show::create_partitions_stmt;
@@ -151,6 +151,13 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        ensure!(
+            !is_readonly_schema(&create_table.schema_name),
+            SchemaReadOnlySnafu {
+                name: create_table.schema_name.clone()
+            }
+        );
+
         // Check if is creating logical table
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
@@ -645,6 +652,13 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
+            ensure!(
+                !is_readonly_schema(&table_name.schema_name),
+                SchemaReadOnlySnafu {
+                    name: table_name.schema_name.clone()
+                }
+            );
+
             if let Some(table) = self
                 .catalog_manager
                 .table(
@@ -694,6 +708,11 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(
+            !is_readonly_schema(&schema),
+            SchemaReadOnlySnafu { name: schema }
+        );
+
         if self
             .catalog_manager
             .schema_exists(&catalog, &schema)
@@ -725,6 +744,13 @@ impl StatementExecutor {
         table_name: TableName,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(
+            !is_readonly_schema(&table_name.schema_name),
+            SchemaReadOnlySnafu {
+                name: table_name.schema_name.clone()
+            }
+        );
+
         let table = self
             .catalog_manager
             .table(
@@ -794,6 +820,13 @@ impl StatementExecutor {
         expr: AlterExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        ensure!(
+            !is_readonly_schema(&expr.schema_name),
+            SchemaReadOnlySnafu {
+                name: expr.schema_name.clone()
+            }
+        );
+
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
         } else {
