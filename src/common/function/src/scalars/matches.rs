@@ -138,18 +138,16 @@ impl MatchesFunction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PatternAst {
-    Literal {
-        op: UnaryOp,
-        pattern: String,
-    },
+    // Distinguish this with `Group` for simplicity
+    /// A leaf node that matches a column with `pattern`
+    Literal { op: UnaryOp, pattern: String },
+    /// Flattened binary chains
     Binary {
         op: BinaryOp,
         children: Vec<PatternAst>,
     },
-    Group {
-        op: UnaryOp,
-        child: Box<PatternAst>,
-    },
+    /// A sub-tree enclosed by parenthesis
+    Group { op: UnaryOp, child: Box<PatternAst> },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1225,7 +1223,7 @@ mod test {
                 "-over AND -lazy",
                 vec![false, false, false, false, false, false, false],
             ),
-            // test priority between AND & OR
+            // priority between AND & OR
             (
                 "fox AND jumps OR over",
                 vec![true, true, true, true, true, true, true],
