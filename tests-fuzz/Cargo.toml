@@ -40,6 +40,7 @@ lazy_static = { workspace = true }
 libfuzzer-sys = "0.4"
 nix = { version = "0.28", features = ["process", "signal"], optional = true }
 partition = { workspace = true }
+paste.workspace = true
 rand = { workspace = true }
 rand_chacha = "0.3.1"
 reqwest = { workspace = true }

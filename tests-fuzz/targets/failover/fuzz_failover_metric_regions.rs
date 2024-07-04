@@ -48,9 +48,9 @@ use tests_fuzz::utils::partition::{
 };
 use tests_fuzz::utils::pod_failure::{inject_datanode_pod_failure, recover_pod_failure};
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, get_from_env_or_default_value,
+    compact_table, flush_memtable, get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables,
     init_greptime_connections_via_env, Connections, GT_FUZZ_CLUSTER_NAME,
-    GT_FUZZ_CLUSTER_NAMESPACE, GT_FUZZ_INPUT_MAX_ROWS, GT_FUZZ_INPUT_MAX_TABLES,
+    GT_FUZZ_CLUSTER_NAMESPACE,
 };
 use tests_fuzz::validator::row::count_values;
 
@@ -78,9 +78,9 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let max_rows = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+        let max_rows = get_gt_fuzz_input_max_rows();
         let rows = rng.gen_range(2..max_rows);
-        let max_tables = get_from_env_or_default_value(GT_FUZZ_INPUT_MAX_TABLES, 64);
+        let max_tables = get_gt_fuzz_input_max_tables();
         let tables = rng.gen_range(1..max_tables);
         Ok(FuzzInput { rows, seed, tables })
     }

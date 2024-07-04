@@ -11765,6 +11765,7 @@ dependencies = [
  "libfuzzer-sys",
  "nix 0.28.0",
  "partition",
+ "paste",
  "rand",
  "rand_chacha",
  "reqwest",
