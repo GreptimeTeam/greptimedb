@@ -97,13 +97,12 @@ impl AccessLayer {
             })?;
 
         let path = location::index_file_path(&self.region_dir, file_meta.file_id);
-        if let Err(err) = self.object_store.delete(&path).await {
-            if err.kind() != object_store::ErrorKind::NotFound {
-                return Err(err).context(DeleteIndexSnafu {
-                    file_id: file_meta.file_id,
-                });
-            }
-        }
+        self.object_store
+            .delete(&path)
+            .await
+            .context(DeleteIndexSnafu {
+                file_id: file_meta.file_id,
+            })?;
 
         Ok(())
     }

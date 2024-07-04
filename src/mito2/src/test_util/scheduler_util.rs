@@ -20,7 +20,6 @@ use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use tokio::sync::mpsc::Sender;
