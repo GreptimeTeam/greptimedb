@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use bounded_stager::BoundedStager;
+pub use bounded_stager::{BoundedStager, FsBlobGuard, FsDirGuard};
 use futures::future::BoxFuture;
 use futures::AsyncWrite;
 

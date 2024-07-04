@@ -45,6 +45,7 @@ use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::parquet::WriteOptions;
 
 /// CompactionRegion represents a region that needs to be compacted.
@@ -93,13 +94,19 @@ pub async fn open_compaction_region(
     };
 
     let access_layer = {
+        let puffin_manager_factory = PuffinManagerFactory::new(
+            &mito_config.index.aux_path,
+            mito_config.index.staging_size.as_bytes(),
+            Some(mito_config.index.write_buffer_size.as_bytes() as _),
+        )
+        .await?;
         let intermediate_manager =
-            IntermediateManager::init_fs(mito_config.inverted_index.intermediate_path.clone())
-                .await?;
+            IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
 
         Arc::new(AccessLayer::new(
             req.region_dir.as_str(),
             object_store.clone(),
+            puffin_manager_factory,
             intermediate_manager,
         ))
     };
@@ -266,7 +273,7 @@ impl Compactor for DefaultCompactor {
             let index_write_buffer_size = Some(
                 compaction_region
                     .engine_config
-                    .inverted_index
+                    .index
                     .write_buffer_size
                     .as_bytes() as usize,
             );
