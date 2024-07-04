@@ -33,10 +33,19 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ConcreteDataType;
 
 use crate::function::{Function, FunctionContext};
+use crate::function_registry::FunctionRegistry;
 
 /// `matches` for full text search.
+///
+/// Usage: matches(`<col>`, `<pattern>`) -> boolean
 #[derive(Clone, Debug, Default)]
-struct MatchesFunction;
+pub(crate) struct MatchesFunction;
+
+impl MatchesFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(MatchesFunction));
+    }
+}
 
 impl fmt::Display for MatchesFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -72,12 +81,6 @@ impl Function for MatchesFunction {
                     "The length of the args is not correct, expect exactly 2, have: {}",
                     columns.len()
                 ),
-            }
-        );
-        ensure!(
-            columns[1].len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: "The second argument should be a string literal",
             }
         );
         let pattern_vector = &columns[1]
