@@ -22,7 +22,7 @@ use super::wait::wait_condition_fn;
 use crate::error;
 
 /// Fetches the state of a procedure.
-pub async fn procedure_state(e: &Pool<MySql>, procedure_id: String) -> String {
+pub async fn procedure_state(e: &Pool<MySql>, procedure_id: &str) -> String {
     let sql = format!("select procedure_state(\"{procedure_id}\");");
     let result = sqlx::query(&sql)
         .fetch_one(e)
@@ -43,7 +43,7 @@ pub async fn wait_for_procedure_finish(
         || {
             let greptime = greptime.clone();
             let procedure_id = procedure_id.clone();
-            Box::pin(async move { procedure_state(&greptime, procedure_id).await })
+            Box::pin(async move { procedure_state(&greptime, &procedure_id).await })
         },
         |output| {
             info!("Procedure({procedure_id}) state: {:?}", output);
