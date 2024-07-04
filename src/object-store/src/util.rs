@@ -128,16 +128,13 @@ pub fn normalize_path(path: &str) -> String {
 // pattern `<data|index>/catalog/schema/table_id/....`
 //
 // this implementation tries to extract at most 3 levels of parent path
-pub(crate) fn extract_parent_path(path: &str) -> String {
+pub(crate) fn extract_parent_path(path: &str) -> &str {
     // split the path into `catalog`, `schema` and others
-    let parts: Vec<&str> = path.splitn(4, '/').collect();
-    if parts.len() == 4 {
-        // retain the first 3 part
-        parts[0..3].join("/").to_string()
-    } else {
-        // use path itself if there is insufficient levels
-        path.to_string()
-    }
+    path.char_indices()
+        .filter(|&(_, c)| c == '/')
+        // we get the data/catalog/schema from path, split at the 3rd /
+        .nth(2)
+        .map_or(path, |(i, _)| &path[..i])
 }
 
 /// Attaches instrument layers to the object store.
