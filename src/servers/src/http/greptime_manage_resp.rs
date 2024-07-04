@@ -77,7 +77,7 @@ impl IntoResponse for GreptimedbManageResponse {
 
         let mut resp = Json(self).into_response();
 
-        // We delibrately don't add this format into [`crate::http::ResponseFormat`]
+        // We deliberately don't add this format into [`crate::http::ResponseFormat`]
         // because this is a format for manage api other than the data query api
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
