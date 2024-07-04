@@ -640,7 +640,7 @@ impl Tokenizer {
                 }
                 _ => {
                     let phase = self.consume_next_phase(false, pattern)?;
-                    match phase.as_str() {
+                    match phase.to_uppercase().as_str() {
                         "AND" => tokens.push(Token::And),
                         "OR" => tokens.push(Token::Or),
                         _ => tokens.push(Token::Phase(phase)),
@@ -1032,6 +1032,22 @@ mod test {
                         PatternAst::Literal {
                             op: UnaryOp::Must,
                             pattern: "a".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                "\"AND\" AnD \"OR\"",
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "AND".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "OR".to_string(),
                         },
                     ],
                 },
