@@ -193,8 +193,8 @@ impl SstIndexCreator {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
-            if !self.column_ids.contains(column_id) {
+        for ((col_id, col_id_str), field, value) in self.codec.decode(batch.primary_key())? {
+            if !self.column_ids.contains(col_id) {
                 continue;
             }
 
@@ -210,7 +210,7 @@ impl SstIndexCreator {
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
-                .push_with_name_n(&column_id.to_string(), value, n)
+                .push_with_name_n(&col_id_str, value, n)
                 .await
                 .context(PushIndexValueSnafu)?;
         }

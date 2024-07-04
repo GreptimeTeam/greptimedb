@@ -60,8 +60,9 @@ impl IndexValueCodec {
 
 /// Decodes primary key values into their corresponding column ids, data types and values.
 pub struct IndexValuesCodec {
-    /// The tag column ids.
-    column_ids: Vec<ColumnId>,
+    /// Tuples containing column id and its corresponding index_name (result of `to_string` on ColumnId),
+    /// to minimize redundant `to_string` calls.
+    column_ids: Vec<(ColumnId, String)>,
     /// The data types of tag columns.
     fields: Vec<SortField>,
     /// The decoder for the primary key.
@@ -74,7 +75,7 @@ impl IndexValuesCodec {
         let (column_ids, fields): (Vec<_>, Vec<_>) = tag_columns
             .map(|column| {
                 (
-                    column.column_id,
+                    (column.column_id, column.column_id.to_string()),
                     SortField::new(column.column_schema.data_type.clone()),
                 )
             })
@@ -92,7 +93,7 @@ impl IndexValuesCodec {
     pub fn decode(
         &self,
         primary_key: &[u8],
-    ) -> Result<impl Iterator<Item = (&ColumnId, &SortField, Option<Value>)>> {
+    ) -> Result<impl Iterator<Item = (&(ColumnId, String), &SortField, Option<Value>)>> {
         let values = self.decoder.decode(primary_key)?;
 
         let iter = values
@@ -174,13 +175,15 @@ mod tests {
         let codec = IndexValuesCodec::from_tag_columns(tag_columns.iter());
         let mut iter = codec.decode(&primary_key).unwrap();
 
-        let (column_id, field, value) = iter.next().unwrap();
+        let ((column_id, col_id_str), field, value) = iter.next().unwrap();
         assert_eq!(*column_id, 1);
+        assert_eq!(col_id_str, "1");
         assert_eq!(field, &SortField::new(ConcreteDataType::string_datatype()));
         assert_eq!(value, None);
 
-        let (column_id, field, value) = iter.next().unwrap();
+        let ((column_id, col_id_str), field, value) = iter.next().unwrap();
         assert_eq!(*column_id, 2);
+        assert_eq!(col_id_str, "2");
         assert_eq!(field, &SortField::new(ConcreteDataType::int64_datatype()));
         assert_eq!(value, Some(Value::Int64(10)));
 
