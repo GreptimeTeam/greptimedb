@@ -14,6 +14,7 @@
 
 use std::result::Result as StdResult;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
@@ -24,20 +25,20 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
-use http::{HeaderMap, HeaderValue};
 use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::util::to_pipeline_version;
 use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Deserializer, Value};
+use serde_json::{Deserializer, Value};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
+use crate::http::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
 use crate::query_handler::LogHandlerRef;
@@ -104,7 +105,8 @@ pub async fn add_pipeline(
     Path(pipeline_name): Path<String>,
     Extension(query_ctx): Extension<QueryContextRef>,
     PipelineContent(payload): PipelineContent,
-) -> Result<impl IntoResponse> {
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
     let handler = state.log_handler;
     if pipeline_name.is_empty() {
         return Err(InvalidParameterSnafu {
@@ -126,7 +128,13 @@ pub async fn add_pipeline(
         .await;
 
     result
-        .map(|pipeline| to_json_result(pipeline_name, pipeline.0.to_timezone_aware_string(None)))
+        .map(|pipeline| {
+            GreptimedbManageResponse::from_pipeline(
+                pipeline_name,
+                pipeline.0.to_timezone_aware_string(None),
+                start.elapsed().as_millis() as u64,
+            )
+        })
         .map_err(|e| {
             error!(e; "failed to insert pipeline");
             e
@@ -139,7 +147,8 @@ pub async fn delete_pipeline(
     Extension(query_ctx): Extension<QueryContextRef>,
     Query(query_params): Query<LogIngesterQueryParams>,
     Path(pipeline_name): Path<String>,
-) -> Result<Response> {
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
     let handler = state.log_handler;
     ensure!(
         !pipeline_name.is_empty(),
@@ -159,9 +168,13 @@ pub async fn delete_pipeline(
         .await
         .map(|v| {
             if v.is_some() {
-                to_json_result(pipeline_name, version_str).into_response()
+                GreptimedbManageResponse::from_pipeline(
+                    pipeline_name,
+                    version_str,
+                    start.elapsed().as_millis() as u64,
+                )
             } else {
-                (HeaderMap::new(), json!({}).to_string()).into_response()
+                GreptimedbManageResponse::from_pipelines(vec![], start.elapsed().as_millis() as u64)
             }
         })
         .map_err(|e| {
@@ -292,17 +305,6 @@ async fn ingest_logs_inner(
         .await
         .with_execution_time(start.elapsed().as_millis() as u64);
     Ok(response)
-}
-
-fn to_json_result(pipeline_name: String, version: String) -> impl IntoResponse {
-    let json_header = HeaderValue::from_str(mime_guess::mime::APPLICATION_JSON.as_ref()).unwrap();
-    let mut headers = HeaderMap::new();
-    headers.append(CONTENT_TYPE, json_header);
-
-    (
-        headers,
-        json!({"version": version, "name": pipeline_name}).to_string(),
-    )
 }
 
 pub trait LogValidator {

@@ -92,6 +92,7 @@ pub mod csv_result;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 pub mod error_result;
+pub mod greptime_manage_resp;
 pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 pub mod table_result;

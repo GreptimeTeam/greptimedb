@@ -1044,16 +1044,23 @@ transform:
 
     let content = serde_json::from_str(&content);
     assert!(content.is_ok());
+    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
     let content: Value = content.unwrap();
-    let pipeline_name = content.get("name");
-    assert!(pipeline_name.is_some());
-    assert_eq!(pipeline_name.unwrap(), "test");
 
-    let version = content.get("version");
-    assert!(version.is_some());
-    let version = version.unwrap().as_str();
-    assert!(version.is_some());
-    let version_str = version.unwrap();
+    let execution_time = content.get("execution_time_ms");
+    assert!(execution_time.unwrap().is_number());
+    let pipelines = content.get("pipelines");
+    let pipelines = pipelines.unwrap().as_array().unwrap();
+    assert_eq!(pipelines.len(), 1);
+    let pipeline = pipelines.first().unwrap();
+    assert_eq!(pipeline.get("name").unwrap(), "test");
+
+    let version_str = pipeline
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. write data
     let data_body = r#"
@@ -1067,7 +1074,7 @@ transform:
     "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
   }
 ]
-    "#;
+"#;
     let res = client
         .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
@@ -1086,13 +1093,15 @@ transform:
 
     assert_eq!(res.status(), StatusCode::OK);
 
+    // {"pipelines":[{"name":"test","version":"2024-07-04 08:55:29.038347"}],"execution_time_ms":22}
     let content = res.text().await;
+    let content: Value = serde_json::from_str(&content).unwrap();
+    assert!(content.get("execution_time_ms").unwrap().is_number());
 
-    let content = serde_json::from_str(&content);
-    assert!(content.is_ok());
-    let content: Value = content.unwrap();
-
-    assert_eq!(content, json!({"name": "test", "version": version_str}));
+    assert_eq!(
+        content.get("pipelines").unwrap().to_string(),
+        format!(r#"[{{"name":"test","version":"{}"}}]"#, version_str).as_str()
+    );
 
     // 4. write data failed
     let res = client
@@ -1101,6 +1110,7 @@ transform:
         .body(data_body)
         .send()
         .await;
+    // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
 
     guard.remove_all().await;
