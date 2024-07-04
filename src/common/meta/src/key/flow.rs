@@ -24,6 +24,7 @@ use std::sync::Arc;
 use common_telemetry::info;
 use flow_route::{FlowRouteKey, FlowRouteManager, FlowRouteValue};
 use snafu::{ensure, OptionExt};
+use table_flow::TableFlowValue;
 
 use self::flow_info::{FlowInfoKey, FlowInfoValue};
 use self::flow_name::FlowNameKey;
@@ -159,7 +160,7 @@ impl FlowMetadataManager {
 
         let create_flow_routes_txn = self
             .flow_route_manager
-            .build_create_txn(flow_id, flow_routes)?;
+            .build_create_txn(flow_id, flow_routes.clone())?;
 
         let create_flownode_flow_txn = self
             .flownode_flow_manager
@@ -167,9 +168,12 @@ impl FlowMetadataManager {
 
         let create_table_flow_txn = self.table_flow_manager.build_create_txn(
             flow_id,
-            flow_info.flownode_ids().clone(),
+            flow_routes
+                .into_iter()
+                .map(|(partition_id, route)| (partition_id, TableFlowValue { peer: route.peer }))
+                .collect(),
             flow_info.source_table_ids(),
-        );
+        )?;
 
         let txn = Txn::merge_all(vec![
             create_flow_flow_name_txn,
@@ -354,7 +358,11 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
         let flow_id = 10;
-        let flow_value = test_flow_info_value("flow", [(0, 1u64)].into(), vec![1024, 1025, 1026]);
+        let flow_value = test_flow_info_value(
+            "flow",
+            [(0, 1u64), (1, 2u64)].into(),
+            vec![1024, 1025, 1026],
+        );
         let flow_routes = vec![
             (
                 1u32,
@@ -422,7 +430,23 @@ mod tests {
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
-            assert_eq!(nodes, vec![TableFlowKey::new(table_id, 1, flow_id, 0)]);
+            assert_eq!(
+                nodes,
+                vec![
+                    (
+                        TableFlowKey::new(table_id, 1, flow_id, 1),
+                        TableFlowValue {
+                            peer: Peer::empty(1)
+                        }
+                    ),
+                    (
+                        TableFlowKey::new(table_id, 2, flow_id, 2),
+                        TableFlowValue {
+                            peer: Peer::empty(2)
+                        }
+                    )
+                ]
+            );
         }
     }
 

@@ -43,9 +43,10 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::cluster_info::{fetch_nodes, PEER_TYPE_DATANODE};
-use tests_fuzz::utils::migration::{migrate_region, wait_for_region_distribution};
-use tests_fuzz::utils::partition::{fetch_partitions, region_distribution};
-use tests_fuzz::utils::procedure::wait_for_procedure_finish;
+use tests_fuzz::utils::migration::migrate_region;
+use tests_fuzz::utils::partition::{fetch_partition, fetch_partitions, region_distribution};
+use tests_fuzz::utils::procedure::procedure_state;
+use tests_fuzz::utils::wait::wait_condition_fn;
 use tests_fuzz::utils::{
     compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
 };
@@ -125,6 +126,7 @@ fn generate_insert_exprs<R: Rng + 'static>(
         .collect::<Result<Vec<_>>>()
 }
 
+#[derive(Debug)]
 struct Migration {
     from_peer: u64,
     to_peer: u64,
@@ -222,17 +224,29 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     }
     info!("Excepted new region distribution: {new_distribution:?}");
 
-    // Waits for all region migrated
-    wait_for_region_distribution(
-        &ctx.greptime,
-        Duration::from_secs(120),
-        table_ctx.name.clone(),
-        new_distribution,
-    )
-    .await;
-
-    for procedure_id in procedure_ids {
-        wait_for_procedure_finish(&ctx.greptime, Duration::from_secs(120), procedure_id).await;
+    for (migration, procedure_id) in migrations.into_iter().zip(procedure_ids) {
+        info!("Waits for migration: {migration:?}");
+        let region_id = migration.region_id.as_u64();
+        wait_condition_fn(
+            Duration::from_secs(120),
+            || {
+                let greptime = ctx.greptime.clone();
+                let procedure_id = procedure_id.to_string();
+                Box::pin(async move {
+                    {
+                        let output = procedure_state(&greptime, &procedure_id).await;
+                        info!("Checking procedure: {procedure_id}, output: {output}");
+                        fetch_partition(&greptime, region_id).await.unwrap()
+                    }
+                })
+            },
+            |partition| {
+                info!("Region: {region_id},  datanode: {}", partition.datanode_id);
+                partition.datanode_id == migration.to_peer
+            },
+            Duration::from_secs(5),
+        )
+        .await;
     }
 
     // Values validation
