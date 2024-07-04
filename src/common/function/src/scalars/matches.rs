@@ -219,11 +219,7 @@ impl PatternAst {
 
     /// Transform this AST with preset rules to make it correct.
     fn transform_ast(self) -> Result<Self> {
-        self
-            // .transform_up(Self::replace_or_with_and_fn)
-            // .context(GeneralDataFusionSnafu)
-            // .map(|data| data.data)?
-            .transform_up(Self::collapse_binary_branch_fn)
+        self.transform_up(Self::collapse_binary_branch_fn)
             .context(GeneralDataFusionSnafu)
             .map(|data| data.data)?
             .transform_up(Self::eliminate_optional_fn)
@@ -232,47 +228,6 @@ impl PatternAst {
             .transform_down(Self::eliminate_single_child_fn)
             .context(GeneralDataFusionSnafu)
             .map(|data| data.data)
-    }
-
-    /// This function assumes the AST is in binary-tree form.
-    fn replace_or_with_and_fn(self) -> DfResult<Transformed<Self>> {
-        let PatternAst::Binary {
-            op: parent_op,
-            children,
-        } = self
-        else {
-            return Ok(Transformed::no(self));
-        };
-
-        if children.len() != 2 {
-            panic!("expect binary tree AST");
-        }
-
-        if parent_op != BinaryOp::Or {
-            return Ok(Transformed::no(PatternAst::Binary {
-                op: parent_op,
-                children,
-            }));
-        }
-
-        fn is_must_or_must_not(ast: &PatternAst) -> bool {
-            match ast {
-                PatternAst::Literal { op, .. } => *op == UnaryOp::Must || *op == UnaryOp::Negative,
-                PatternAst::Binary { .. } | PatternAst::Group { .. } => false,
-            }
-        }
-
-        if is_must_or_must_not(&children[0]) || is_must_or_must_not(&children[1]) {
-            Ok(Transformed::yes(PatternAst::Binary {
-                op: BinaryOp::And,
-                children,
-            }))
-        } else {
-            Ok(Transformed::no(PatternAst::Binary {
-                op: parent_op,
-                children,
-            }))
-        }
     }
 
     /// Collapse binary branch with the same operator. I.e., this transformer
@@ -344,12 +299,7 @@ impl PatternAst {
 
             for child in children {
                 match child {
-                    PatternAst::Literal {
-                        op,
-                        // pattern: ref _pattern,
-                        ..
-                    }
-                    | PatternAst::Group { op, .. } => match op {
+                    PatternAst::Literal { op, .. } | PatternAst::Group { op, .. } => match op {
                         UnaryOp::Must => must_list.push(child),
                         UnaryOp::Optional => optional_list.push(child),
                         UnaryOp::Negative => must_not_list.push(child),
@@ -475,9 +425,7 @@ impl ParserContext {
         let tokenizer = Tokenizer::default();
         let raw_tokens = tokenizer.tokenize(pattern)?;
         let raw_tokens = Self::accomplish_optional_unary_op(raw_tokens);
-        println!("[DEBUG] accomplished tokens: {:?}", raw_tokens);
         let mut tokens = Self::to_rpn(raw_tokens)?;
-        println!("[DEBUG] rpn tokens: {:?}", tokens);
 
         while !tokens.is_empty() {
             self.parse_one_impl(&mut tokens)?;
@@ -504,7 +452,6 @@ impl ParserContext {
     /// Add [`Token::Optional`] for all bare [`Token::Phase`] and [`Token::Or`]
     /// for all adjacent [`Token::Phase`]s.
     fn accomplish_optional_unary_op(raw_tokens: Vec<Token>) -> Vec<Token> {
-        println!("[DEBUG] raw tokens before accomplish: {:?}", raw_tokens);
         let mut is_prev_unary_op = false;
         // The first one doesn't need binary op
         let mut is_binary_op_before = true;
@@ -537,7 +484,6 @@ impl ParserContext {
 
             // fill `Token::Optional`
             if !is_prev_unary_op && matches!(token, Token::Phase(_) | Token::OpenParen) {
-                // is_prev_unary_op = false;
                 new_tokens.push(Token::Optional);
             } else {
                 is_prev_unary_op = matches!(token, Token::Must | Token::Negative);
@@ -559,11 +505,6 @@ impl ParserContext {
             match token {
                 Token::Phase(_) => result.push(token),
                 Token::Must | Token::Negative | Token::Optional => {
-                    // TODO: unary operator with paren is not handled yet
-                    // let phase = raw_tokens.pop().context(InvalidFuncArgsSnafu {
-                    //     err_msg: "Unexpected end of pattern, expected a phase after unary operator",
-                    // })?;
-                    // result.push(phase);
                     operator_stack.push(token);
                 }
                 Token::OpenParen => operator_stack.push(token),
@@ -610,7 +551,6 @@ impl ParserContext {
             match token {
                 Token::Must => {
                     if self.stack.is_empty() {
-                        // self.unwind_for_phase(tokens, token)?;
                         self.parse_one_impl(tokens)?;
                     }
                     let phase_or_group = self.stack.pop().context(InvalidFuncArgsSnafu {
@@ -634,7 +574,6 @@ impl ParserContext {
                 }
                 Token::Negative => {
                     if self.stack.is_empty() {
-                        // self.unwind_for_phase(tokens, token)?;
                         self.parse_one_impl(tokens)?;
                     }
                     let phase_or_group = self.stack.pop().context(InvalidFuncArgsSnafu {
@@ -658,7 +597,6 @@ impl ParserContext {
                 }
                 Token::Optional => {
                     if self.stack.is_empty() {
-                        // self.unwind_for_phase(tokens, token)?;
                         self.parse_one_impl(tokens)?;
                     }
                     let phase_or_group = self.stack.pop().context(InvalidFuncArgsSnafu {
@@ -736,28 +674,6 @@ impl ParserContext {
         }
 
         Ok(())
-    }
-
-    /// Try unwind one token if the next one is phase.
-    fn unwind_for_phase(&mut self, tokens: &mut Vec<Token>, unwind: Token) -> Result<()> {
-        let stack_top = tokens.last().context(InvalidFuncArgsSnafu {
-            err_msg: "Unexpected EOF, want a phase or group",
-        })?;
-        if matches!(*stack_top, Token::Phase(_)) {
-            tokens.push(unwind);
-        }
-
-        Ok(())
-    }
-
-    fn unwrap_phase(token: Token) -> Result<String> {
-        match token {
-            Token::Phase(phase) => Ok(phase),
-            _ => InvalidFuncArgsSnafu {
-                err_msg: format!("Unexpected token: {:?}, want a phase", token),
-            }
-            .fail(),
-        }
     }
 }
 
@@ -1363,6 +1279,10 @@ mod test {
             (
                 "over -(fox AND jumps)",
                 vec![false, false, true, true, false, false, false],
+            ),
+            (
+                "over AND -(-(fox OR jumps))",
+                vec![true, true, true, true, false, true, true],
             ),
         ];
 
