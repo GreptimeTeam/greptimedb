@@ -25,6 +25,7 @@ use table::table_name::TableName;
 use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
 use crate::key::FlowId;
+use crate::peer::Peer;
 use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
@@ -169,7 +170,7 @@ pub enum CacheIdent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateFlow {
     pub source_table_ids: Vec<TableId>,
-    pub flownode_ids: Vec<FlownodeId>,
+    pub flownode_peers: Vec<Peer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

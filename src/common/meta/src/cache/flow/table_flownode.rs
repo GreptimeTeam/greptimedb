@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -26,9 +26,10 @@ use crate::error::Result;
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::{TableFlowManager, TableFlowManagerRef};
 use crate::kv_backend::KvBackendRef;
+use crate::peer::Peer;
 use crate::FlownodeId;
 
-type FlownodeSet = HashSet<FlownodeId>;
+type FlownodeSet = Arc<HashMap<FlownodeId, Peer>>;
 
 pub type TableFlownodeSetCacheRef = Arc<TableFlownodeSetCache>;
 
@@ -53,13 +54,14 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
         Box::pin(async move {
             table_flow_manager
                 .flows(table_id)
-                .map_ok(|key| key.flownode_id())
-                .try_collect::<HashSet<_>>()
+                .map_ok(|(key, value)| (key.flownode_id(), value.peer))
+                .try_collect::<HashMap<_, _>>()
                 .await
                 // We must cache the `HashSet` even if it's empty,
                 // to avoid future requests to the remote storage next time;
                 // If the value is added to the remote storage,
                 // we have a corresponding cache invalidation mechanism to invalidate `(Key, EmptyHashSet)`.
+                .map(Arc::new)
                 .map(Some)
         })
     })
@@ -69,21 +71,23 @@ async fn handle_create_flow(
     cache: &Cache<TableId, FlownodeSet>,
     CreateFlow {
         source_table_ids,
-        flownode_ids,
+        flownode_peers,
     }: &CreateFlow,
 ) {
     for table_id in source_table_ids {
         let entry = cache.entry(*table_id);
         entry
             .and_compute_with(
-                async |entry: Option<moka::Entry<u32, HashSet<u64>>>| match entry {
+                async |entry: Option<moka::Entry<u32, Arc<HashMap<u64, _>>>>| match entry {
                     Some(entry) => {
-                        let mut set = entry.into_value();
-                        set.extend(flownode_ids.iter().cloned());
+                        let mut map = entry.into_value().as_ref().clone();
+                        map.extend(flownode_peers.iter().map(|peer| (peer.id, peer.clone())));
 
-                        Op::Put(set)
+                        Op::Put(Arc::new(map))
                     }
-                    None => Op::Put(HashSet::from_iter(flownode_ids.iter().cloned())),
+                    None => Op::Put(Arc::new(HashMap::from_iter(
+                        flownode_peers.iter().map(|peer| (peer.id, peer.clone())),
+                    ))),
                 },
             )
             .await;
@@ -101,14 +105,14 @@ async fn handle_drop_flow(
         let entry = cache.entry(*table_id);
         entry
             .and_compute_with(
-                async |entry: Option<moka::Entry<u32, HashSet<u64>>>| match entry {
+                async |entry: Option<moka::Entry<u32, Arc<HashMap<u64, _>>>>| match entry {
                     Some(entry) => {
-                        let mut set = entry.into_value();
+                        let mut set = entry.into_value().as_ref().clone();
                         for flownode_id in flownode_ids {
                             set.remove(flownode_id);
                         }
 
-                        Op::Put(set)
+                        Op::Put(Arc::new(set))
                     }
                     None => {
                         // Do nothing
@@ -140,7 +144,7 @@ fn filter(ident: &CacheIdent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -150,8 +154,10 @@ mod tests {
     use crate::cache::flow::table_flownode::new_table_flownode_set_cache;
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
     use crate::key::flow::flow_info::FlowInfoValue;
+    use crate::key::flow::flow_route::FlowRouteValue;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::peer::Peer;
 
     #[tokio::test]
     async fn test_cache_empty_set() {
@@ -184,16 +190,31 @@ mod tests {
                     comment: "comment".to_string(),
                     options: Default::default(),
                 },
-                vec![],
+                (1..=3)
+                    .map(|i| {
+                        (
+                            (i - 1) as u32,
+                            FlowRouteValue {
+                                peer: Peer::empty(i),
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>(),
             )
             .await
             .unwrap();
         let cache = CacheBuilder::new(128).build();
         let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let set = cache.get(1024).await.unwrap().unwrap();
-        assert_eq!(set, HashSet::from([1, 2, 3]));
+        assert_eq!(
+            set.as_ref().clone(),
+            HashMap::from_iter((1..=3).map(|i| { (i, Peer::empty(i),) }))
+        );
         let set = cache.get(1025).await.unwrap().unwrap();
-        assert_eq!(set, HashSet::from([1, 2, 3]));
+        assert_eq!(
+            set.as_ref().clone(),
+            HashMap::from_iter((1..=3).map(|i| { (i, Peer::empty(i),) }))
+        );
         let result = cache.get(1026).await.unwrap().unwrap();
         assert_eq!(result.len(), 0);
     }
@@ -205,7 +226,7 @@ mod tests {
         let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let ident = vec![CacheIdent::CreateFlow(CreateFlow {
             source_table_ids: vec![1024, 1025],
-            flownode_ids: vec![1, 2, 3, 4, 5],
+            flownode_peers: (1..=5).map(Peer::empty).collect(),
         })];
         cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
@@ -222,11 +243,11 @@ mod tests {
         let ident = vec![
             CacheIdent::CreateFlow(CreateFlow {
                 source_table_ids: vec![1024, 1025],
-                flownode_ids: vec![1, 2, 3, 4, 5],
+                flownode_peers: (1..=5).map(Peer::empty).collect(),
             }),
             CacheIdent::CreateFlow(CreateFlow {
                 source_table_ids: vec![1024, 1025],
-                flownode_ids: vec![11, 12],
+                flownode_peers: (11..=12).map(Peer::empty).collect(),
             }),
         ];
         cache.invalidate(&ident).await.unwrap();
@@ -241,8 +262,14 @@ mod tests {
         })];
         cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
-        assert_eq!(set, HashSet::from([11, 12]));
+        assert_eq!(
+            set.as_ref().clone(),
+            HashMap::from_iter((11..=12).map(|i| { (i, Peer::empty(i),) }))
+        );
         let set = cache.get(1025).await.unwrap().unwrap();
-        assert_eq!(set, HashSet::from([11, 12]));
+        assert_eq!(
+            set.as_ref().clone(),
+            HashMap::from_iter((11..=12).map(|i| { (i, Peer::empty(i),) }))
+        );
     }
 }
