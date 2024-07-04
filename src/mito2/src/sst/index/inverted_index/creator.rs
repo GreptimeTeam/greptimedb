@@ -88,6 +88,7 @@ impl SstIndexCreator {
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
         compress: bool,
+        ignore_column_ids: &[ColumnId],
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
@@ -105,10 +106,14 @@ impl SstIndexCreator {
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
-        let column_ids = metadata
+        let mut column_ids = metadata
             .primary_key_columns()
             .map(|c| c.column_id)
-            .collect();
+            .collect::<HashSet<_>>();
+        for id in ignore_column_ids {
+            column_ids.remove(id);
+        }
+
         Self {
             codec,
             index_creator,
@@ -120,14 +125,6 @@ impl SstIndexCreator {
             compress,
             column_ids,
         }
-    }
-
-    /// Sets the ignore column IDs for index creation.
-    pub fn with_ignore_column_ids(mut self, ignore_column_ids: &[ColumnId]) -> Self {
-        for id in ignore_column_ids {
-            self.column_ids.remove(id);
-        }
-        self
     }
 
     /// Updates index with a batch of rows.
@@ -401,6 +398,7 @@ mod tests {
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
             false,
+            &[],
         );
 
         for (str_tag, i32_tag) in &tags {
