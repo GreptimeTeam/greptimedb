@@ -15,6 +15,7 @@
 mod bounded_stager;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use bounded_stager::{BoundedStager, FsBlobGuard, FsDirGuard};
@@ -52,8 +53,7 @@ pub trait InitDirFn = Fn(DirWriterProviderRef) -> WriteResult;
 
 /// `Stager` manages the staging area for the puffin files.
 #[async_trait]
-#[auto_impl::auto_impl(Box, Rc, Arc)]
-pub trait Stager: Send + Sync {
+pub trait Stager {
     type Blob: BlobGuard;
     type Dir: DirGuard;
 
@@ -88,3 +88,5 @@ pub trait Stager: Send + Sync {
         dir_size: u64,
     ) -> Result<()>;
 }
+
+pub type StagerRef<B, D> = Arc<dyn Stager<Blob = B, Dir = D> + Send + Sync>;

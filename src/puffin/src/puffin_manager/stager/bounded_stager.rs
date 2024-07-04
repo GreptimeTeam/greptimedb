@@ -425,7 +425,7 @@ pub struct FsBlobGuard {
     delete_queue: Sender<DeleteTask>,
 }
 
-impl BlobGuard for FsBlobGuard {
+impl BlobGuard for Arc<FsBlobGuard> {
     type Reader = Compat<fs::File>;
 
     fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>> {
@@ -460,7 +460,7 @@ pub struct FsDirGuard {
     delete_queue: Sender<DeleteTask>,
 }
 
-impl DirGuard for FsDirGuard {
+impl DirGuard for Arc<FsDirGuard> {
     fn path(&self) -> &PathBuf {
         &self.path
     }

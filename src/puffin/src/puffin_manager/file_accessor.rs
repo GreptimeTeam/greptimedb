@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 
@@ -19,10 +21,9 @@ use crate::error::Result;
 
 /// `PuffinFileAccessor` is for opening readers and writers for puffin files.
 #[async_trait]
-#[auto_impl::auto_impl(Box, Rc, Arc)]
-pub trait PuffinFileAccessor: Send + Sync + 'static {
-    type Reader: AsyncRead + AsyncSeek + Unpin + Send;
-    type Writer: AsyncWrite + Unpin + Send;
+pub trait PuffinFileAccessor {
+    type Reader: AsyncRead + AsyncSeek;
+    type Writer: AsyncWrite;
 
     /// Opens a reader for the given puffin file.
     async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader>;
@@ -30,3 +31,6 @@ pub trait PuffinFileAccessor: Send + Sync + 'static {
     /// Creates a writer for the given puffin file.
     async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer>;
 }
+
+pub type PuffinFileAccessorRef<R, W> =
+    Arc<dyn PuffinFileAccessor<Reader = R, Writer = W> + Send + Sync>;

@@ -40,7 +40,7 @@ impl Indexer {
         output
     }
 
-    pub(crate) async fn do_finish_puffin_writer(&mut self, writer: SstPuffinWriter) -> ByteCount {
+    async fn do_finish_puffin_writer(&mut self, writer: SstPuffinWriter) -> ByteCount {
         let err = match writer.finish().await {
             Ok(size) => return size,
             Err(err) => err,
@@ -73,7 +73,7 @@ impl Indexer {
 
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
-                self.fill_up_inverted_index_output(
+                self.fill_inverted_index_output(
                     &mut index_output.inverted_index,
                     row_count,
                     byte_count,
@@ -99,7 +99,7 @@ impl Indexer {
         false
     }
 
-    fn fill_up_inverted_index_output(
+    fn fill_inverted_index_output(
         &mut self,
         output: &mut InvertedIndexOutput,
         row_count: RowCount,

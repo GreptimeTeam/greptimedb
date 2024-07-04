@@ -24,11 +24,10 @@ impl Indexer {
     }
 
     async fn do_abort_inverted_index(&mut self) {
-        let Some(mut creator) = self.inverted_indexer.take() else {
+        let Some(mut indexer) = self.inverted_indexer.take() else {
             return;
         };
-
-        let Err(err) = creator.abort().await else {
+        let Err(err) = indexer.abort().await else {
             return;
         };
 
@@ -45,7 +44,7 @@ impl Indexer {
         }
     }
 
-    pub(crate) async fn do_abort_puffin_writer(&mut self) {
+    async fn do_abort_puffin_writer(&mut self) {
         let Some(puffin_writer) = self.puffin_writer.take() else {
             return;
         };

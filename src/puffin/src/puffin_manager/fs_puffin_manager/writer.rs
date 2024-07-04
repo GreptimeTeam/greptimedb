@@ -30,16 +30,16 @@ use crate::error::{
 };
 use crate::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
 use crate::puffin_manager::fs_puffin_manager::dir_meta::{DirFileMetadata, DirMetadata};
-use crate::puffin_manager::stager::Stager;
-use crate::puffin_manager::{PuffinWriter, PutOptions};
+use crate::puffin_manager::stager::StagerRef;
+use crate::puffin_manager::{BlobGuard, DirGuard, PuffinWriter, PutOptions};
 
 /// `FsPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
-pub struct FsPuffinWriter<S, W> {
+pub struct FsPuffinWriter<B, D, W> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
     /// The stager.
-    stager: S,
+    stager: StagerRef<B, D>,
 
     /// The underlying `PuffinFileWriter`.
     puffin_file_writer: PuffinFileWriter<W>,
@@ -48,8 +48,8 @@ pub struct FsPuffinWriter<S, W> {
     blob_keys: HashSet<String>,
 }
 
-impl<S, W> FsPuffinWriter<S, W> {
-    pub(crate) fn new(puffin_file_name: String, stager: S, writer: W) -> Self {
+impl<B, D, W> FsPuffinWriter<B, D, W> {
+    pub(crate) fn new(puffin_file_name: String, stager: StagerRef<B, D>, writer: W) -> Self {
         Self {
             puffin_file_name,
             stager,
@@ -60,9 +60,10 @@ impl<S, W> FsPuffinWriter<S, W> {
 }
 
 #[async_trait]
-impl<S, W> PuffinWriter for FsPuffinWriter<S, W>
+impl<B, D, W> PuffinWriter for FsPuffinWriter<B, D, W>
 where
-    S: Stager,
+    B: BlobGuard,
+    D: DirGuard,
     W: AsyncWrite + Unpin + Send,
 {
     async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>
@@ -163,9 +164,10 @@ where
     }
 }
 
-impl<S, W> FsPuffinWriter<S, W>
+impl<B, G, W> FsPuffinWriter<B, G, W>
 where
-    S: Stager,
+    B: BlobGuard,
+    G: DirGuard,
     W: AsyncWrite + Unpin + Send,
 {
     /// Compresses the raw data and writes it to the puffin file.

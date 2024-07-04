@@ -16,7 +16,7 @@ use async_compression::futures::bufread::ZstdDecoder;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use futures::io::BufReader;
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite};
+use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::blob_metadata::CompressionCodec;
@@ -25,25 +25,29 @@ use crate::error::{
     ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
 use crate::file_format::reader::{AsyncReader, PuffinFileReader};
-use crate::puffin_manager::file_accessor::PuffinFileAccessor;
+use crate::puffin_manager::file_accessor::PuffinFileAccessorRef;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
-use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
-use crate::puffin_manager::PuffinReader;
+use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, StagerRef};
+use crate::puffin_manager::{BlobGuard, DirGuard, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
-pub struct FsPuffinReader<S, F> {
+pub struct FsPuffinReader<B, G, AR, AW> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
     /// The stager.
-    stager: S,
+    stager: StagerRef<B, G>,
 
     /// The puffin file accessor.
-    puffin_file_accessor: F,
+    puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
 }
 
-impl<S, F> FsPuffinReader<S, F> {
-    pub(crate) fn new(puffin_file_name: String, stager: S, puffin_file_accessor: F) -> Self {
+impl<B, D, AR, AW> FsPuffinReader<B, D, AR, AW> {
+    pub(crate) fn new(
+        puffin_file_name: String,
+        stager: StagerRef<B, D>,
+        puffin_file_accessor: PuffinFileAccessorRef<AR, AW>,
+    ) -> Self {
         Self {
             puffin_file_name,
             stager,
@@ -53,13 +57,15 @@ impl<S, F> FsPuffinReader<S, F> {
 }
 
 #[async_trait]
-impl<S, F> PuffinReader for FsPuffinReader<S, F>
+impl<B, D, AR, AW> PuffinReader for FsPuffinReader<B, D, AR, AW>
 where
-    S: Stager,
-    F: PuffinFileAccessor + Clone,
+    B: BlobGuard,
+    D: DirGuard,
+    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
+    AW: AsyncWrite + 'static,
 {
-    type Blob = S::Blob;
-    type Dir = S::Dir;
+    type Blob = B;
+    type Dir = D;
 
     async fn blob(&self, key: &str) -> Result<Self::Blob> {
         self.stager
@@ -92,16 +98,18 @@ where
     }
 }
 
-impl<S, F> FsPuffinReader<S, F>
+impl<B, G, AR, AW> FsPuffinReader<B, G, AR, AW>
 where
-    S: Stager,
-    F: PuffinFileAccessor,
+    B: BlobGuard,
+    G: DirGuard,
+    AR: AsyncRead + AsyncSeek + Send + Unpin + 'static,
+    AW: AsyncWrite + 'static,
 {
     fn init_blob_to_cache(
         puffin_file_name: String,
         key: String,
         mut writer: BoxWriter,
-        accessor: F,
+        accessor: PuffinFileAccessorRef<AR, AW>,
     ) -> BoxFuture<'static, Result<u64>> {
         Box::pin(async move {
             let reader = accessor.reader(&puffin_file_name).await?;
@@ -126,7 +134,7 @@ where
         puffin_file_name: String,
         key: String,
         writer_provider: DirWriterProviderRef,
-        accessor: F,
+        accessor: PuffinFileAccessorRef<AR, AW>,
     ) -> BoxFuture<'static, Result<u64>> {
         Box::pin(async move {
             let reader = accessor.reader(&puffin_file_name).await?;
