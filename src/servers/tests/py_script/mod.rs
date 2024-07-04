@@ -60,7 +60,7 @@ def hello() -> vector[str]:
     let query_ctx = Arc::new(
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
-            .current_schema_raw(schema.to_string())
+            .current_schema(schema.to_string())
             .build(),
     );
 

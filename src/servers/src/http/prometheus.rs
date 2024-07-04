@@ -622,7 +622,7 @@ pub(crate) fn try_update_catalog_schema(
         Arc::new(
             QueryContextBuilder::from_existing(&ctx)
                 .current_catalog(catalog.to_string())
-                .current_schema_raw(schema.to_string())
+                .current_schema(schema.to_string())
                 .build(),
         )
     } else {

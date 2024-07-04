@@ -65,8 +65,8 @@ pub async fn inner_auth<B>(
     let timezone = extract_timezone(&req);
     let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.clone())
-        .current_schema_raw(schema.clone())
-        .timezone_raw(timezone);
+        .current_schema(schema.clone())
+        .timezone(timezone);
 
     let query_ctx = Arc::new(query_ctx_builder.build());
     let need_auth = need_auth(&req);

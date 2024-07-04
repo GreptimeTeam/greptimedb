@@ -195,8 +195,8 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
     QueryContextBuilder::default()
         .current_catalog(catalog)
-        .current_schema_raw(schema)
-        .timezone_raw(timezone)
+        .current_schema(schema)
+        .timezone(timezone)
         .build()
         .into()
 }

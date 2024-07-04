@@ -1021,7 +1021,7 @@ mod test {
         };
         let ctx = Arc::new(
             QueryContextBuilder::default()
-                .timezone_raw(Timezone::from_tz_string(tz).unwrap())
+                .timezone(Timezone::from_tz_string(tz).unwrap())
                 .build(),
         );
         match show_variable(stmt, ctx) {
