@@ -222,18 +222,18 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     }
     info!("Excepted new region distribution: {new_distribution:?}");
 
+    for procedure_id in procedure_ids {
+        wait_for_procedure_finish(&ctx.greptime, Duration::from_secs(120), procedure_id).await;
+    }
+
     // Waits for all region migrated
     wait_for_region_distribution(
         &ctx.greptime,
-        Duration::from_secs(120),
+        Duration::from_secs(60),
         table_ctx.name.clone(),
         new_distribution,
     )
     .await;
-
-    for procedure_id in procedure_ids {
-        wait_for_procedure_finish(&ctx.greptime, Duration::from_secs(120), procedure_id).await;
-    }
 
     // Values validation
     info!("Validating rows");
