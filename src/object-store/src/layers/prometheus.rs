@@ -33,7 +33,7 @@ lazy_static! {
     static ref REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "opendal_requests_total",
         "Total times of all kinds of operation being called",
-        &["scheme", "operation", "path_prefix"],
+        &["scheme", "operation", "path"],
     )
     .unwrap();
     static ref REQUESTS_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
@@ -42,7 +42,7 @@ lazy_static! {
             "Histogram of the time spent on specific operation",
             exponential_buckets(0.01, 2.0, 16).unwrap()
         ),
-        &["scheme", "operation", "path_prefix"]
+        &["scheme", "operation", "path"]
     )
     .unwrap();
     static ref BYTES_TOTAL: HistogramVec = register_histogram_vec!(
@@ -51,7 +51,7 @@ lazy_static! {
             "Total size of sync or async Read/Write",
             exponential_buckets(0.01, 2.0, 16).unwrap()
         ),
-        &["scheme", "operation", "path_prefix"]
+        &["scheme", "operation", "path"]
     )
     .unwrap();
 }
