@@ -91,7 +91,12 @@ pub enum Statement {
     Explain(Explain),
     // COPY
     Copy(crate::statements::copy::Copy),
+    // TQL
     Tql(Tql),
+    // Several TQL expression (possibly a redundant step)
+    Tqls(Vec<Tql>),
+    // CTE TQL
+    HybridTql(Vec<Tql>, Box<Query>),
     // TRUNCATE TABLE
     TruncateTable(TruncateTable),
     // SET VARIABLES
@@ -128,6 +133,10 @@ impl Display for Statement {
             Statement::Explain(s) => s.fmt(f),
             Statement::Copy(s) => s.fmt(f),
             Statement::Tql(s) => s.fmt(f),
+            Statement::Tqls(_) => {
+                write!(f, "TODO later if we need it")
+            },
+            Statement::HybridTql(_,s) => s.fmt(f),
             Statement::TruncateTable(s) => s.fmt(f),
             Statement::SetVariables(s) => s.fmt(f),
             Statement::ShowVariables(s) => s.fmt(f),

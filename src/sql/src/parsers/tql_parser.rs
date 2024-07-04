@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use datafusion_common::ScalarValue;
+use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
@@ -39,6 +40,84 @@ use crate::parsers::error::{EvaluationSnafu, ParserSnafu, TQLError};
 /// - `TQL EXPLAIN [VERBOSE] <query>`
 /// - `TQL ANALYZE [VERBOSE] <query>`
 impl<'a> ParserContext<'a> {
+
+    pub(crate) fn parse_tql_cte(&mut self) -> Result<Statement> {
+        let parser = &mut self.parser;
+        let _skip_with = parser.next_token();
+        let mut tqls = Vec::new();
+        loop {
+            let cte_name = parser.parse_identifier(false).unwrap().to_string();
+            parser.expect_keyword(Keyword::AS).unwrap();
+            parser.expect_token(&Token::LParen).unwrap();
+
+            let _skip_tql_keyword = parser.next_token();
+            let _skip_eval_keyword = parser.next_token();
+
+            let (start, end, step, lookback) = match parser.peek_token().token {
+                Token::LParen => {
+                    let _consume_lparen_token = parser.next_token();
+                    let start = Self::parse_string_or_number_or_word(parser, &[Token::Comma]).unwrap().0;
+                    let end = Self::parse_string_or_number_or_word(parser, &[Token::Comma]).unwrap().0;
+                    let (step, delimiter) =
+                        Self::parse_string_or_number_or_word(parser, &[Token::Comma, Token::RParen]).unwrap();
+                    let lookback = if delimiter == Token::Comma {
+                        Self::parse_string_or_number_or_word(parser, &[Token::RParen])
+                            .ok()
+                            .map(|t| t.0)
+                    } else {
+                        None
+                    };
+                    (start, end, step, lookback)
+                }
+                _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
+            };
+            let cte_query = Self::parse_tql_cte_query(parser, self.sql).unwrap();
+
+            let parameters = TqlParameters::new(start, end, step, lookback, cte_query.clone()).with_name(Some(cte_name));
+            let tql = Tql::Eval(TqlEval::from(parameters));
+            tqls.push(tql);
+
+            if parser.peek_token() == Token::Comma {
+                let _skip_comma = parser.next_token();
+            } else {
+                break;
+            }
+        }
+        Ok(Statement::Tqls(tqls))
+    }
+
+    fn parse_tql_cte_query(parser: &mut Parser, sql: &str) -> std::result::Result<String, ParserError> {
+        while matches!(parser.peek_token().token, Token::Comma) {
+            let _skip_token = parser.next_token();
+            dbg!(_skip_token);
+        }
+
+        let location = parser.next_token();
+        let query_start_index = location.location.column as usize;
+        if query_start_index == 0 {
+            return Err(ParserError::ParserError("empty TQL query".to_string()));
+        }
+        let mut end_pos = query_start_index;
+        let mut paren_count = 1; // we already start with (TQL
+
+        while parser.peek_token() != Token::EOF {
+            let token = parser.next_token();
+            end_pos = token.location.column as usize;
+
+            match token.token {
+                Token::LParen => paren_count += 1,
+                Token::RParen => {
+                    paren_count -= 1;
+                    if paren_count == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(sql[(query_start_index - 1)..(end_pos - 1)].trim().to_string())
+    }
+
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
 
@@ -242,6 +321,12 @@ mod tests {
                 .unwrap();
         assert_eq!(1, result.len());
         result.remove(0)
+    }
+
+    #[test]
+    fn test_cte_first() {
+        let sql = "WITH cte_test_a AS (TQL EVAL (0, 10, '1s', '2s') host_cpu{host=\"host1\"}), cte_test_b AS (TQL EVAL (5, 15, '5s', '10s') host_memory{host=\"host1\"} + host_swap{host=\"host1\"}), cte_test_c AS (TQL EVAL (0, 20, '2s') host_disk{host=\"host1\"}) SELECT * FROM cte_test_a JOIN cte_test_b ON cte_test_a.timestamp = cte_test_b.timestamp JOIN cte_test_c ON cte_test_a.timestamp = cte_test_c.timestamp WHERE cte_test_a.value > 80";
+        let statement = parse_into_statement(sql);
     }
 
     #[test]

@@ -148,7 +148,18 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::INSERT => self.parse_insert(),
 
-                    Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+                    Keyword::SELECT | Keyword::VALUES => self.parse_query(),
+
+                    Keyword::WITH => {
+                        if self.sql.contains(tql_parser::TQL) { // can replace with something like 'find_next_delimiter_token'
+                            let tql_result = self.parse_tql_cte();
+                            let sql_result = self.parse_statement();
+                            let result = self.create_hybrid_statement(tql_result, sql_result);
+                            result
+                        } else {
+                            self.parse_query()
+                        }
+                    }
 
                     Keyword::ALTER => self.parse_alter(),
 
@@ -286,6 +297,15 @@ impl<'a> ParserContext<'a> {
     /// we don't want to write it again and again.
     pub(crate) fn parse_identifier(&mut self) -> std::result::Result<Ident, ParserError> {
         self.parser.parse_identifier(false)
+    }
+
+    fn create_hybrid_statement(&self, tql: Result<Statement>, sql: Result<Statement>) -> Result<Statement> {
+        let tql = tql?.clone();
+        let sql = sql?.clone();
+        return match (tql, sql) {
+            (Statement::Tqls(tvec), Statement::Query(q)) => Ok(Statement::HybridTql(tvec, q)),
+            _ => self.unsupported("cte".to_string()),
+        };
     }
 }
 
