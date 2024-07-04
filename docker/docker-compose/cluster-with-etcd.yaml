@@ -66,7 +66,7 @@ services:
       - --node-id=0
       - --rpc-addr=0.0.0.0:3001
       - --rpc-hostname=datanode0:3001
-      - --metasrv-addr=metasrv:3002
+      - --metasrv-addrs=metasrv:3002
     volumes:
       - /tmp/greptimedb-cluster-docker-compose/datanode0:/tmp/greptimedb
     depends_on:
