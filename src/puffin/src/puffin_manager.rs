@@ -72,7 +72,7 @@ pub struct PutOptions {
 
 /// The `PuffinReader` trait provides methods for reading blobs and directories from a Puffin file.
 #[async_trait]
-#[auto_impl::auto_impl(Box, Arc)]
+#[auto_impl::auto_impl(Arc)]
 pub trait PuffinReader {
     type Blob: BlobGuard;
     type Dir: DirGuard;
@@ -92,7 +92,7 @@ pub trait PuffinReader {
 
 /// `BlobGuard` is provided by the `PuffinReader` to access the blob data.
 /// Users should hold the `BlobGuard` until they are done with the blob data.
-#[auto_impl::auto_impl(Box, Arc)]
+#[auto_impl::auto_impl(Arc)]
 pub trait BlobGuard {
     type Reader: AsyncRead + AsyncSeek + Unpin;
     fn reader(&self) -> BoxFuture<'static, Result<Self::Reader>>;
@@ -100,7 +100,7 @@ pub trait BlobGuard {
 
 /// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.
 /// Users should hold the `DirGuard` until they are done with the directory.
-#[auto_impl::auto_impl(Box, Arc)]
+#[auto_impl::auto_impl(Arc)]
 pub trait DirGuard {
     fn path(&self) -> &PathBuf;
 }

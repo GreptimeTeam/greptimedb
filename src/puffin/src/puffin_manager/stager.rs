@@ -52,7 +52,7 @@ pub trait InitDirFn = Fn(DirWriterProviderRef) -> WriteResult;
 
 /// `Stager` manages the staging area for the puffin files.
 #[async_trait]
-#[auto_impl::auto_impl(Box, Arc)]
+#[auto_impl::auto_impl(Arc)]
 pub trait Stager: Send + Sync {
     type Blob: BlobGuard;
     type Dir: DirGuard;
