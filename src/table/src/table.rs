@@ -12,12 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion::execution::FunctionRegistry;
+use datafusion::logical_expr::expr::ScalarFunction;
+use datafusion::logical_expr::Cast;
+use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN, NOW_FN};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaRef};
+use lazy_static::lazy_static;
 use snafu::ResultExt;
 use store_api::data_source::DataSourceRef;
 use store_api::storage::ScanRequest;
@@ -30,6 +38,20 @@ mod metrics;
 pub mod numbers;
 pub mod scan;
 
+lazy_static! {
+    //// The [`Expr`] to call UDF function `now()`.
+    static ref NOW_EXPR: Expr = {
+         let ctx = SessionContext::new();
+
+        let now_udf = ctx.udf("now").expect("now UDF not found");
+
+        Expr::ScalarFunction(ScalarFunction {
+            func: now_udf,
+            args: vec![],
+        })
+    };
+}
+
 pub type TableRef = Arc<Table>;
 
 /// Table handle.
@@ -37,6 +59,8 @@ pub struct Table {
     table_info: TableInfoRef,
     filter_pushdown: FilterPushDownType,
     data_source: DataSourceRef,
+    /// Columns default [`Expr`]
+    column_defaults: HashMap<String, Expr>,
 }
 
 impl Table {
@@ -46,10 +70,16 @@ impl Table {
         data_source: DataSourceRef,
     ) -> Self {
         Self {
+            column_defaults: collect_column_defaults(table_info.meta.schema.column_schemas()),
             table_info,
             filter_pushdown,
             data_source,
         }
+    }
+
+    /// Get column default [`Expr`], if available.
+    pub fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.column_defaults.get(column)
     }
 
     pub fn data_source(&self) -> DataSourceRef {
@@ -111,5 +141,86 @@ impl Table {
             .enumerate()
             .filter(move |(i, c)| !primary_keys.contains(i) && !c.is_time_index())
             .map(|(_, c)| c.clone())
+    }
+}
+
+/// Collects column default [`Expr`] from column schemas.
+fn collect_column_defaults(column_schemas: &[ColumnSchema]) -> HashMap<String, Expr> {
+    column_schemas
+        .iter()
+        .filter_map(|column_schema| {
+            default_constraint_to_expr(
+                column_schema.default_constraint()?,
+                &column_schema.data_type,
+            )
+            .map(|expr| (column_schema.name.to_string(), expr))
+        })
+        .collect()
+}
+
+/// Try to cast the [`ColumnDefaultConstraint`] to [`Expr`] by the target data type.
+fn default_constraint_to_expr(
+    default_constraint: &ColumnDefaultConstraint,
+    target_type: &ConcreteDataType,
+) -> Option<Expr> {
+    match default_constraint {
+        ColumnDefaultConstraint::Value(v) => {
+            v.try_to_scalar_value(target_type).ok().map(Expr::Literal)
+        }
+
+        ColumnDefaultConstraint::Function(name)
+            if matches!(
+                name.as_str(),
+                CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN
+            ) =>
+        {
+            Some(Expr::Cast(Cast {
+                expr: Box::new(NOW_EXPR.clone()),
+                data_type: target_type.as_arrow_type(),
+            }))
+        }
+
+        ColumnDefaultConstraint::Function(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion_common::ScalarValue;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnDefaultConstraint;
+
+    use super::*;
+
+    #[test]
+    fn test_collect_columns_defaults() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value("test".into())))
+                .unwrap(),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Function(
+                "current_timestamp".to_string(),
+            )))
+            .unwrap(),
+        ];
+        let column_defaults = collect_column_defaults(&column_schemas[..]);
+
+        assert!(!column_defaults.contains_key("col1"));
+        assert!(matches!(column_defaults.get("col2").unwrap(),
+                         Expr::Literal(ScalarValue::Utf8(Some(s))) if s == "test"));
+        assert!(matches!(
+            column_defaults.get("ts").unwrap(),
+            Expr::Cast(Cast {
+                expr,
+                data_type
+            }) if **expr == *NOW_EXPR && *data_type == ConcreteDataType::timestamp_millisecond_datatype().as_arrow_type()
+        ));
     }
 }

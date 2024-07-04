@@ -15,7 +15,6 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -32,7 +31,6 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{RegionId, ScanRequest};
-use table::table::adapter::collect_column_defaults;
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
@@ -136,8 +134,6 @@ pub struct DummyTableProvider {
     metadata: RegionMetadataRef,
     /// Keeping a mutable request makes it possible to change in the optimize phase.
     scan_request: Arc<Mutex<ScanRequest>>,
-    /// Columns default [`Expr`]
-    column_defaults: HashMap<String, Expr>,
 }
 
 #[async_trait]
@@ -148,10 +144,6 @@ impl TableProvider for DummyTableProvider {
 
     fn schema(&self) -> SchemaRef {
         self.metadata.schema.arrow_schema().clone()
-    }
-
-    fn get_column_default(&self, column: &str) -> Option<&Expr> {
-        self.column_defaults.get(column)
     }
 
     fn table_type(&self) -> TableType {
@@ -193,7 +185,6 @@ impl DummyTableProvider {
     /// Creates a new provider.
     pub fn new(region_id: RegionId, engine: RegionEngineRef, metadata: RegionMetadataRef) -> Self {
         Self {
-            column_defaults: collect_column_defaults(metadata.schema.column_schemas()),
             region_id,
             engine,
             metadata,
@@ -231,7 +222,6 @@ impl TableProviderFactory for DummyTableProviderFactory {
                     region_id,
                 })?;
         Ok(Arc::new(DummyTableProvider {
-            column_defaults: collect_column_defaults(metadata.schema.column_schemas()),
             region_id,
             engine,
             metadata,

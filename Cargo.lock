@@ -11504,6 +11504,7 @@ dependencies = [
  "greptime-proto",
  "humantime",
  "humantime-serde",
+ "lazy_static",
  "parquet",
  "paste",
  "serde",
