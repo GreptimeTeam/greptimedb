@@ -276,7 +276,7 @@ impl SstIndexCreator {
         self.temp_file_provider.cleanup().await
     }
 
-    pub fn column_ids(&self) -> impl Iterator<Item = store_api::storage::ColumnId> + '_ {
+    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
         self.column_ids.iter().copied()
     }
 
