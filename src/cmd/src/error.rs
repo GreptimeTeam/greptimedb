@@ -339,6 +339,13 @@ pub enum Error {
         location: Location,
         source: cache::error::Error,
     },
+
+    #[snafu(display("Failed to initialize meta client"))]
+    MetaClientInit {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -397,6 +404,7 @@ impl ErrorExt for Error {
             Self::StartFlownode { source, .. } | Self::ShutdownFlownode { source, .. } => {
                 source.status_code()
             }
+            Error::MetaClientInit { source, .. } => source.status_code(),
         }
     }
 

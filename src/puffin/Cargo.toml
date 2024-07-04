@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-async-compression = "0.4.11"
+async-compression = { version = "0.4", features = ["futures-io", "zstd"] }
 async-trait.workspace = true
 async-walkdir = "2.0.0"
 base64.workspace = true
@@ -20,7 +20,7 @@ common-telemetry.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
 lz4_flex = "0.11"
-moka.workspace = true
+moka = { workspace = true, features = ["future", "sync"] }
 pin-project.workspace = true
 serde.workspace = true
 serde_json.workspace = true

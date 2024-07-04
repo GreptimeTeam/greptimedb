@@ -25,13 +25,14 @@ use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::service::DatanodeServiceBuilder;
-use meta_client::MetaClientOptions;
+use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
+    LoadLayeredConfigSnafu, MetaClientInitSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu,
+    StartDatanodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -125,7 +126,7 @@ struct StartCommand {
     rpc_addr: Option<String>,
     #[clap(long)]
     rpc_hostname: Option<String>,
-    #[clap(long, aliases = ["metasrv-addr"], value_delimiter = ',', num_args = 1..)]
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
@@ -275,7 +276,8 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        let node_id = opts
+        let cluster_id = 0; // TODO(hl): read from config
+        let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
 
@@ -283,12 +285,16 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
-            .await
-            .context(StartDatanodeSnafu)?;
+        let meta_client = meta_client::create_meta_client(
+            cluster_id,
+            MetaClientType::Datanode { member_id },
+            meta_config,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
         let meta_backend = Arc::new(MetaKvBackend {
-            client: Arc::new(meta_client.clone()),
+            client: meta_client.clone(),
         });
 
         let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
