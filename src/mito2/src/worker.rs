@@ -134,12 +134,12 @@ impl WorkerGroup {
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let puffin_manager_factory = PuffinManagerFactory::new(
-            &config.index.auxiliary_path,
+            &config.index.aux_path,
             config.index.staging_size.as_bytes(),
             Some(config.index.write_buffer_size.as_bytes() as _),
         )
         .await?;
-        let intermediate_manager = IntermediateManager::init_fs(&config.index.auxiliary_path)
+        let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
@@ -269,12 +269,12 @@ impl WorkerGroup {
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let puffin_manager_factory = PuffinManagerFactory::new(
-            &config.index.auxiliary_path,
+            &config.index.aux_path,
             config.index.staging_size.as_bytes(),
             Some(config.index.write_buffer_size.as_bytes() as _),
         )
         .await?;
-        let intermediate_manager = IntermediateManager::init_fs(&config.index.auxiliary_path)
+        let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let write_cache = write_cache_from_config(

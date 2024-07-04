@@ -263,7 +263,7 @@ pub struct IndexConfig {
     /// - `staging`: for storing staging files used during searching index.
     ///
     /// The default name for this directory is `index_intermediate` for backward compatibility.
-    pub auxiliary_path: String,
+    pub aux_path: String,
 
     /// The max capacity of the staging directory.
     pub staging_size: ReadableSize,
@@ -275,9 +275,9 @@ pub struct IndexConfig {
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
+            aux_path: String::new(),
             staging_size: ReadableSize::gb(2),
             write_buffer_size: ReadableSize::mb(8),
-            auxiliary_path: String::new(),
         }
     }
 }
@@ -289,18 +289,17 @@ impl IndexConfig {
         inverted_index: &InvertedIndexConfig,
     ) -> Result<()> {
         #[allow(deprecated)]
-        if self.auxiliary_path.is_empty() && !inverted_index.intermediate_path.is_empty() {
-            self.auxiliary_path
-                .clone_from(&inverted_index.intermediate_path);
+        if self.aux_path.is_empty() && !inverted_index.intermediate_path.is_empty() {
+            self.aux_path.clone_from(&inverted_index.intermediate_path);
             warn!(
                 "`inverted_index.intermediate_path` is deprecated, use
-                 `index.auxiliary_path` instead. Set `index.auxiliary_path` to {}",
+                 `index.aux_path` instead. Set `index.aux_path` to {}",
                 &inverted_index.intermediate_path
             )
         }
-        if self.auxiliary_path.is_empty() {
+        if self.aux_path.is_empty() {
             let path = Path::new(data_home).join("index_intermediate");
-            self.auxiliary_path = path.as_os_str().to_string_lossy().to_string();
+            self.aux_path = path.as_os_str().to_string_lossy().to_string();
         }
 
         if self.write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
@@ -355,7 +354,7 @@ pub struct InvertedIndexConfig {
     #[serde_as(as = "NoneAsEmptyString")]
     pub mem_threshold_on_create: Option<ReadableSize>,
 
-    #[deprecated = "use [IndexConfig::auxiliary_path] instead"]
+    #[deprecated = "use [IndexConfig::aux_path] instead"]
     #[serde(skip_serializing)]
     pub intermediate_path: String,
 

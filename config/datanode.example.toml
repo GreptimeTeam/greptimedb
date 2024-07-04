@@ -404,7 +404,7 @@ allow_stale_entries = false
 ## This path contains two subdirectories:
 ## - `__intm`: for storing intermediate files used during creating index.
 ## - `staging`: for storing staging files used during searching index.
-auxiliary_path = ""
+aux_path = ""
 
 ## The max capacity of the staging directory.
 staging_size = "2GB"
@@ -431,7 +431,7 @@ apply_on_query = "auto"
 ## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
 mem_threshold_on_create = "64M"
 
-## Deprecated, use `region_engine.mito.index.auxiliary_path` instead.
+## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
 
 [region_engine.mito.memtable]

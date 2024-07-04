@@ -95,13 +95,13 @@ pub async fn open_compaction_region(
 
     let access_layer = {
         let puffin_manager_factory = PuffinManagerFactory::new(
-            &mito_config.index.auxiliary_path,
+            &mito_config.index.aux_path,
             mito_config.index.staging_size.as_bytes(),
             Some(mito_config.index.write_buffer_size.as_bytes() as _),
         )
         .await?;
         let intermediate_manager =
-            IntermediateManager::init_fs(mito_config.index.auxiliary_path.clone()).await?;
+            IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
 
         Arc::new(AccessLayer::new(
             req.region_dir.as_str(),
