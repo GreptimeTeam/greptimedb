@@ -210,7 +210,7 @@ impl SstIndexCreator {
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
-                .push_with_name_n(&col_id_str, value, n)
+                .push_with_name_n(col_id_str, value, n)
                 .await
                 .context(PushIndexValueSnafu)?;
         }
