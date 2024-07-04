@@ -8615,6 +8615,7 @@ dependencies = [
  "async-compression 0.4.11",
  "async-trait",
  "async-walkdir",
+ "auto_impl",
  "base64 0.21.7",
  "bitflags 2.5.0",
  "common-error",
