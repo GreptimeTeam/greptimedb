@@ -71,7 +71,7 @@ async fn handle_create_flow(
     cache: &Cache<TableId, FlownodeSet>,
     CreateFlow {
         source_table_ids,
-        flownode_peers,
+        flownodes: flownode_peers,
     }: &CreateFlow,
 ) {
     for table_id in source_table_ids {
@@ -226,7 +226,7 @@ mod tests {
         let cache = new_table_flownode_set_cache("test".to_string(), cache, mem_kv);
         let ident = vec![CacheIdent::CreateFlow(CreateFlow {
             source_table_ids: vec![1024, 1025],
-            flownode_peers: (1..=5).map(Peer::empty).collect(),
+            flownodes: (1..=5).map(Peer::empty).collect(),
         })];
         cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
@@ -243,11 +243,11 @@ mod tests {
         let ident = vec![
             CacheIdent::CreateFlow(CreateFlow {
                 source_table_ids: vec![1024, 1025],
-                flownode_peers: (1..=5).map(Peer::empty).collect(),
+                flownodes: (1..=5).map(Peer::empty).collect(),
             }),
             CacheIdent::CreateFlow(CreateFlow {
                 source_table_ids: vec![1024, 1025],
-                flownode_peers: (11..=12).map(Peer::empty).collect(),
+                flownodes: (11..=12).map(Peer::empty).collect(),
             }),
         ];
         cache.invalidate(&ident).await.unwrap();

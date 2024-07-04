@@ -194,7 +194,7 @@ impl CreateFlowProcedure {
                 &ctx,
                 &[CacheIdent::CreateFlow(CreateFlow {
                     source_table_ids: self.data.source_table_ids.clone(),
-                    flownode_peers: self.data.peers.clone(),
+                    flownodes: self.data.peers.clone(),
                 })],
             )
             .await?;

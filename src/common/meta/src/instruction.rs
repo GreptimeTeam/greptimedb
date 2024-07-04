@@ -170,7 +170,7 @@ pub enum CacheIdent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateFlow {
     pub source_table_ids: Vec<TableId>,
-    pub flownode_peers: Vec<Peer>,
+    pub flownodes: Vec<Peer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
