@@ -31,7 +31,7 @@ use crate::context::{Channel, ConnInfo, QueryContextRef};
 /// Session for persistent connection such as MySQL, PostgreSQL etc.
 #[derive(Debug)]
 pub struct Session {
-    catalog: Arc<RwLock<String>>,
+    catalog: RwLock<String>,
     mutable_inner: Arc<RwLock<MutableInner>>,
     conn_info: ConnInfo,
     configuration_variables: Arc<ConfigurationVariables>,
@@ -64,7 +64,7 @@ impl Session {
         configuration_variables: ConfigurationVariables,
     ) -> Self {
         Session {
-            catalog: Arc::new(RwLock::new(DEFAULT_CATALOG_NAME.into())),
+            catalog: RwLock::new(DEFAULT_CATALOG_NAME.into()),
             conn_info: ConnInfo::new(addr, channel),
             configuration_variables: Arc::new(configuration_variables),
             mutable_inner: Arc::new(RwLock::new(MutableInner::default())),
