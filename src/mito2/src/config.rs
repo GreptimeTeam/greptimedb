@@ -354,6 +354,9 @@ pub struct InvertedIndexConfig {
     #[serde_as(as = "NoneAsEmptyString")]
     pub mem_threshold_on_create: Option<ReadableSize>,
 
+    /// Whether to compress the index data.
+    pub compress: bool,
+
     #[deprecated = "use [IndexConfig::aux_path] instead"]
     #[serde(skip_serializing)]
     pub intermediate_path: String,
@@ -370,8 +373,10 @@ impl Default for InvertedIndexConfig {
             create_on_flush: Mode::Auto,
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
-            write_buffer_size: ReadableSize::mb(8),
+            compress: true,
             mem_threshold_on_create: Some(ReadableSize::mb(64)),
+
+            write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
         }
     }

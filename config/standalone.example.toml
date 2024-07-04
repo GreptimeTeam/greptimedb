@@ -454,6 +454,9 @@ apply_on_query = "auto"
 ## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
 mem_threshold_on_create = "64M"
 
+## Whether to compress the inverted index data.
+compress = true
+
 ## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
 

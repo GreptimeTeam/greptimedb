@@ -30,8 +30,8 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
+use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
-use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
 /// The [`SstIndexApplier`] is responsible for applying predicates to the provided SST files

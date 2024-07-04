@@ -12,151 +12,139 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod applier;
-mod codec;
-pub(crate) mod creator;
+mod indexer;
 pub(crate) mod intermediate;
+pub(crate) mod inverted_index;
 pub(crate) mod puffin_manager;
+mod statistics;
 mod store;
 
 use std::num::NonZeroUsize;
 
 use common_telemetry::{debug, warn};
-use creator::SstIndexCreator;
-use object_store::ObjectStore;
+use puffin::puffin_manager::PuffinManager;
+use puffin_manager::{SstPuffinManager, SstPuffinWriter};
+use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 
+use crate::access_layer::OperationType;
+use crate::config::InvertedIndexConfig;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
 
-const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
+#[derive(Debug, Clone, Default)]
+pub struct IndexOutput {
+    pub file_size: u64,
+    pub inverted_index: InvertedIndexOutput,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InvertedIndexOutput {
+    pub available: bool,
+    pub index_size: ByteCount,
+    pub row_count: RowCount,
+    pub columns: Vec<ColumnId>,
+}
 
 /// The index creator that hides the error handling details.
 #[derive(Default)]
 pub struct Indexer {
     file_id: FileId,
     region_id: RegionId,
-    inner: Option<SstIndexCreator>,
     last_memory_usage: usize,
+
+    inverted_indexer: Option<InvertedIndexer>,
+    puffin_writer: Option<SstPuffinWriter>,
 }
 
 impl Indexer {
-    /// Update the index with the given batch.
+    /// Updates the index with the given batch.
     pub async fn update(&mut self, batch: &Batch) {
-        if let Some(creator) = self.inner.as_mut() {
-            if let Err(err) = creator.update(batch).await {
-                if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to update index, region_id: {}, file_id: {}, err: {}",
-                        self.region_id, self.file_id, err
-                    );
-                } else {
-                    warn!(
-                        err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
-                        self.region_id, self.file_id,
-                    );
-                }
+        self.do_update(batch).await;
 
-                // Skip index creation if error occurs.
-                self.inner = None;
-            }
-        }
-
-        if let Some(creator) = self.inner.as_ref() {
-            let memory_usage = creator.memory_usage();
-            INDEX_CREATE_MEMORY_USAGE.add(memory_usage as i64 - self.last_memory_usage as i64);
-            self.last_memory_usage = memory_usage;
-        } else {
-            INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
-            self.last_memory_usage = 0;
-        }
+        let memory_usage = self.memory_usage();
+        INDEX_CREATE_MEMORY_USAGE.add(memory_usage as i64 - self.last_memory_usage as i64);
+        self.last_memory_usage = memory_usage;
     }
 
-    /// Finish the index creation.
-    /// Returns the number of bytes written if success or None if failed.
-    pub async fn finish(&mut self) -> Option<u64> {
-        if let Some(mut creator) = self.inner.take() {
-            match creator.finish().await {
-                Ok((row_count, byte_count)) => {
-                    debug!(
-                        "Create index successfully, region_id: {}, file_id: {}, bytes: {}, rows: {}",
-                        self.region_id, self.file_id, byte_count, row_count
-                    );
-
-                    INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
-                    self.last_memory_usage = 0;
-                    return Some(byte_count);
-                }
-                Err(err) => {
-                    if cfg!(any(test, feature = "test")) {
-                        panic!(
-                            "Failed to create index, region_id: {}, file_id: {}, err: {}",
-                            self.region_id, self.file_id, err
-                        );
-                    } else {
-                        warn!(
-                            err; "Failed to create index, region_id: {}, file_id: {}",
-                            self.region_id, self.file_id,
-                        );
-                    }
-                }
-            }
-        }
-
+    /// Finalizes the index creation.
+    pub async fn finish(&mut self) -> IndexOutput {
         INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
         self.last_memory_usage = 0;
-        None
+
+        self.do_finish().await
     }
 
-    /// Abort the index creation.
+    /// Aborts the index creation.
     pub async fn abort(&mut self) {
-        if let Some(mut creator) = self.inner.take() {
-            if let Err(err) = creator.abort().await {
-                if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to abort index, region_id: {}, file_id: {}, err: {}",
-                        self.region_id, self.file_id, err
-                    );
-                } else {
-                    warn!(
-                        err; "Failed to abort index, region_id: {}, file_id: {}",
-                        self.region_id, self.file_id,
-                    );
-                }
-            }
-        }
         INDEX_CREATE_MEMORY_USAGE.sub(self.last_memory_usage as i64);
         self.last_memory_usage = 0;
+
+        self.do_abort().await;
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.inverted_indexer
+            .as_ref()
+            .map_or(0, |creator| creator.memory_usage())
     }
 }
 
 pub(crate) struct IndexerBuilder<'a> {
-    pub(crate) create_inverted_index: bool,
-    pub(crate) mem_threshold_index_create: Option<usize>,
-    pub(crate) write_buffer_size: Option<usize>,
+    pub(crate) op_type: OperationType,
     pub(crate) file_id: FileId,
     pub(crate) file_path: String,
     pub(crate) metadata: &'a RegionMetadataRef,
     pub(crate) row_group_size: usize,
-    pub(crate) object_store: ObjectStore,
+    pub(crate) puffin_manager: SstPuffinManager,
     pub(crate) intermediate_manager: IntermediateManager,
     pub(crate) index_options: IndexOptions,
+    pub(crate) inverted_index_config: InvertedIndexConfig,
 }
 
 impl<'a> IndexerBuilder<'a> {
-    /// Sanity check for arguments and create a new [Indexer]
-    /// with inner [SstIndexCreator] if arguments are valid.
-    pub(crate) fn build(self) -> Indexer {
-        if !self.create_inverted_index {
+    /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
+    pub(crate) async fn build(self) -> Indexer {
+        let mut indexer = Indexer {
+            file_id: self.file_id,
+            region_id: self.metadata.region_id,
+            last_memory_usage: 0,
+
+            ..Default::default()
+        };
+
+        indexer.inverted_indexer = self.build_inverted_indexer();
+        if indexer.inverted_indexer.is_none() {
+            indexer.abort().await;
+            return Indexer::default();
+        }
+
+        indexer.puffin_writer = self.build_puffin_writer().await;
+        if indexer.puffin_writer.is_none() {
+            indexer.abort().await;
+            return Indexer::default();
+        }
+
+        indexer
+    }
+
+    fn build_inverted_indexer(&self) -> Option<InvertedIndexer> {
+        let create = match self.op_type {
+            OperationType::Flush => self.inverted_index_config.create_on_flush.auto(),
+            OperationType::Compact => self.inverted_index_config.create_on_compaction.auto(),
+        };
+
+        if !create {
             debug!(
-                "Skip creating index due to request, region_id: {}, file_id: {}",
+                "Skip creating inverted index due to config, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
-            return Indexer::default();
+            return None;
         }
 
         if self.metadata.primary_key.is_empty() {
@@ -164,7 +152,7 @@ impl<'a> IndexerBuilder<'a> {
                 "No tag columns, skip creating index, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
-            return Indexer::default();
+            return None;
         }
 
         let Some(mut segment_row_count) =
@@ -174,7 +162,7 @@ impl<'a> IndexerBuilder<'a> {
                 "Segment row count is 0, skip creating index, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
-            return Indexer::default();
+            return None;
         };
 
         let Some(row_group_size) = NonZeroUsize::new(self.row_group_size) else {
@@ -182,7 +170,7 @@ impl<'a> IndexerBuilder<'a> {
                 "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
-            return Indexer::default();
+            return None;
         };
 
         // if segment row count not aligned with row group size, adjust it to be aligned.
@@ -190,16 +178,19 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count = row_group_size;
         }
 
-        let creator = SstIndexCreator::new(
-            self.file_path,
+        let mem_threshold = self
+            .inverted_index_config
+            .mem_threshold_on_create
+            .map(|t| t.as_bytes() as usize);
+
+        let indexer = InvertedIndexer::new(
             self.file_id,
             self.metadata,
-            self.object_store,
-            self.intermediate_manager,
-            self.mem_threshold_index_create,
+            self.intermediate_manager.clone(),
+            mem_threshold,
             segment_row_count,
+            self.inverted_index_config.compress,
         )
-        .with_buffer_size(self.write_buffer_size)
         .with_ignore_column_ids(
             self.index_options
                 .inverted_index
@@ -209,12 +200,28 @@ impl<'a> IndexerBuilder<'a> {
                 .collect(),
         );
 
-        Indexer {
-            file_id: self.file_id,
-            region_id: self.metadata.region_id,
-            inner: Some(creator),
-            last_memory_usage: 0,
+        Some(indexer)
+    }
+
+    async fn build_puffin_writer(&self) -> Option<SstPuffinWriter> {
+        let err = match self.puffin_manager.writer(&self.file_path).await {
+            Ok(writer) => return Some(writer),
+            Err(err) => err,
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to create puffin writer, region_id: {}, file_id: {}, err: {}",
+                self.metadata.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to create puffin writer, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
         }
+
+        None
     }
 }
 
@@ -226,9 +233,12 @@ mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
+    use object_store::ObjectStore;
+    use puffin_manager::PuffinManagerFactory;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
+    use crate::config::Mode;
 
     fn mock_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
@@ -291,83 +301,102 @@ mod tests {
         IntermediateManager::new(mock_object_store())
     }
 
-    #[test]
-    fn test_build_indexer_basic() {
+    #[tokio::test]
+    async fn test_build_indexer_basic() {
+        let (_d, factory) =
+            PuffinManagerFactory::new_for_test_async("test_build_indexer_basic_").await;
+        let store = mock_object_store();
+        let puffin_manager = factory.build(store);
         let metadata = mock_region_metadata();
         let indexer = IndexerBuilder {
-            create_inverted_index: true,
-            mem_threshold_index_create: Some(1024),
-            write_buffer_size: None,
+            op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 1024,
-            object_store: mock_object_store(),
+            puffin_manager,
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
         }
-        .build();
+        .build()
+        .await;
 
-        assert!(indexer.inner.is_some());
+        assert!(indexer.inverted_indexer.is_some());
     }
 
-    #[test]
-    fn test_build_indexer_disable_create() {
+    #[tokio::test]
+    async fn test_build_indexer_disable_create() {
+        let (_d, factory) =
+            PuffinManagerFactory::new_for_test_async("test_build_indexer_disable_create_").await;
+        let store = mock_object_store();
+        let puffin_manager = factory.build(store);
         let metadata = mock_region_metadata();
         let indexer = IndexerBuilder {
-            create_inverted_index: false,
-            mem_threshold_index_create: Some(1024),
-            write_buffer_size: None,
+            op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 1024,
-            object_store: mock_object_store(),
+            puffin_manager,
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig {
+                create_on_flush: Mode::Disable,
+                ..Default::default()
+            },
         }
-        .build();
+        .build()
+        .await;
 
-        assert!(indexer.inner.is_none());
+        assert!(indexer.inverted_indexer.is_none());
     }
 
-    #[test]
-    fn test_build_indexer_no_tag() {
+    #[tokio::test]
+    async fn test_build_indexer_no_tag() {
+        let (_d, factory) =
+            PuffinManagerFactory::new_for_test_async("test_build_indexer_no_tag_").await;
+        let store = mock_object_store();
+        let puffin_manager = factory.build(store);
         let metadata = no_tag_region_metadata();
         let indexer = IndexerBuilder {
-            create_inverted_index: true,
-            mem_threshold_index_create: Some(1024),
-            write_buffer_size: None,
+            op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 1024,
-            object_store: mock_object_store(),
+            puffin_manager,
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
         }
-        .build();
+        .build()
+        .await;
 
-        assert!(indexer.inner.is_none());
+        assert!(indexer.inverted_indexer.is_none());
     }
 
-    #[test]
-    fn test_build_indexer_zero_row_group() {
+    #[tokio::test]
+    async fn test_build_indexer_zero_row_group() {
+        let (_d, factory) =
+            PuffinManagerFactory::new_for_test_async("test_build_indexer_zero_row_group_").await;
+        let store = mock_object_store();
+        let puffin_manager = factory.build(store);
         let metadata = mock_region_metadata();
         let indexer = IndexerBuilder {
-            create_inverted_index: true,
-            mem_threshold_index_create: Some(1024),
-            write_buffer_size: None,
+            op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 0,
-            object_store: mock_object_store(),
+            puffin_manager,
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
         }
-        .build();
+        .build()
+        .await;
 
-        assert!(indexer.inner.is_none());
+        assert!(indexer.inverted_indexer.is_none());
     }
 }

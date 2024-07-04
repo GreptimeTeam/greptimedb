@@ -17,7 +17,7 @@ use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePre
 use index::inverted_index::Bytes;
 
 use crate::error::Result;
-use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
 
 impl<'a> SstIndexApplierBuilder<'a> {
     /// Collects a comparison expression in the form of
@@ -134,7 +134,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::sst::index::applier::builder::tests::{
+    use crate::sst::index::inverted_index::applier::builder::tests::{
         encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
         test_object_store, test_region_metadata,
     };
