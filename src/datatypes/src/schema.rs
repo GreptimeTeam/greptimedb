@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion_common::DFSchemaRef;
-use datafusion_expr::expr::Expr;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
@@ -44,8 +43,6 @@ pub struct Schema {
     /// Timestamp key column is the column holds the timestamp and forms part of
     /// the primary key. None means there is no timestamp key column.
     timestamp_index: Option<usize>,
-    /// Columns default [`Expr`]
-    column_defaults: HashMap<String, Expr>,
     /// Version of the schema.
     ///
     /// Initial value is zero. The version should bump after altering schema.
@@ -121,11 +118,6 @@ impl Schema {
         self.column_schemas.is_empty()
     }
 
-    /// Get the default value for a column, if available.
-    pub fn get_column_default(&self, column: &str) -> Option<&Expr> {
-        self.column_defaults.get(column)
-    }
-
     /// Returns index of the timestamp key column.
     pub fn timestamp_index(&self) -> Option<usize> {
         self.timestamp_index
@@ -170,7 +162,6 @@ impl Schema {
             .collect();
 
         Ok(Self {
-            column_defaults: collect_column_defaults(&column_schemas),
             column_schemas,
             name_to_index,
             arrow_schema: Arc::new(arrow_schema),
@@ -239,7 +230,6 @@ impl SchemaBuilder {
         let arrow_schema = ArrowSchema::new(self.fields).with_metadata(self.metadata);
 
         Ok(Schema {
-            column_defaults: collect_column_defaults(&self.column_schemas),
             column_schemas: self.column_schemas,
             name_to_index: self.name_to_index,
             arrow_schema: Arc::new(arrow_schema),
@@ -247,20 +237,6 @@ impl SchemaBuilder {
             version: self.version,
         })
     }
-}
-
-fn collect_column_defaults(column_schemas: &[ColumnSchema]) -> HashMap<String, Expr> {
-    column_schemas
-        .iter()
-        .filter_map(|column_schema| {
-            column_schema
-                .create_default()
-                .ok()??
-                .try_to_scalar_value(&column_schema.data_type)
-                .ok()
-                .map(|scalar| (column_schema.name.to_string(), Expr::Literal(scalar)))
-        })
-        .collect()
 }
 
 struct FieldsAndIndices {
@@ -347,7 +323,6 @@ impl TryFrom<Arc<ArrowSchema>> for Schema {
         let version = try_parse_version(&arrow_schema.metadata, VERSION_KEY)?;
 
         Ok(Self {
-            column_defaults: collect_column_defaults(&column_schemas),
             column_schemas,
             name_to_index,
             arrow_schema,
@@ -390,8 +365,6 @@ fn try_parse_version(metadata: &HashMap<String, String>, key: &str) -> Result<u3
 
 #[cfg(test)]
 mod tests {
-    use datafusion_common::ScalarValue;
-
     use super::*;
     use crate::data_type::ConcreteDataType;
 
@@ -507,38 +480,5 @@ mod tests {
             .unwrap()
             .build()
             .is_err());
-    }
-
-    #[test]
-    fn test_column_defaults() {
-        let column_schemas = vec![
-            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value("test".into())))
-                .unwrap(),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true)
-            .with_default_constraint(Some(ColumnDefaultConstraint::Function(
-                "current_timestamp".to_string(),
-            )))
-            .unwrap(),
-        ];
-        let schema = SchemaBuilder::try_from(column_schemas.clone())
-            .unwrap()
-            .version(123)
-            .build()
-            .unwrap();
-
-        assert!(schema.get_column_default("col1").is_none());
-        assert!(matches!(schema.get_column_default("col2").unwrap(),
-                         Expr::Literal(ScalarValue::Utf8(Some(s))) if s == "test"));
-        assert!(matches!(
-            schema.get_column_default("ts").unwrap(),
-            Expr::Literal(ScalarValue::TimestampMillisecond(_, _))
-        ));
     }
 }

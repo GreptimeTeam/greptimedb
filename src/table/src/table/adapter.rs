@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use common_recordbatch::OrderOption;
@@ -25,7 +26,7 @@ use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::ColumnSchema;
 use store_api::region_engine::SinglePartitionScanner;
 use store_api::storage::ScanRequest;
 
@@ -36,13 +37,14 @@ use crate::table::{TableRef, TableType};
 pub struct DfTableProviderAdapter {
     table: TableRef,
     scan_req: Arc<Mutex<ScanRequest>>,
-    schema: SchemaRef,
+    /// Columns default [`Expr`]
+    column_defaults: HashMap<String, Expr>,
 }
 
 impl DfTableProviderAdapter {
     pub fn new(table: TableRef) -> Self {
         Self {
-            schema: table.schema(),
+            column_defaults: collect_column_defaults(table.schema().column_schemas()),
             table,
             scan_req: Arc::default(),
         }
@@ -62,6 +64,21 @@ impl DfTableProviderAdapter {
     }
 }
 
+/// Collects column default [`Expr`] from column schemas.
+pub fn collect_column_defaults(column_schemas: &[ColumnSchema]) -> HashMap<String, Expr> {
+    column_schemas
+        .iter()
+        .filter_map(|column_schema| {
+            column_schema
+                .create_default()
+                .ok()??
+                .try_to_scalar_value(&column_schema.data_type)
+                .ok()
+                .map(|scalar| (column_schema.name.to_string(), Expr::Literal(scalar)))
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl TableProvider for DfTableProviderAdapter {
     fn as_any(&self) -> &dyn Any {
@@ -69,7 +86,7 @@ impl TableProvider for DfTableProviderAdapter {
     }
 
     fn schema(&self) -> DfSchemaRef {
-        self.schema.arrow_schema().clone()
+        self.table.schema().arrow_schema().clone()
     }
 
     fn table_type(&self) -> DfTableType {
@@ -81,7 +98,7 @@ impl TableProvider for DfTableProviderAdapter {
     }
 
     fn get_column_default(&self, column: &str) -> Option<&Expr> {
-        self.schema.get_column_default(column)
+        self.column_defaults.get(column)
     }
 
     async fn scan(
@@ -134,5 +151,43 @@ impl TableProvider for DfTableProviderAdapter {
             .table
             .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())
             .map(|v| v.into_iter().map(Into::into).collect::<Vec<_>>())?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion_common::ScalarValue;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnDefaultConstraint;
+
+    use super::*;
+
+    #[test]
+    fn test_collect_columns_defaults() {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value("test".into())))
+                .unwrap(),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Function(
+                "current_timestamp".to_string(),
+            )))
+            .unwrap(),
+        ];
+        let column_defaults = collect_column_defaults(&column_schemas[..]);
+
+        assert!(!column_defaults.contains_key("col1"));
+        assert!(matches!(column_defaults.get("col2").unwrap(),
+                         Expr::Literal(ScalarValue::Utf8(Some(s))) if s == "test"));
+        assert!(matches!(
+            column_defaults.get("ts").unwrap(),
+            Expr::Literal(ScalarValue::TimestampMillisecond(_, _))
+        ));
     }
 }

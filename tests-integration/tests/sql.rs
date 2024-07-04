@@ -246,7 +246,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .unwrap();
     assert_eq!(rows.len(), 1);
 
-    for row in rows.iter() {
+    for row in rows {
         let i: i64 = row.get("i");
         assert_eq!(i, 99);
     }
