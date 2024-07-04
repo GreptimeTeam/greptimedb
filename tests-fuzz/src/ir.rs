@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use self::insert_expr::{RowValue, RowValues};
 use crate::context::TableContextRef;
+use crate::fake::WordGenerator;
 use crate::generator::{Random, TsValueGenerator};
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
@@ -450,7 +451,11 @@ pub fn partible_column_options_generator<R: Rng + 'static>(
         1 => vec![ColumnOption::PrimaryKey, ColumnOption::NotNull],
         2 => vec![
             ColumnOption::PrimaryKey,
-            ColumnOption::DefaultValue(generate_random_value(rng, column_type, None)),
+            ColumnOption::DefaultValue(generate_random_value(
+                rng,
+                column_type,
+                Some(&WordGenerator),
+            )),
         ],
         3 => vec![ColumnOption::PrimaryKey],
         _ => unreachable!(),

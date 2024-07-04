@@ -69,7 +69,7 @@ pub async fn wait_for_region_distribution(
             })
         },
         move |region_distribution| {
-            info!("Region Distribution: {:?}", region_distribution);
+            info!("region distribution: {:?}", region_distribution);
             if expected_region_distribution.keys().len() != region_distribution.keys().len() {
                 return false;
             }
