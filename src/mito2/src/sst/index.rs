@@ -37,17 +37,25 @@ use crate::sst::file::FileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
 
+/// Output of the index creation.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutput {
+    /// Size of the file.
     pub file_size: u64,
+    /// Inverted index output.
     pub inverted_index: InvertedIndexOutput,
 }
 
+/// Output of the inverted index creation.
 #[derive(Debug, Clone, Default)]
 pub struct InvertedIndexOutput {
+    /// Whether the index is available.
     pub available: bool,
+    /// Size of the index.
     pub index_size: ByteCount,
+    /// Number of rows in the index.
     pub row_count: RowCount,
+    /// Available columns in the index.
     pub columns: Vec<ColumnId>,
 }
 
