@@ -127,17 +127,16 @@ pub fn normalize_path(path: &str) -> String {
 // the function also relies on assumption that the region path is built from
 // pattern `<data|index>/catalog/schema/table_id/....`
 //
-// this implementation is also safe when the path is not constructed in a
-// way that we assumed.
-pub fn extract_parent_path(path: &str) -> String {
+// this implementation tries to extract at most 3 levels of parent path
+pub(crate) fn extract_parent_path(path: &str) -> String {
     // split the path into `catalog`, `schema` and others
     let parts: Vec<&str> = path.splitn(4, '/').collect();
     if parts.len() == 4 {
         // retain the first 3 part
         parts[0..3].join("/").to_string()
     } else {
-        // unexpected path, return empty string for safety
-        String::new()
+        // use path itself if there is insufficient levels
+        path.to_string()
     }
 }
 
@@ -205,6 +204,20 @@ mod tests {
             extract_parent_path("data/greptime/public/1024/1024_0000000000/")
         );
 
-        assert_eq!("", extract_parent_path("tmp/greptime"));
+        assert_eq!(
+            "data/greptime/public",
+            extract_parent_path("data/greptime/public/1/")
+        );
+
+        assert_eq!(
+            "data/greptime/public",
+            extract_parent_path("data/greptime/public")
+        );
+
+        assert_eq!("data/greptime/", extract_parent_path("data/greptime/"));
+
+        assert_eq!("data/", extract_parent_path("data/"));
+
+        assert_eq!("/", extract_parent_path("/"));
     }
 }
