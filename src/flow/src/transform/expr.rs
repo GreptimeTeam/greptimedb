@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{OptionExt, ResultExt};
@@ -159,9 +159,9 @@ impl TypedExpr {
     ) -> Result<TypedExpr, Error> {
         let (arg_exprs, arg_types): (Vec<_>, Vec<_>) =
             arg_exprs_typed.into_iter().map(|e| (e.expr, e.typ)).unzip();
-        info!("Before rewrite: {:?}", f);
+        debug!("Before rewrite: {:?}", f);
         let f_rewrite = rewrite_scalar_function(f);
-        info!("After rewrite: {:?}", f_rewrite);
+        debug!("After rewrite: {:?}", f_rewrite);
         let input_schema = RelationType::new(arg_types).into_unnamed();
         let raw_fn =
             RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
