@@ -19,7 +19,7 @@ use crate::error::Result;
 
 /// `PuffinFileAccessor` is for opening readers and writers for puffin files.
 #[async_trait]
-#[auto_impl::auto_impl(Box, Rc, Arc)]
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait PuffinFileAccessor: Send + Sync + 'static {
     type Reader: AsyncRead + AsyncSeek + Unpin + Send;
     type Writer: AsyncWrite + Unpin + Send;
