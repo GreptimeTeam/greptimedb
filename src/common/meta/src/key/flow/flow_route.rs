@@ -187,7 +187,7 @@ impl FlowRouteManager {
 
     /// Builds a create flow routes transaction.
     ///
-    /// Puts `__flow/route/{flownode_id}/{partitions}` keys.
+    /// Puts `__flow/route/{flow_id}/{partition_id}` keys.
     pub(crate) fn build_create_txn<I: IntoIterator<Item = (FlowPartitionId, FlowRouteValue)>>(
         &self,
         flow_id: FlowId,

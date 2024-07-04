@@ -341,8 +341,8 @@ impl Inserter {
                         .await
                         .context(RequestInsertsSnafu)?
                         .unwrap_or_default()
-                        .into_iter()
-                        .map(|id| Peer::new(id, ""))
+                        .values()
+                        .cloned()
                         .collect::<Vec<_>>();
 
                     if !peers.is_empty() {
