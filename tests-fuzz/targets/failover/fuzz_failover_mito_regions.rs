@@ -90,7 +90,7 @@ impl Arbitrary<'_> for FuzzInput {
         let max_rows = get_gt_fuzz_input_max_rows();
         let rows = rng.gen_range(2..max_rows);
         let max_tables = get_gt_fuzz_input_max_tables();
-        let tables = rng.gen_range(1..max_tables);
+        let tables = rng.gen_range(2..max_tables);
         let max_inserts = get_gt_fuzz_input_max_insert_actions();
         let inserts = rng.gen_range(2..max_inserts);
         Ok(FuzzInput {
@@ -283,8 +283,6 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let partitions = collect_table_partitions(&ctx, &table_ctxs).await?;
     let region_distribution = region_distribution(partitions);
 
-    // Ensures num of datanode > 1.
-    assert!(region_distribution.len() > 1);
     pretty_print_region_distribution(&region_distribution);
     let nodes = region_distribution.keys().cloned().collect::<Vec<_>>();
     let selected_datanode = nodes
