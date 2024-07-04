@@ -396,14 +396,18 @@ allow_stale_entries = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
-## File system path to store staging files for searching index (default `{data_home}/index_staging`).
-staging_path = ""
+
+## Auxiliary directory path for the index in filesystem, used to store intermediate files for
+## creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.
+## The default name for this directory is `index_intermediate` for backward compatibility.
+##
+## This path contains two subdirectories:
+## - `__intm`: for storing intermediate files used during creating index.
+## - `staging`: for storing staging files used during searching index.
+auxiliary_path = ""
 
 ## The max capacity of the staging directory.
 staging_size = "2GB"
-
-## File system path to store intermediate files for creating index (default `{data_home}/index_intermediate`).
-intermediate_path = ""
 
 ## The options for inverted index in Mito engine.
 [region_engine.mito.inverted_index]

@@ -43,6 +43,8 @@ pub(crate) type SstPuffinManager = FsPuffinManager<
     InstrumentedAsyncWrite,
 >;
 
+const STAGING_DIR: &str = "staging";
+
 /// A factory for creating `SstPuffinManager` instances.
 #[derive(Clone)]
 pub struct PuffinManagerFactory {
@@ -56,11 +58,12 @@ pub struct PuffinManagerFactory {
 impl PuffinManagerFactory {
     /// Creates a new `PuffinManagerFactory` instance.
     pub async fn new(
-        staging_path: impl AsRef<Path>,
+        auxiliary_path: impl AsRef<Path>,
         staging_capacity: u64,
         write_buffer_size: Option<usize>,
     ) -> Result<Self> {
-        let stager = BoundedStager::new(staging_path.as_ref().to_path_buf(), staging_capacity)
+        let staging_dir = auxiliary_path.as_ref().join(STAGING_DIR);
+        let stager = BoundedStager::new(staging_dir, staging_capacity)
             .await
             .context(PuffinInitStagerSnafu)?;
         Ok(Self {

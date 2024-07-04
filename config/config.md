@@ -119,9 +119,8 @@
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
-| `region_engine.mito.index.staging_path` | String | `""` | File system path to store staging files for searching index (default `{data_home}/index_staging`). |
+| `region_engine.mito.index.auxiliary_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
-| `region_engine.mito.index.intermediate_path` | String | `""` | File system path to store intermediate files for creating index (default `{data_home}/index_intermediate`). |
 | `region_engine.mito.inverted_index` | -- | -- | The options for inverted index in Mito engine. |
 | `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically<br/>- `disable`: never |
 | `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically<br/>- `disable`: never |
@@ -404,9 +403,8 @@
 | `region_engine.mito.parallel_scan_channel_size` | Integer | `32` | Capacity of the channel to send data from parallel scan tasks to the main task. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
-| `region_engine.mito.index.staging_path` | String | `""` | File system path to store staging files for searching index (default `{data_home}/index_staging`). |
+| `region_engine.mito.index.auxiliary_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
-| `region_engine.mito.index.intermediate_path` | String | `""` | File system path to store intermediate files for creating index (default `{data_home}/index_intermediate`). |
 | `region_engine.mito.inverted_index` | -- | -- | The options for inverted index in Mito engine. |
 | `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically<br/>- `disable`: never |
 | `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically<br/>- `disable`: never |

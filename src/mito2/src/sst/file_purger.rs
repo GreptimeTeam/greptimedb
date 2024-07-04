@@ -120,12 +120,11 @@ mod tests {
         let sst_dir = "table1";
         let path = location::sst_file_path(sst_dir, sst_file_id);
 
-        let intm_path = dir.path().join("intm");
-        let staging_path = dir.path().join("staging");
-        let puffin_mgr = PuffinManagerFactory::new(staging_path, 4096, None)
+        let index_aux_path = dir.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
             .await
             .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(intm_path.to_str().unwrap())
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
 
@@ -177,12 +176,11 @@ mod tests {
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
 
-        let intm_path = dir.path().join("intm");
-        let staging_path = dir.path().join("staging");
-        let puffin_mgr = PuffinManagerFactory::new(staging_path, 4096, None)
+        let index_aux_path = dir.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
             .await
             .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(intm_path.to_str().unwrap())
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
 

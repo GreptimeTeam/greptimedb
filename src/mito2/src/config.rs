@@ -254,26 +254,30 @@ impl MitoConfig {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct IndexConfig {
-    /// File system path to store staging files for searching index, defaults to `{data_home}/index_staging`.
-    pub staging_path: String,
+    /// Auxiliary directory path for the index in filesystem, used to
+    /// store intermediate files for creating the index and staging files
+    /// for searching the index, defaults to `{data_home}/index_intermediate`.
+    ///
+    /// This path contains two subdirectories:
+    /// - `__intm`: for storing intermediate files used during creating index.
+    /// - `staging`: for storing staging files used during searching index.
+    ///
+    /// The default name for this directory is `index_intermediate` for backward compatibility.
+    pub auxiliary_path: String,
 
     /// The max capacity of the staging directory.
     pub staging_size: ReadableSize,
 
     /// Write buffer size for creating the index.
     pub write_buffer_size: ReadableSize,
-
-    /// File system path to store intermediate files for creating index, defaults to `{data_home}/index_intermediate`.
-    pub intermediate_path: String,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
-            staging_path: String::new(),
             staging_size: ReadableSize::gb(2),
             write_buffer_size: ReadableSize::mb(8),
-            intermediate_path: String::new(),
+            auxiliary_path: String::new(),
         }
     }
 }
@@ -285,22 +289,18 @@ impl IndexConfig {
         inverted_index: &InvertedIndexConfig,
     ) -> Result<()> {
         #[allow(deprecated)]
-        if self.intermediate_path.is_empty() && !inverted_index.intermediate_path.is_empty() {
-            self.intermediate_path
+        if self.auxiliary_path.is_empty() && !inverted_index.intermediate_path.is_empty() {
+            self.auxiliary_path
                 .clone_from(&inverted_index.intermediate_path);
             warn!(
                 "`inverted_index.intermediate_path` is deprecated, use
-                 `index.intermediate_path` instead. Set `index.intermediate_path` to {}",
+                 `index.auxiliary_path` instead. Set `index.auxiliary_path` to {}",
                 &inverted_index.intermediate_path
             )
         }
-        if self.intermediate_path.is_empty() {
+        if self.auxiliary_path.is_empty() {
             let path = Path::new(data_home).join("index_intermediate");
-            self.intermediate_path = path.as_os_str().to_string_lossy().to_string();
-        }
-        if self.staging_path.is_empty() {
-            let path = Path::new(data_home).join("index_staging");
-            self.staging_path = path.as_os_str().to_string_lossy().to_string();
+            self.auxiliary_path = path.as_os_str().to_string_lossy().to_string();
         }
 
         if self.write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
@@ -355,7 +355,7 @@ pub struct InvertedIndexConfig {
     #[serde_as(as = "NoneAsEmptyString")]
     pub mem_threshold_on_create: Option<ReadableSize>,
 
-    #[deprecated = "use [IndexConfig::intermediate_path] instead"]
+    #[deprecated = "use [IndexConfig::auxiliary_path] instead"]
     #[serde(skip_serializing)]
     pub intermediate_path: String,
 

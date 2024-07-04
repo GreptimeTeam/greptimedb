@@ -33,8 +33,8 @@ pub struct IntermediateManager {
 impl IntermediateManager {
     /// Create a new `IntermediateManager` with the given root path.
     /// It will clean up all garbage intermediate files from previous runs.
-    pub async fn init_fs(root_path: impl AsRef<str>) -> Result<Self> {
-        let store = new_fs_object_store(&normalize_dir(root_path.as_ref())).await?;
+    pub async fn init_fs(auxiliary_path: impl AsRef<str>) -> Result<Self> {
+        let store = new_fs_object_store(&normalize_dir(auxiliary_path.as_ref())).await?;
         let store = InstrumentedStore::new(store);
 
         // Remove all garbage intermediate files from previous runs.

@@ -56,12 +56,11 @@ impl SchedulerEnv {
         let mut builder = Fs::default();
         builder.root(&path_str);
 
-        let intm_path = path.path().join("intm");
-        let staging_path = path.path().join("staging");
-        let puffin_mgr = PuffinManagerFactory::new(staging_path, 4096, None)
+        let index_aux_path = path.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
             .await
             .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(intm_path.to_str().unwrap())
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
         let object_store = ObjectStore::new(builder).unwrap().finish();

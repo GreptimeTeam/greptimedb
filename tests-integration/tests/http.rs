@@ -827,10 +827,9 @@ parallel_scan_channel_size = 32
 allow_stale_entries = false
 
 [region_engine.mito.index]
-staging_path = ""
+auxiliary_path = ""
 staging_size = "2GiB"
 write_buffer_size = "8MiB"
-intermediate_path = ""
 
 [region_engine.mito.inverted_index]
 create_on_flush = "auto"
