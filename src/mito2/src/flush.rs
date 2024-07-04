@@ -351,7 +351,7 @@ impl RegionFlushTask {
                 file_size: sst_info.file_size,
                 available_indexes: {
                     let mut indexes = SmallVec::new();
-                    if sst_info.index_metadata.inverted_index.available {
+                    if sst_info.index_metadata.inverted_index.index_size > 0 {
                         indexes.push(IndexType::InvertedIndex);
                     }
                     indexes

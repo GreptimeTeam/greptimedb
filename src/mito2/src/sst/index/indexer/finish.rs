@@ -111,7 +111,6 @@ impl Indexer {
             self.region_id, self.file_id, byte_count, row_count
         );
 
-        output.available = true;
         output.index_size = byte_count;
         output.row_count = row_count;
         output.columns = indexer.column_ids().collect();

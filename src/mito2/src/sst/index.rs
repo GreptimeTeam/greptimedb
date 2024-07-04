@@ -49,8 +49,6 @@ pub struct IndexOutput {
 /// Output of the inverted index creation.
 #[derive(Debug, Clone, Default)]
 pub struct InvertedIndexOutput {
-    /// Whether the index is available.
-    pub available: bool,
     /// Size of the index.
     pub index_size: ByteCount,
     /// Number of rows in the index.
