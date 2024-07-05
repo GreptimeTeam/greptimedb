@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::{debug, warn};
-use puffin::puffin_manager::PuffinWriter;
+use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 
 use crate::sst::index::fulltext_index::creator::SstIndexCreator as FulltextIndexer;
 use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
@@ -25,7 +25,8 @@ impl Indexer {
     pub(crate) async fn do_finish(&mut self) -> IndexOutput {
         let mut output = IndexOutput::default();
 
-        let Some(mut writer) = self.puffin_writer.take() else {
+        let Some(mut writer) = self.build_puffin_writer().await else {
+            self.do_abort().await;
             return output;
         };
 
@@ -47,6 +48,31 @@ impl Indexer {
 
         output.file_size = self.do_finish_puffin_writer(writer).await;
         output
+    }
+
+    async fn build_puffin_writer(&mut self) -> Option<SstPuffinWriter> {
+        let Some(puffin_manager) = self.puffin_manager.take() else {
+            return None;
+        };
+
+        let err = match puffin_manager.writer(&self.file_path).await {
+            Ok(writer) => return Some(writer),
+            Err(err) => err,
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to create puffin writer, region_id: {}, file_id: {}, err: {}",
+                self.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to create puffin writer, region_id: {}, file_id: {}",
+                self.region_id, self.file_id,
+            );
+        }
+
+        None
     }
 
     async fn do_finish_puffin_writer(&mut self, writer: SstPuffinWriter) -> ByteCount {

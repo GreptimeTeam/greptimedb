@@ -52,7 +52,7 @@ impl SstIndexCreator {
     pub async fn new(
         region_id: &RegionId,
         sst_file_id: &FileId,
-        intermediate_manager: IntermediateManager,
+        intermediate_manager: &IntermediateManager,
         metadata: &RegionMetadataRef,
         compress: bool,
         mem_limit: usize,

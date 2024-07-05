@@ -23,8 +23,7 @@ mod store;
 use std::num::NonZeroUsize;
 
 use common_telemetry::{debug, warn};
-use puffin::puffin_manager::PuffinManager;
-use puffin_manager::{SstPuffinManager, SstPuffinWriter};
+use puffin_manager::SstPuffinManager;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId};
@@ -88,12 +87,13 @@ impl FulltextIndexOutput {
 #[derive(Default)]
 pub struct Indexer {
     file_id: FileId,
+    file_path: String,
     region_id: RegionId,
     last_memory_usage: usize,
 
+    puffin_manager: Option<SstPuffinManager>,
     inverted_indexer: Option<InvertedIndexer>,
     fulltext_indexer: Option<FulltextIndexer>,
-    puffin_writer: Option<SstPuffinWriter>,
 }
 
 impl Indexer {
@@ -151,6 +151,7 @@ impl<'a> IndexerBuilder<'a> {
     pub(crate) async fn build(self) -> Indexer {
         let mut indexer = Indexer {
             file_id: self.file_id,
+            file_path: self.file_path.clone(),
             region_id: self.metadata.region_id,
             last_memory_usage: 0,
 
@@ -160,16 +161,10 @@ impl<'a> IndexerBuilder<'a> {
         indexer.inverted_indexer = self.build_inverted_indexer();
         indexer.fulltext_indexer = self.build_fulltext_indexer().await;
         if indexer.inverted_indexer.is_none() && indexer.fulltext_indexer.is_none() {
-            indexer.abort().await;
             return Indexer::default();
         }
 
-        indexer.puffin_writer = self.build_puffin_writer().await;
-        if indexer.puffin_writer.is_none() {
-            indexer.abort().await;
-            return Indexer::default();
-        }
-
+        indexer.puffin_manager = Some(self.puffin_manager);
         indexer
     }
 
@@ -244,7 +239,7 @@ impl<'a> IndexerBuilder<'a> {
 
         if !create {
             debug!(
-                "Skip creating fulltext index due to config, region_id: {}, file_id: {}",
+                "Skip creating full-text index due to config, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
             return None;
@@ -257,7 +252,7 @@ impl<'a> IndexerBuilder<'a> {
         let creator = FulltextIndexer::new(
             &self.metadata.region_id,
             &self.file_id,
-            self.intermediate_manager.clone(),
+            &self.intermediate_manager,
             self.metadata,
             self.fulltext_index_config.compress,
             mem_limit,
@@ -268,7 +263,7 @@ impl<'a> IndexerBuilder<'a> {
             Ok(creator) => {
                 if creator.is_empty() {
                     debug!(
-                        "Skip creating fulltext index due to no columns require indexing, region_id: {}, file_id: {}",
+                        "Skip creating full-text index due to no columns require indexing, region_id: {}, file_id: {}",
                         self.metadata.region_id, self.file_id,
                     );
                     return None;
@@ -281,33 +276,12 @@ impl<'a> IndexerBuilder<'a> {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create fulltext indexer, region_id: {}, file_id: {}, err: {}",
+                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {}",
                 self.metadata.region_id, self.file_id, err
             );
         } else {
             warn!(
-                err; "Failed to create fulltext indexer, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
-            );
-        }
-
-        None
-    }
-
-    async fn build_puffin_writer(&self) -> Option<SstPuffinWriter> {
-        let err = match self.puffin_manager.writer(&self.file_path).await {
-            Ok(writer) => return Some(writer),
-            Err(err) => err,
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to create puffin writer, region_id: {}, file_id: {}, err: {}",
-                self.metadata.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to create puffin writer, region_id: {}, file_id: {}",
+                err; "Failed to create full-text indexer, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
         }
