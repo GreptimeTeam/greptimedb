@@ -434,6 +434,27 @@ mem_threshold_on_create = "64M"
 ## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
 
+## The options for full-text index in Mito engine.
+[region_engine.mito.fulltext_index]
+
+## Whether to create the index on flush.
+## - `auto`: automatically
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the index on compaction.
+## - `auto`: automatically
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the index on query
+## - `auto`: automatically
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for index creation.
+mem_threshold_on_create = "64M"
+
 [region_engine.mito.memtable]
 ## Memtable type.
 ## - `time_series`: time-series memtable

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod fulltext_index;
 mod indexer;
 pub(crate) mod intermediate;
 pub(crate) mod inverted_index;
@@ -29,11 +30,12 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::OperationType;
-use crate::config::InvertedIndexConfig;
+use crate::config::{FulltextIndexConfig, InvertedIndexConfig};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::sst::file::FileId;
+use crate::sst::index::fulltext_index::creator::SstIndexCreator as FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::SstIndexCreator as InvertedIndexer;
 
@@ -44,11 +46,24 @@ pub struct IndexOutput {
     pub file_size: u64,
     /// Inverted index output.
     pub inverted_index: InvertedIndexOutput,
+    /// Fulltext index output.
+    pub fulltext_index: FulltextIndexOutput,
 }
 
 /// Output of the inverted index creation.
 #[derive(Debug, Clone, Default)]
 pub struct InvertedIndexOutput {
+    /// Size of the index.
+    pub index_size: ByteCount,
+    /// Number of rows in the index.
+    pub row_count: RowCount,
+    /// Available columns in the index.
+    pub columns: Vec<ColumnId>,
+}
+
+/// Output of the fulltext index creation.
+#[derive(Debug, Clone, Default)]
+pub struct FulltextIndexOutput {
     /// Size of the index.
     pub index_size: ByteCount,
     /// Number of rows in the index.
@@ -63,6 +78,12 @@ impl InvertedIndexOutput {
     }
 }
 
+impl FulltextIndexOutput {
+    pub fn is_available(&self) -> bool {
+        self.index_size > 0
+    }
+}
+
 /// The index creator that hides the error handling details.
 #[derive(Default)]
 pub struct Indexer {
@@ -71,6 +92,7 @@ pub struct Indexer {
     last_memory_usage: usize,
 
     inverted_indexer: Option<InvertedIndexer>,
+    fulltext_indexer: Option<FulltextIndexer>,
     puffin_writer: Option<SstPuffinWriter>,
 }
 
@@ -104,6 +126,10 @@ impl Indexer {
         self.inverted_indexer
             .as_ref()
             .map_or(0, |creator| creator.memory_usage())
+            + self
+                .fulltext_indexer
+                .as_ref()
+                .map_or(0, |creator| creator.memory_usage())
     }
 }
 
@@ -117,6 +143,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) intermediate_manager: IntermediateManager,
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
+    pub(crate) fulltext_index_config: FulltextIndexConfig,
 }
 
 impl<'a> IndexerBuilder<'a> {
@@ -131,7 +158,8 @@ impl<'a> IndexerBuilder<'a> {
         };
 
         indexer.inverted_indexer = self.build_inverted_indexer();
-        if indexer.inverted_indexer.is_none() {
+        indexer.fulltext_indexer = self.build_fulltext_indexer().await;
+        if indexer.inverted_indexer.is_none() && indexer.fulltext_indexer.is_none() {
             indexer.abort().await;
             return Indexer::default();
         }
@@ -208,6 +236,64 @@ impl<'a> IndexerBuilder<'a> {
         Some(indexer)
     }
 
+    async fn build_fulltext_indexer(&self) -> Option<FulltextIndexer> {
+        let create = match self.op_type {
+            OperationType::Flush => self.fulltext_index_config.create_on_flush.auto(),
+            OperationType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
+        };
+
+        if !create {
+            debug!(
+                "Skip creating fulltext index due to config, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return None;
+        }
+
+        let mem_limit = self
+            .fulltext_index_config
+            .mem_threshold_on_create
+            .as_bytes() as usize;
+        let creator = FulltextIndexer::new(
+            &self.metadata.region_id,
+            &self.file_id,
+            self.intermediate_manager.clone(),
+            self.metadata,
+            self.fulltext_index_config.compress,
+            mem_limit,
+        )
+        .await;
+
+        let err = match creator {
+            Ok(creator) => {
+                if creator.is_empty() {
+                    debug!(
+                        "Skip creating fulltext index due to no columns require indexing, region_id: {}, file_id: {}",
+                        self.metadata.region_id, self.file_id,
+                    );
+                    return None;
+                } else {
+                    return Some(creator);
+                }
+            }
+            Err(err) => err,
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to create fulltext indexer, region_id: {}, file_id: {}, err: {}",
+                self.metadata.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to create fulltext indexer, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+        }
+
+        None
+    }
+
     async fn build_puffin_writer(&self) -> Option<SstPuffinWriter> {
         let err = match self.puffin_manager.writer(&self.file_path).await {
             Ok(writer) => return Some(writer),
@@ -243,7 +329,7 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
-    use crate::config::Mode;
+    use crate::config::{FulltextIndexConfig, Mode};
 
     fn mock_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
@@ -323,6 +409,7 @@ mod tests {
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
         }
         .build()
         .await;
@@ -350,6 +437,7 @@ mod tests {
                 create_on_flush: Mode::Disable,
                 ..Default::default()
             },
+            fulltext_index_config: FulltextIndexConfig::default(),
         }
         .build()
         .await;
@@ -374,6 +462,7 @@ mod tests {
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
         }
         .build()
         .await;
@@ -398,6 +487,7 @@ mod tests {
             intermediate_manager: mock_intm_mgr(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
         }
         .build()
         .await;

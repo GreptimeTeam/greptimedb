@@ -109,6 +109,8 @@ pub struct MitoConfig {
     pub index: IndexConfig,
     /// Inverted index configs.
     pub inverted_index: InvertedIndexConfig,
+    /// Full-text index configs.
+    pub fulltext_index: FulltextIndexConfig,
 
     /// Memtable config
     pub memtable: MemtableConfig,
@@ -139,6 +141,7 @@ impl Default for MitoConfig {
             allow_stale_entries: false,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
+            fulltext_index: FulltextIndexConfig::default(),
             memtable: MemtableConfig::default(),
         };
 
@@ -378,6 +381,35 @@ impl Default for InvertedIndexConfig {
 
             write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
+        }
+    }
+}
+
+/// Configuration options for the full-text index.
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct FulltextIndexConfig {
+    /// Whether to create the index on flush: automatically or never.
+    pub create_on_flush: Mode,
+    /// Whether to create the index on compaction: automatically or never.
+    pub create_on_compaction: Mode,
+    /// Whether to apply the index on query: automatically or never.
+    pub apply_on_query: Mode,
+    /// Memory threshold for creating the index.
+    pub mem_threshold_on_create: ReadableSize,
+    /// Whether to compress the index data.
+    pub compress: bool,
+}
+
+impl Default for FulltextIndexConfig {
+    fn default() -> Self {
+        Self {
+            create_on_flush: Mode::Auto,
+            create_on_compaction: Mode::Auto,
+            apply_on_query: Mode::Auto,
+            mem_threshold_on_create: ReadableSize::mb(64),
+            compress: true,
         }
     }
 }

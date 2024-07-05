@@ -128,11 +128,16 @@ pub struct FileMeta {
 pub enum IndexType {
     /// Inverted index.
     InvertedIndex,
+    /// Full-text index.
+    FulltextIndex,
 }
 
 impl FileMeta {
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
+    }
+    pub fn fulltext_index_available(&self) -> bool {
+        self.available_indexes.contains(&IndexType::FulltextIndex)
     }
 }
 
