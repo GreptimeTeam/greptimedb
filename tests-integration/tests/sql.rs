@@ -250,7 +250,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let i: i64 = row.get("i");
         let ts: DateTime<Utc> = row.get("ts");
         let now = common_time::util::current_time_millis();
-        assert!(now - ts.timestamp() < 1000);
+        assert!(now - ts.timestamp_millis() < 1000);
         assert_eq!(i, 99);
     }
 
