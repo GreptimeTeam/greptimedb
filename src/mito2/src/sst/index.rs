@@ -57,6 +57,12 @@ pub struct InvertedIndexOutput {
     pub columns: Vec<ColumnId>,
 }
 
+impl InvertedIndexOutput {
+    pub fn is_available(&self) -> bool {
+        self.index_size > 0
+    }
+}
+
 /// The index creator that hides the error handling details.
 #[derive(Default)]
 pub struct Indexer {

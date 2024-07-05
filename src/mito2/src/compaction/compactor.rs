@@ -311,7 +311,7 @@ impl Compactor for DefaultCompactor {
                         file_size: sst_info.file_size,
                         available_indexes: {
                             let mut indexes = SmallVec::new();
-                            if sst_info.index_metadata.inverted_index.index_size > 0 {
+                            if sst_info.index_metadata.inverted_index.is_available() {
                                 indexes.push(IndexType::InvertedIndex);
                             }
                             indexes
