@@ -25,13 +25,12 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{async_trait, BoxError, Extension, TypedHeader};
 use common_telemetry::{error, warn};
-use mime_guess::mime;
 use pipeline::error::{CastTypeSnafu, PipelineTransformSnafu};
 use pipeline::util::to_pipeline_version;
 use pipeline::{PipelineVersion, Value as PipelineValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Value};
+use serde_json::{json, Deserializer, Value};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -250,13 +249,19 @@ pub async fn log_ingester(
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
-    let m: mime::Mime = content_type.clone().into();
-    let value = match m.subtype() {
-        mime::JSON => transform_ndjson_array_factory(
+    let value = match content_type {
+        ct if ct == ContentType::json() => transform_ndjson_array_factory(
             Deserializer::from_str(&payload).into_iter(),
             ignore_errors,
         )?,
-        // add more content type support
+        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => {
+            let a = payload
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| json!({ "line": line }))
+                .collect::<Vec<Value>>();
+            Value::Array(a)
+        }
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     };
 
