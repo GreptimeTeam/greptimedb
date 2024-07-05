@@ -35,6 +35,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
+common-time.workspace = true
 common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true

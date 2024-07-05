@@ -77,6 +77,10 @@ impl TableProvider for DfTableProviderAdapter {
         }
     }
 
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.table.get_column_default(column)
+    }
+
     async fn scan(
         &self,
         _ctx: &SessionState,
