@@ -52,7 +52,7 @@ use crate::metrics::{
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
-use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::index::inverted_index::applier::SstIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;

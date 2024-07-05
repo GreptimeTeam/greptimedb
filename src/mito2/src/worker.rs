@@ -149,6 +149,7 @@ impl WorkerGroup {
         let write_cache = write_cache_from_config(
             &config,
             object_store_manager.clone(),
+            puffin_manager_factory.clone(),
             intermediate_manager.clone(),
         )
         .await?;
@@ -280,6 +281,7 @@ impl WorkerGroup {
         let write_cache = write_cache_from_config(
             &config,
             object_store_manager.clone(),
+            puffin_manager_factory.clone(),
             intermediate_manager.clone(),
         )
         .await?;
@@ -337,6 +339,7 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
 async fn write_cache_from_config(
     config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
+    puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> Result<Option<WriteCacheRef>> {
     if !config.enable_experimental_write_cache {
@@ -351,6 +354,7 @@ async fn write_cache_from_config(
         object_store_manager,
         config.experimental_write_cache_size,
         config.experimental_write_cache_ttl,
+        puffin_manager_factory,
         intermediate_manager,
     )
     .await?;

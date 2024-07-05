@@ -17,7 +17,7 @@ use datafusion_expr::Expr as DfExpr;
 use index::inverted_index::search::predicate::{Predicate, RegexMatchPredicate};
 
 use crate::error::Result;
-use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
 
 impl<'a> SstIndexApplierBuilder<'a> {
     /// Collects a regex match expression in the form of `column ~ pattern`.
@@ -49,7 +49,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::sst::index::applier::builder::tests::{
+    use crate::sst::index::inverted_index::applier::builder::tests::{
         field_column, int64_lit, nonexistent_column, string_lit, tag_column, test_object_store,
         test_region_metadata,
     };
