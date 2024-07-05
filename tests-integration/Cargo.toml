@@ -35,6 +35,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
+common-time.workspace = true
 common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
@@ -90,3 +91,4 @@ script.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 tokio-postgres = "0.7"
+url = "2.3"

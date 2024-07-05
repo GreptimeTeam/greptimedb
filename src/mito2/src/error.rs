@@ -597,13 +597,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to write puffin completely"))]
-    PuffinFinish {
-        source: puffin::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to add blob to puffin file"))]
     PuffinAddBlob {
         source: puffin::error::Error,
@@ -891,7 +884,6 @@ impl ErrorExt for Error {
             | IndexFinish { source, .. } => source.status_code(),
             PuffinReadMetadata { source, .. }
             | PuffinReadBlob { source, .. }
-            | PuffinFinish { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
             | PuffinBuildReader { source, .. } => source.status_code(),

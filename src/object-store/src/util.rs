@@ -123,6 +123,20 @@ pub fn normalize_path(path: &str) -> String {
     p
 }
 
+// This logical tries to extract parent path from the object storage operation
+// the function also relies on assumption that the region path is built from
+// pattern `<data|index>/catalog/schema/table_id/....`
+//
+// this implementation tries to extract at most 3 levels of parent path
+pub(crate) fn extract_parent_path(path: &str) -> &str {
+    // split the path into `catalog`, `schema` and others
+    path.char_indices()
+        .filter(|&(_, c)| c == '/')
+        // we get the data/catalog/schema from path, split at the 3rd /
+        .nth(2)
+        .map_or(path, |(i, _)| &path[..i])
+}
+
 /// Attaches instrument layers to the object store.
 pub fn with_instrument_layers(object_store: ObjectStore) -> ObjectStore {
     object_store
@@ -178,5 +192,29 @@ mod tests {
         assert_eq!("abc/def", join_path(" abc", "/def "));
         assert_eq!("/abc", join_path("//", "/abc"));
         assert_eq!("abc/def", join_path("abc/", "//def"));
+    }
+
+    #[test]
+    fn test_path_extraction() {
+        assert_eq!(
+            "data/greptime/public",
+            extract_parent_path("data/greptime/public/1024/1024_0000000000/")
+        );
+
+        assert_eq!(
+            "data/greptime/public",
+            extract_parent_path("data/greptime/public/1/")
+        );
+
+        assert_eq!(
+            "data/greptime/public",
+            extract_parent_path("data/greptime/public")
+        );
+
+        assert_eq!("data/greptime/", extract_parent_path("data/greptime/"));
+
+        assert_eq!("data/", extract_parent_path("data/"));
+
+        assert_eq!("/", extract_parent_path("/"));
     }
 }
