@@ -7720,6 +7720,7 @@ dependencies = [
  "common-time",
  "crossbeam-utils",
  "csv",
+ "dashmap",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -11575,6 +11576,7 @@ dependencies = [
  "tokio-stream",
  "tonic 0.11.0",
  "tower",
+ "url",
  "uuid",
  "zstd 0.13.1",
 ]

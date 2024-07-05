@@ -19,7 +19,7 @@ use auth::user_provider_from_option;
 use axum::http::{HeaderName, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
 use prost::Message;
-use serde_json::json;
+use serde_json::{json, Value};
 use servers::http::error_result::ErrorResponse;
 use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
@@ -76,6 +76,8 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_prometheus_remote_write,
                 test_vm_proto_remote_write,
+
+                test_pipeline_api,
             );
         )*
     };
@@ -997,6 +999,122 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+
+    // handshake
+    let client = TestClient::new(app);
+
+    let body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+
+    let content = serde_json::from_str(&content);
+    assert!(content.is_ok());
+    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
+    let content: Value = content.unwrap();
+
+    let execution_time = content.get("execution_time_ms");
+    assert!(execution_time.unwrap().is_number());
+    let pipelines = content.get("pipelines");
+    let pipelines = pipelines.unwrap().as_array().unwrap();
+    assert_eq!(pipelines.len(), 1);
+    let pipeline = pipelines.first().unwrap();
+    assert_eq!(pipeline.get("name").unwrap(), "test");
+
+    let version_str = pipeline
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "I",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let encoded: String = url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
+
+    // 3. remove pipeline
+    let res = client
+        .delete(format!("/v1/events/pipelines/test?version={}", encoded).as_str())
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // {"pipelines":[{"name":"test","version":"2024-07-04 08:55:29.038347"}],"execution_time_ms":22}
+    let content = res.text().await;
+    let content: Value = serde_json::from_str(&content).unwrap();
+    assert!(content.get("execution_time_ms").unwrap().is_number());
+
+    assert_eq!(
+        content.get("pipelines").unwrap().to_string(),
+        format!(r#"[{{"name":"test","version":"{}"}}]"#, version_str).as_str()
+    );
+
+    // 4. write data failed
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    // todo(shuiyisong): refactor http error handling
+    assert_ne!(res.status(), StatusCode::OK);
 
     guard.remove_all().await;
 }

@@ -14,8 +14,12 @@
 
 mod etl;
 mod manager;
+mod metrics;
 
 pub use etl::transform::GreptimeTransformer;
 pub use etl::value::Value;
 pub use etl::{parse, Content, Pipeline};
-pub use manager::{error, pipeline_operator, table};
+pub use manager::{
+    error, pipeline_operator, table, util, PipelineInfo, PipelineRef, PipelineTableRef,
+    PipelineVersion,
+};
