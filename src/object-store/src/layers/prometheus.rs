@@ -25,13 +25,15 @@ use prometheus::{
     Histogram, HistogramTimer, HistogramVec, IntCounterVec,
 };
 
+use crate::util::extract_parent_path;
+
 type Result<T> = std::result::Result<T, opendal::Error>;
 
 lazy_static! {
     static ref REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "opendal_requests_total",
         "Total times of all kinds of operation being called",
-        &["scheme", "operation"],
+        &["scheme", "operation", "path"],
     )
     .unwrap();
     static ref REQUESTS_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
@@ -40,7 +42,7 @@ lazy_static! {
             "Histogram of the time spent on specific operation",
             exponential_buckets(0.01, 2.0, 16).unwrap()
         ),
-        &["scheme", "operation"]
+        &["scheme", "operation", "path"]
     )
     .unwrap();
     static ref BYTES_TOTAL: HistogramVec = register_histogram_vec!(
@@ -49,7 +51,7 @@ lazy_static! {
             "Total size of sync or async Read/Write",
             exponential_buckets(0.01, 2.0, 16).unwrap()
         ),
-        &["scheme", "operation"]
+        &["scheme", "operation", "path"]
     )
     .unwrap();
 }
@@ -126,12 +128,13 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::CreateDir.into_static()])
+            .with_label_values(&[&self.scheme, Operation::CreateDir.into_static(), path_label])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::CreateDir.into_static()])
+            .with_label_values(&[&self.scheme, Operation::CreateDir.into_static(), path_label])
             .start_timer();
         let create_res = self.inner.create_dir(path, args).await;
 
@@ -143,12 +146,13 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Read.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Read.into_static(), path_label])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Read.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Read.into_static(), path_label])
             .start_timer();
 
         let (rp, r) = self.inner.read(path, args).await.map_err(|e| {
@@ -161,19 +165,24 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             PrometheusMetricWrapper::new(
                 r,
                 Operation::Read,
-                BYTES_TOTAL.with_label_values(&[&self.scheme, Operation::Read.into_static()]),
+                BYTES_TOTAL.with_label_values(&[
+                    &self.scheme,
+                    Operation::Read.into_static(),
+                    path_label,
+                ]),
                 timer,
             ),
         ))
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Write.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Write.into_static(), path_label])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Write.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Write.into_static(), path_label])
             .start_timer();
 
         let (rp, r) = self.inner.write(path, args).await.map_err(|e| {
@@ -186,18 +195,23 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
             PrometheusMetricWrapper::new(
                 r,
                 Operation::Write,
-                BYTES_TOTAL.with_label_values(&[&self.scheme, Operation::Write.into_static()]),
+                BYTES_TOTAL.with_label_values(&[
+                    &self.scheme,
+                    Operation::Write.into_static(),
+                    path_label,
+                ]),
                 timer,
             ),
         ))
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Stat.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Stat.into_static(), path_label])
             .inc();
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Stat.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Stat.into_static(), path_label])
             .start_timer();
 
         let stat_res = self.inner.stat(path, args).await;
@@ -209,12 +223,13 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Delete.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Delete.into_static(), path_label])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Delete.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Delete.into_static(), path_label])
             .start_timer();
 
         let delete_res = self.inner.delete(path, args).await;
@@ -226,12 +241,13 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::List.into_static()])
+            .with_label_values(&[&self.scheme, Operation::List.into_static(), path_label])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::List.into_static()])
+            .with_label_values(&[&self.scheme, Operation::List.into_static(), path_label])
             .start_timer();
 
         let list_res = self.inner.list(path, args).await;
@@ -245,11 +261,11 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
 
     async fn batch(&self, args: OpBatch) -> Result<RpBatch> {
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Batch.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Batch.into_static(), ""])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Batch.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Batch.into_static(), ""])
             .start_timer();
         let result = self.inner.batch(args).await;
 
@@ -261,12 +277,13 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Presign.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Presign.into_static(), path_label])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Presign.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Presign.into_static(), path_label])
             .start_timer();
         let result = self.inner.presign(path, args).await;
         timer.observe_duration();
@@ -278,12 +295,21 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::BlockingCreateDir.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingCreateDir.into_static(),
+                path_label,
+            ])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::BlockingCreateDir.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingCreateDir.into_static(),
+                path_label,
+            ])
             .start_timer();
         let result = self.inner.blocking_create_dir(path, args);
 
@@ -296,12 +322,21 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingRead.into_static(),
+                path_label,
+            ])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingRead.into_static(),
+                path_label,
+            ])
             .start_timer();
 
         self.inner
@@ -315,6 +350,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
                         BYTES_TOTAL.with_label_values(&[
                             &self.scheme,
                             Operation::BlockingRead.into_static(),
+                            path_label,
                         ]),
                         timer,
                     ),
@@ -327,12 +363,21 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingWrite.into_static(),
+                path_label,
+            ])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::BlockingWrite.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingWrite.into_static(),
+                path_label,
+            ])
             .start_timer();
 
         self.inner
@@ -346,6 +391,7 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
                         BYTES_TOTAL.with_label_values(&[
                             &self.scheme,
                             Operation::BlockingWrite.into_static(),
+                            path_label,
                         ]),
                         timer,
                     ),
@@ -358,12 +404,21 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::BlockingStat.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingStat.into_static(),
+                path_label,
+            ])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::BlockingStat.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingStat.into_static(),
+                path_label,
+            ])
             .start_timer();
         let result = self.inner.blocking_stat(path, args);
         timer.observe_duration();
@@ -374,12 +429,21 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::BlockingDelete.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingDelete.into_static(),
+                path_label,
+            ])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::BlockingDelete.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingDelete.into_static(),
+                path_label,
+            ])
             .start_timer();
         let result = self.inner.blocking_delete(path, args);
         timer.observe_duration();
@@ -391,12 +455,21 @@ impl<A: Access> LayeredAccess for PrometheusAccess<A> {
     }
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingLister)> {
+        let path_label = extract_parent_path(path);
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::BlockingList.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingList.into_static(),
+                path_label,
+            ])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::BlockingList.into_static()])
+            .with_label_values(&[
+                &self.scheme,
+                Operation::BlockingList.into_static(),
+                path_label,
+            ])
             .start_timer();
         let result = self.inner.blocking_list(path, args);
         timer.observe_duration();
