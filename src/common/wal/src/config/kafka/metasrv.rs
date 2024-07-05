@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
     backoff_prefix, kafka_topic_prefix, BackoffConfig, KafkaTopicConfig,
 };
-use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
+use crate::BROKER_ENDPOINT;
 
 /// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,6 +28,7 @@ pub struct MetasrvKafkaConfig {
     /// The backoff config.
     #[serde(flatten, with = "backoff_prefix")]
     pub backoff: BackoffConfig,
+    /// The kafka config.
     #[serde(flatten, with = "kafka_topic_prefix")]
     pub kafka_topic: KafkaTopicConfig,
 }
@@ -37,19 +36,10 @@ pub struct MetasrvKafkaConfig {
 impl Default for MetasrvKafkaConfig {
     fn default() -> Self {
         let broker_endpoints = vec![BROKER_ENDPOINT.to_string()];
-        let replication_factor = broker_endpoints.len() as i16;
-        let kafka_topic = KafkaTopicConfig {
-            num_topics: 64,
-            selector_type: TopicSelectorType::RoundRobin,
-            name_prefix: TOPIC_NAME_PREFIX.to_string(),
-            num_partitions: 1,
-            replication_factor,
-            create_topic_timeout: Duration::from_secs(30),
-        };
         Self {
             broker_endpoints,
             backoff: BackoffConfig::default(),
-            kafka_topic,
+            kafka_topic: KafkaTopicConfig::default(),
         }
     }
 }

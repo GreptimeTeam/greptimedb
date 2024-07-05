@@ -52,6 +52,7 @@ impl Default for BackoffConfig {
 
 /// Topic configurations for kafka clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct KafkaTopicConfig {
     /// Number of topics to be created upon start.
     pub num_topics: usize,
