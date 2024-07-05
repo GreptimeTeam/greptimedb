@@ -39,7 +39,7 @@ pub mod numbers;
 pub mod scan;
 
 lazy_static! {
-    //// The [`Expr`] to call UDF function `now()`.
+    /// The [`Expr`] to call UDF function `now()`.
     static ref NOW_EXPR: Expr = {
         let ctx = SessionContext::new();
 
