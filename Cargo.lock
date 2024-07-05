@@ -11811,6 +11811,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "common-wal",
  "datafusion 38.0.0",
  "datafusion-expr 38.0.0",
