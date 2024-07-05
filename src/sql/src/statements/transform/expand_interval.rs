@@ -27,6 +27,9 @@ lazy_static! {
     /// Matches either one or more digits `(\d+)` or one or more ASCII characters `[a-zA-Z]` or plus/minus signs
     static ref INTERVAL_ABBREVIATION_PATTERN: Regex = Regex::new(r"([+-]?\d+|[a-zA-Z]+|\+|-)").unwrap();
 
+    /// Checks if the provided string starts as ISO_8601 format string (case/sign independent)
+    static ref IS_VALID_ISO_8601_PREFIX_PATTERN: Regex = Regex::new(r"^[-]?[Pp]").unwrap();
+
     static ref INTERVAL_ABBREVIATION_MAPPING: HashMap<&'static str, &'static str> = HashMap::from([
         ("y","years"),
         ("mon","months"),
@@ -59,7 +62,8 @@ lazy_static! {
 pub(crate) struct ExpandIntervalTransformRule;
 
 impl TransformRule for ExpandIntervalTransformRule {
-    /// Applies transform rule for `Interval` type by extending the shortened version (e.g. '1h', '2d')
+    /// Applies transform rule for `Interval` type by extending the shortened version (e.g. '1h', '2d') or
+    /// converting ISO 8601 format strings (e.g., "P1Y2M3D")
     /// In case when `Interval` has `BinaryOp` value (e.g. query like `SELECT INTERVAL '2h' - INTERVAL '1h'`)
     /// it's AST has `left` part of type `Value::SingleQuotedString` which needs to be handled specifically.
     /// To handle the `right` part which is `Interval` no extra steps are needed.
@@ -143,7 +147,7 @@ fn update_existing_interval_with_value(interval: &Interval, value: Box<Expr>) ->
 /// 1. Abbreviated interval strings (e.g., "1y2mo3d")
 /// Returns an interval's full name (e.g., "years", "hours", "minutes") according to the `INTERVAL_ABBREVIATION_MAPPING`
 /// If the `interval_str` contains whitespaces, the interval name is considered to be in a full form.
-/// 2. ISO 8601 format strings (e.g., "P1Y2M3D")
+/// 2. ISO 8601 format strings (e.g., "P1Y2M3D"), case/sign independent
 /// Returns a number of milliseconds corresponding to ISO 8601 (e.g., "36525000 milliseconds")
 /// Note: Hybrid format "1y 2 days 3h" is not supported.
 fn normalize_interval_name(interval_str: &str) -> Option<String> {
@@ -151,7 +155,7 @@ fn normalize_interval_name(interval_str: &str) -> Option<String> {
         return None;
     }
 
-    if is_iso8601_format(interval_str) {
+    if IS_VALID_ISO_8601_PREFIX_PATTERN.is_match(interval_str) {
         return parse_iso8601_interval(interval_str);
     }
 
@@ -187,13 +191,6 @@ fn expand_interval_abbreviation(interval_str: &str) -> Option<String> {
             })
             .join(" "),
     )
-}
-
-fn is_iso8601_format(interval_str: &str) -> bool {
-    interval_str.starts_with('P')
-        || interval_str.starts_with('p')
-        || interval_str.starts_with("-P")
-        || interval_str.starts_with("-p")
 }
 
 #[cfg(test)]
