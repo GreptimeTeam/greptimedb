@@ -24,7 +24,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::{AccessLayer, AccessLayerRef, SstWriteRequest};
+use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{new_picker, PickerOutput};
 use crate::compaction::CompactionSstReaderBuilder;
@@ -260,23 +260,6 @@ impl Compactor for DefaultCompactor {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 ..Default::default()
             };
-            let create_inverted_index = compaction_region
-                .engine_config
-                .inverted_index
-                .create_on_compaction
-                .auto();
-            let mem_threshold_index_create = compaction_region
-                .engine_config
-                .inverted_index
-                .mem_threshold_on_create
-                .map(|m| m.as_bytes() as _);
-            let index_write_buffer_size = Some(
-                compaction_region
-                    .engine_config
-                    .index
-                    .write_buffer_size
-                    .as_bytes() as usize,
-            );
 
             let region_metadata = compaction_region.region_metadata.clone();
             let sst_layer = compaction_region.access_layer.clone();
@@ -291,6 +274,7 @@ impl Compactor for DefaultCompactor {
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
+            let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
@@ -307,15 +291,14 @@ impl Compactor for DefaultCompactor {
                 let file_meta_opt = sst_layer
                     .write_sst(
                         SstWriteRequest {
+                            op_type: OperationType::Compact,
                             file_id,
                             metadata: region_metadata,
                             source: Source::Reader(reader),
                             cache_manager,
                             storage,
-                            create_inverted_index,
-                            mem_threshold_index_create,
-                            index_write_buffer_size,
                             index_options,
+                            inverted_index_config,
                         },
                         &write_opts,
                     )
@@ -326,11 +309,14 @@ impl Compactor for DefaultCompactor {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
-                        available_indexes: sst_info
-                            .inverted_index_available
-                            .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
-                            .unwrap_or_default(),
-                        index_file_size: sst_info.index_file_size,
+                        available_indexes: {
+                            let mut indexes = SmallVec::new();
+                            if sst_info.index_metadata.inverted_index.is_available() {
+                                indexes.push(IndexType::InvertedIndex);
+                            }
+                            indexes
+                        },
+                        index_file_size: sst_info.index_metadata.file_size,
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
                     });

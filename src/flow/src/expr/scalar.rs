@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use bytes::BytesMut;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
+use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
@@ -211,7 +212,6 @@ impl DfScalarFunction {
     pub fn eval(&self, values: &[Value], exprs: &[ScalarExpr]) -> Result<Value, EvalError> {
         // first eval exprs to construct values to feed to datafusion
         let values: Vec<_> = Self::eval_args(values, exprs)?;
-
         if values.is_empty() {
             return InvalidArgumentSnafu {
                 reason: "values is empty".to_string(),
@@ -242,6 +242,7 @@ impl DfScalarFunction {
             }
             .build()
         })?;
+
         let res = self.fn_impl.evaluate(&rb).map_err(|err| {
             EvalDatafusionSnafu {
                 raw: err,
@@ -296,6 +297,7 @@ impl RawDfScalarFn {
             .context(DecodeRelSnafu)
             .map_err(BoxedError::new)
             .context(crate::error::ExternalSnafu)?;
+        debug!("Decoded scalar function: {:?}", f);
 
         let input_schema = &self.input_schema;
         let extensions = &self.extensions;

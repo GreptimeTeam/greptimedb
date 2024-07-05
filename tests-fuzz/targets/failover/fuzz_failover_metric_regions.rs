@@ -13,15 +13,16 @@
 // limitations under the License.
 
 #![no_main]
-
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 
+use arbitrary::{Arbitrary, Unstructured};
 use common_telemetry::info;
-use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaChaRng;
+use rand_chacha::{ChaCha20Rng, ChaChaRng};
 use snafu::{ensure, ResultExt};
 use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
@@ -36,19 +37,28 @@ use tests_fuzz::generator::create_expr::{
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    generate_random_timestamp_for_mysql, generate_random_value, replace_default,
-    sort_by_primary_keys, CreateTableExpr, InsertIntoExpr,
+    generate_random_timestamp_for_mysql, generate_random_value, CreateTableExpr, InsertIntoExpr,
 };
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::DslTranslator;
+use tests_fuzz::utils::cluster_info::wait_for_all_datanode_online;
+use tests_fuzz::utils::partition::{
+    fetch_partitions, region_distribution, wait_for_all_regions_evicted,
+};
+use tests_fuzz::utils::pod_failure::{inject_datanode_pod_failure, recover_pod_failure};
 use tests_fuzz::utils::{
     compact_table, flush_memtable, get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables,
-    init_greptime_connections_via_env, Connections,
+    init_greptime_connections_via_env, Connections, GT_FUZZ_CLUSTER_NAME,
+    GT_FUZZ_CLUSTER_NAMESPACE,
 };
-use tests_fuzz::validator;
+use tests_fuzz::validator::row::count_values;
+
 struct FuzzContext {
     greptime: Pool<MySql>,
+    kube: kube::client::Client,
+    namespace: String,
+    cluster_name: String,
 }
 
 impl FuzzContext {
@@ -60,19 +70,19 @@ impl FuzzContext {
 #[derive(Copy, Clone, Debug)]
 struct FuzzInput {
     seed: u64,
-    tables: usize,
     rows: usize,
+    tables: usize,
 }
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
+        let max_rows = get_gt_fuzz_input_max_rows();
+        let rows = rng.gen_range(2..max_rows);
         let max_tables = get_gt_fuzz_input_max_tables();
         let tables = rng.gen_range(1..max_tables);
-        let max_row = get_gt_fuzz_input_max_rows();
-        let rows = rng.gen_range(1..max_row);
-        Ok(FuzzInput { tables, seed, rows })
+        Ok(FuzzInput { rows, seed, tables })
     }
 }
 
@@ -87,6 +97,23 @@ fn generate_create_physical_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<
         .build()
         .unwrap();
     create_physical_table_expr.generate(rng)
+}
+
+async fn create_physical_table<R: Rng + 'static>(
+    ctx: &FuzzContext,
+    rng: &mut R,
+) -> Result<TableContextRef> {
+    // Create a physical table and a logical table on top of it
+    let create_physical_table_expr = generate_create_physical_table_expr(rng).unwrap();
+    let translator = CreateTableExprTranslator;
+    let sql = translator.translate(&create_physical_table_expr)?;
+    let result = sqlx::query(&sql)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!("Create physical table: {sql}, result: {result:?}");
+
+    Ok(Arc::new(TableContext::from(&create_physical_table_expr)))
 }
 
 fn generate_create_logical_table_expr<R: Rng + 'static>(
@@ -125,73 +152,6 @@ fn generate_insert_expr<R: Rng + 'static>(
     insert_generator.generate(rng)
 }
 
-async fn create_physical_table<R: Rng + 'static>(
-    ctx: &FuzzContext,
-    rng: &mut R,
-) -> Result<TableContextRef> {
-    // Create a physical table and a logical table on top of it
-    let create_physical_table_expr = generate_create_physical_table_expr(rng).unwrap();
-    let translator = CreateTableExprTranslator;
-    let sql = translator.translate(&create_physical_table_expr)?;
-    let result = sqlx::query(&sql)
-        .execute(&ctx.greptime)
-        .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
-    info!("Create physical table: {sql}, result: {result:?}");
-
-    Ok(Arc::new(TableContext::from(&create_physical_table_expr)))
-}
-
-async fn validate_values(
-    ctx: &FuzzContext,
-    logical_table_ctx: TableContextRef,
-    insert_expr: &InsertIntoExpr,
-) -> Result<()> {
-    // Validate inserted rows
-    // The order of inserted rows are random, so we need to sort the inserted rows by primary keys and time index for comparison
-    let primary_keys_names = logical_table_ctx
-        .columns
-        .iter()
-        .filter(|c| c.is_primary_key() || c.is_time_index())
-        .map(|c| c.name.clone())
-        .collect::<Vec<_>>();
-
-    // Not all primary keys are in insert_expr
-    let primary_keys_idxs_in_insert_expr = insert_expr
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| primary_keys_names.contains(&c.name))
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    let primary_keys_column_list = primary_keys_idxs_in_insert_expr
-        .iter()
-        .map(|&i| insert_expr.columns[i].name.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-        .to_string();
-
-    let column_list = insert_expr
-        .columns
-        .iter()
-        .map(|c| c.name.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-        .to_string();
-
-    let select_sql = format!(
-        "SELECT {} FROM {} ORDER BY {}",
-        column_list, logical_table_ctx.name, primary_keys_column_list
-    );
-    let fetched_rows = validator::row::fetch_values(&ctx.greptime, select_sql.as_str()).await?;
-    let mut expected_rows =
-        replace_default(&insert_expr.values_list, &logical_table_ctx, insert_expr);
-    sort_by_primary_keys(&mut expected_rows, primary_keys_idxs_in_insert_expr);
-    validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
-
-    Ok(())
-}
-
 async fn insert_values<R: Rng + 'static>(
     rows: usize,
     ctx: &FuzzContext,
@@ -222,14 +182,13 @@ async fn insert_values<R: Rng + 'static>(
     Ok(insert_expr)
 }
 
-async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
-    info!("input: {input:?}");
-    let mut rng = ChaChaRng::seed_from_u64(input.seed);
+async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
+    let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
+    // Creates a physical table.
     let physical_table_ctx = create_physical_table(&ctx, &mut rng).await?;
 
     let mut tables = HashMap::with_capacity(input.tables);
 
-    // Create logical tables
     for _ in 0..input.tables {
         let translator = CreateTableExprTranslator;
         let create_logical_table_expr =
@@ -248,40 +207,80 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
         let insert_expr =
             insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
-        validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
-        tables.insert(logical_table_ctx.name.clone(), logical_table_ctx.clone());
         if rng.gen_bool(0.1) {
             flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
-            validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
         }
         if rng.gen_bool(0.1) {
             compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
-            validate_values(&ctx, logical_table_ctx.clone(), &insert_expr).await?;
         }
+
+        tables.insert(
+            logical_table_ctx.name.clone(),
+            (logical_table_ctx.clone(), insert_expr),
+        );
     }
 
-    // Clean up logical table
-    for (table_name, _) in tables {
-        let sql = format!("DROP TABLE {}", table_name);
+    let partitions = fetch_partitions(&ctx.greptime, physical_table_ctx.name.clone()).await?;
+    let region_distribution = region_distribution(partitions);
+    let selected_datanode = *region_distribution.keys().next().unwrap();
+    let selected_regions = region_distribution
+        .get(&selected_datanode)
+        .cloned()
+        .unwrap();
+
+    // Injects pod failures
+    info!("Injects pod failures to datanode: {selected_datanode}, regions: {selected_regions:?}");
+    let chaos_name = inject_datanode_pod_failure(
+        ctx.kube.clone(),
+        &ctx.namespace,
+        &ctx.cluster_name,
+        selected_datanode,
+        360,
+    )
+    .await?;
+
+    // Waits for num of regions on `selected_datanode` become to 0.
+    wait_for_all_regions_evicted(
+        ctx.greptime.clone(),
+        selected_datanode,
+        Duration::from_secs(300),
+    )
+    .await;
+
+    // Recovers pod failures
+    recover_pod_failure(ctx.kube.clone(), &ctx.namespace, &chaos_name).await?;
+    wait_for_all_datanode_online(ctx.greptime.clone(), Duration::from_secs(60)).await;
+
+    // Validates value rows
+    info!("Validates num of rows");
+
+    for (table_ctx, insert_expr) in tables.values() {
+        let sql = format!("select count(1) as count from {}", table_ctx.name);
+        let values = count_values(&ctx.greptime, &sql).await?;
+        assert_eq!(values.count as usize, insert_expr.values_list.len());
+    }
+
+    // Clean up
+    for (table_ctx, _) in tables.values() {
+        let sql = format!("DROP TABLE {}", table_ctx.name);
         let result = sqlx::query(&sql)
             .execute(&ctx.greptime)
             .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Drop table: {}, result: {result:?}", table_name);
+            .context(error::ExecuteQuerySnafu { sql })?;
+        info!("Drop table: {}\n\nResult: {result:?}\n\n", table_ctx.name);
     }
 
-    // Clean up physical table
     let sql = format!("DROP TABLE {}", physical_table_ctx.name);
     let result = sqlx::query(&sql)
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
     info!(
-        "Drop table: {}, result: {result:?}",
+        "Drop table: {}\n\nResult: {result:?}\n\n",
         physical_table_ctx.name
     );
-    ctx.close().await;
 
+    ctx.close().await;
     Ok(())
 }
 
@@ -291,8 +290,13 @@ fuzz_target!(|input: FuzzInput| {
         let Connections { mysql } = init_greptime_connections_via_env().await;
         let ctx = FuzzContext {
             greptime: mysql.expect("mysql connection init must be succeed"),
+            kube: kube::client::Client::try_default()
+                .await
+                .expect("init kube client"),
+            namespace: env::var(GT_FUZZ_CLUSTER_NAMESPACE).unwrap_or("my-greptimedb".to_string()),
+            cluster_name: env::var(GT_FUZZ_CLUSTER_NAME).unwrap_or("my-greptimedb".to_string()),
         };
-        execute_insert(ctx, input)
+        execute_failover(ctx, input)
             .await
             .unwrap_or_else(|err| panic!("fuzz test must be succeed: {err:?}"));
     })

@@ -33,6 +33,7 @@ futures.workspace = true
 greptime-proto.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
+lazy_static.workspace = true
 paste = "1.0"
 serde.workspace = true
 snafu.workspace = true
