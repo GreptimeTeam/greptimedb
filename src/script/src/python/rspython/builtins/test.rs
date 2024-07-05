@@ -39,7 +39,7 @@ use crate::python::utils::format_py_error;
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-        // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
+        // this can be in `.enter()` closure, but for clarity, put it in the `with_init()`
         let _ = PyVector::make_class(&vm.ctx);
     })
     .enter(|vm| {
@@ -422,7 +422,7 @@ fn test_vm() {
 
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
         vm.add_native_module("udf_builtins", Box::new(greptime_builtin::make_module));
-        // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
+        // this can be in `.enter()` closure, but for clarity, put it in the `with_init()`
         let _ = PyVector::make_class(&vm.ctx);
     })
     .enter(|vm| {
