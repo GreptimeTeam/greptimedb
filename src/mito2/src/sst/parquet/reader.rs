@@ -936,13 +936,3 @@ impl RowGroupReader {
         Ok(())
     }
 }
-
-impl Drop for RowGroupReader {
-    fn drop(&mut self) {
-        debug!(
-            "Row group reader finish, file_id: {}, metrics: {:?}",
-            self.context.file_path(),
-            self.metrics
-        );
-    }
-}
