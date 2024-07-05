@@ -28,7 +28,7 @@ use crate::metasrv::Context;
 
 const MAX_CACHED_STATS_PER_KEY: usize = 10;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct EpochStats {
     stats: Vec<Stat>,
     epoch: Option<u64>,

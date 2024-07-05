@@ -14,6 +14,7 @@
 
 pub mod builder;
 
+use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,6 +247,15 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
 pub enum SelectTarget {
     Datanode,
     Flownode,
+}
+
+impl Display for SelectTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectTarget::Datanode => write!(f, "datanode"),
+            SelectTarget::Flownode => write!(f, "flownode"),
+        }
+    }
 }
 
 #[derive(Clone)]

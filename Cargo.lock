@@ -1760,6 +1760,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "toml 0.8.14",
+ "tonic 0.11.0",
  "tracing-appender",
 ]
 
@@ -3756,6 +3757,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "catalog",
+ "client",
  "common-base",
  "common-catalog",
  "common-config",
