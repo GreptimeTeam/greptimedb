@@ -254,6 +254,8 @@ impl SeqScan {
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let stream = try_stream! {
+            let first_poll = stream_ctx.query_start.elapsed();
+
             for partition_range in partition_ranges {
                 let maybe_reader =
                     Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics)
@@ -287,10 +289,11 @@ impl SeqScan {
                 metrics.observe_metrics_on_finish();
 
                 debug!(
-                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}",
+                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     metrics,
+                    first_poll,
                 );
             }
         };
