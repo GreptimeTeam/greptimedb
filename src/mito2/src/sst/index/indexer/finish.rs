@@ -25,7 +25,7 @@ impl Indexer {
         let mut output = IndexOutput::default();
 
         let Some(mut writer) = self.puffin_writer.take() else {
-            return IndexOutput::default();
+            return output;
         };
 
         let success = self
