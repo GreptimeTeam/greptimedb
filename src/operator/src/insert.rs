@@ -665,11 +665,11 @@ impl Inserter {
     ) -> Result<TableRef> {
         let schema = ctx.current_schema();
         let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
-        // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_log_inserts`.
+        // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_row_inserts_with_create_type()`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 
-        info!("Table `{table_ref}` does not exist, try creating the log table");
+        info!("Table `{table_ref}` does not exist, try creating table");
         for (k, v) in options {
             create_table_expr
                 .table_options
@@ -681,11 +681,11 @@ impl Inserter {
 
         match res {
             Ok(table) => {
-                info!("Successfully created a log table {}", table_ref);
+                info!("Successfully created table {}", table_ref);
                 Ok(table)
             }
             Err(err) => {
-                error!(err; "Failed to create a log table {}", table_ref);
+                error!(err; "Failed to create table {}", table_ref);
                 Err(err)
             }
         }
