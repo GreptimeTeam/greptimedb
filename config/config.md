@@ -1,10 +1,12 @@
 # Configurations
 
-- [Standalone Mode](#standalone-mode)
-- [Distributed Mode](#distributed-mode)
+- [Configurations](#configurations)
+  - [Standalone Mode](#standalone-mode)
+  - [Distributed Mode](#distributed-mode)
     - [Frontend](#frontend)
     - [Metasrv](#metasrv)
     - [Datanode](#datanode)
+    - [Flownode](#flownode)
 
 ## Standalone Mode
 
@@ -432,5 +434,43 @@
 | `export_metrics.remote_write` | -- | -- | -- |
 | `export_metrics.remote_write.url` | String | `""` | The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`. |
 | `export_metrics.remote_write.headers` | InlineTable | -- | HTTP headers of Prometheus remote-write carry. |
+| `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
+| `tracing.tokio_console_addr` | String | `None` | The tokio console address. |
+
+
+### Flownode
+
+| Key | Type | Default | Descriptions |
+| --- | -----| ------- | ----------- |
+| `mode` | String | `distributed` | The running mode of the flownode. It can be `standalone` or `distributed`. |
+| `node_id` | Integer | `None` | The flownode identifier and should be unique in the cluster. |
+| `frontend_addr` | String | `http://127.0.0.1:4001` | Frontend grpc address. Used by flownode to write result back to frontend. |
+| `grpc` | -- | -- | The gRPC server options. |
+| `grpc.addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
+| `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
+| `grpc.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
+| `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
+| `meta_client` | -- | -- | The metasrv client options. |
+| `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
+| `meta_client.timeout` | String | `3s` | Operation timeout. |
+| `meta_client.heartbeat_timeout` | String | `500ms` | Heartbeat timeout. |
+| `meta_client.ddl_timeout` | String | `10s` | DDL timeout. |
+| `meta_client.connect_timeout` | String | `1s` | Connect server timeout. |
+| `meta_client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
+| `meta_client.metadata_cache_max_capacity` | Integer | `100000` | The configuration about the cache of the metadata. |
+| `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
+| `meta_client.metadata_cache_tti` | String | `5m` | -- |
+| `heartbeat` | -- | -- | The heartbeat options. |
+| `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
+| `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
+| `logging` | -- | -- | The logging options. |
+| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. |
+| `logging.level` | String | `None` | The log level. Can be `info`/`debug`/`warn`/`error`. |
+| `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
+| `logging.otlp_endpoint` | String | `None` | The OTLP tracing endpoint. |
+| `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
+| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | `None` | The tokio console address. |

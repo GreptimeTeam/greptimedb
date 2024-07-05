@@ -90,7 +90,7 @@ impl SeqScan {
     /// Builds a [BoxedBatchReader] from sequential scan for compaction.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let maybe_reader =
@@ -247,13 +247,15 @@ impl SeqScan {
         }
 
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.semaphore.clone();
         let partition_ranges = self.properties.partitions[partition].clone();
         let stream = try_stream! {
+            let first_poll = stream_ctx.query_start.elapsed();
+
             for partition_range in partition_ranges {
                 let maybe_reader =
                     Self::build_merge_reader(&stream_ctx, partition_range.identifier, semaphore.clone(), &mut metrics)
@@ -287,10 +289,11 @@ impl SeqScan {
                 metrics.observe_metrics_on_finish();
 
                 debug!(
-                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}",
+                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     metrics,
+                    first_poll,
                 );
             }
         };
@@ -321,7 +324,7 @@ impl SeqScan {
             ));
         }
         let mut metrics = ScannerMetrics {
-            prepare_scan_cost: self.stream_ctx.prepare_scan_cost,
+            prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
             ..Default::default()
         };
         let stream_ctx = self.stream_ctx.clone();
@@ -329,6 +332,8 @@ impl SeqScan {
 
         // build stream
         let stream = try_stream! {
+            let first_poll = stream_ctx.query_start.elapsed();
+
             // init parts
             let parts_len = {
                 let mut parts = stream_ctx.parts.lock().await;
@@ -375,10 +380,11 @@ impl SeqScan {
                 metrics.observe_metrics_on_finish();
 
                 debug!(
-                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}",
+                    "Seq scan finished, region_id: {:?}, partition: {}, metrics: {:?}, first_poll: {:?}",
                     stream_ctx.input.mapper.metadata().region_id,
                     partition,
                     metrics,
+                    first_poll
                 );
             }
         };
@@ -444,7 +450,6 @@ impl fmt::Debug for SeqScan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SeqScan")
             .field("parts", &self.stream_ctx.parts)
-            .field("prepare_scan_cost", &self.stream_ctx.prepare_scan_cost)
             .finish()
     }
 }

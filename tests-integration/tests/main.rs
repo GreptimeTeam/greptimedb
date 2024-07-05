@@ -19,10 +19,7 @@ mod http;
 #[macro_use]
 mod sql;
 #[macro_use]
-#[allow(dead_code)]
 mod region_migration;
-// #[macro_use]
-// mod region_failover;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);

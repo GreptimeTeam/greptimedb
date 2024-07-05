@@ -46,6 +46,8 @@ pub enum MergeMode {
     LastNonNull,
 }
 
+// Note: We need to update [store_api::mito_engine_options::is_mito_engine_option_key()]
+// if we want expose the option to table options.
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.

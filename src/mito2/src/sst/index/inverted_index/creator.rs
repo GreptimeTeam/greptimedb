@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod statistics;
-mod temp_provider;
+pub(crate) mod temp_provider;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -25,28 +24,26 @@ use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
-use object_store::ObjectStore;
-use puffin::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
+use puffin::blob_metadata::CompressionCodec;
+use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::ColumnId;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
-    PushIndexValueSnafu, Result,
-};
-use crate::metrics::{
-    INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
+    BiSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushIndexValueSnafu,
+    Result,
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
-use crate::sst::index::codec::{ColumnId, IndexValueCodec, IndexValuesCodec};
-use crate::sst::index::creator::statistics::Statistics;
-use crate::sst::index::creator::temp_provider::TempFileProvider;
 use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
-use crate::sst::index::store::InstrumentedStore;
-use crate::sst::index::INDEX_BLOB_TYPE;
+use crate::sst::index::inverted_index::codec::{IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::inverted_index::creator::temp_provider::TempFileProvider;
+use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
+use crate::sst::index::puffin_manager::SstPuffinWriter;
+use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
 
 /// The minimum memory usage threshold for one column.
 const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
@@ -54,15 +51,8 @@ const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
-type ByteCount = u64;
-type RowCount = usize;
-
 /// Creates SST index.
 pub struct SstIndexCreator {
-    /// Path of index file to write.
-    file_path: String,
-    /// The store to write index files.
-    store: InstrumentedStore,
     /// The index creator.
     index_creator: Box<dyn InvertedIndexCreator>,
     /// The provider of intermediate files.
@@ -78,24 +68,27 @@ pub struct SstIndexCreator {
     /// Whether the index creation is aborted.
     aborted: bool,
 
-    /// Ignore column IDs for index creation.
-    ignore_column_ids: HashSet<ColumnId>,
-
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
+
+    /// Whether to compress the index data.
+    compress: bool,
+
+    /// Ids of indexed columns.
+    column_ids: HashSet<ColumnId>,
 }
 
 impl SstIndexCreator {
     /// Creates a new `SstIndexCreator`.
     /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
-        file_path: String,
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
-        index_store: ObjectStore,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
+        compress: bool,
+        ignore_column_ids: &[ColumnId],
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
@@ -113,33 +106,25 @@ impl SstIndexCreator {
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
+        let mut column_ids = metadata
+            .primary_key_columns()
+            .map(|c| c.column_id)
+            .collect::<HashSet<_>>();
+        for id in ignore_column_ids {
+            column_ids.remove(id);
+        }
+
         Self {
-            file_path,
-            store: InstrumentedStore::new(index_store),
             codec,
             index_creator,
             temp_file_provider,
-
             value_buf: vec![],
-
             stats: Statistics::default(),
             aborted: false,
-
-            ignore_column_ids: HashSet::default(),
             memory_usage,
+            compress,
+            column_ids,
         }
-    }
-
-    /// Sets the write buffer size of the store.
-    pub fn with_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
-        self.store = self.store.with_write_buffer_size(write_buffer_size);
-        self
-    }
-
-    /// Sets the ignore column IDs for index creation.
-    pub fn with_ignore_column_ids(mut self, ignore_column_ids: HashSet<ColumnId>) -> Self {
-        self.ignore_column_ids = ignore_column_ids;
-        self
     }
 
     /// Updates index with a batch of rows.
@@ -155,12 +140,9 @@ impl SstIndexCreator {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
                 if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to clean up index creator, file_path: {}, err: {}",
-                        self.file_path, err
-                    );
+                    panic!("Failed to clean up index creator, err: {err}",);
                 } else {
-                    warn!(err; "Failed to clean up index creator, file_path: {}", self.file_path);
+                    warn!(err; "Failed to clean up index creator");
                 }
             }
             return Err(update_err);
@@ -171,7 +153,10 @@ impl SstIndexCreator {
 
     /// Finishes index creation and cleans up garbage.
     /// Returns the number of rows and bytes written.
-    pub async fn finish(&mut self) -> Result<(RowCount, ByteCount)> {
+    pub async fn finish(
+        &mut self,
+        puffin_writer: &mut SstPuffinWriter,
+    ) -> Result<(RowCount, ByteCount)> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if self.stats.row_count() == 0 {
@@ -179,16 +164,13 @@ impl SstIndexCreator {
             return Ok((0, 0));
         }
 
-        let finish_res = self.do_finish().await;
+        let finish_res = self.do_finish(puffin_writer).await;
         // clean up garbage no matter finish successfully or not
         if let Err(err) = self.do_cleanup().await {
             if cfg!(any(test, feature = "test")) {
-                panic!(
-                    "Failed to clean up index creator, file_path: {}, err: {}",
-                    self.file_path, err
-                );
+                panic!("Failed to clean up index creator, err: {err}",);
             } else {
-                warn!(err; "Failed to clean up index creator, file_path: {}", self.file_path);
+                warn!(err; "Failed to clean up index creator");
             }
         }
 
@@ -211,8 +193,8 @@ impl SstIndexCreator {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (column_id, field, value) in self.codec.decode(batch.primary_key())? {
-            if self.ignore_column_ids.contains(column_id) {
+        for ((col_id, col_id_str), field, value) in self.codec.decode(batch.primary_key())? {
+            if !self.column_ids.contains(col_id) {
                 continue;
             }
 
@@ -228,7 +210,7 @@ impl SstIndexCreator {
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
-                .push_with_name_n(column_id, value, n)
+                .push_with_name_n(col_id_str, value, n)
                 .await
                 .context(PushIndexValueSnafu)?;
         }
@@ -254,32 +236,18 @@ impl SstIndexCreator {
     ///  └─────────────┘ └────────────────►│ File │
     ///                                    └──────┘
     /// ```
-    async fn do_finish(&mut self) -> Result<()> {
+    async fn do_finish(&mut self, puffin_writer: &mut SstPuffinWriter) -> Result<()> {
         let mut guard = self.stats.record_finish();
 
-        let file_writer = self
-            .store
-            .writer(
-                &self.file_path,
-                &INDEX_PUFFIN_WRITE_BYTES_TOTAL,
-                &INDEX_PUFFIN_WRITE_OP_TOTAL,
-                &INDEX_PUFFIN_FLUSH_OP_TOTAL,
-            )
-            .await?;
-        let mut puffin_writer = PuffinFileWriter::new(file_writer);
-
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
-        let blob = Blob {
-            blob_type: INDEX_BLOB_TYPE.to_string(),
-            compressed_data: rx.compat(),
-            properties: HashMap::default(),
-            compression_codec: None,
-        };
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
 
+        let put_options = PutOptions {
+            compression: self.compress.then_some(CompressionCodec::Zstd),
+        };
         let (index_finish, puffin_add_blob) = futures::join!(
             self.index_creator.finish(&mut index_writer),
-            puffin_writer.add_blob(blob)
+            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), put_options)
         );
 
         match (
@@ -294,11 +262,11 @@ impl SstIndexCreator {
 
             (Ok(_), e @ Err(_)) => e?,
             (e @ Err(_), Ok(_)) => e.map(|_| ())?,
-            _ => {}
+            (Ok(written_bytes), Ok(_)) => {
+                guard.inc_byte_count(written_bytes);
+            }
         }
 
-        let byte_count = puffin_writer.finish().await.context(PuffinFinishSnafu)?;
-        guard.inc_byte_count(byte_count);
         Ok(())
     }
 
@@ -306,6 +274,10 @@ impl SstIndexCreator {
         let _guard = self.stats.record_cleanup();
 
         self.temp_file_provider.cleanup().await
+    }
+
+    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
+        self.column_ids.iter().copied()
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -326,12 +298,14 @@ mod tests {
     use datatypes::vectors::{UInt64Vector, UInt8Vector};
     use futures::future::BoxFuture;
     use object_store::services::Memory;
+    use object_store::ObjectStore;
+    use puffin::puffin_manager::PuffinManager;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
-    use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+    use crate::sst::index::inverted_index::applier::builder::SstIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
 
@@ -418,13 +392,13 @@ mod tests {
         let segment_row_count = 2;
 
         let mut creator = SstIndexCreator::new(
-            file_path,
             sst_file_id,
             &region_metadata,
-            object_store.clone(),
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
+            false,
+            &[],
         );
 
         for (str_tag, i32_tag) in &tags {
@@ -432,8 +406,11 @@ mod tests {
             creator.update(&batch).await.unwrap();
         }
 
-        let (row_count, _) = creator.finish().await.unwrap();
+        let puffin_manager = factory.build(object_store.clone());
+        let mut writer = puffin_manager.writer(&file_path).await.unwrap();
+        let (row_count, _) = creator.finish(&mut writer).await.unwrap();
         assert_eq!(row_count, tags.len() * segment_row_count);
+        writer.finish().await.unwrap();
 
         move |expr| {
             let _d = &d;

@@ -35,6 +35,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         "memtable.partition_tree.data_freeze_threshold",
         "memtable.partition_tree.fork_dictionary_bytes",
         "append_mode",
+        "merge_mode",
     ]
     .contains(&key)
 }
