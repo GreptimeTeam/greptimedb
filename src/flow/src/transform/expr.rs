@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{OptionExt, ResultExt};
@@ -127,11 +128,25 @@ pub(crate) fn proto_col(i: usize) -> substrait_proto::proto::FunctionArgument {
     }
 }
 
+fn is_proto_literal(arg: &substrait_proto::proto::FunctionArgument) -> bool {
+    use substrait_proto::proto::expression;
+    matches!(
+        arg.arg_type.as_ref().unwrap(),
+        ArgType::Value(Expression {
+            rex_type: Some(expression::RexType::Literal(_)),
+        })
+    )
+}
+
 /// rewrite ScalarFunction's arguments to Columns 0..n so nested exprs are still handled by us instead of datafusion
+///
+/// specially, if a argument is a literal, the replacement will not happen
 fn rewrite_scalar_function(f: &ScalarFunction) -> ScalarFunction {
     let mut f_rewrite = f.clone();
     for (idx, raw_expr) in f_rewrite.arguments.iter_mut().enumerate() {
-        *raw_expr = proto_col(idx);
+        if !is_proto_literal(raw_expr) {
+            *raw_expr = proto_col(idx)
+        }
     }
     f_rewrite
 }
@@ -144,9 +159,9 @@ impl TypedExpr {
     ) -> Result<TypedExpr, Error> {
         let (arg_exprs, arg_types): (Vec<_>, Vec<_>) =
             arg_exprs_typed.into_iter().map(|e| (e.expr, e.typ)).unzip();
-
+        debug!("Before rewrite: {:?}", f);
         let f_rewrite = rewrite_scalar_function(f);
-
+        debug!("After rewrite: {:?}", f_rewrite);
         let input_schema = RelationType::new(arg_types).into_unnamed();
         let raw_fn =
             RawDfScalarFn::from_proto(&f_rewrite, input_schema.clone(), extensions.clone())?;
