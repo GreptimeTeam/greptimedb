@@ -205,7 +205,19 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
     match param {
         Expr::Value(v) => {
-            let v = sql_value_to_value("", t, v, None);
+            let v = sql_value_to_value("", t, v, None, None);
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
+                }
+                .fail(),
+            }
+        }
+        Expr::UnaryOp { op, expr } if let Expr::Value(v) = &**expr => {
+            let v = sql_value_to_value("", t, v, None, Some(*op));
             match v {
                 Ok(v) => v
                     .try_to_scalar_value(t)

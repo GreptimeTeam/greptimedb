@@ -200,7 +200,7 @@ fn sql_value_to_grpc_value(
             column: column.clone(),
         })?
     } else {
-        statements::sql_value_to_value(column, &column_schema.data_type, sql_val, timezone)
+        statements::sql_value_to_value(column, &column_schema.data_type, sql_val, timezone, None)
             .context(ParseSqlSnafu)?
     };
 

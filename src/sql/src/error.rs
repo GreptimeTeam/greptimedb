@@ -20,6 +20,7 @@ use common_macro::stack_trace_debug;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::DataFusionError;
+use datafusion_sql::sqlparser::ast::UnaryOperator;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::{Location, Snafu};
 use sqlparser::ast::Ident;
@@ -161,6 +162,21 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Invalid unary operator {} for value {}", unary_op, value))]
+    InvalidUnaryOp {
+        unary_op: UnaryOperator,
+        value: Value,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported unary operator {}", unary_op))]
+    UnsupportedUnaryOp {
+        unary_op: UnaryOperator,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unrecognized table option key: {}", key))]
     InvalidTableOption {
         key: String,
@@ -285,7 +301,9 @@ impl ErrorExt for Error {
             | ConvertToLogicalExpression { .. }
             | Simplification { .. }
             | InvalidInterval { .. }
-            | PermissionDenied { .. } => StatusCode::InvalidArguments,
+            | PermissionDenied { .. }
+            | InvalidUnaryOp { .. }
+            | UnsupportedUnaryOp { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
