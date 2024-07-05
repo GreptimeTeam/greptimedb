@@ -21,7 +21,7 @@ use object_store::{FuturesAsyncReader, FuturesAsyncWriter, ObjectStore};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
-use puffin::puffin_manager::stager::{BoundedStager, FsBlobGuard, FsDirGuard};
+use puffin::puffin_manager::stager::{BoundedStager, FsBlobGuard};
 use puffin::puffin_manager::BlobGuard;
 use snafu::ResultExt;
 
@@ -36,12 +36,8 @@ type InstrumentedAsyncRead = store::InstrumentedAsyncRead<'static, FuturesAsyncR
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
 pub(crate) type BlobReader = <Arc<FsBlobGuard> as BlobGuard>::Reader;
-pub(crate) type SstPuffinManager = FsPuffinManager<
-    Arc<FsBlobGuard>,
-    Arc<FsDirGuard>,
-    InstrumentedAsyncRead,
-    InstrumentedAsyncWrite,
->;
+pub(crate) type SstPuffinManager =
+    FsPuffinManager<Arc<BoundedStager>, ObjectStorePuffinFileAccessor>;
 
 const STAGING_DIR: &str = "staging";
 
@@ -75,12 +71,12 @@ impl PuffinManagerFactory {
     pub(crate) fn build(&self, store: ObjectStore) -> SstPuffinManager {
         let store = InstrumentedStore::new(store).with_write_buffer_size(self.write_buffer_size);
         let puffin_file_accessor = ObjectStorePuffinFileAccessor::new(store);
-        SstPuffinManager::new(self.stager.clone(), Arc::new(puffin_file_accessor))
+        SstPuffinManager::new(self.stager.clone(), puffin_file_accessor)
     }
 }
 
+#[cfg(test)]
 impl PuffinManagerFactory {
-    #[cfg(test)]
     pub(crate) async fn new_for_test_async(
         prefix: &str,
     ) -> (common_test_util::temp_dir::TempDir, Self) {
@@ -91,7 +87,6 @@ impl PuffinManagerFactory {
         (tempdir, factory)
     }
 
-    #[cfg(test)]
     pub(crate) fn new_for_test_block(prefix: &str) -> (common_test_util::temp_dir::TempDir, Self) {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
 
@@ -103,6 +98,7 @@ impl PuffinManagerFactory {
 }
 
 /// A `PuffinFileAccessor` implementation that uses an object store as the underlying storage.
+#[derive(Clone)]
 pub(crate) struct ObjectStorePuffinFileAccessor {
     object_store: InstrumentedStore,
 }
@@ -152,9 +148,7 @@ mod tests {
     use futures::AsyncReadExt;
     use object_store::services::Memory;
     use puffin::blob_metadata::CompressionCodec;
-    use puffin::puffin_manager::{
-        BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
-    };
+    use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
     use super::*;
 

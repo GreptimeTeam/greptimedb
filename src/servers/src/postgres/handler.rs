@@ -59,7 +59,6 @@ impl SimpleQueryHandler for PostgresServerHandler {
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
             .start_timer();
         let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
-        query_ctx.update_session(&self.session);
 
         let mut results = Vec::with_capacity(outputs.len());
 
