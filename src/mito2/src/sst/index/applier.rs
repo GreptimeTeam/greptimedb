@@ -16,27 +16,21 @@ pub mod builder;
 
 use std::sync::Arc;
 
-use futures::{AsyncRead, AsyncSeek};
+use common_telemetry::warn;
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use object_store::ObjectStore;
-use puffin::file_format::reader::{AsyncReader, PuffinFileReader};
-use snafu::{OptionExt, ResultExt};
+use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
-use crate::error::{
-    ApplyIndexSnafu, OpenDalSnafu, PuffinBlobTypeNotFoundSnafu, PuffinReadBlobSnafu,
-    PuffinReadMetadataSnafu, Result,
-};
-use crate::metrics::{
-    INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
-    INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_SEEK_OP_TOTAL,
-};
+use crate::error::{ApplyIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
+use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
-use crate::sst::index::store::InstrumentedStore;
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
@@ -50,7 +44,7 @@ pub(crate) struct SstIndexApplier {
     region_id: RegionId,
 
     /// Store responsible for accessing remote index files.
-    store: InstrumentedStore,
+    store: ObjectStore,
 
     /// The cache of index files.
     file_cache: Option<FileCacheRef>,
@@ -58,6 +52,9 @@ pub(crate) struct SstIndexApplier {
     /// Predefined index applier used to apply predicates to index files
     /// and return the relevant row group ids for further scan.
     index_applier: Box<dyn IndexApplier>,
+
+    /// The puffin manager factory.
+    puffin_manager_factory: PuffinManagerFactory,
 }
 
 pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
@@ -67,18 +64,20 @@ impl SstIndexApplier {
     pub fn new(
         region_dir: String,
         region_id: RegionId,
-        object_store: ObjectStore,
+        store: ObjectStore,
         file_cache: Option<FileCacheRef>,
         index_applier: Box<dyn IndexApplier>,
+        puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
         Self {
             region_dir,
             region_id,
-            store: InstrumentedStore::new(object_store),
+            store,
             file_cache,
             index_applier,
+            puffin_manager_factory,
         }
     }
 
@@ -91,94 +90,65 @@ impl SstIndexApplier {
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
 
-        match self.cached_puffin_reader(file_id).await? {
-            Some(mut puffin_reader) => {
-                let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
-                let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
-                self.index_applier
-                    .apply(context, &mut index_reader)
-                    .await
-                    .context(ApplyIndexSnafu)
+        let blob = match self.cached_blob_reader(file_id).await {
+            Ok(Some(puffin_reader)) => puffin_reader,
+            other => {
+                if let Err(err) = other {
+                    warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
+                }
+                self.remote_blob_reader(file_id).await?
             }
-            None => {
-                let mut puffin_reader = self.remote_puffin_reader(file_id).await?;
-                let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
-                let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
-                self.index_applier
-                    .apply(context, &mut index_reader)
-                    .await
-                    .context(ApplyIndexSnafu)
-            }
-        }
+        };
+        let mut blob_reader = InvertedIndexBlobReader::new(blob);
+        let output = self
+            .index_applier
+            .apply(context, &mut blob_reader)
+            .await
+            .context(ApplyIndexSnafu)?;
+        Ok(output)
     }
 
-    /// Helper function to create a [`PuffinFileReader`] from the cached index file.
-    async fn cached_puffin_reader(
-        &self,
-        file_id: FileId,
-    ) -> Result<Option<PuffinFileReader<impl AsyncRead + AsyncSeek>>> {
+    /// Creates a blob reader from the cached index file.
+    async fn cached_blob_reader(&self, file_id: FileId) -> Result<Option<BlobReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
 
-        let Some(indexed_value) = file_cache
-            .get(IndexKey::new(self.region_id, file_id, FileType::Puffin))
-            .await
-        else {
+        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+        if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
 
-        let Some(reader) = file_cache
-            .reader(IndexKey::new(self.region_id, file_id, FileType::Puffin))
-            .await
-        else {
-            return Ok(None);
-        };
+        let puffin_manager = self.puffin_manager_factory.build(file_cache.local_store());
+        let puffin_file_name = file_cache.cache_file_path(index_key);
 
-        let reader = reader
-            .into_futures_async_read(0..indexed_value.file_size as u64)
+        let reader = puffin_manager
+            .reader(&puffin_file_name)
             .await
-            .context(OpenDalSnafu)?;
-
-        Ok(Some(PuffinFileReader::new(reader)))
+            .context(PuffinBuildReaderSnafu)?
+            .blob(INDEX_BLOB_TYPE)
+            .await
+            .context(PuffinReadBlobSnafu)?
+            .reader()
+            .await
+            .context(PuffinBuildReaderSnafu)?;
+        Ok(Some(reader))
     }
 
-    /// Helper function to create a [`PuffinFileReader`] from the remote index file.
-    async fn remote_puffin_reader(
-        &self,
-        file_id: FileId,
-    ) -> Result<PuffinFileReader<impl AsyncRead + AsyncSeek>> {
+    /// Creates a blob reader from the remote index file.
+    async fn remote_blob_reader(&self, file_id: FileId) -> Result<BlobReader> {
+        let puffin_manager = self.puffin_manager_factory.build(self.store.clone());
         let file_path = location::index_file_path(&self.region_dir, file_id);
-        let file_reader = self
-            .store
-            .reader(
-                &file_path,
-                &INDEX_PUFFIN_READ_BYTES_TOTAL,
-                &INDEX_PUFFIN_READ_OP_TOTAL,
-                &INDEX_PUFFIN_SEEK_OP_TOTAL,
-            )
-            .await?;
-        Ok(PuffinFileReader::new(file_reader))
-    }
-
-    /// Helper function to create a [`PuffinBlobReader`] for the index blob of the provided index file reader.
-    async fn index_blob_reader(
-        puffin_reader: &mut PuffinFileReader<impl AsyncRead + AsyncSeek + Unpin + Send>,
-    ) -> Result<impl AsyncRead + AsyncSeek + '_> {
-        let file_meta = puffin_reader
-            .metadata()
+        puffin_manager
+            .reader(&file_path)
             .await
-            .context(PuffinReadMetadataSnafu)?;
-        let blob_meta = file_meta
-            .blobs
-            .iter()
-            .find(|blob| blob.blob_type == INDEX_BLOB_TYPE)
-            .context(PuffinBlobTypeNotFoundSnafu {
-                blob_type: INDEX_BLOB_TYPE,
-            })?;
-        puffin_reader
-            .blob_reader(blob_meta)
-            .context(PuffinReadBlobSnafu)
+            .context(PuffinBuildReaderSnafu)?
+            .blob(INDEX_BLOB_TYPE)
+            .await
+            .context(PuffinReadBlobSnafu)?
+            .reader()
+            .await
+            .context(PuffinBuildReaderSnafu)
     }
 }
 
@@ -194,35 +164,26 @@ mod tests {
     use futures::io::Cursor;
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
-    use puffin::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter};
+    use puffin::puffin_manager::PuffinWriter;
 
     use super::*;
-    use crate::error::Error;
 
     #[tokio::test]
     async fn test_index_applier_apply_basic() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_index_applier_apply_basic_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
         let path = location::index_file_path(&region_dir, file_id);
 
-        let mut puffin_writer = PuffinFileWriter::new(
-            object_store
-                .writer(&path)
-                .await
-                .unwrap()
-                .into_futures_async_write(),
-        );
-        puffin_writer
-            .add_blob(Blob {
-                blob_type: INDEX_BLOB_TYPE.to_string(),
-                compressed_data: Cursor::new(vec![]),
-                properties: Default::default(),
-                compression_codec: None,
-            })
+        let puffin_manager = puffin_manager_factory.build(object_store.clone());
+        let mut writer = puffin_manager.writer(&path).await.unwrap();
+        writer
+            .put_blob(INDEX_BLOB_TYPE, Cursor::new(vec![]), Default::default())
             .await
             .unwrap();
-        puffin_writer.finish().await.unwrap();
+        writer.finish().await.unwrap();
 
         let mut mock_index_applier = MockIndexApplier::new();
         mock_index_applier.expect_memory_usage().returning(|| 100);
@@ -240,6 +201,7 @@ mod tests {
             object_store,
             None,
             Box::new(mock_index_applier),
+            puffin_manager_factory,
         );
         let output = sst_index_applier.apply(file_id).await.unwrap();
         assert_eq!(
@@ -254,28 +216,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_applier_apply_invalid_blob_type() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_index_applier_apply_invalid_blob_type_")
+                .await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
         let path = location::index_file_path(&region_dir, file_id);
 
-        let mut puffin_writer = PuffinFileWriter::new(
-            object_store
-                .writer(&path)
-                .await
-                .unwrap()
-                .into_futures_async_write(),
-        );
-        puffin_writer
-            .add_blob(Blob {
-                blob_type: "invalid_blob_type".to_string(),
-                compressed_data: Cursor::new(vec![]),
-                properties: Default::default(),
-                compression_codec: None,
-            })
+        let puffin_manager = puffin_manager_factory.build(object_store.clone());
+        let mut writer = puffin_manager.writer(&path).await.unwrap();
+        writer
+            .put_blob("invalid_blob_type", Cursor::new(vec![]), Default::default())
             .await
             .unwrap();
-        puffin_writer.finish().await.unwrap();
+        writer.finish().await.unwrap();
 
         let mut mock_index_applier = MockIndexApplier::new();
         mock_index_applier.expect_memory_usage().returning(|| 100);
@@ -287,8 +242,9 @@ mod tests {
             object_store,
             None,
             Box::new(mock_index_applier),
+            puffin_manager_factory,
         );
         let res = sst_index_applier.apply(file_id).await;
-        assert!(matches!(res, Err(Error::PuffinBlobTypeNotFound { .. })));
+        assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));
     }
 }

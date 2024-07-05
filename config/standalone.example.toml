@@ -417,6 +417,21 @@ parallel_scan_channel_size = 32
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
+## The options for index in Mito engine.
+[region_engine.mito.index]
+
+## Auxiliary directory path for the index in filesystem, used to store intermediate files for
+## creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.
+## The default name for this directory is `index_intermediate` for backward compatibility.
+##
+## This path contains two subdirectories:
+## - `__intm`: for storing intermediate files used during creating index.
+## - `staging`: for storing staging files used during searching index.
+aux_path = ""
+
+## The max capacity of the staging directory.
+staging_size = "2GB"
+
 ## The options for inverted index in Mito engine.
 [region_engine.mito.inverted_index]
 
@@ -439,7 +454,7 @@ apply_on_query = "auto"
 ## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
 mem_threshold_on_create = "64M"
 
-## File system path to store intermediate files for external sorting (default `{data_home}/index_intermediate`).
+## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
 
 [region_engine.mito.memtable]

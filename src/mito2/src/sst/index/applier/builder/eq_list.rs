@@ -128,9 +128,11 @@ mod tests {
         encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
         tag_column2, test_object_store, test_region_metadata,
     };
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[test]
     fn test_collect_eq_basic() {
+        let (_d, facotry) = PuffinManagerFactory::new_for_test_block("test_collect_eq_basic_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -138,6 +140,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         builder
@@ -165,6 +168,8 @@ mod tests {
 
     #[test]
     fn test_collect_eq_field_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_eq_field_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -172,6 +177,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         builder
@@ -182,6 +188,8 @@ mod tests {
 
     #[test]
     fn test_collect_eq_nonexistent_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_eq_nonexistent_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -189,6 +197,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let res = builder.collect_eq(&nonexistent_column(), &string_lit("abc"));
@@ -198,6 +207,8 @@ mod tests {
 
     #[test]
     fn test_collect_eq_type_mismatch() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_eq_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -205,6 +216,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let res = builder.collect_eq(&tag_column(), &int64_lit(1));
@@ -214,6 +226,8 @@ mod tests {
 
     #[test]
     fn test_collect_or_eq_list_basic() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_or_eq_list_basic_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -221,6 +235,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
@@ -269,6 +284,8 @@ mod tests {
 
     #[test]
     fn test_collect_or_eq_list_invalid_op() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_or_eq_list_invalid_op_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -276,6 +293,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
@@ -303,6 +321,8 @@ mod tests {
 
     #[test]
     fn test_collect_or_eq_list_multiple_columns() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_or_eq_list_multiple_columns_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -310,6 +330,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {

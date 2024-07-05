@@ -62,7 +62,7 @@ pub async fn inner_auth<B>(
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
     // TODO(ruihang): move this out of auth module
-    let timezone = Arc::new(extract_timezone(&req));
+    let timezone = extract_timezone(&req);
     let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.clone())
         .current_schema(schema.clone())
@@ -75,7 +75,7 @@ pub async fn inner_auth<B>(
     let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
         user_provider
     } else {
-        query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+        query_ctx.set_current_user(auth::userinfo_by_name(None));
         let _ = req.extensions_mut().insert(query_ctx);
         return Ok(req);
     };
@@ -103,7 +103,7 @@ pub async fn inner_auth<B>(
         .await
     {
         Ok(userinfo) => {
-            query_ctx.set_current_user(Some(userinfo));
+            query_ctx.set_current_user(userinfo);
             let _ = req.extensions_mut().insert(query_ctx);
             Ok(req)
         }

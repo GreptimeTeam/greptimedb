@@ -343,6 +343,7 @@ impl ScanRegion {
                 .iter()
                 .copied()
                 .collect(),
+            self.access_layer.puffin_manager_factory().clone(),
         )
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build index applier"))

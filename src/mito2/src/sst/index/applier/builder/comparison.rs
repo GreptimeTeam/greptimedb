@@ -138,6 +138,7 @@ mod tests {
         encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
         test_object_store, test_region_metadata,
     };
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[test]
     fn test_collect_comparison_basic() {
@@ -224,6 +225,8 @@ mod tests {
             ),
         ];
 
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_comparison_basic_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -231,6 +234,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         for ((left, op, right), _) in &cases {
@@ -249,6 +253,8 @@ mod tests {
 
     #[test]
     fn test_collect_comparison_type_mismatch() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_comparison_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -256,6 +262,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let res = builder.collect_comparison_expr(&tag_column(), &Operator::Lt, &int64_lit(10));
@@ -265,6 +272,8 @@ mod tests {
 
     #[test]
     fn test_collect_comparison_field_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_comparison_field_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -272,6 +281,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         builder
@@ -282,6 +292,8 @@ mod tests {
 
     #[test]
     fn test_collect_comparison_nonexistent_column() {
+        let (_d, facotry) =
+            PuffinManagerFactory::new_for_test_block("test_collect_comparison_nonexistent_column_");
         let metadata = test_region_metadata();
         let mut builder = SstIndexApplierBuilder::new(
             "test".to_string(),
@@ -289,6 +301,7 @@ mod tests {
             None,
             &metadata,
             HashSet::default(),
+            facotry,
         );
 
         let res = builder.collect_comparison_expr(

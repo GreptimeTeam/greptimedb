@@ -257,11 +257,8 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
                     .map_err(|e| DataFusionError::Plan(e.to_string()))?;
                 let by = parse_expr_list(&func.args, 4, byc)?;
                 let align = parse_duration_expr(&func.args, byc + 4)?;
-                let align_to = parse_align_to(
-                    &func.args,
-                    byc + 5,
-                    Some(self.query_ctx.timezone().as_ref()),
-                )?;
+                let align_to =
+                    parse_align_to(&func.args, byc + 5, Some(&self.query_ctx.timezone()))?;
                 let mut data_type = range_expr.get_type(self.input_plan.schema())?;
                 let mut need_cast = false;
                 let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;

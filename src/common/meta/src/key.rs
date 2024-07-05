@@ -112,6 +112,7 @@ use common_catalog::consts::{
 use common_telemetry::warn;
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use flow::flow_route::FlowRouteValue;
+use flow::table_flow::TableFlowValue;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::DeserializeOwned;
@@ -1193,7 +1194,8 @@ impl_table_meta_value! {
     DatanodeTableValue,
     FlowInfoValue,
     FlowNameValue,
-    FlowRouteValue
+    FlowRouteValue,
+    TableFlowValue
 }
 
 impl_optional_meta_value! {
