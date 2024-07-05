@@ -182,7 +182,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<Arc<dyn Processor>, String> 
 
 pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String, String> {
     v.as_str()
-        .map(|s| s.trim().to_string())
+        .map(|s| s.to_string())
         .ok_or(format!("'{field}' must be a string"))
 }
 
