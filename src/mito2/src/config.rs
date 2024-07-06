@@ -15,6 +15,7 @@
 //! Configurations.
 
 use std::cmp;
+use std::path::Path;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
@@ -104,6 +105,8 @@ pub struct MitoConfig {
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
 
+    /// Index configs.
+    pub index: IndexConfig,
     /// Inverted index configs.
     pub inverted_index: InvertedIndexConfig,
 
@@ -134,6 +137,7 @@ impl Default for MitoConfig {
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
+            index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             memtable: MemtableConfig::default(),
         };
@@ -202,7 +206,7 @@ impl MitoConfig {
             self.experimental_write_cache_path = join_dir(data_home, "write_cache");
         }
 
-        self.inverted_index.sanitize(data_home)?;
+        self.index.sanitize(data_home, &self.inverted_index)?;
 
         Ok(())
     }
@@ -246,6 +250,70 @@ impl MitoConfig {
     }
 }
 
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct IndexConfig {
+    /// Auxiliary directory path for the index in filesystem, used to
+    /// store intermediate files for creating the index and staging files
+    /// for searching the index, defaults to `{data_home}/index_intermediate`.
+    ///
+    /// This path contains two subdirectories:
+    /// - `__intm`: for storing intermediate files used during creating index.
+    /// - `staging`: for storing staging files used during searching index.
+    ///
+    /// The default name for this directory is `index_intermediate` for backward compatibility.
+    pub aux_path: String,
+
+    /// The max capacity of the staging directory.
+    pub staging_size: ReadableSize,
+
+    /// Write buffer size for creating the index.
+    pub write_buffer_size: ReadableSize,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            aux_path: String::new(),
+            staging_size: ReadableSize::gb(2),
+            write_buffer_size: ReadableSize::mb(8),
+        }
+    }
+}
+
+impl IndexConfig {
+    pub fn sanitize(
+        &mut self,
+        data_home: &str,
+        inverted_index: &InvertedIndexConfig,
+    ) -> Result<()> {
+        #[allow(deprecated)]
+        if self.aux_path.is_empty() && !inverted_index.intermediate_path.is_empty() {
+            self.aux_path.clone_from(&inverted_index.intermediate_path);
+            warn!(
+                "`inverted_index.intermediate_path` is deprecated, use
+                 `index.aux_path` instead. Set `index.aux_path` to {}",
+                &inverted_index.intermediate_path
+            )
+        }
+        if self.aux_path.is_empty() {
+            let path = Path::new(data_home).join("index_intermediate");
+            self.aux_path = path.as_os_str().to_string_lossy().to_string();
+        }
+
+        if self.write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
+            self.write_buffer_size = MULTIPART_UPLOAD_MINIMUM_SIZE;
+            warn!(
+                "Sanitize index write buffer size to {}",
+                self.write_buffer_size
+            );
+        }
+
+        Ok(())
+    }
+}
+
 /// Operational mode for certain actions.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -280,44 +348,37 @@ pub struct InvertedIndexConfig {
     pub create_on_compaction: Mode,
     /// Whether to apply the index on query: automatically or never.
     pub apply_on_query: Mode,
-    /// Write buffer size for creating the index.
-    pub write_buffer_size: ReadableSize,
+
     /// Memory threshold for performing an external sort during index creation.
     /// `None` means all sorting will happen in memory.
     #[serde_as(as = "NoneAsEmptyString")]
     pub mem_threshold_on_create: Option<ReadableSize>,
-    /// File system path to store intermediate files for external sort, defaults to `{data_home}/index_intermediate`.
+
+    /// Whether to compress the index data.
+    pub compress: bool,
+
+    #[deprecated = "use [IndexConfig::aux_path] instead"]
+    #[serde(skip_serializing)]
     pub intermediate_path: String,
+
+    #[deprecated = "use [IndexConfig::write_buffer_size] instead"]
+    #[serde(skip_serializing)]
+    pub write_buffer_size: ReadableSize,
 }
 
 impl Default for InvertedIndexConfig {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             create_on_flush: Mode::Auto,
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
-            write_buffer_size: ReadableSize::mb(8),
+            compress: true,
             mem_threshold_on_create: Some(ReadableSize::mb(64)),
+
+            write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
         }
-    }
-}
-
-impl InvertedIndexConfig {
-    pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
-        if self.intermediate_path.is_empty() {
-            self.intermediate_path = join_dir(data_home, "index_intermediate");
-        }
-
-        if self.write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
-            self.write_buffer_size = MULTIPART_UPLOAD_MINIMUM_SIZE;
-            warn!(
-                "Sanitize index write buffer size to {}",
-                self.write_buffer_size
-            );
-        }
-
-        Ok(())
     }
 }
 

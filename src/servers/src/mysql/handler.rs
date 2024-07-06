@@ -103,9 +103,7 @@ impl MysqlInstanceShim {
         {
             vec![Ok(output)]
         } else {
-            let output = self.query_handler.do_query(query, query_ctx.clone()).await;
-            query_ctx.update_session(&self.session);
-            output
+            self.query_handler.do_query(query, query_ctx.clone()).await
         }
     }
 
@@ -525,7 +523,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let catalog = if let Some(catalog) = &catalog_from_db {
             catalog.to_string()
         } else {
-            self.session.get_catalog()
+            self.session.catalog()
         };
 
         if !self

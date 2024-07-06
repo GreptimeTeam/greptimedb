@@ -117,6 +117,7 @@ impl FileCache {
     }
 
     /// Reads a file from the cache.
+    #[allow(unused)]
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
         // We must use `get()` to update the estimator of the cache.
         // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key

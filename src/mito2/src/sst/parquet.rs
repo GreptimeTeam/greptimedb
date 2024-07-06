@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
 use crate::sst::file::FileTimeRange;
+use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub(crate) mod file_range;
@@ -71,10 +72,8 @@ pub struct SstInfo {
     pub num_row_groups: u64,
     /// File Meta Data
     pub file_metadata: Option<Arc<ParquetMetaData>>,
-    /// Whether inverted index is available.
-    pub inverted_index_available: bool,
-    /// Index file size in bytes.
-    pub index_file_size: u64,
+    /// Index Meta Data
+    pub index_metadata: IndexOutput,
 }
 
 #[cfg(test)]

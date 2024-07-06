@@ -40,6 +40,7 @@ lazy_static = { workspace = true }
 libfuzzer-sys = "0.4"
 nix = { version = "0.28", features = ["process", "signal"], optional = true }
 partition = { workspace = true }
+paste.workspace = true
 rand = { workspace = true }
 rand_chacha = "0.3.1"
 reqwest = { workspace = true }
@@ -124,6 +125,20 @@ required-features = ["unstable"]
 [[bin]]
 name = "fuzz_failover_mito_regions"
 path = "targets/failover/fuzz_failover_mito_regions.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_failover_metric_regions"
+path = "targets/failover/fuzz_failover_metric_regions.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_migrate_mito_regions"
+path = "targets/migration/fuzz_migrate_mito_regions.rs"
 test = false
 bench = false
 doc = false

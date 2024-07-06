@@ -334,15 +334,15 @@ impl Inserter {
                 // already know this is not source table
                 Some(None) => continue,
                 _ => {
-                    // TODO(discord9): determine where to store the flow node address in distributed mode
+                    // TODO(discord9): query metasrv for actual peer address
                     let peers = self
                         .table_flownode_set_cache
                         .get(table_id)
                         .await
                         .context(RequestInsertsSnafu)?
                         .unwrap_or_default()
-                        .into_iter()
-                        .map(|id| Peer::new(id, ""))
+                        .values()
+                        .cloned()
                         .collect::<Vec<_>>();
 
                     if !peers.is_empty() {
@@ -443,7 +443,7 @@ impl Inserter {
         for req in &requests.inserts {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
-            let table = self.get_table(catalog, schema, &req.table_name).await?;
+            let table = self.get_table(catalog, &schema, &req.table_name).await?;
             match table {
                 Some(table) => {
                     let table_info = table.table_info();
@@ -525,14 +525,14 @@ impl Inserter {
 
         // check if exist
         if self
-            .get_table(catalog_name, schema_name, &physical_table)
+            .get_table(catalog_name, &schema_name, &physical_table)
             .await?
             .is_some()
         {
             return Ok(());
         }
 
-        let table_reference = TableReference::full(catalog_name, schema_name, &physical_table);
+        let table_reference = TableReference::full(catalog_name, &schema_name, &physical_table);
         info!("Physical metric table `{table_reference}` does not exist, try creating table");
 
         // schema with timestamp and field column
@@ -621,8 +621,8 @@ impl Inserter {
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<TableRef> {
-        let table_ref =
-            TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
+        let schema = ctx.current_schema();
+        let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
 
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
@@ -652,8 +652,8 @@ impl Inserter {
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<TableRef> {
-        let table_ref =
-            TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
+        let schema = ctx.current_schema();
+        let table_ref = TableReference::full(ctx.current_catalog(), &schema, &req.table_name);
         // SAFETY: `req.rows` is guaranteed to be `Some` by `handle_log_inserts`.
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
@@ -692,7 +692,7 @@ impl Inserter {
         let create_table_exprs = create_tables
             .iter()
             .map(|req| {
-                let table_ref = TableReference::full(catalog_name, schema_name, &req.table_name);
+                let table_ref = TableReference::full(catalog_name, &schema_name, &req.table_name);
                 let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
                 let mut create_table_expr = build_create_table_expr(&table_ref, request_schema)?;
 
@@ -707,7 +707,7 @@ impl Inserter {
             .collect::<Result<Vec<_>>>()?;
 
         let res = statement_executor
-            .create_logical_tables(catalog_name, schema_name, &create_table_exprs, ctx.clone())
+            .create_logical_tables(catalog_name, &schema_name, &create_table_exprs, ctx.clone())
             .await;
 
         match res {

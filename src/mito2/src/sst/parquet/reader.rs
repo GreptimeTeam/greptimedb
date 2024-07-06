@@ -52,7 +52,7 @@ use crate::metrics::{
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
-use crate::sst::index::applier::SstIndexApplierRef;
+use crate::sst::index::inverted_index::applier::SstIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -729,10 +729,8 @@ impl BatchReader for ParquetReader {
             return Ok(None);
         };
 
-        let start = Instant::now();
         // We don't collect the elapsed time if the reader returns an error.
         if let Some(batch) = reader.next_batch().await? {
-            reader.metrics.scan_cost += start.elapsed();
             return Ok(Some(batch));
         }
 
@@ -746,13 +744,11 @@ impl BatchReader for ParquetReader {
             // Resets the parquet reader.
             reader.reset_reader(parquet_reader);
             if let Some(batch) = reader.next_batch().await? {
-                reader.metrics.scan_cost += start.elapsed();
                 return Ok(Some(batch));
             }
         }
 
         // The reader is exhausted.
-        reader.metrics.scan_cost += start.elapsed();
         self.reader_state = ReaderState::Exhausted(std::mem::take(&mut reader.metrics));
         Ok(None)
     }
@@ -874,14 +870,17 @@ impl RowGroupReader {
 
     /// Tries to fetch next [Batch] from the reader.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
+            self.metrics.scan_cost += scan_start.elapsed();
             return Ok(Some(batch));
         }
 
         // We need to fetch next record batch and convert it to batches.
         while self.batches.is_empty() {
             let Some(record_batch) = self.fetch_next_record_batch()? else {
+                self.metrics.scan_cost += scan_start.elapsed();
                 return Ok(None);
             };
             self.metrics.num_record_batches += 1;
@@ -894,6 +893,7 @@ impl RowGroupReader {
         }
         let batch = self.batches.pop_front();
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+        self.metrics.scan_cost += scan_start.elapsed();
         Ok(batch)
     }
 

@@ -311,7 +311,7 @@ pub async fn show_columns(
     let schema_name = if let Some(database) = stmt.database {
         database
     } else {
-        query_ctx.current_schema().to_owned()
+        query_ctx.current_schema()
     };
 
     let projects = if stmt.full {
@@ -372,7 +372,7 @@ pub async fn show_index(
     let schema_name = if let Some(database) = stmt.database {
         database
     } else {
-        query_ctx.current_schema().to_owned()
+        query_ctx.current_schema()
     };
 
     let select = vec![
@@ -454,7 +454,7 @@ pub async fn show_tables(
     let schema_name = if let Some(database) = stmt.database {
         database
     } else {
-        query_ctx.current_schema().to_owned()
+        query_ctx.current_schema()
     };
 
     // (dennis): MySQL rename `table_name` to `Tables_in_{schema}`, but we use `Tables` instead.
@@ -1021,7 +1021,7 @@ mod test {
         };
         let ctx = Arc::new(
             QueryContextBuilder::default()
-                .timezone(Arc::new(Timezone::from_tz_string(tz).unwrap()))
+                .timezone(Timezone::from_tz_string(tz).unwrap())
                 .build(),
         );
         match show_variable(stmt, ctx) {

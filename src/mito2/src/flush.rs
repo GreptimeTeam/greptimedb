@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
-use crate::access_layer::{AccessLayerRef, SstWriteRequest};
+use crate::access_layer::{AccessLayerRef, OperationType, SstWriteRequest};
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -321,30 +321,17 @@ impl RegionFlushTask {
             let file_id = FileId::random();
             let iter = mem.iter(None, None)?;
             let source = Source::Iter(iter);
-            let create_inverted_index = self.engine_config.inverted_index.create_on_flush.auto();
-            let mem_threshold_index_create = self
-                .engine_config
-                .inverted_index
-                .mem_threshold_on_create
-                .map(|m| m.as_bytes() as _);
-            let index_write_buffer_size = Some(
-                self.engine_config
-                    .inverted_index
-                    .write_buffer_size
-                    .as_bytes() as usize,
-            );
 
             // Flush to level 0.
             let write_request = SstWriteRequest {
+                op_type: OperationType::Flush,
                 file_id,
                 metadata: version.metadata.clone(),
                 source,
                 cache_manager: self.cache_manager.clone(),
                 storage: version.options.storage.clone(),
-                create_inverted_index,
-                mem_threshold_index_create,
-                index_write_buffer_size,
                 index_options: self.index_options.clone(),
+                inverted_index_config: self.engine_config.inverted_index.clone(),
             };
             let Some(sst_info) = self
                 .access_layer
@@ -362,11 +349,14 @@ impl RegionFlushTask {
                 time_range: sst_info.time_range,
                 level: 0,
                 file_size: sst_info.file_size,
-                available_indexes: sst_info
-                    .inverted_index_available
-                    .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
-                    .unwrap_or_default(),
-                index_file_size: sst_info.index_file_size,
+                available_indexes: {
+                    let mut indexes = SmallVec::new();
+                    if sst_info.index_metadata.inverted_index.is_available() {
+                        indexes.push(IndexType::InvertedIndex);
+                    }
+                    indexes
+                },
+                index_file_size: sst_info.index_metadata.file_size,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
             };

@@ -16,8 +16,10 @@ pub mod cluster_info;
 pub mod config;
 pub mod crd;
 pub mod health;
+pub mod migration;
 pub mod partition;
 pub mod pod_failure;
+pub mod procedure;
 #[cfg(feature = "unstable")]
 pub mod process;
 pub mod wait;
@@ -26,6 +28,7 @@ use std::env;
 
 use common_telemetry::info;
 use common_telemetry::tracing::log::LevelFilter;
+use paste::paste;
 use snafu::ResultExt;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::{ConnectOptions, MySql, Pool};
@@ -124,9 +127,28 @@ pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
 pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
 pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
 
+macro_rules! make_get_from_env_helper {
+    ($key:expr, $default: expr) => {
+        paste! {
+            #[doc = "Retrieves `" $key "` environment variable \
+                     or returns a default value (`" $default "`) if the environment variable is not set.
+            "]
+            pub fn [<get_ $key:lower>]() -> usize {
+                get_from_env_or_default_value($key, $default)
+            }
+        }
+    };
+}
+
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ALTER_ACTIONS, 256);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 8);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_TABLES, 64);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_COLUMNS, 32);
+
 /// Retrieves a value from the environment variables
 /// or returns a default value if the environment variable is not set.
-pub fn get_from_env_or_default_value(key: &str, default_value: usize) -> usize {
+fn get_from_env_or_default_value(key: &str, default_value: usize) -> usize {
     let _ = dotenv::dotenv();
     if let Ok(value) = env::var(key) {
         value.parse().unwrap()

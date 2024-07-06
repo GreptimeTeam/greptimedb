@@ -551,8 +551,9 @@ pub fn to_create_flow_task_expr(
         .to_string();
     let schema = sink_table_ref
         .schema()
-        .unwrap_or(query_ctx.current_schema())
-        .to_string();
+        .map(|s| s.to_owned())
+        .unwrap_or(query_ctx.current_schema());
+
     let sink_table_name = TableName {
         catalog_name: catalog,
         schema_name: schema,
@@ -571,8 +572,9 @@ pub fn to_create_flow_task_expr(
                 .to_string();
             let schema = reference
                 .schema()
-                .unwrap_or(query_ctx.current_schema())
-                .to_string();
+                .map(|s| s.to_string())
+                .unwrap_or(query_ctx.current_schema());
+
             let table_name = TableName {
                 catalog_name: catalog,
                 schema_name: schema,
@@ -678,7 +680,7 @@ mod tests {
 
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
-            .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
+            .timezone(Timezone::from_tz_string("+08:00").unwrap())
             .build()
             .into();
         let expr = create_to_expr(&create_table, &ctx).unwrap();
@@ -733,7 +735,7 @@ mod tests {
         //
         // query context with timezone `+08:00`
         let ctx = QueryContextBuilder::default()
-            .timezone(Timezone::from_tz_string("+08:00").unwrap().into())
+            .timezone(Timezone::from_tz_string("+08:00").unwrap())
             .build()
             .into();
         let expr = to_alter_expr(alter_table, &ctx).unwrap();

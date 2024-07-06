@@ -19,12 +19,8 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
-use pipeline::table::{PipelineInfo, PipelineVersion};
-use pipeline::{GreptimeTransformer, Pipeline};
-use servers::error::{
-    AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
-    UnsupportedDeletePipelineSnafu,
-};
+use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
+use servers::error::{AuthSnafu, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult};
 use servers::query_handler::LogHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -72,9 +68,16 @@ impl LogHandler for Instance {
             .context(PipelineSnafu)
     }
 
-    async fn delete_pipeline(&self, _name: &str, _query_ctx: QueryContextRef) -> ServerResult<()> {
-        // TODO(qtang): impl delete
-        Err(UnsupportedDeletePipelineSnafu {}.build())
+    async fn delete_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Option<()>> {
+        self.pipeline_operator
+            .delete_pipeline(name, version, ctx)
+            .await
+            .context(PipelineSnafu)
     }
 }
 

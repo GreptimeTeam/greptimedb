@@ -48,6 +48,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -63,6 +64,7 @@ pub(crate) struct RegionOpener {
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
+    puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
     time_provider: Option<TimeProviderRef>,
     stats: ManifestStats,
@@ -77,6 +79,7 @@ impl RegionOpener {
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         purge_scheduler: SchedulerRef,
+        puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> RegionOpener {
         RegionOpener {
@@ -89,6 +92,7 @@ impl RegionOpener {
             options: None,
             cache_manager: None,
             skip_wal_replay: false,
+            puffin_manager_factory,
             intermediate_manager,
             time_provider: None,
             stats: Default::default(),
@@ -216,6 +220,7 @@ impl RegionOpener {
         let access_layer = Arc::new(AccessLayer::new(
             self.region_dir,
             object_store,
+            self.puffin_manager_factory,
             self.intermediate_manager,
         ));
         let time_provider = self
@@ -317,6 +322,7 @@ impl RegionOpener {
         let access_layer = Arc::new(AccessLayer::new(
             self.region_dir.clone(),
             object_store,
+            self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
         ));
         let file_purger = Arc::new(LocalFilePurger::new(
