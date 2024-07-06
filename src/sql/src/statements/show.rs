@@ -38,7 +38,7 @@ impl Display for ShowKind {
 }
 
 macro_rules! format_kind {
-    ($self: expr,$f: expr) => {
+    ($self: expr, $f: expr) => {
         if $self.kind != ShowKind::All {
             write!($f, " {}", &$self.kind)?;
         }

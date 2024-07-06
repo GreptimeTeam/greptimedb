@@ -359,7 +359,7 @@ impl<'a> ParserContext<'a> {
                 }));
             }
 
-            // SHOW TABLES [in | FROM] [DATABASE]
+            // SHOW TABLE STATUS [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => self.parse_db_name()?,
 
