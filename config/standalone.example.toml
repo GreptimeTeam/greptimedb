@@ -451,8 +451,10 @@ create_on_compaction = "auto"
 apply_on_query = "auto"
 
 ## Memory threshold for performing an external sort during index creation.
-## Setting to empty will disable external sorting, forcing all sorting operations to happen in memory.
-mem_threshold_on_create = "64M"
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]`: e.g. `64MB`, fixed memory threshold
+mem_threshold_on_create = "auto"
 
 ## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
@@ -476,7 +478,10 @@ create_on_compaction = "auto"
 apply_on_query = "auto"
 
 ## Memory threshold for index creation.
-mem_threshold_on_create = "64M"
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
 
 [region_engine.mito.memtable]
 ## Memtable type.

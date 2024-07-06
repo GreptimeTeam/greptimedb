@@ -214,16 +214,11 @@ impl<'a> IndexerBuilder<'a> {
             segment_row_count = row_group_size;
         }
 
-        let mem_threshold = self
-            .inverted_index_config
-            .mem_threshold_on_create
-            .map(|t| t.as_bytes() as usize);
-
         let indexer = InvertedIndexer::new(
             self.file_id,
             self.metadata,
             self.intermediate_manager.clone(),
-            mem_threshold,
+            self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
             self.inverted_index_config.compress,
             &self.index_options.inverted_index.ignore_column_ids,
@@ -246,10 +241,7 @@ impl<'a> IndexerBuilder<'a> {
             return None;
         }
 
-        let mem_limit = self
-            .fulltext_index_config
-            .mem_threshold_on_create
-            .as_bytes() as usize;
+        let mem_limit = self.fulltext_index_config.mem_threshold_on_create();
         let creator = FulltextIndexer::new(
             &self.metadata.region_id,
             &self.file_id,
