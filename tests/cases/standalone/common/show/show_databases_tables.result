@@ -58,6 +58,114 @@ SHOW TABLES;
 | triggers                              |
 +---------------------------------------+
 
+SHOW TABLES LIKE 'tables';
+
++--------+
+| Tables |
++--------+
+| tables |
++--------+
+
+SHOW FULL TABLES;
+
++---------------------------------------+-----------------+
+| Tables                                | Table_type      |
++---------------------------------------+-----------------+
+| build_info                            | LOCAL TEMPORARY |
+| character_sets                        | LOCAL TEMPORARY |
+| check_constraints                     | LOCAL TEMPORARY |
+| cluster_info                          | LOCAL TEMPORARY |
+| collation_character_set_applicability | LOCAL TEMPORARY |
+| collations                            | LOCAL TEMPORARY |
+| column_privileges                     | LOCAL TEMPORARY |
+| column_statistics                     | LOCAL TEMPORARY |
+| columns                               | LOCAL TEMPORARY |
+| engines                               | LOCAL TEMPORARY |
+| events                                | LOCAL TEMPORARY |
+| files                                 | LOCAL TEMPORARY |
+| global_status                         | LOCAL TEMPORARY |
+| key_column_usage                      | LOCAL TEMPORARY |
+| optimizer_trace                       | LOCAL TEMPORARY |
+| parameters                            | LOCAL TEMPORARY |
+| partitions                            | LOCAL TEMPORARY |
+| profiling                             | LOCAL TEMPORARY |
+| referential_constraints               | LOCAL TEMPORARY |
+| region_peers                          | LOCAL TEMPORARY |
+| routines                              | LOCAL TEMPORARY |
+| runtime_metrics                       | LOCAL TEMPORARY |
+| schema_privileges                     | LOCAL TEMPORARY |
+| schemata                              | LOCAL TEMPORARY |
+| session_status                        | LOCAL TEMPORARY |
+| table_constraints                     | LOCAL TEMPORARY |
+| table_privileges                      | LOCAL TEMPORARY |
+| tables                                | LOCAL TEMPORARY |
+| triggers                              | LOCAL TEMPORARY |
++---------------------------------------+-----------------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+SHOW TABLE STATUS;
+
++---------------------------------------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| Name                                  | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
++---------------------------------------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| build_info                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| character_sets                        |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| check_constraints                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| cluster_info                          |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| collation_character_set_applicability |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| collations                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| column_privileges                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| column_statistics                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| columns                               |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| engines                               |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| events                                |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| files                                 |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| global_status                         |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| key_column_usage                      |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| optimizer_trace                       |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| parameters                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| partitions                            |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| profiling                             |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| referential_constraints               |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| region_peers                          |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| routines                              |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| runtime_metrics                       |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| schema_privileges                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| schemata                              |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| session_status                        |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| table_constraints                     |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| table_privileges                      |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| tables                                |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
+| triggers                              |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
++---------------------------------------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+SHOW TABLE STATUS LIKE 'tables';
+
++--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| Name   | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
++--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| tables |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
++--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+SHOW TABLE STATUS WHERE Name = 'tables';
+
++--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| Name   | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
++--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| tables |        | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
++--------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}) DATETIME
+SHOW TABLE STATUS from public;
+
++---------+-------------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| Name    | Engine      | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time             | Update_time | Check_time | Collation | Checksum | Create_options | Comment |
++---------+-------------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+| numbers | test_engine | 11      | Fixed      | 0    | 0              | 0           | 0               | 0            | 0         | 0              | DATETIME |             |            |           | 0        |                |         |
++---------+-------------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+-------------------------+-------------+------------+-----------+----------+----------------+---------+
+
 USE public;
 
 Affected Rows: 0

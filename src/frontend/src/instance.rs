@@ -520,6 +520,9 @@ pub fn check_permission(
         Statement::ShowTables(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
+        Statement::ShowTableStatus(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
         Statement::ShowColumns(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
