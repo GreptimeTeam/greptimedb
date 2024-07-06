@@ -457,7 +457,7 @@ apply_on_query = "auto"
 ## Memory threshold for index creation.
 ## - `auto`: automatically determine the threshold based on the system memory size (default)
 ## - `unlimited`: no memory limit
-## - `[size]`: e.g. `64MB`, fixed memory threshold
+## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
 [region_engine.mito.memtable]
