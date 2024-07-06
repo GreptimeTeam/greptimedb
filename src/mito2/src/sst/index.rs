@@ -161,6 +161,7 @@ impl<'a> IndexerBuilder<'a> {
         indexer.inverted_indexer = self.build_inverted_indexer();
         indexer.fulltext_indexer = self.build_fulltext_indexer().await;
         if indexer.inverted_indexer.is_none() && indexer.fulltext_indexer.is_none() {
+            indexer.abort().await;
             return Indexer::default();
         }
 
