@@ -384,7 +384,7 @@ mod tests {
     async fn test_build_indexer_basic() {
         let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_basic_").await;
-        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
@@ -397,7 +397,7 @@ mod tests {
             metadata: &metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
-            intermediate_manager: intm_maanger,
+            intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
@@ -413,7 +413,7 @@ mod tests {
     async fn test_build_indexer_disable_create() {
         let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_disable_create_").await;
-        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
@@ -426,7 +426,7 @@ mod tests {
             metadata: &metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
-            intermediate_manager: intm_maanger.clone(),
+            intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig {
                 create_on_flush: Mode::Disable,
@@ -447,7 +447,7 @@ mod tests {
             metadata: &metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
-            intermediate_manager: intm_maanger,
+            intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig {
@@ -466,7 +466,7 @@ mod tests {
     async fn test_build_indexer_no_required() {
         let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_no_required_").await;
-        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: false,
@@ -479,7 +479,7 @@ mod tests {
             metadata: &metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
-            intermediate_manager: intm_maanger.clone(),
+            intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
@@ -501,7 +501,7 @@ mod tests {
             metadata: &metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
-            intermediate_manager: intm_maanger,
+            intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
@@ -517,7 +517,7 @@ mod tests {
     async fn test_build_indexer_zero_row_group() {
         let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_zero_row_group_").await;
-        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
@@ -530,7 +530,7 @@ mod tests {
             metadata: &metadata,
             row_group_size: 0,
             puffin_manager: factory.build(mock_object_store()),
-            intermediate_manager: intm_maanger,
+            intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),

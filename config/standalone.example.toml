@@ -436,17 +436,17 @@ staging_size = "2GB"
 [region_engine.mito.inverted_index]
 
 ## Whether to create the index on flush.
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_flush = "auto"
 
 ## Whether to create the index on compaction.
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_compaction = "auto"
 
 ## Whether to apply the index on query
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 apply_on_query = "auto"
 
@@ -461,17 +461,17 @@ intermediate_path = ""
 [region_engine.mito.fulltext_index]
 
 ## Whether to create the index on flush.
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_flush = "auto"
 
 ## Whether to create the index on compaction.
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_compaction = "auto"
 
 ## Whether to apply the index on query
-## - `auto`: automatically
+## - `auto`: automatically (default)
 ## - `disable`: never
 apply_on_query = "auto"
 
