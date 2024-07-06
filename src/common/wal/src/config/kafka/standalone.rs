@@ -67,7 +67,7 @@ impl Default for StandaloneKafkaConfig {
             num_partitions: 1,
             replication_factor,
             create_topic_timeout: Duration::from_secs(30),
-            compression: Compression::Lz4,
+            compression: Compression::NoCompression,
             // Warning: Kafka has a default limit of 1MB per message in a topic.
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
