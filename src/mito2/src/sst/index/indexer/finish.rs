@@ -51,9 +51,7 @@ impl Indexer {
     }
 
     async fn build_puffin_writer(&mut self) -> Option<SstPuffinWriter> {
-        let Some(puffin_manager) = self.puffin_manager.take() else {
-            return None;
-        };
+        let puffin_manager = self.puffin_manager.take()?;
 
         let err = match puffin_manager.writer(&self.file_path).await {
             Ok(writer) => return Some(writer),

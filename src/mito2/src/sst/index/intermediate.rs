@@ -77,14 +77,6 @@ impl IntermediateManager {
             .join(sst_file_id.to_string())
             .join(format!("fulltext-{column_id}-{uuid}"))
     }
-
-    #[cfg(test)]
-    pub(crate) fn new(store: object_store::ObjectStore) -> Self {
-        Self {
-            base_dir: PathBuf::new(),
-            store: InstrumentedStore::new(store),
-        }
-    }
 }
 
 /// `IntermediateLocation` produces paths for intermediate files

@@ -296,7 +296,7 @@ mod tests {
 
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, FulltextOptions, FULLTEXT_KEY};
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin_manager::PuffinManagerFactory;
@@ -305,39 +305,26 @@ mod tests {
     use super::*;
     use crate::config::{FulltextIndexConfig, Mode};
 
-    fn mock_region_metadata() -> RegionMetadataRef {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("b", ConcreteDataType::float64_datatype(), false),
-                semantic_type: SemanticType::Field,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "c",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 3,
-            })
-            .primary_key(vec![1]);
-
-        Arc::new(builder.build().unwrap())
+    struct MetaConfig {
+        with_tag: bool,
+        with_fulltext: bool,
     }
 
-    fn no_tag_region_metadata() -> RegionMetadataRef {
+    fn mock_region_metadata(
+        MetaConfig {
+            with_tag,
+            with_fulltext,
+        }: MetaConfig,
+    ) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
-                semantic_type: SemanticType::Field,
+                semantic_type: if with_tag {
+                    SemanticType::Tag
+                } else {
+                    SemanticType::Field
+                },
                 column_id: 1,
             })
             .push_column_metadata(ColumnMetadata {
@@ -355,6 +342,32 @@ mod tests {
                 column_id: 3,
             });
 
+        if with_tag {
+            builder.primary_key(vec![1]);
+        }
+
+        if with_fulltext {
+            let opts = serde_json::to_string(&FulltextOptions {
+                enable: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+            let mut column_schema =
+                ColumnSchema::new("text", ConcreteDataType::string_datatype(), true);
+            column_schema
+                .mut_metadata()
+                .insert(FULLTEXT_KEY.to_string(), opts);
+
+            let column = ColumnMetadata {
+                column_schema,
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            };
+
+            builder.push_column_metadata(column);
+        }
+
         Arc::new(builder.build().unwrap())
     }
 
@@ -362,25 +375,28 @@ mod tests {
         ObjectStore::new(Memory::default()).unwrap().finish()
     }
 
-    fn mock_intm_mgr() -> IntermediateManager {
-        IntermediateManager::new(mock_object_store())
+    async fn mock_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
+        IntermediateManager::init_fs(path).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_build_indexer_basic() {
-        let (_d, factory) =
+        let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_basic_").await;
-        let store = mock_object_store();
-        let puffin_manager = factory.build(store);
-        let metadata = mock_region_metadata();
+        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_tag: true,
+            with_fulltext: true,
+        });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 1024,
-            puffin_manager,
-            intermediate_manager: mock_intm_mgr(),
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_maanger,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
@@ -389,23 +405,27 @@ mod tests {
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
+        assert!(indexer.fulltext_indexer.is_some());
     }
 
     #[tokio::test]
     async fn test_build_indexer_disable_create() {
-        let (_d, factory) =
+        let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_disable_create_").await;
-        let store = mock_object_store();
-        let puffin_manager = factory.build(store);
-        let metadata = mock_region_metadata();
+        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_tag: true,
+            with_fulltext: true,
+        });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 1024,
-            puffin_manager,
-            intermediate_manager: mock_intm_mgr(),
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_maanger.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig {
                 create_on_flush: Mode::Disable,
@@ -417,23 +437,48 @@ mod tests {
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
+        assert!(indexer.fulltext_indexer.is_some());
+
+        let indexer = IndexerBuilder {
+            op_type: OperationType::Compact,
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_maanger,
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig {
+                create_on_compaction: Mode::Disable,
+                ..Default::default()
+            },
+        }
+        .build()
+        .await;
+
+        assert!(indexer.inverted_indexer.is_some());
+        assert!(indexer.fulltext_indexer.is_none());
     }
 
     #[tokio::test]
-    async fn test_build_indexer_no_tag() {
-        let (_d, factory) =
-            PuffinManagerFactory::new_for_test_async("test_build_indexer_no_tag_").await;
-        let store = mock_object_store();
-        let puffin_manager = factory.build(store);
-        let metadata = no_tag_region_metadata();
+    async fn test_build_indexer_no_required() {
+        let (dir, factory) =
+            PuffinManagerFactory::new_for_test_async("test_build_indexer_no_required_").await;
+        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_tag: false,
+            with_fulltext: true,
+        });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 1024,
-            puffin_manager,
-            intermediate_manager: mock_intm_mgr(),
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_maanger.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
@@ -442,23 +487,49 @@ mod tests {
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
+        assert!(indexer.fulltext_indexer.is_some());
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_tag: true,
+            with_fulltext: false,
+        });
+        let indexer = IndexerBuilder {
+            op_type: OperationType::Flush,
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_maanger,
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
+        }
+        .build()
+        .await;
+
+        assert!(indexer.inverted_indexer.is_some());
+        assert!(indexer.fulltext_indexer.is_none());
     }
 
     #[tokio::test]
     async fn test_build_indexer_zero_row_group() {
-        let (_d, factory) =
+        let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_zero_row_group_").await;
-        let store = mock_object_store();
-        let puffin_manager = factory.build(store);
-        let metadata = mock_region_metadata();
+        let intm_maanger = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_tag: true,
+            with_fulltext: true,
+        });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
             file_id: FileId::random(),
             file_path: "test".to_string(),
             metadata: &metadata,
             row_group_size: 0,
-            puffin_manager,
-            intermediate_manager: mock_intm_mgr(),
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_maanger,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
