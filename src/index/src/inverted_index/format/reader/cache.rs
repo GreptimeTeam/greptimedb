@@ -27,11 +27,11 @@ use crate::inverted_index::FstMap;
 pub struct CachedInvertedIndexBlobReader<R> {
     file_id: Uuid,
     inner: R,
-    cache: Arc<InvertedIndexCache>,
+    cache: InvertedIndexCacheRef,
 }
 
 impl<R> CachedInvertedIndexBlobReader<R> {
-    pub fn new(file_id: Uuid, inner: R, cache: Arc<InvertedIndexCache>) -> Self {
+    pub fn new(file_id: Uuid, inner: R, cache: InvertedIndexCacheRef) -> Self {
         Self {
             file_id,
             inner,
@@ -115,8 +115,12 @@ pub struct IndexKey {
     size: u32,
 }
 
+pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
+
 pub struct InvertedIndexCache {
+    /// Cache for inverted index metadata
     metadata: moka::sync::Cache<MetadataKey, Arc<InvertedIndexMeta>>,
+    /// Cache for inverted index content.
     index: moka::sync::Cache<IndexKey, Vec<u8>>,
 }
 

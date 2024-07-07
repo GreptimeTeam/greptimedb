@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_telemetry::warn;
 use index::inverted_index::format::reader::cache::{
-    CachedInvertedIndexBlobReader, InvertedIndexCache,
+    CachedInvertedIndexBlobReader, InvertedIndexCache, InvertedIndexCacheRef,
 };
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
@@ -60,7 +60,7 @@ pub(crate) struct SstIndexApplier {
     puffin_manager_factory: PuffinManagerFactory,
 
     /// In-memory cache for inverted index.
-    inverted_index_cache: Option<Arc<InvertedIndexCache>>,
+    inverted_index_cache: Option<InvertedIndexCacheRef>,
 }
 
 pub(crate) type SstIndexApplierRef = Arc<SstIndexApplier>;
@@ -72,7 +72,7 @@ impl SstIndexApplier {
         region_id: RegionId,
         store: ObjectStore,
         file_cache: Option<FileCacheRef>,
-        index_cache: Option<Arc<InvertedIndexCache>>,
+        index_cache: Option<InvertedIndexCacheRef>,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {

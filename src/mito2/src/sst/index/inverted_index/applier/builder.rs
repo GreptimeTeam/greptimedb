@@ -27,7 +27,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use index::inverted_index::format::reader::cache::InvertedIndexCache;
+use index::inverted_index::format::reader::cache::{InvertedIndexCache, InvertedIndexCacheRef};
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
@@ -65,7 +65,8 @@ pub(crate) struct SstIndexApplierBuilder<'a> {
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
 
-    index_cache: Option<Arc<InvertedIndexCache>>,
+    /// Cache for inverted index.
+    index_cache: Option<InvertedIndexCacheRef>,
 }
 
 impl<'a> SstIndexApplierBuilder<'a> {
@@ -74,7 +75,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         region_dir: String,
         object_store: ObjectStore,
         file_cache: Option<FileCacheRef>,
-        index_cache: Option<Arc<InvertedIndexCache>>,
+        index_cache: Option<InvertedIndexCacheRef>,
         metadata: &'a RegionMetadata,
         ignore_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,

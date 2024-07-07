@@ -330,7 +330,11 @@ impl ScanRegion {
             Some(file_cache)
         }();
 
-        let index_cache = self.cache_manager.as_ref().map(|c| c.index_cache());
+        let index_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|c| c.index_cache())
+            .cloned();
 
         SstIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
